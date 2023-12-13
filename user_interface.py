@@ -103,7 +103,7 @@ right_panel.grid(row=0, column=1, sticky="ew", padx=20)
 right_panel.grid_rowconfigure(0, weight=1)
 right_panel.grid_rowconfigure(1, weight=1)
 right_panel.grid_rowconfigure(2, weight=1)
-right_panel.grid_rowconfigure(3, weight=1)  # Extra row for spacing
+right_panel.grid_rowconfigure(3, weight=1)  # Extra row for spacing to make it visually apealing
 
 bottom_frame = tk.Frame(root)
 bottom_frame.pack(fill='x', expand=False)
