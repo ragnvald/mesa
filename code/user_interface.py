@@ -109,14 +109,14 @@ button_padx = 20
 button_pady = 10
 
 # Add buttons to left panel with spacing between buttons
-import_assets_btn = tk.Button(left_panel, text="Import Assets", command=import_assets, width=button_width)
+import_assets_btn = tk.Button(left_panel, text="Import assets", command=import_assets, width=button_width)
 import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
-edit_asset_group_btn = tk.Button(left_panel, text="Edit Asset Group", command=edit_asset_group, width=button_width)
+edit_asset_group_btn = tk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width)
 edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
 
-import_grids_btn = tk.Button(left_panel, text="Import Grids", command=import_grids, width=button_width)
+import_grids_btn = tk.Button(left_panel, text="Import geocodes", command=import_grids, width=button_width)
 import_grids_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
-edit_geocode_group_btn = tk.Button(left_panel, text="Edit Geocode Group", command=edit_geocode_group, width=button_width)
+edit_geocode_group_btn = tk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width)
 edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
 view_statistics_btn = tk.Button(left_panel, text="Set up processing", command=edit_susceptibilitiesandimportance, width=button_width)
@@ -126,10 +126,10 @@ view_statistics_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 display_image(bottom_frame)
 
 # Add buttons to right panel with spacing between buttons
-process_data_btn = tk.Button(right_panel, text="Process Data", command=process_data, width=button_width)
+process_data_btn = tk.Button(right_panel, text="Process data", command=process_data, width=button_width)
 process_data_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
-export_package_btn = tk.Button(right_panel, text="Export Package", command=export_package, width=button_width)
+export_package_btn = tk.Button(right_panel, text="Export package", command=export_package, width=button_width)
 export_package_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
 # Exit button
