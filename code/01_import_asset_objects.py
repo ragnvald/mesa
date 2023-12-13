@@ -53,9 +53,13 @@ def process_layer(data, asset_objects, object_id_counter, group_id, layer_name, 
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
         return object_id_counter
 
+    # Ensure data is in a CRS that uses meters for calculating area
+    if data.crs.is_geographic:
+        data = data.to_crs("EPSG:3395")  # Example UTM CRS, change as per your requirement
+
     for index, row in data.iterrows():
         attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
-        area_m2 = row.geometry.area if row.geometry else 0
+        area_m2 = row.geometry.area if row.geometry and row.geometry.geom_type == 'Polygon' else 0
         asset_objects.append({
             'id': int(object_id_counter),
             'ref_asset_group': int(group_id),
@@ -82,7 +86,8 @@ def import_spatial_data(input_folder_asset, log_widget, progress_var):
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
             try:
-                log_to_gui(log_widget, f"Processing file: {filepath}")
+                filename = os.path.basename(filepath)
+                log_to_gui(log_widget, f"Processing file: {filename}")
                 if filepath.endswith('.gpkg'):
                     ds = ogr.Open(filepath)
                     if ds is None:
