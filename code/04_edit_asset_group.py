@@ -16,23 +16,27 @@ def save_data(df):
     except Exception as e:
         print(f"Error saving data: {e}")
 
-# Update record in the DataFrame and save to the database
-def update_record():
+# Function to update record in the DataFrame and save to the database
+def update_record(save_message=True):
     try:
         df.at[current_index, 'name_original'] = name_original_var.get()
         df.at[current_index, 'name_fromuser'] = name_fromuser_var.get()
         save_data(df)  # Save changes to the database
+        if save_message:
+            print("Record updated and saved")
     except Exception as e:
         print(f"Error updating and saving record: {e}")
 
 # Navigate through records
 def navigate(direction):
     global current_index
+    update_record(save_message=False)  # Save current edits without showing a message
     if direction == 'next' and current_index < len(df) - 1:
         current_index += 1
     elif direction == 'previous' and current_index > 0:
         current_index -= 1
     load_record()
+
 
 # Load a record into the form
 def load_record():
@@ -53,24 +57,25 @@ name_original_var = tk.StringVar()
 name_fromuser_var = tk.StringVar()
 
 # Form fields with larger entry widgets
-tk.Label(root, text="Name Original").grid(row=0, column=0, sticky='w')
+tk.Label(root, text="Original name").grid(row=0, column=0, sticky='w')
 name_original_entry = tk.Entry(root, textvariable=name_original_var, width=50)
 name_original_entry.grid(row=0, column=1, sticky='e')
 
-tk.Label(root, text="Name From User").grid(row=1, column=0, sticky='w')
+tk.Label(root, text="Alternate name").grid(row=1, column=0, sticky='w')
 name_fromuser_entry = tk.Entry(root, textvariable=name_fromuser_var, width=50)
 name_fromuser_entry.grid(row=1, column=1, sticky='e')
 
 # Information text field above the "Update and Save Record" button
-info_label_text = ("This is where I inform the user about relevant stuff. "
-                   "It could be 5 sentences long. Here's some important information "
-                   "you need to know before using the asset group editor.")
-info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label_text = ("All assets that are imported are associated with a file "
+                   " or table name. This table name is the original name. If "
+                   "you want to use a different name in presenting the analysis "
+                   "we suggest that you add that name here.")
+info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
 info_label.grid(row=2, column=0, columnspan=3, padx=10, pady=10)
 
 # Navigation and Update buttons
 ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=3, column=0, padx=5, pady=5)
-ttk.Button(root, text="Update and Save Record", command=update_record).grid(row=3, column=1, padx=5, pady=5)
+ttk.Button(root, text="Save", command=update_record).grid(row=3, column=1, padx=5, pady=5)
 ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=3, column=2, padx=5, pady=5)
 
 # Exit button
