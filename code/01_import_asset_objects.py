@@ -200,7 +200,7 @@ def close_application():
 
 # Create the user interface
 root = tk.Tk()
-root.title("Asset Import Utility")
+root.title("Import assets")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
