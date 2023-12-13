@@ -61,13 +61,20 @@ tk.Label(root, text="Name From User").grid(row=1, column=0, sticky='w')
 name_fromuser_entry = tk.Entry(root, textvariable=name_fromuser_var, width=50)
 name_fromuser_entry.grid(row=1, column=1, sticky='e')
 
+# Information text field above the "Update and Save Record" button
+info_label_text = ("This is where I inform the user about relevant stuff. "
+                   "It could be 5 sentences long. Here's some important information "
+                   "you need to know before using the asset group editor.")
+info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label.grid(row=2, column=0, columnspan=3, padx=10, pady=10)
+
 # Navigation and Update buttons
-ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0, padx=5, pady=5)
-ttk.Button(root, text="Update and Save Record", command=update_record).grid(row=2, column=1, padx=5, pady=5)
-ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=2, padx=5, pady=5)
+ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=3, column=0, padx=5, pady=5)
+ttk.Button(root, text="Update and Save Record", command=update_record).grid(row=3, column=1, padx=5, pady=5)
+ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=3, column=2, padx=5, pady=5)
 
 # Exit button
-ttk.Button(root, text="Exit", command=root.destroy).grid(row=3, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=3, pady=5)
 
 # Load the first record
 load_record()

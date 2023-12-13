@@ -44,12 +44,11 @@ def load_record():
     description_text.insert(tk.END, record['description'])  # Insert new text
 
 # Initialize the main window
+# Initialize the main window
 root = tk.Tk()
 root.title("Edit Geocode Groups")
 
 gpkg_file = 'output/mesa.gpkg'
-table_name = 'tbl_geocode_group'
-
 df = load_data()
 current_index = 0
 
@@ -69,13 +68,20 @@ scroll = tk.Scrollbar(root, command=description_text.yview)
 scroll.grid(row=1, column=2, sticky='nsew')
 description_text['yscrollcommand'] = scroll.set
 
-# Navigation buttons
-ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0)
-ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=1)
+# Information text field above the navigation buttons
+info_label_text = ("This is where I inform the user about relevant stuff. "
+                   "It could be 5 sentences long. Here's some important information "
+                   "you need to know before using the geocode group editor.")
+info_label = tk.Label(root, text=info_label_text, wraplength=300, justify="left")
+info_label.grid(row=2, column=0, columnspan=3, padx=10, pady=10)
 
-# Save and Exit buttons
-ttk.Button(root, text="Save Changes", command=lambda: save_data(df)).grid(row=3, column=1)
-ttk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=2)
+# Navigation and Save buttons
+ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=3, column=0, padx=5, pady=5)
+ttk.Button(root, text="Save", command=lambda: save_data(df)).grid(row=3, column=1, padx=5, pady=5)
+ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=3, column=2, padx=5, pady=5)
+
+# Exit button
+ttk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=3, pady=5)
 
 # Load the first record
 load_record()
