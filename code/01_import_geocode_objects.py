@@ -4,11 +4,11 @@ import threading
 import geopandas as gpd
 from sqlalchemy import create_engine
 from shapely.geometry import box
-from osgeo import ogr
 import configparser
 import datetime
-import glob
 import os
+import glob
+from osgeo import ogr
 
 # Read the configuration file
 def read_config(file_name):
@@ -22,7 +22,6 @@ def log_to_gui(log_widget, message):
     formatted_message = f"{timestamp} - {message}"
     log_widget.insert(tk.END, formatted_message + "\n")
     log_widget.see(tk.END)
-
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
@@ -30,6 +29,7 @@ def log_to_gui(log_widget, message):
 def read_and_reproject(filepath, layer=None):
     data = gpd.read_file(filepath, layer=layer)
     if data.crs is None:
+        log_to_gui(log_widget, f"Warning: No CRS found for {filepath}. Setting CRS to EPSG:4326.")
         data.set_crs(epsg=4326, inplace=True)
     elif data.crs.to_epsg() != 4326:
         data = data.to_crs(epsg=4326)
@@ -84,6 +84,23 @@ def export_to_geopackage(geocode_groups_gdf, geocode_objects_gdf, gpkg_file, log
     except Exception as e:
         log_to_gui(log_widget, f"Error during export: {e}")
 
+# Function to process each file
+def process_file(filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget):
+    if filepath.endswith('.gpkg'):
+        ds = ogr.Open(filepath)
+        for i in range(ds.GetLayerCount()):
+            layer = ds.GetLayerByIndex(i)
+            layer_name = layer.GetName()
+            data = read_and_reproject(filepath, layer=layer_name)
+            group_id_counter, object_id_counter = process_layer(
+                data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
+        ds = None
+    else:
+        data = read_and_reproject(filepath)
+        layer_name = os.path.splitext(os.path.basename(filepath))[0]
+        group_id_counter, object_id_counter = process_layer(
+            data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
+    return group_id_counter, object_id_counter
 
 # Import spatial data and export to geopackage
 def import_spatial_data(input_folder_grid, log_widget, progress_var):
@@ -97,26 +114,8 @@ def import_spatial_data(input_folder_grid, log_widget, progress_var):
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True):
-            if filepath.endswith('.gpkg'):
-                ds = ogr.Open(filepath)
-                if ds is None:
-                    log_to_gui(log_widget, f"No layers found in GeoPackage: {filepath}")
-                    continue
-
-                for i in range(ds.GetLayerCount()):
-                    layer = ds.GetLayerByIndex(i)
-                    layer_name = layer.GetName()
-                    data = gpd.read_file(filepath, layer=layer_name)
-                    group_id_counter, object_id_counter = process_layer(
-                        data, geocode_groups, geocode_objects, group_id_counter,
-                        object_id_counter, layer_name, log_widget)
-                ds = None
-            else:
-                data = read_and_reproject(filepath)
-                original_layer_name = os.path.splitext(os.path.basename(filepath))[0]
-                group_id_counter, object_id_counter = process_layer(
-                    data, geocode_groups, geocode_objects, group_id_counter,
-                    object_id_counter, original_layer_name, log_widget)
+            group_id_counter, object_id_counter = process_file(
+                filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
 
             processed_files += 1
             progress_var.set(processed_files / total_files * 100)
@@ -136,7 +135,6 @@ def run_import(input_folder_grid, gpkg_file, log_widget, progress_var):
     export_to_geopackage(geocode_groups_gdf, geocode_objects_gdf, gpkg_file, log_widget)
     log_to_gui(log_widget, "Import and export completed.")
     progress_var.set(100)
-
 
 # Function to close the application
 def close_application():
