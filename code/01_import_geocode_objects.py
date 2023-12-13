@@ -148,6 +148,13 @@ root.title("MESA Import Utility")
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
+# Information text field above the "Import Data" button
+info_label_text = ("Geocodes can be of any shape. In this context they area usually rectangular "
+                   "grid cells. Geocodes are impoted per shapefile or by layers within a "
+                   "geopackage file in the folder input/grid.")
+info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label.pack(padx=10, pady=10)
+
 # Create a progress bar
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
