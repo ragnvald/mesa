@@ -35,6 +35,7 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
 
 # Main function for processing data
 def main(log_widget, progress_var, gpkg_file):
+    log_to_gui(log_widget, "Starting processing...")
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
