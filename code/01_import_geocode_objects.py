@@ -154,11 +154,11 @@ progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="dete
 progress_bar.pack(pady=5, fill=tk.X)
 
 # Add buttons for the different operations
-import_btn = tk.Button(root, text="Import Data", command=lambda: threading.Thread(
+import_btn = ttk.Button(root, text="Import Data", command=lambda: threading.Thread(
     target=run_import, args=(input_folder_grid, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_btn.pack(pady=5, fill=tk.X)
 
-close_btn = tk.Button(root, text="Close", command=close_application)
+close_btn = ttk.Button(root, text="Close", command=close_application)
 close_btn.pack(pady=5, fill=tk.X)
 
 # Load configuration settings

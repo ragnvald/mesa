@@ -62,12 +62,12 @@ name_fromuser_entry = tk.Entry(root, textvariable=name_fromuser_var, width=50)
 name_fromuser_entry.grid(row=1, column=1, sticky='e')
 
 # Navigation and Update buttons
-tk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0, padx=5, pady=5)
-tk.Button(root, text="Update and Save Record", command=update_record).grid(row=2, column=1, padx=5, pady=5)
-tk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=2, padx=5, pady=5)
+ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0, padx=5, pady=5)
+ttk.Button(root, text="Update and Save Record", command=update_record).grid(row=2, column=1, padx=5, pady=5)
+ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=2, padx=5, pady=5)
 
 # Exit button
-tk.Button(root, text="Exit", command=root.destroy).grid(row=3, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=root.destroy).grid(row=3, column=0, columnspan=3, pady=5)
 
 # Load the first record
 load_record()

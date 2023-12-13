@@ -70,12 +70,12 @@ scroll.grid(row=1, column=2, sticky='nsew')
 description_text['yscrollcommand'] = scroll.set
 
 # Navigation buttons
-tk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0)
-tk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=1)
+ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0)
+ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=1)
 
 # Save and Exit buttons
-tk.Button(root, text="Save Changes", command=lambda: save_data(df)).grid(row=3, column=1)
-tk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=2)
+ttk.Button(root, text="Save Changes", command=lambda: save_data(df)).grid(row=3, column=1)
+ttk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=2)
 
 # Load the first record
 load_record()

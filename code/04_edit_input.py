@@ -115,7 +115,7 @@ def save_to_gpkg():
         df.to_sql(table_name, con=engine, if_exists='replace', index=False, dtype=data_types)
         messagebox.showinfo("Success", "Data successfully saved to GeoPackage.")
     except exc.SQLAlchemyError as e:
-        messagebox.showerror("Database Error", f"Failed to save data: {e}")
+        messagebox.showerror("Database Error", f"Failed to save data: {e} (try closing QGIS)")
 
 # Function to close the application
 def close_application():
@@ -124,7 +124,7 @@ def close_application():
 # Initialize the main window with a larger size
 root = tk.Tk()
 root.title("Data Editor")
-root.geometry("600x1000")  # Set window size (width x height)
+root.geometry("600x600")  # Set window size (width x height)
 
 # Register the validation command
 vcmd = (root.register(validate_integer), '%P')
@@ -132,6 +132,13 @@ vcmd = (root.register(validate_integer), '%P')
 # Create a frame for the data rows
 frame = ttk.Frame(root)
 frame.pack(padx=10, pady=10, fill="both", expand=True)
+
+# Text panel above the buttons
+info_text = "This is where you register susceptibility and importance." \
+            "Importance could be based on local, national or global " \
+            "scale. Susceptibility is usually scientifically based."
+info_label = tk.Label(root, text=info_text, wraplength=500, justify="left")
+info_label.pack(padx=10, pady=10)
 
 # Paths for the geopackage and the table name
 gpkg_path = 'output/mesa.gpkg'
@@ -141,10 +148,10 @@ table_name = 'tbl_asset_group'
 load_data()
 
 # Add buttons for saving data and closing the application
-save_button = ttk.Button(root, text="Save to Geopackage", command=save_to_gpkg)
+save_button = ttk.Button(root, text="Save", command=save_to_gpkg)
 save_button.pack(side='left', padx=10, pady=10)
 
-refresh_button = ttk.Button(root, text="Refresh Data", command=load_data)
+refresh_button = ttk.Button(root, text="Reload data", command=load_data)
 refresh_button.pack(side='left', padx=10, pady=10)
 
 close_button = ttk.Button(root, text="Close", command=close_application)

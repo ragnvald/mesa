@@ -76,11 +76,11 @@ progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="dete
 progress_bar.pack(pady=5, fill=tk.X)
 
 # Add buttons for operations
-run_btn = tk.Button(root, text="Run Analysis", command=lambda: threading.Thread(
+run_btn = ttk.Button(root, text="Run Analysis", command=lambda: threading.Thread(
     target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
 run_btn.pack(pady=5, fill=tk.X)
 
-close_btn = tk.Button(root, text="Close", command=lambda: close_application(root))
+close_btn = ttk.Button(root, text="Close", command=lambda: close_application(root))
 close_btn.pack(pady=5, fill=tk.X)
 
 # Load configuration settings
