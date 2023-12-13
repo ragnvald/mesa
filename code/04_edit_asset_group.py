@@ -20,11 +20,9 @@ def save_data(df):
 # Update record in the DataFrame
 def update_record():
     try:
-        row = df.loc[current_index]
-        row['name_original'] = name_original_var.get()
-        row['name_fromuser'] = name_fromuser_var.get()
-        # Update other fields similarly
-        df.loc[current_index] = row
+        # Only update name_original and name_fromuser fields
+        df.at[current_index, 'name_original'] = name_original_var.get()
+        df.at[current_index, 'name_fromuser'] = name_fromuser_var.get()
         messagebox.showinfo("Success", "Record updated")
     except Exception as e:
         messagebox.showerror("Error", f"Failed to update record: {e}")
@@ -52,7 +50,6 @@ root.title("Edit Asset Groups")
 gpkg_file = 'output/mesa.gpkg'
 table_name = 'tbl_asset_group'
 
-
 df = load_data()
 current_index = 0
 
@@ -72,13 +69,13 @@ name_fromuser_entry.grid(row=1, column=1, sticky='e')
 # Create other fields similarly
 
 # Navigation buttons
-tk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=3, column=0)
-tk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=3, column=1)
+tk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=2, column=0)
+tk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=2, column=1)
 
 # Save and Exit buttons
-tk.Button(root, text="Update Record", command=update_record).grid(row=4, column=0)
-tk.Button(root, text="Save Changes", command=lambda: save_data(df)).grid(row=4, column=1)
-tk.Button(root, text="Exit", command=root.destroy).grid(row=5, column=0, columnspan=2)
+tk.Button(root, text="Update Record", command=update_record).grid(row=3, column=0)
+tk.Button(root, text="Save Changes", command=lambda: save_data(df)).grid(row=3, column=1)
+tk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=2)
 
 # Load the first record
 load_record()

@@ -53,13 +53,21 @@ def process_layer(data, asset_objects, object_id_counter, group_id, layer_name, 
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
         return object_id_counter
 
-    # Ensure data is in a CRS that uses meters for calculating area
+    # Create a temporary GeoSeries for area calculation if the CRS is geographic
     if data.crs.is_geographic:
-        data = data.to_crs("EPSG:3395")  # Example UTM CRS, change as per your requirement
+        temp_data = data.copy()
+        temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
+
+        # Calculate area in the temporary projected system
+        area_m2_series = temp_data.geometry.area
+    else:
+        # Calculate area in the original system
+        area_m2_series = data.geometry.area
 
     for index, row in data.iterrows():
         attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
-        area_m2 = row.geometry.area if row.geometry and row.geometry.geom_type == 'Polygon' else 0
+        area_m2 = area_m2_series.iloc[index] if row.geometry.geom_type == 'Polygon' else 0
+
         asset_objects.append({
             'id': int(object_id_counter),
             'ref_asset_group': int(group_id),
@@ -67,11 +75,13 @@ def process_layer(data, asset_objects, object_id_counter, group_id, layer_name, 
             'attributes': attributes,
             'process': True,
             'area_m2': int(area_m2),
-            'geom': row.geometry
+            'geom': row.geometry  # Original geometry in EPSG:4326
         })
         object_id_counter += 1
 
     return object_id_counter
+
+
 
 # Function to import spatial data for assets
 def import_spatial_data(input_folder_asset, log_widget, progress_var):
