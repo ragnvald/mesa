@@ -74,10 +74,10 @@ top_frame = tk.Frame(root)
 top_frame.pack(fill='x', expand=False, pady=10)
 
 # Add text and link to the top frame
-info_text = tk.Label(top_frame, text="Read more about the MESA method and tools", font=("Arial", 10))
+info_text = tk.Label(top_frame, text="Read more about the MESA method and tools", font=("Calibri", 10))
 info_text.pack(side='left')
 
-link_text = tk.Label(top_frame, text="here ", font=("Arial", 10, "underline"), fg="blue", cursor="hand2")
+link_text = tk.Label(top_frame, text="here ", font=("Calibri", 10, "underline"), fg="blue", cursor="hand2")
 link_text.pack(side='left')
 link_text.bind("<Button-1>", lambda e: open_link("https://www.mesamethod.org/wiki/Main_Page"))
 
