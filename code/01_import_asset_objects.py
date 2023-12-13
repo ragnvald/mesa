@@ -207,11 +207,10 @@ log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
 # Information text field above the "Import Assets" button
-info_label_text = ("This is where I inform the user about relevant stuff. "
-                   "It could be 5 sentences long. Here's some important information "
-                   "you need to know before using the asset import utility. "
-                   "Please read the instructions carefully to understand how to "
-                   "import assets correctly.")
+info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
+                   "that are placed in the folder input/assets-folder. The features will "
+                   "be placed in our database and used in the analysis. All assets will "
+                   "be associated with importance and susceptibility values.")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
