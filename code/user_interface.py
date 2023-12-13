@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, scrolledtext, ttk
 import subprocess
 import webbrowser
 from PIL import Image, ImageTk

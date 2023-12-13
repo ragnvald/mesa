@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, ttk
+from tkinter import messagebox, scrolledtext, ttk
 import threading
 import geopandas as gpd
 import pandas as pd

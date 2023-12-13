@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, scrolledtext, ttk
 import pandas as pd
 from sqlalchemy import create_engine
 
