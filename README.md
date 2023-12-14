@@ -14,6 +14,6 @@ Features
 
 System Requirements
 
-    The compiled version (when ready) is expected to be compatible with Windows OS/linux and MacOS.
+The compiled version (when ready) is expected to be compatible with Windows OS/linux and MacOS.
 
 Read more about the method and tool here: https://www.mesamethod.org/wiki/Main_Page
