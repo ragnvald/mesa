@@ -67,18 +67,20 @@ for idx, row in df.iterrows():
     tk.Label(edit_frame, text=row['id']).grid(row=idx, column=0, sticky='w')
     
     name_var = tk.StringVar(value=row['name'])
-    tk.Entry(edit_frame, textvariable=name_var, width=20).grid(row=idx, column=1, sticky='w')
+    tk.Entry(edit_frame, textvariable=name_var, width=30).grid(row=idx, column=1, sticky='w')
     
     desc_var = tk.StringVar(value=row['description'])
-    tk.Entry(edit_frame, textvariable=desc_var, width=80).grid(row=idx, column=2, sticky='w')
+    tk.Entry(edit_frame, textvariable=desc_var, width=70).grid(row=idx, column=2, sticky='w')
 
     records.append({'id': row['id'], 'name_var': name_var, 'desc_var': desc_var})
 
 # Information text field
-info_label_text = ("This is where I inform the user about relevant stuff. "
-                   "It could be 5 sentences long. Here's some important information "
-                   "you need to know before using the geocode group editor.")
-info_label = tk.Label(root, text=info_label_text, wraplength=300, justify="left")
+info_label_text = ("After you have imported the geocodes you might want to "
+                   "adjust the name of the geocode. Here you can make changes "
+                   "to both the name and the description. The name will be "
+                   "used in exports to QGIS. Name and description will probably "
+                   "be used in a PDF report which this system will generate. ")
+info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
 # Button frame
