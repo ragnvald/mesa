@@ -40,6 +40,7 @@ def aggregate_data(intersected_data):
         'importance': ['max', 'min'],
         'sensitivity': ['max', 'min'],
         'susceptibility': ['max', 'min'],
+        'name': 'first',  # Include the first name for each group
         'geometry': 'first'  # Keeping the first geometry for each group
     }
 
@@ -56,22 +57,34 @@ def aggregate_data(intersected_data):
 # Main function for processing data
 def main(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Starting processing...")
-    asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-    geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
 
-    # Merge asset group data with asset data
-    asset_data = asset_data.merge(asset_group_data[['id', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
-                                  left_on='ref_asset_group', right_on='id', how='left')
+    # Reading 'tbl_stacked' data from the GeoPackage
+    log_to_gui(log_widget, "Reading 'tbl_stacked' data...")
+    asset_data = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
-    point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
-    line_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'LineString', log_widget)
-    polygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Polygon', log_widget)
+    # Reading 'tbl_geocode_group' data from the GeoPackage
+    log_to_gui(log_widget, "Reading 'tbl_geocode_group' data...")
+    geocode_group_data = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
 
-    intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
+    # Ensure 'code' column is present in 'tbl_stacked'
+    if 'code' not in asset_data.columns:
+        log_to_gui(log_widget, "'code' column not found in 'tbl_stacked'.")
+        raise KeyError("'code' column not found in 'tbl_stacked'")
 
-    # Aggregate data
-    aggregated_data = aggregate_data(intersected_data)
+    # Merge asset_data with geocode_group_data on ref_geocodegroup
+    log_to_gui(log_widget, "Merging data...")
+    merged_data = asset_data.merge(geocode_group_data[['id', 'name']],
+                                   left_on='ref_geocodegroup',
+                                   right_on='id',
+                                   how='left',
+                                   suffixes=('_asset', '_geocode'))
+
+    # Drop the unnecessary columns (id_x and id_y)
+    merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
+
+    # Proceed with aggregation
+    log_to_gui(log_widget, "Aggregating data...")
+    aggregated_data = aggregate_data(merged_data)
 
     # Save to GeoPackage
     aggregated_gdf = gpd.GeoDataFrame(aggregated_data, geometry='geometry_first')
@@ -79,6 +92,7 @@ def main(log_widget, progress_var, gpkg_file):
 
     log_to_gui(log_widget, "Data processing and aggregation completed.")
     progress_var.set(100)
+
 
 # Thread function to run main without freezing GUI
 def run_main(log_widget, progress_var, gpkg_file):
