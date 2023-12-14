@@ -57,7 +57,7 @@ def process_layer(data, geocode_groups, geocode_objects, group_id_counter, objec
     # Add geocode objects with unique IDs
     for index, row in data.iterrows():
         geom = row.geometry if 'geometry' in data.columns else None
-        code = row['QDGC'] if 'QDGC' in data.columns else object_id_counter
+        code = row['qdgc'] if 'qdgc' in data.columns else object_id_counter
         geocode_objects.append({
             'pk_id': object_id_counter,  # Primary Key ID
             'id': object_id_counter,  # Object ID
@@ -112,7 +112,8 @@ def import_spatial_data(input_folder_grid, log_widget, progress_var):
     file_patterns = ['*.shp', '*.gpkg']
     total_files = sum([len(glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
-
+    log_to_gui(log_widget, "Working with imports...")
+    progress_var.set(70)
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True):
             group_id_counter, object_id_counter = process_file(
@@ -134,7 +135,7 @@ def run_import(input_folder_grid, gpkg_file, log_widget, progress_var):
     log_to_gui(log_widget, f"Preparing to export {len(geocode_objects_gdf)} geocode objects.")
     
     export_to_geopackage(geocode_groups_gdf, geocode_objects_gdf, gpkg_file, log_widget)
-    log_to_gui(log_widget, "Import and export completed.")
+    log_to_gui(log_widget, "Import completed.")
     progress_var.set(100)
 
 # Function to close the application
