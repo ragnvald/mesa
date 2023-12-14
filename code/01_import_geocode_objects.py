@@ -48,18 +48,19 @@ def process_layer(data, geocode_groups, geocode_objects, group_id_counter, objec
     bounding_box = data.total_bounds
     bbox_geom = box(*bounding_box)
     geocode_groups.append({
-        'id': group_id_counter,
+        'id': group_id_counter,  # Group ID
         'name': layer_name,
         'description': f'Description for {layer_name}',
         'geom': bbox_geom
     })
 
-    # Add geocode objects
+    # Add geocode objects with unique IDs
     for index, row in data.iterrows():
         geom = row.geometry if 'geometry' in data.columns else None
         code = row['QDGC'] if 'QDGC' in data.columns else object_id_counter
         geocode_objects.append({
-            'id': object_id_counter,
+            'pk_id': object_id_counter,  # Primary Key ID
+            'id': object_id_counter,  # Object ID
             'code': code,
             'ref_geocodegroup': group_id_counter,
             'geom': geom
@@ -151,7 +152,8 @@ log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 # Information text field above the "Import Data" button
 info_label_text = ("Geocodes can be of any shape. In this context they area usually rectangular "
                    "grid cells. Geocodes are impoted per shapefile or by layers within a "
-                   "geopackage file in the folder input/grid.")
+                   "geopackage file in the folder input/grid. you may adjust the geocode "
+                   "group name and description at a later stage")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
