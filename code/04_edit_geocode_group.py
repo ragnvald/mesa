@@ -1,24 +1,47 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
-import pandas as pd
+import geopandas as gpd
 from sqlalchemy import create_engine
 
-# Function to load data from the database
-def load_data():
-    engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
-    return pd.read_sql_table('tbl_geocode_group', engine)
+def update_records():
+    global df, records
+    for record in records:
+        row_id = record['id']
+        name = record['name_var'].get()
+        description = record['desc_var'].get()
 
-# Function to save data to the database
-def save_data():
+        # Update the DataFrame
+        df.loc[df['id'] == row_id, 'name'] = name
+        df.loc[df['id'] == row_id, 'description'] = description
+
+def save_changes():
+    update_records()
+    save_spatial_data()
+
+# Function to load spatial data from the database
+def load_spatial_data(gpkg_file):
+    engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
+    # Use Geopandas to load a GeoDataFrame
+    gdf = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
+    return gdf
+
+
+# Function to save spatial data to the database
+def save_spatial_data():
+    global df  # Access the global DataFrame
     try:
         engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
-        for record in records:
-            df.at[record['id']-1, 'name'] = record['name_var'].get()
-            df.at[record['id']-1, 'description'] = record['desc_var'].get()
-        df.to_sql('tbl_geocode_group', con=engine, if_exists='replace', index=False)
-        messagebox.showinfo("Success", "Data saved successfully")
+        # Use Geopandas to save the GeoDataFrame
+        df.to_file(gpkg_file, layer='tbl_geocode_group', driver='GPKG', if_exists='replace')
+        messagebox.showinfo("Success", "Spatial data saved successfully")
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to save data: {e}")
+        messagebox.showerror("Error", f"Failed to save spatial data: {e}")
+
+
+# Your existing code for creating the Tkinter interface would remain the same
+# Just ensure to call load_spatial_data() instead of load_data()
+# and save_spatial_data(gdf) instead of save_data()
+
 
 # Function to close the application
 def exit_application():
@@ -30,7 +53,7 @@ root.title("Edit Geocode Groups")
 
 # Load data
 gpkg_file = 'output/mesa.gpkg'
-df = load_data()
+df = load_spatial_data(gpkg_file)
 
 # Create a frame for the editable fields
 edit_frame = tk.Frame(root, padx=5, pady=5)
@@ -63,7 +86,7 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=10)
 
 # Save button
-save_button = ttk.Button(button_frame, text="Save Data", command=save_data)
+save_button = ttk.Button(button_frame, text="Save Data", command=save_changes)
 save_button.pack(side=tk.LEFT, padx=10)
 
 # Exit button
