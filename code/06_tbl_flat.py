@@ -37,18 +37,27 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
 def aggregate_data(intersected_data):
     # Group by code and calculate aggregates
     aggregation_functions = {
-        'importance': ['max', 'min'],
-        'sensitivity': ['max', 'min'],
-        'susceptibility': ['max', 'min'],
+        'importance': ['min', 'max'],
+        'sensitivity': ['min', 'max'],
+        'susceptibility': ['min', 'max'],
+        'ref_geocodegroup': 'first',  # Include the first reference to geocode group id
         'name': 'first',  # Include the first name for each group
         'geometry': 'first'  # Keeping the first geometry for each group
     }
-
+    
     grouped = intersected_data.groupby('code').agg(aggregation_functions)
-
+    
     # Flatten MultiIndex columns
     grouped.columns = ['_'.join(col).strip() for col in grouped.columns.values]
 
+    # Rename columns after flattening
+    renamed_columns = {
+        'name_first': 'name_geocodegroup',
+        'ref_geocodegroup_first': 'ref_geocodegroup'
+    }    
+    
+    grouped.rename(columns=renamed_columns, inplace=True)
+    
     # Count the total assets in each group
     grouped['assets_total'] = intersected_data.groupby('code').size()
 
