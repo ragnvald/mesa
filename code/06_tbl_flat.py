@@ -42,26 +42,35 @@ def aggregate_data(intersected_data):
         'susceptibility': ['min', 'max'],
         'ref_geocodegroup': 'first',  # Include the first reference to geocode group id
         'name': 'first',  # Include the first name for each group
-        'geometry': 'first'  # Keeping the first geometry for each group
+        'geometry': 'first',  # Keeping the first geometry for each group
+        'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
     }
-    
-    grouped = intersected_data.groupby('code').agg(aggregation_functions)
-    
+
+    # Check if asset_group_name column exists
+    if 'asset_group_name' in intersected_data.columns:
+        grouped = intersected_data.groupby('code').agg(aggregation_functions)
+    else:
+        # Remove asset_group_name aggregation if the column does not exist
+        aggregation_functions.pop('asset_group_name')
+        grouped = intersected_data.groupby('code').agg(aggregation_functions)
+
     # Flatten MultiIndex columns
     grouped.columns = ['_'.join(col).strip() for col in grouped.columns.values]
 
     # Rename columns after flattening
     renamed_columns = {
         'name_first': 'name_geocodegroup',
-        'ref_geocodegroup_first': 'ref_geocodegroup'
-    }    
-    
+        'ref_geocodegroup_first': 'ref_geocodegroup',
+        'asset_group_name_<lambda>': 'asset_group_names'  # Rename aggregated asset_group_name
+    }
+
     grouped.rename(columns=renamed_columns, inplace=True)
-    
+
     # Count the total assets in each group
     grouped['assets_total'] = intersected_data.groupby('code').size()
 
     return grouped
+
 
 # Main function for processing data
 def main(log_widget, progress_var, gpkg_file):
