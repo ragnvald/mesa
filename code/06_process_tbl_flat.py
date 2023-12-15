@@ -131,7 +131,7 @@ def close_application(root):
 
 # Create the user interface
 root = tk.Tk()
-root.title("Geocode Intersection Utility")
+root.title("Geocode intersection utility")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
@@ -142,12 +142,21 @@ progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
 
+# Information text field above the buttons
+info_label_text = ("In this processing we collect all data from all geocode objects "
+                   "which cover the same area. This is done to make it possible for "
+                   "the user to present a summary of the sensitivities in an area. "
+                   "We count up the number of assets which area relevant within the "
+                   "geocode object (grid).")
+info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label.pack(padx=10, pady=10)
+
 # Create a frame for buttons
 button_frame = tk.Frame(root)
 button_frame.pack(pady=5, fill=tk.X)
 
 # Add buttons for operations within the button frame
-run_btn = ttk.Button(button_frame, text="Run Analysis", command=lambda: threading.Thread(
+run_btn = ttk.Button(button_frame, text="Run analysis", command=lambda: threading.Thread(
     target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
 run_btn.pack(side=tk.LEFT, padx=5, expand=True)  # Adjust button placement and padding
 
