@@ -206,7 +206,12 @@ root.title("Import assets")
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-# Information text field above the "Import Assets" button
+# Create a progress bar
+progress_var = tk.DoubleVar()
+progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
+progress_bar.pack(pady=5, fill=tk.X)
+
+# Information text field below the progress bar
 info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
                    "that are placed in the folder input/assets-folder. The features will "
                    "be placed in our database and used in the analysis. All assets will "
@@ -214,18 +219,17 @@ info_label_text = ("Assets are all shapefiles or geopackage files with their lay
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
-# Create a progress bar
-progress_var = tk.DoubleVar()
-progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
-progress_bar.pack(pady=5, fill=tk.X)
+# Create a frame for buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=5)
 
-# Add buttons for the different operations
-import_btn = ttk.Button(root, text="Import Assets", command=lambda: threading.Thread(
+# Add buttons for the different operations within the button frame
+import_btn = ttk.Button(button_frame, text="Import Assets", command=lambda: threading.Thread(
     target=run_import, args=(input_folder_asset, gpkg_file, log_widget, progress_var), daemon=True).start())
-import_btn.pack(pady=5, fill=tk.X)
+import_btn.pack(side=tk.LEFT, padx=10)
 
-close_btn = ttk.Button(root, text="Close", command=close_application)
-close_btn.pack(pady=5, fill=tk.X)
+close_btn = ttk.Button(button_frame, text="Close", command=close_application)
+close_btn.pack(side=tk.LEFT, padx=10)
 
 # Load configuration settings
 config_file = 'config.ini'
