@@ -112,15 +112,22 @@ def import_spatial_data(input_folder_grid, log_widget, progress_var):
     file_patterns = ['*.shp', '*.gpkg']
     total_files = sum([len(glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
+    progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
+
     log_to_gui(log_widget, "Working with imports...")
-    progress_var.set(70)
+    progress_var.set(10)  # Initial progress after starting
+
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True):
+            log_to_gui(log_widget, f"Processing file: {filepath}")
+            progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
+
             group_id_counter, object_id_counter = process_file(
                 filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
 
             processed_files += 1
-            progress_var.set(processed_files / total_files * 100)
+            progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
+
 
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
     geocode_objects_gdf = gpd.GeoDataFrame(geocode_objects, geometry='geom' if geocode_objects else None)
@@ -150,7 +157,12 @@ root.title("MESA Import Utility")
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-# Information text field above the "Import Data" button
+# Create a progress bar
+progress_var = tk.DoubleVar()
+progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
+progress_bar.pack(pady=5, fill=tk.X)
+
+# Information text field below the progress bar
 info_label_text = ("Geocodes can be of any shape. In this context they area usually rectangular "
                    "grid cells. Geocodes are impoted per shapefile or by layers within a "
                    "geopackage file in the folder input/grid. you may adjust the geocode "
@@ -158,18 +170,17 @@ info_label_text = ("Geocodes can be of any shape. In this context they area usua
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
-# Create a progress bar
-progress_var = tk.DoubleVar()
-progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
-progress_bar.pack(pady=5, fill=tk.X)
+# Create a frame for buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=5)
 
-# Add buttons for the different operations
-import_btn = ttk.Button(root, text="Import Data", command=lambda: threading.Thread(
+# Add buttons for the different operations within the button frame
+import_btn = ttk.Button(button_frame, text="Import Data", command=lambda: threading.Thread(
     target=run_import, args=(input_folder_grid, gpkg_file, log_widget, progress_var), daemon=True).start())
-import_btn.pack(pady=5, fill=tk.X)
+import_btn.pack(side=tk.LEFT, padx=10)
 
-close_btn = ttk.Button(root, text="Close", command=close_application)
-close_btn.pack(pady=5, fill=tk.X)
+close_btn = ttk.Button(button_frame, text="Close", command=close_application)
+close_btn.pack(side=tk.LEFT, padx=10)
 
 # Load configuration settings
 config_file = 'config.ini'
