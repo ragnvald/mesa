@@ -51,9 +51,15 @@ def edit_susceptibilitiesandimportance():
 def view_statistics():
     messagebox.showinfo("View Statistics", "View statistics script executed.")
 
-def process_data():
+def process_stacked_data():
     try:
-        subprocess.run(["python", "06_tbl_mesa_stacked.py"], check=True)
+        subprocess.run(["python", "06_process_tbl_stacked.py"], check=True)
+    except subprocess.CalledProcessError:
+        messagebox.showerror("Error", "Failed to process.")
+        
+def process_flat_data():
+    try:
+        subprocess.run(["python", "06_process_tbl_flat.py"], check=True)
     except subprocess.CalledProcessError:
         messagebox.showerror("Error", "Failed to process.")
 
@@ -126,11 +132,15 @@ view_statistics_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 display_image(bottom_frame)
 
 # Add buttons to right panel with spacing between buttons
-process_data_btn = ttk.Button(right_panel, text="Process data", command=process_data, width=button_width)
-process_data_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
+process_stacked_data_btn = ttk.Button(right_panel, text="Process stacked", command=process_stacked_data, width=button_width)
+process_stacked_data_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
+
+# Add buttons to right panel with spacing between buttons
+process_flat_data_btn = ttk.Button(right_panel, text="Process flat", command=process_flat_data, width=button_width)
+process_flat_data_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
 export_package_btn = ttk.Button(right_panel, text="Export package", command=export_package, width=button_width)
-export_package_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
+export_package_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 # Exit button
 exit_btn = ttk.Button(main_frame, text="Exit", command=exit_program, width=button_width)
