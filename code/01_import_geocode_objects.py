@@ -16,6 +16,10 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
+def update_progress(new_value):
+    progress_var.set(new_value)
+    progress_label.config(text=f"{int(new_value)}%")
+
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
@@ -116,6 +120,7 @@ def import_spatial_data(input_folder_grid, log_widget, progress_var):
 
     log_to_gui(log_widget, "Working with imports...")
     progress_var.set(10)  # Initial progress after starting
+    update_progress(10)
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True):
@@ -127,6 +132,7 @@ def import_spatial_data(input_folder_grid, log_widget, progress_var):
 
             processed_files += 1
             progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
+            update_progress(10 + processed_files * progress_increment)
 
 
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
@@ -161,6 +167,10 @@ log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
+
+# Create a label to show progress percentage on the progress bar
+progress_label = tk.Label(root, text="0%", bg="light grey")
+progress_label.place(in_=progress_bar, relx=0.5, rely=0.5, anchor="center")
 
 # Information text field below the progress bar
 info_label_text = ("Geocodes can be of any shape. In this context they area usually rectangular "
