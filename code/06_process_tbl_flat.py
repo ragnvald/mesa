@@ -131,7 +131,7 @@ def close_application(root):
 
 # Create the user interface
 root = tk.Tk()
-root.title("Geocode intersection utility")
+root.title("Dissolve and collect analysis")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)

@@ -150,6 +150,7 @@ def run_import(input_folder_grid, gpkg_file, log_widget, progress_var):
     export_to_geopackage(geocode_groups_gdf, geocode_objects_gdf, gpkg_file, log_widget)
     log_to_gui(log_widget, "Import completed.")
     progress_var.set(100)
+    update_progress(100)
 
 # Function to close the application
 def close_application():
