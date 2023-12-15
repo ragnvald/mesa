@@ -75,14 +75,18 @@ def aggregate_data(intersected_data):
 # Main function for processing data
 def main(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Starting processing...")
+    progress_var.set(10)  # Indicate start
 
     # Reading 'tbl_stacked' data from the GeoPackage
     log_to_gui(log_widget, "Reading 'tbl_stacked' data...")
     asset_data = gpd.read_file(gpkg_file, layer='tbl_stacked')
+    progress_var.set(25)  # Update progress after reading asset data
 
     # Reading 'tbl_geocode_group' data from the GeoPackage
     log_to_gui(log_widget, "Reading 'tbl_geocode_group' data...")
     geocode_group_data = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
+    progress_var.set(40)  # Update progress after reading geocode group data
+    
 
     # Ensure 'code' column is present in 'tbl_stacked'
     if 'code' not in asset_data.columns:
@@ -97,16 +101,21 @@ def main(log_widget, progress_var, gpkg_file):
                                    how='left',
                                    suffixes=('_asset', '_geocode'))
 
+    progress_var.set(55)  # Update progress after merging data
+
     # Drop the unnecessary columns (id_x and id_y)
     merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
 
     # Proceed with aggregation
     log_to_gui(log_widget, "Aggregating data...")
     aggregated_data = aggregate_data(merged_data)
+    progress_var.set(70)  # Update progress after data aggregation
+    
 
     # Save to GeoPackage
     aggregated_gdf = gpd.GeoDataFrame(aggregated_data, geometry='geometry_first')
     aggregated_gdf.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
+    progress_var.set(85)  # Update progress after saving data
 
     log_to_gui(log_widget, "Data processing and aggregation completed.")
     progress_var.set(100)
@@ -133,13 +142,18 @@ progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
 
-# Add buttons for operations
-run_btn = ttk.Button(root, text="Run Analysis", command=lambda: threading.Thread(
-    target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
-run_btn.pack(pady=5, fill=tk.X)
+# Create a frame for buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=5, fill=tk.X)
 
-close_btn = ttk.Button(root, text="Close", command=lambda: close_application(root))
-close_btn.pack(pady=5, fill=tk.X)
+# Add buttons for operations within the button frame
+run_btn = ttk.Button(button_frame, text="Run Analysis", command=lambda: threading.Thread(
+    target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+run_btn.pack(side=tk.LEFT, padx=5, expand=True)  # Adjust button placement and padding
+
+close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
+close_btn.pack(side=tk.LEFT, padx=5, expand=True)  # Adjust button placement and padding
+
 
 # Load configuration settings
 config_file = 'config.ini'
