@@ -65,7 +65,6 @@ def close_application(root):
 # Create the user interface
 root = tk.Tk()
 root.title("Geocode Intersection Utility")
-
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
@@ -75,13 +74,25 @@ progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
 
-# Add buttons for operations
-run_btn = ttk.Button(root, text="Run Analysis", command=lambda: threading.Thread(
-    target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
-run_btn.pack(pady=5, fill=tk.X)
+# Information text field above the buttons
+info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
+                   "that are placed in the folder input/assets-folder. The features will "
+                   "be placed in our database and used in the analysis. All assets will "
+                   "be associated with importance and susceptibility values.")
+info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label.pack(padx=10, pady=10)
 
-close_btn = ttk.Button(root, text="Close", command=lambda: close_application(root))
-close_btn.pack(pady=5, fill=tk.X)
+# Create a frame for buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=5, fill=tk.X)
+
+# Add buttons for operations within the button frame
+run_btn = ttk.Button(button_frame, text="Run Analysis", command=lambda: threading.Thread(
+    target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+run_btn.pack(side=tk.LEFT, padx=5, expand=True)
+
+close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
+close_btn.pack(side=tk.LEFT, padx=5, expand=True)
 
 # Load configuration settings
 config_file = 'config.ini'
