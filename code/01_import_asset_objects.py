@@ -12,11 +12,13 @@ import pandas as pd
 from sqlalchemy import exc
 from shapely.geometry import box
 
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
 
 # Logging function to write to the GUI log and log file
 def log_to_gui(log_widget, message):
@@ -26,6 +28,7 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
+
 
 # Read and reproject spatial file to EPSG:4326
 def read_spatial_file(filepath, layer_name=None):
@@ -80,7 +83,6 @@ def process_layer(data, asset_objects, object_id_counter, group_id, layer_name, 
         object_id_counter += 1
 
     return object_id_counter
-
 
 
 # Function to import spatial data for assets
@@ -153,16 +155,21 @@ def import_spatial_data(input_folder_asset, log_widget, progress_var):
             except Exception as e:
                 log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
     
-    # Convert dictionary to DataFrame
+    # Convert dictionary to DataFrame and list of asset objects to GeoDataFrame
     asset_groups_df = pd.DataFrame(asset_groups.values())
     asset_objects_gdf = gpd.GeoDataFrame(asset_objects, geometry='geom')
+
+    # Calculate total bounding box for all asset objects
+    if not asset_objects_gdf.empty:
+        total_bbox = asset_objects_gdf.geometry.unary_union.bounds
+        total_bbox_geom = box(*total_bbox)
+        log_to_gui(log_widget, f"Total bounding box for all assets imported.")
 
     # Ensure the id column is of type int64
     asset_groups_df['id'] = asset_groups_df['id'].astype('int64')
     asset_objects_gdf['id'] = asset_objects_gdf['id'].astype('int64')
 
-    
-    return gpd.GeoDataFrame(asset_objects, geometry='geom'), asset_groups_df
+    return asset_objects_gdf, asset_groups_df, total_bbox_geom
 
 
 # Function to export to geopackage
@@ -170,6 +177,7 @@ def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     engine = create_engine(f'sqlite:///{gpkg_file}')
     gdf.to_file(gpkg_file, layer=layer_name, driver="GPKG", if_exists='append')
     log_to_gui(log_widget, f"Data exported to {gpkg_file}, layer {layer_name}")
+
 
 # Function to update asset groups in geopackage
 def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
@@ -185,31 +193,42 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
     except exc.SQLAlchemyError as e:
         log_to_gui(log_widget, f"Failed to update asset groups: {e}")
 
+
 # Thread function to run import without freezing GUI
 def run_import(input_folder_asset, gpkg_file, log_widget, progress_var):
     log_to_gui(log_widget, "Starting asset import process...")
-    asset_objects_gdf, asset_groups_df = import_spatial_data(input_folder_asset, log_widget, progress_var)
+    
+    asset_objects_gdf, asset_groups_df, total_bbox_geom = import_spatial_data(input_folder_asset, log_widget, progress_var)
+
     export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
+    
     update_asset_groups(asset_groups_df, gpkg_file, log_widget)
+    
     log_to_gui(log_widget, "Asset import completed.")
+    
     progress_var.set(100)
+
 
 # Function to close the application
 def close_application():
     root.destroy()
 
+
 # Create the user interface
 root = tk.Tk()
 root.title("Import assets")
+
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
+
 # Create a progress bar
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
+
 
 # Information text field below the progress bar
 info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
@@ -219,9 +238,11 @@ info_label_text = ("Assets are all shapefiles or geopackage files with their lay
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
+
 # Create a frame for buttons
 button_frame = tk.Frame(root)
 button_frame.pack(pady=5)
+
 
 # Add buttons for the different operations within the button frame
 import_btn = ttk.Button(button_frame, text="Import Assets", command=lambda: threading.Thread(
@@ -230,6 +251,7 @@ import_btn.pack(side=tk.LEFT, padx=10)
 
 close_btn = ttk.Button(button_frame, text="Close", command=close_application)
 close_btn.pack(side=tk.LEFT, padx=10)
+
 
 # Load configuration settings
 config_file = 'config.ini'
