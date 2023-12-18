@@ -2,7 +2,15 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 import subprocess
 import webbrowser
+import os
 from PIL import Image, ImageTk
+
+# Function to check and create folders
+def check_and_create_folders():
+    folders = ["input/code", "input/grid", "output"]
+    for folder in folders:
+        if not os.path.exists(folder):
+            os.makedirs(folder)
 
 # Function to open a web link
 def open_link(url):
@@ -57,6 +65,9 @@ def export_package():
 
 def exit_program():
     root.destroy()
+
+# Check and create folders at the beginning
+check_and_create_folders()
 
 # Setup the main Tkinter window
 root = tk.Tk()
