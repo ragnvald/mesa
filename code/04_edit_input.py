@@ -1,8 +1,15 @@
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
+import configparser
 import pandas as pd
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
+
+# Read the configuration file
+def read_config(file_name):
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    return config
 
 # Function to validate integer input
 def validate_integer(P):
@@ -19,7 +26,6 @@ def calculate_sensitivity(row_index):
         entries[row_index]['sensitivity'].config(text=str(sensitivity))
         df.at[row_index, 'susceptibility'] = susceptibility
         df.at[row_index, 'importance'] = importance
-        #df.at[row_index, 'sensitivity'] = sensitivity
         df.at[row_index, 'sensitivity'] = susceptibility * importance
     except ValueError:
         entries[row_index]['sensitivity'].config(text="")
@@ -32,7 +38,7 @@ def calculate_sensitivity(row_index):
 # Function to load and refresh data from geopackage
 def load_data():
     global df, entries
-    engine = create_engine(f'sqlite:///{gpkg_path}')
+    engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
         df = pd.read_sql(f"SELECT * FROM {table_name}", con=engine)
         print("Column names in the DataFrame:", df.columns)  # Print the column names
@@ -88,7 +94,7 @@ def add_data_row(i, row):
 # Function to save changes to the geopackage
 # Function to save changes to the geopackage
 def save_to_gpkg():
-    engine = create_engine(f'sqlite:///{gpkg_path}')
+    engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
         # Convert 'date_import' to datetime format
         df['date_import'] = pd.to_datetime(df['date_import'], errors='coerce')
@@ -142,7 +148,14 @@ info_label = tk.Label(root, text=info_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
 # Paths for the geopackage and the table name
-gpkg_path = 'output/mesa.gpkg'
+
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+input_folder_asset = config['DEFAULT']['input_folder_asset']
+input_folder_geocode = config['DEFAULT']['input_folder_geocode']
+gpkg_file = config['DEFAULT']['gpkg_file']
+
 table_name = 'tbl_asset_group'
 
 # Load data and populate UI
