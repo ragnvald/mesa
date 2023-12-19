@@ -253,7 +253,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                                 asset_groups[layer_name] = {
                                     'id': int(group_id_counter),
                                     'name_original': layer_name,
-                                    'name_fromuser': layer_name,
+                                    'name_gis': f"layer_{group_id_counter:03d}",
+                                    'title_fromuser': layer_name,
                                     'date_import': datetime.datetime.now(),
                                     'bounding_box_geom': bbox_geom.wkt,
                                     'total_asset_objects': int(0),
@@ -274,7 +275,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                         asset_groups[asset_group_name] = {
                             'id': int(group_id_counter),
                             'name_original': asset_group_name,
-                            'name_fromuser': '',
+                            'name_gis': f"layer_{group_id_counter:03d}",
+                            'title_fromuser': asset_group_name,
                             'date_import': datetime.datetime.now(),
                             'bounding_box_geom': bbox_geom.wkt,
                             'total_asset_objects': int(0),
