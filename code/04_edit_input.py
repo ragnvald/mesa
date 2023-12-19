@@ -134,9 +134,10 @@ frame = ttk.Frame(root)
 frame.pack(padx=10, pady=10, fill="both", expand=True)
 
 # Text panel above the buttons
-info_text = "This is where you register susceptibility and importance." \
+info_text = "This is where you register susceptibility and importance. " \
             "Importance could be based on local, national or global " \
-            "scale. Susceptibility is usually scientifically based."
+            "scale. Susceptibility is usually scientifically based. " \
+            "Valid values are from 1 to 5."
 info_label = tk.Label(root, text=info_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
