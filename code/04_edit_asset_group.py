@@ -1,7 +1,15 @@
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
+import configparser
 import pandas as pd
 from sqlalchemy import create_engine
+
+
+# Read the configuration file
+def read_config(file_name):
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    return config
 
 # Function to load data from the database
 def load_data():
@@ -20,7 +28,8 @@ def save_data(df):
 def update_record(save_message=True):
     try:
         df.at[current_index, 'name_original'] = name_original_var.get()
-        df.at[current_index, 'name_fromuser'] = name_fromuser_var.get()
+        df.at[current_index, 'name_gis'] = name_gis_var.get()
+        df.at[current_index, 'title_fromuser'] = title_fromuser_var.get()
         save_data(df)  # Save changes to the database
         if save_message:
             print("Record updated and saved")
@@ -42,28 +51,48 @@ def navigate(direction):
 def load_record():
     record = df.iloc[current_index]
     name_original_var.set(record['name_original'])
-    name_fromuser_var.set(record['name_fromuser'])
+    name_gis_var.set(record['name_gis'])
+    title_fromuser_var.set(record['title_fromuser'])
 
 # Initialize the main window
 root = tk.Tk()
 root.title("Edit Asset Groups")
 
-gpkg_file = 'output/mesa.gpkg'
+# Configure column widths
+root.columnconfigure(0, minsize=200)  # Configure the size of the first column
+root.columnconfigure(1, weight=1)     # Make the second column expandable
+
+
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+input_folder_asset = config['DEFAULT']['input_folder_asset']
+input_folder_geocode = config['DEFAULT']['input_folder_geocode']
+gpkg_file = config['DEFAULT']['gpkg_file']
+
+
 df = load_data()
 current_index = 0
 
 # Variables for form fields
 name_original_var = tk.StringVar()
-name_fromuser_var = tk.StringVar()
+name_gis_var = tk.StringVar()
+title_fromuser_var = tk.StringVar()
 
-# Form fields with larger entry widgets
-tk.Label(root, text="Original name").grid(row=0, column=0, sticky='w')
+# GIS name is internal to the system. Can not be edited.
+tk.Label(root, text="GIS name").grid(row=0, column=0, sticky='w')
+name_gis_label = tk.Label(root, textvariable=name_gis_var, width=50, relief="sunken", anchor="w")
+name_gis_label.grid(row=0, column=1, sticky='w')
+
+# Original Name Entry
+tk.Label(root, text="Original name").grid(row=1, column=0, sticky='w')
 name_original_entry = tk.Entry(root, textvariable=name_original_var, width=50)
-name_original_entry.grid(row=0, column=1, sticky='e')
+name_original_entry.grid(row=1, column=1, sticky='w')
 
-tk.Label(root, text="Alternate name").grid(row=1, column=0, sticky='w')
-name_fromuser_entry = tk.Entry(root, textvariable=name_fromuser_var, width=50)
-name_fromuser_entry.grid(row=1, column=1, sticky='e')
+# Title Entry
+tk.Label(root, text="Title").grid(row=2, column=0, sticky='w')
+title_fromuser_entry = tk.Entry(root, textvariable=title_fromuser_var, width=50)
+title_fromuser_entry.grid(row=2, column=1, sticky='w')
 
 # Information text field above the "Update and Save Record" button
 info_label_text = ("All assets that are imported are associated with a file "
@@ -71,15 +100,15 @@ info_label_text = ("All assets that are imported are associated with a file "
                    "you want to use a different name in presenting the analysis "
                    "we suggest that you add that name here.")
 info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
-info_label.grid(row=2, column=0, columnspan=3, padx=10, pady=10)
+info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
 
 # Navigation and Update buttons
-ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=3, column=0, padx=5, pady=5)
-ttk.Button(root, text="Save", command=update_record).grid(row=3, column=1, padx=5, pady=5)
-ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=3, column=2, padx=5, pady=5)
+ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=4, column=0, padx=5, pady=5)
+ttk.Button(root, text="Save", command=update_record).grid(row=4, column=1, padx=5, pady=5)
+ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=4, column=2, padx=5, pady=5)
 
 # Exit button
-ttk.Button(root, text="Exit", command=root.destroy).grid(row=4, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=root.destroy).grid(row=5, column=0, columnspan=3, pady=5)
 
 # Load the first record
 load_record()
