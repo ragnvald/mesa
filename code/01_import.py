@@ -118,6 +118,8 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     geocode_groups.append({
         'id': group_id_counter,  # Group ID
         'name': layer_name,
+        'name_gis': f"geocode_{group_id_counter:03d}",
+        'title_user': layer_name,
         'description': f'Description for {layer_name}',
         'geom': bbox_geom
     })
@@ -172,13 +174,13 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
     return group_id_counter, object_id_counter
 
 # Import spatial data and export to geopackage
-def import_spatial_data_grid(input_folder_grid, log_widget, progress_var):
+def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     geocode_groups = []
     geocode_objects = []
     group_id_counter = 1
     object_id_counter = 1
     file_patterns = ['*.shp', '*.gpkg']
-    total_files = sum([len(glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True)) for pattern in file_patterns])
+    total_files = sum([len(glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
     progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
 
@@ -187,8 +189,8 @@ def import_spatial_data_grid(input_folder_grid, log_widget, progress_var):
     update_progress(10)
 
     for pattern in file_patterns:
-        for filepath in glob.glob(os.path.join(input_folder_grid, '**', pattern), recursive=True):
-            log_to_gui(log_widget, f"Processing file: {filepath}")
+        for filepath in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True):
+            log_to_gui(log_widget, f"Processing file: {os.path.splitext(os.path.basename(filepath))[0]}.gpkg")
             progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
 
             group_id_counter, object_id_counter = process_geocode_file(
@@ -206,8 +208,8 @@ def import_spatial_data_grid(input_folder_grid, log_widget, progress_var):
     return geocode_groups_gdf, geocode_objects_gdf
 
 # Thread function to run import without freezing GUI
-def run_import_geocode(input_folder_grid, gpkg_file, log_widget, progress_var):
-    geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_grid(input_folder_grid, log_widget, progress_var)
+def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
+    geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
     
     log_to_gui(log_widget, f"Preparing to export geocode groups and objects.")
 
@@ -235,8 +237,10 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
             try:
-                filename = os.path.basename(filepath)
+                filename = os.path.splitext(os.path.basename(filepath))[0]
+                
                 log_to_gui(log_widget, f"Processing file: {filename}")
+                
                 if filepath.endswith('.gpkg'):
                     ds = ogr.Open(filepath)
                     if ds is None:
@@ -269,7 +273,9 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                     ds = None
                 else:
                     data = read_and_reproject(filepath)
+                    
                     asset_group_name = os.path.splitext(os.path.basename(filepath))[0]
+                    
                     if asset_group_name not in asset_groups:
                         bbox_geom = get_bounding_box(data)
                         asset_groups[asset_group_name] = {
@@ -291,6 +297,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
                 processed_files += 1
                 progress_var.set(processed_files / total_files * 100)
+                
             except Exception as e:
                 log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
     
@@ -404,7 +411,7 @@ close_btn.pack(side=tk.LEFT, padx=10)
 config_file = 'config.ini'
 config = read_config(config_file)
 input_folder_asset = config['DEFAULT']['input_folder_asset']
-input_folder_geocode = config['DEFAULT']['input_folder_grid']
+input_folder_geocode = config['DEFAULT']['input_folder_geocode']
 gpkg_file = config['DEFAULT']['gpkg_file']
 
 root.mainloop()
