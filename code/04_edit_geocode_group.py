@@ -76,10 +76,10 @@ for idx, row in df.iterrows():
 
 # Information text field
 info_label_text = ("After you have imported the geocodes you might want to "
-                   "adjust the name of the geocode. Here you can make changes "
-                   "to both the name and the description. The name will be "
-                   "used in exports to QGIS. Name and description will probably "
-                   "be used in a PDF report which this system will generate. ")
+                   "adjust the name of the geocode. You will find their names "
+                   "when you open QGIS after having initiated the data processing "
+                   "to both the name and the description. You will also find the "
+                   "name in the PDF report which this system will generate.")
 info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
