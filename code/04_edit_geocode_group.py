@@ -1,17 +1,27 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
+import configparser
 import geopandas as gpd
 from sqlalchemy import create_engine
+
+
+# Read the configuration file
+def read_config(file_name):
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    return config
 
 def update_records():
     global df, records
     for record in records:
-        row_id = record['id']
-        name = record['name_var'].get()
-        description = record['desc_var'].get()
+        row_id      = record['id']
+        name        = record['name'].get()
+        title_user  = record['title_user'].get()
+        description = record['description'].get()
 
         # Update the DataFrame
         df.loc[df['id'] == row_id, 'name'] = name
+        df.loc[df['id'] == row_id, 'title_user'] = title_user
         df.loc[df['id'] == row_id, 'description'] = description
 
 def save_changes():
@@ -51,28 +61,57 @@ def exit_application():
 root = tk.Tk()
 root.title("Edit Geocode Groups")
 
+
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+input_folder_asset = config['DEFAULT']['input_folder_asset']
+input_folder_geocode = config['DEFAULT']['input_folder_geocode']
+gpkg_file = config['DEFAULT']['gpkg_file']
+
 # Load data
-gpkg_file = 'output/mesa.gpkg'
 df = load_spatial_data(gpkg_file)
 
 # Create a frame for the editable fields
 edit_frame = tk.Frame(root, padx=5, pady=5)
 edit_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+# Column headers
+tk.Label(edit_frame, text="ID").grid(row=0, column=0, sticky='w')
+tk.Label(edit_frame, text="GIS Name").grid(row=0, column=1, sticky='w')
+tk.Label(edit_frame, text="Layer name").grid(row=0, column=2, sticky='w')
+tk.Label(edit_frame, text="User Title").grid(row=0, column=3, sticky='w')
+tk.Label(edit_frame, text="Description").grid(row=0, column=4, sticky='w')
+
+
 # Store references to the variables
 records = []
 
 # Create labels and entry widgets for each record
 for idx, row in df.iterrows():
-    tk.Label(edit_frame, text=row['id']).grid(row=idx, column=0, sticky='w')
-    
-    name_var = tk.StringVar(value=row['name'])
-    tk.Entry(edit_frame, textvariable=name_var, width=30).grid(row=idx, column=1, sticky='w')
-    
-    desc_var = tk.StringVar(value=row['description'])
-    tk.Entry(edit_frame, textvariable=desc_var, width=70).grid(row=idx, column=2, sticky='w')
+    row_number = idx + 1  # Adjust for the header row
 
-    records.append({'id': row['id'], 'name_var': name_var, 'desc_var': desc_var})
+    tk.Label(edit_frame, text=row['id']).grid(row=row_number, column=0, sticky='w')
+    
+    # Read-only field for 'name_gis'
+    tk.Label(edit_frame, text=row['name_gis']).grid(row=row_number, column=1, sticky='w')
+    
+    
+    # Editable field for 'user title'
+    name_var = tk.StringVar(value=row.get('name', ''))
+    tk.Entry(edit_frame, textvariable=name_var, width=30).grid(row=row_number, column=2, sticky='w')
+    
+    # Editable field for 'user title'
+    user_title_var = tk.StringVar(value=row.get('title_user', ''))
+    tk.Entry(edit_frame, textvariable=user_title_var, width=30).grid(row=row_number, column=3, sticky='w')
+    
+    # Editable field for 'description'
+    description_var = tk.StringVar(value=row['description'])
+    tk.Entry(edit_frame, textvariable=description_var, width=70).grid(row=row_number, column=4, sticky='w')
+
+    records.append({'id': row['id'], 'name': name_var, 'title_user': user_title_var, 'description': description_var})
+
+
 
 # Information text field
 info_label_text = ("After you have imported the geocodes you might want to "
