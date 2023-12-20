@@ -10,14 +10,21 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
-def filter_atlas_geometries(atlas_geometries, tbl_flat):
+def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
     # Convert atlas_geometries to a GeoDataFrame
-    atlas_gdf = gpd.GeoDataFrame(atlas_geometries, columns=['id', 'name_gis', 'geom'])
+    atlas_gdf = gpd.GeoDataFrame(atlas_geometries, columns=['id', 'name_gis', 'title_user', 'geom'])
     atlas_gdf.set_geometry('geom', inplace=True)
 
     # Check for intersection
-    intersecting_geometries = atlas_gdf[atlas_gdf.geometry.apply(lambda geom: tbl_flat.intersects(geom).any())]
+    filtered_indices = atlas_gdf.geometry.apply(lambda geom: tbl_flat.intersects(geom).any())
+    intersecting_geometries = atlas_gdf[filtered_indices].copy()
 
+    # Recalculate name_gis
+    id_counter = 1
+    for index, row in intersecting_geometries.iterrows():
+        intersecting_geometries.loc[index, 'name_gis']   = f'atlas{id_counter:03}'
+        intersecting_geometries.loc[index, 'title_user'] = f'Map title for {id_counter:03}'
+        id_counter += 1
     return intersecting_geometries
 
 
@@ -44,7 +51,7 @@ def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, at
         while x < maxx:
             # Create a box and append to list
             geom = box(x, y, x + lon_size_deg, y + lat_size_deg)
-            atlas_geometries.append({'id': id_counter, 'name_gis': f'atlas{id_counter:03}', 'geom': geom})
+            atlas_geometries.append({'id': id_counter, 'name_gis': f'atlas{id_counter:03}',  'title_user': f'Map title for {id_counter:03}', 'geom': geom})
             id_counter += 1
 
             # Move to the next box in x-direction, consider overlap
@@ -67,14 +74,15 @@ def main():
     # Load tbl_flat from GeoPackage
     tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')  # Modify the layer name if different
 
-   # Generate atlas geometries
+    # Generate atlas geometries
     atlas_geometries = generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
 
-    # Filter atlas geometries based on intersection with tbl_flat
-    filtered_atlas_geometries = filter_atlas_geometries(atlas_geometries, tbl_flat)
+    # Filter atlas geometries and update name_gis
+    updated_atlas_geometries = filter_and_update_atlas_geometries(atlas_geometries, tbl_flat)
 
-    # Save filtered geometries to GeoPackage
-    filtered_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
+    # Save updated geometries to GeoPackage
+    updated_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
+
 
 
 if __name__ == "__main__":
