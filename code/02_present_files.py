@@ -16,7 +16,7 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
             print(f"Layer {layer_name} is empty, contains invalid geometries, or has no geometry column.")
             return
 
-        fig, ax = plt.subplots(figsize=(10, 10), dpi=200)
+        fig, ax = plt.subplots(figsize=(40, 40), dpi=600)
         common_crs = 'EPSG:4326'
 
         if layer.crs and layer.crs.to_string() != common_crs:
@@ -60,5 +60,10 @@ config_file = 'config.ini'
 config = read_config(config_file)
 gpkg_file = config['DEFAULT']['gpkg_file']
 output_png = config['DEFAULT']['output_png']
+asset_output_png   = 'output/asset.png'
+flat_output_png    ='output/flat.png'
+geocode_output_png = 'output/geocode.png'
 
-plot_geopackage_layer(gpkg_file, 'tbl_asset_object', output_png)
+plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
+plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
+plot_geopackage_layer(gpkg_file, 'tbl_geocode_object', geocode_output_png)
