@@ -98,7 +98,7 @@ def aggregate_data(intersected_data):
     return grouped
 
 
-# Main Processing Functions from Script 1
+# Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Building tbl_flat...")
     progress_var.set(10)  # Indicate start
@@ -134,7 +134,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     progress_var.set(100)  # Final progress
 
 
-# Main Processing Functions from Script 2
+# Create tbl_flat by reading out values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Building tbl_stacked...")
     progress_var.set(10)  # Indicate start
@@ -173,15 +173,10 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     aggregated_data = aggregate_data(merged_data)
     progress_var.set(70)  # Update progress after data aggregation
     
-
     # Save to GeoPackage
     aggregated_gdf = gpd.GeoDataFrame(aggregated_data, geometry='geometry_first')
     aggregated_gdf.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     progress_var.set(85)  # Update progress after saving data
-
-    log_to_gui(log_widget, "Data processing and aggregation completed.")
-    progress_var.set(100)
-    
 
 
 def process_all(log_widget, progress_var, gpkg_file):
@@ -190,6 +185,9 @@ def process_all(log_widget, progress_var, gpkg_file):
 
     # Process and create tbl_flat
     main_tbl_flat(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 2
+    
+    log_to_gui(log_widget, "Data processing and aggregation completed.")
+    progress_var.set(100)
 
 
 # Create the user interface
