@@ -20,27 +20,11 @@ def read_config(file_name):
     return config
 
 
-# Logging function to write to the GUI log and log file
-def log_to_gui(log_widget, message):
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    formatted_message = f"{timestamp} - {message}"
-    log_widget.insert(tk.END, formatted_message + "\n")
-    log_widget.see(tk.END)
-    with open("log.txt", "a") as log_file:
-        log_file.write(formatted_message + "\n")
-
 # Get bounding box in EPSG:4326
 def get_bounding_box(data):
     bbox = data.total_bounds
     bbox_geom = box(*bbox)
     return bbox_geom
-
-
-# Read the configuration file
-def read_config(file_name):
-    config = configparser.ConfigParser()
-    config.read(file_name)
-    return config
 
 def update_progress(new_value):
     progress_var.set(new_value)
@@ -139,21 +123,6 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
 
     return group_id_counter + 1, object_id_counter
 
-# Function to export to geopackage
-def export_to_geopackage(geocode_groups_gdf, geocode_objects_gdf, gpkg_file, log_widget):
-    engine = create_engine(f'sqlite:///{gpkg_file}')
-    try:
-        if not geocode_groups_gdf.empty:
-            geocode_groups_gdf.to_file(gpkg_file, layer='tbl_geocode_group', driver="GPKG", if_exists='append')
-            log_to_gui(log_widget, f"Exported {len(geocode_groups_gdf)} groups to {gpkg_file}")
-
-        if not geocode_objects_gdf.empty:
-            log_to_gui(log_widget, f"Attempting to export {len(geocode_objects_gdf)} objects to {gpkg_file}")
-            geocode_objects_gdf.to_file(gpkg_file, layer='tbl_geocode_object', driver="GPKG", if_exists='append')
-            log_to_gui(log_widget, f"Exported {len(geocode_objects_gdf)} objects to {gpkg_file}")
-
-    except Exception as e:
-        log_to_gui(log_widget, f"Error during export: {e}")
 
 # Function to process each file
 def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget):
@@ -227,82 +196,52 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
 # Function to import spatial data for assets
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     asset_objects = []
-    asset_groups = {}
+    asset_groups = []
     group_id_counter = 1
     object_id_counter = 1
     file_patterns = ['*.shp', '*.gpkg']
     total_files = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
+    progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
+
+    log_to_gui(log_widget, "Working with asset imports...")
+    progress_var.set(10)  # Initial progress after starting
+    update_progress(10)
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
             try:
                 filename = os.path.splitext(os.path.basename(filepath))[0]
-                
                 log_to_gui(log_widget, f"Processing file: {filename}")
-                
-                if filepath.endswith('.gpkg'):
-                    ds = ogr.Open(filepath)
-                    if ds is None:
-                        log_to_gui(log_widget, f"No layers found in GeoPackage: {filepath}")
-                        continue
 
-                    for i in range(ds.GetLayerCount()):
-                        layer = ds.GetLayerByIndex(i)
-                        if layer.GetGeomType() != 0:  # Check if the layer is spatial
-                            layer_name = layer.GetName()
-                            data = read_and_reproject(filepath, layer_name=layer_name)
-                            if layer_name not in asset_groups:
-                                bbox_geom = get_bounding_box(data)
-                                asset_groups[layer_name] = {
-                                    'id': int(group_id_counter),
-                                    'name_original': layer_name,
-                                    'name_gis': f"layer_{group_id_counter:03d}",
-                                    'title_fromuser': layer_name,
-                                    'date_import': datetime.datetime.now(),
-                                    'bounding_box_geom': bbox_geom.wkt,
-                                    'total_asset_objects': int(0),
-                                    'importance': int(0),
-                                    'susceptibility': int(0),
-                                    'sensitivity': int(0)
-                                }
-                                group_id_counter += 1
-                            group_id = asset_groups[layer_name]['id']
-                            object_id_counter = process_asset_layer(
-                                data, asset_objects, object_id_counter, group_id, layer_name, log_widget)
-                    ds = None
-                else:
-                    data = read_and_reproject(filepath)
-                    
-                    asset_group_name = os.path.splitext(os.path.basename(filepath))[0]
-                    
-                    if asset_group_name not in asset_groups:
-                        bbox_geom = get_bounding_box(data)
-                        asset_groups[asset_group_name] = {
-                            'id': int(group_id_counter),
-                            'name_original': asset_group_name,
-                            'name_gis': f"layer_{group_id_counter:03d}",
-                            'title_fromuser': asset_group_name,
-                            'date_import': datetime.datetime.now(),
-                            'bounding_box_geom': bbox_geom.wkt,
-                            'total_asset_objects': int(0),
-                            'importance': int(0),
-                            'susceptibility': int(0),
-                            'sensitivity': int(0)
-                        }
-                        group_id_counter += 1
-                    group_id = asset_groups[asset_group_name]['id']
+                data = read_and_reproject(filepath)
+                if not data.empty:
+                    bbox_geom = get_bounding_box(data)
+                    asset_groups.append({
+                        'id': group_id_counter,
+                        'name_original': filename,
+                        'name_gis': f"layer_{group_id_counter:03d}",
+                        'title_fromuser': filename,
+                        'date_import': datetime.datetime.now(),
+                        'geom': bbox_geom,
+                        'total_asset_objects': int(0),
+                        'importance': int(0),
+                        'susceptibility': int(0),
+                        'sensitivity': int(0)
+                    })
+
                     object_id_counter = process_asset_layer(
-                        data, asset_objects, object_id_counter, group_id, asset_group_name, log_widget)
+                        data, asset_objects, object_id_counter, group_id_counter, filename, log_widget)
+                    group_id_counter += 1
 
                 processed_files += 1
-                progress_var.set(processed_files / total_files * 100)
-                
+                progress_var.set(10 + processed_files * progress_increment)
+                update_progress(10 + processed_files * progress_increment)
+
             except Exception as e:
                 log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
     
-    # Convert dictionary to DataFrame and list of asset objects to GeoDataFrame
-    asset_groups_df = pd.DataFrame(asset_groups.values())
+    asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
     asset_objects_gdf = gpd.GeoDataFrame(asset_objects, geometry='geom')
 
     # Calculate total bounding box for all asset objects
@@ -311,14 +250,14 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
         total_bbox_geom = box(*total_bbox)
         log_to_gui(log_widget, f"Total bounding box for all assets imported.")
 
-    # Ensure the id column is of type int64
-    asset_groups_df['id'] = asset_groups_df['id'].astype('int64')
+    asset_groups_gdf['id'] = asset_groups_gdf['id'].astype('int64')
     asset_objects_gdf['id'] = asset_objects_gdf['id'].astype('int64')
 
-    return asset_objects_gdf, asset_groups_df, total_bbox_geom
+    return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
 
-# Function to export to geopackage
+
+# Function to export to geopackage -
 def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     engine = create_engine(f'sqlite:///{gpkg_file}')
     gdf.to_file(gpkg_file, layer=layer_name, driver="GPKG", if_exists='append')
@@ -329,15 +268,24 @@ def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
 def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
     engine = create_engine(f'sqlite:///{gpkg_file}')
 
-    # Define the data types for the ID columns
-    id_col = asset_groups_df.columns[asset_groups_df.dtypes == 'int64']
-    asset_groups_df[id_col] = asset_groups_df[id_col].astype(int)
+    # Check if 'geom' column exists in the DataFrame
+    if 'geom' in asset_groups_df.columns:
+        # Define the data types for the ID columns
+        id_col = asset_groups_df.columns[asset_groups_df.dtypes == 'int64']
+        
+        asset_groups_gdf = gpd.GeoDataFrame(asset_groups_df, geometry='geom')
 
-    try:
-        asset_groups_df.to_sql('tbl_asset_group', con=engine, if_exists='replace', index=False)
-        log_to_gui(log_widget, "Asset groups updated in GeoPackage.")
-    except exc.SQLAlchemyError as e:
-        log_to_gui(log_widget, f"Failed to update asset groups: {e}")
+        asset_groups_gdf[id_col] = asset_groups_gdf[id_col].astype(int)
+
+        try:
+            asset_groups_gdf.to_file(gpkg_file, layer='tbl_asset_group', driver="GPKG", if_exists='append')
+            log_to_gui(log_widget, "Asset groups updated in GeoPackage.")
+        except exc.SQLAlchemyError as e:
+            log_to_gui(log_widget, f"Failed to update asset groups: {e}")
+    else:
+        log_to_gui(log_widget, "Error: 'geom' column not found in asset_groups_df.")
+
+
 
 
 # Thread function to run import without freezing GUI
