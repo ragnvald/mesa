@@ -7,13 +7,10 @@ import configparser
 import datetime
 import os
 
-# Read the configuration file
-def read_config(file_name):
-    config = configparser.ConfigParser()
-    config.read(file_name)
-    return config
+# # # # # # # # # # # # # # 
+# Shared functions
 
-# Functions from Script 1
+# Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
@@ -28,17 +25,6 @@ def log_to_gui(log_widget, message):
 
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
-
-# Function to perform intersection with geocode data
-def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
-    log_to_gui(log_widget, f"Processing {geom_type} intersections")
-    asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
-
-    if asset_filtered.empty:
-        return gpd.GeoDataFrame()
-
-    return gpd.sjoin(geocode_df, asset_filtered, how='inner', op='intersects')
-
 
 # Thread function to run main without freezing GUI
 def run_main(log_widget, progress_var, gpkg_file):
@@ -48,13 +34,6 @@ def run_main(log_widget, progress_var, gpkg_file):
 def close_application(root):
     root.destroy()
 
-
-# Functions from Script 2
-def read_config(file_name):
-    config = configparser.ConfigParser()
-    config.read(file_name)
-    return config
-
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
@@ -63,6 +42,11 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
+
+
+# # # # # # # # # # # # # # 
+# Spatial functions
+
 
 # Function to perform intersection with geocode data
 def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
@@ -73,6 +57,7 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
         return gpd.GeoDataFrame()
 
     return gpd.sjoin(geocode_df, asset_filtered, how='inner', op='intersects')
+
 
 # Function to aggregate data by code
 def aggregate_data(intersected_data):
@@ -112,13 +97,6 @@ def aggregate_data(intersected_data):
 
     return grouped
 
-
-def process_all(log_widget, progress_var, gpkg_file):
-    # Process and create tbl_stacked
-    main_tbl_stacked(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 1
-
-    # Process and create tbl_flat
-    main_tbl_flat(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 2
 
 # Main Processing Functions from Script 1
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
@@ -205,10 +183,14 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     progress_var.set(100)
     
 
-# Function to close the application
-def close_application(root):
-    root.destroy()
-    
+
+def process_all(log_widget, progress_var, gpkg_file):
+    # Process and create tbl_stacked
+    main_tbl_stacked(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 1
+
+    # Process and create tbl_flat
+    main_tbl_flat(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 2
+
 
 # Create the user interface
 root = tk.Tk()
