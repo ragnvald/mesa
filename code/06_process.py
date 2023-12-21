@@ -149,7 +149,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     geocode_group_data = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
     progress_var.set(70)  # Update progress after reading geocode group data
     
-
     # Ensure 'code' column is present in 'tbl_stacked'
     if 'code' not in asset_data.columns:
         log_to_gui(log_widget, "'code' column not found in 'tbl_stacked'.")
@@ -231,6 +230,5 @@ close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 config_file = 'config.ini'
 config = read_config(config_file)
 gpkg_file = config['DEFAULT']['gpkg_file']
-
 
 root.mainloop()
