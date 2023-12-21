@@ -68,7 +68,7 @@ def edit_atlas():
     except subprocess.CalledProcessError:
         messagebox.showerror("Error", "Failed to process.")
 
-def export_package():
+def export_qgis():
     messagebox.showinfo("Export Package", "Export package script executed.")
 
 def exit_program():
@@ -143,8 +143,8 @@ process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pad
 edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width)
 edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
-export_package_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_package, width=button_width)
-export_package_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
+export_qgis_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_qgis, width=button_width)
+export_qgis_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
 
 # Exit button
