@@ -7,7 +7,7 @@ from PIL import Image, ImageTk
 
 # Function to check and create folders
 def check_and_create_folders():
-    folders = ["input/code", "input/grid", "output"]
+    folders = ["input/code", "input/grid", "output", "qgis"]
     for folder in folders:
         if not os.path.exists(folder):
             os.makedirs(folder)
@@ -44,14 +44,11 @@ def edit_geocode_group():
     except subprocess.CalledProcessError:
         messagebox.showerror("Error", "Failed to execute edit geocode group script.")
 
-def edit_susceptibilitiesandimportance():
+def edit_processing_setup():
     try:
         subprocess.run(["python", "04_edit_input.py"], check=True)
     except subprocess.CalledProcessError:
         messagebox.showerror("Error", "Failed to edit.")
-
-def view_statistics():
-    messagebox.showinfo("View Statistics", "View statistics script executed.")
 
 def process_data():
     try:
@@ -59,6 +56,17 @@ def process_data():
     except subprocess.CalledProcessError:
         messagebox.showerror("Error", "Failed to process.")
 
+def make_atlas():
+    try:
+        subprocess.run(["python", "07_make_atlas.py"], check=True)
+    except subprocess.CalledProcessError:
+        messagebox.showerror("Error", "Failed to process.")
+
+def edit_atlas():
+    try:
+        subprocess.run(["python", "07_edit_atlas.py"], check=True)
+    except subprocess.CalledProcessError:
+        messagebox.showerror("Error", "Failed to process.")
 
 def export_package():
     messagebox.showinfo("Export Package", "Export package script executed.")
@@ -72,7 +80,7 @@ check_and_create_folders()
 # Setup the main Tkinter window
 root = tk.Tk()
 root.title("MESA 4")
-root.geometry("700x540")
+root.geometry("800x540")
 
 # Main frame
 main_frame = tk.Frame(root)
@@ -88,6 +96,9 @@ left_panel.grid_rowconfigure(0, weight=1)
 left_panel.grid_rowconfigure(1, weight=1)
 left_panel.grid_rowconfigure(2, weight=1)
 left_panel.grid_rowconfigure(3, weight=1)
+left_panel.grid_rowconfigure(4, weight=1)
+left_panel.grid_rowconfigure(5, weight=1)
+left_panel.grid_rowconfigure(6, weight=1)
 
 # Separator
 separator = ttk.Separator(main_frame, orient='vertical')
@@ -120,19 +131,25 @@ edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
 edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width)
 edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
-view_statistics_btn = ttk.Button(left_panel, text="Set up processing", command=edit_susceptibilitiesandimportance, width=button_width)
-view_statistics_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
+edit_processing_setup_btn = ttk.Button(left_panel, text="Set up processing", command=edit_processing_setup, width=button_width)
+edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
 process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
+process_stacked_data_btn = ttk.Button(left_panel, text="Make atlas", command=make_atlas, width=button_width)
+process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+
+edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width)
+edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
+
 export_package_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_package, width=button_width)
-export_package_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+export_package_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
 
 # Exit button
 exit_btn = ttk.Button(left_panel, text="Exit", command=exit_program, width=button_width)
-exit_btn.grid(row=5, column=0, columnspan=2, pady=button_pady)
+exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
 
 # Call the function to display the image in the bottom frame
 display_image(bottom_frame)
