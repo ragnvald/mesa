@@ -56,7 +56,7 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
     if asset_filtered.empty:
         return gpd.GeoDataFrame()
 
-    return gpd.sjoin(geocode_df, asset_filtered, how='inner', op='intersects')
+    return gpd.sjoin(geocode_df, asset_filtered, how='inner', predicate='intersects')
 
 
 # Function to aggregate data by code
@@ -100,54 +100,54 @@ def aggregate_data(intersected_data):
 
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
-    log_to_gui(log_widget, "Building tbl_flat...")
+    log_to_gui(log_widget, "Building tbl_stacked...")
     progress_var.set(10)  # Indicate start
 
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-    progress_var.set(20)  # Progress after reading asset data
+    progress_var.set(15)  # Progress after reading asset data
 
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    progress_var.set(30)  # Progress after reading geocode data
+    progress_var.set(20)  # Progress after reading geocode data
 
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    progress_var.set(40)  # Progress after reading asset group data
+    progress_var.set(25)  # Progress after reading asset group data
 
     # Merge asset group data with asset data
     asset_data = asset_data.merge(asset_group_data[['id', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
                                   left_on='ref_asset_group', right_on='id', how='left')
-    progress_var.set(50)  # Progress after merging data
+    progress_var.set(30)  # Progress after merging data
 
     point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
-    progress_var.set(60)  # Progress after point intersections
+    progress_var.set(35)  # Progress after point intersections
 
     line_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'LineString', log_widget)
-    progress_var.set(70)  # Progress after line intersections
+    progress_var.set(40)  # Progress after line intersections
 
     polygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Polygon', log_widget)
-    progress_var.set(80)  # Progress after polygon intersections
+    progress_var.set(43)  # Progress after polygon intersections
 
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
-    progress_var.set(90)  # Progress after concatenating data
+    progress_var.set(45)  # Progress after concatenating data
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Data processing completed.")
-    progress_var.set(100)  # Final progress
+    progress_var.set(50)  # Final progress
 
 
 # Create tbl_flat by reading out values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Building tbl_stacked...")
-    progress_var.set(10)  # Indicate start
+    progress_var.set(55)  # Indicate start
 
     # Reading 'tbl_stacked' data from the GeoPackage
     log_to_gui(log_widget, "Reading 'tbl_stacked' data...")
     asset_data = gpd.read_file(gpkg_file, layer='tbl_stacked')
-    progress_var.set(25)  # Update progress after reading asset data
+    progress_var.set(60)  # Update progress after reading asset data
 
     # Reading 'tbl_geocode_group' data from the GeoPackage
     log_to_gui(log_widget, "Reading 'tbl_geocode_group' data...")
     geocode_group_data = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
-    progress_var.set(40)  # Update progress after reading geocode group data
+    progress_var.set(70)  # Update progress after reading geocode group data
     
 
     # Ensure 'code' column is present in 'tbl_stacked'
@@ -163,7 +163,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
                                    how='left',
                                    suffixes=('_asset', '_geocode'))
 
-    progress_var.set(55)  # Update progress after merging data
+    progress_var.set(80)  # Update progress after merging data
 
     # Drop the unnecessary columns (id_x and id_y)
     merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
@@ -171,12 +171,12 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     # Proceed with aggregation
     log_to_gui(log_widget, "Aggregating data...")
     aggregated_data = aggregate_data(merged_data)
-    progress_var.set(70)  # Update progress after data aggregation
+    progress_var.set(85)  # Update progress after data aggregation
     
     # Save to GeoPackage
     aggregated_gdf = gpd.GeoDataFrame(aggregated_data, geometry='geometry_first')
     aggregated_gdf.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
-    progress_var.set(85)  # Update progress after saving data
+    progress_var.set(92)  # Update progress after saving data
 
 
 def process_all(log_widget, progress_var, gpkg_file):
