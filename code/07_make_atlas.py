@@ -27,7 +27,6 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
         id_counter += 1
     return intersecting_geometries
 
-
 # Function to generate atlas geometries
 def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent):
     # Convert the atlas sizes to degrees (approximation)
@@ -72,7 +71,7 @@ def main():
     gpkg_file = config['DEFAULT']['gpkg_file']
 
     # Load tbl_flat from GeoPackage
-    tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')  # Modify the layer name if different
+    tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')
 
     # Generate atlas geometries
     atlas_geometries = generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
@@ -82,8 +81,6 @@ def main():
 
     # Save updated geometries to GeoPackage
     updated_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
-
-
 
 if __name__ == "__main__":
     main()
