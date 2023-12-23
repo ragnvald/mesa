@@ -28,45 +28,74 @@ def display_image(bottom_frame):
 
 def import_assets():
     try:
-        subprocess.run(["python", "01_import.py"], check=True)
+        # First try running import.py
+        subprocess.run(["python", "import.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to execute import assets script.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["import.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def edit_asset_group():
     try:
         subprocess.run(["python", "04_edit_asset_group.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to execute edit asset group script.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["04_edit_asset_group.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def edit_geocode_group():
     try:
         subprocess.run(["python", "04_edit_geocode_group.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to execute edit geocode group script.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["04_edit_geocode_group.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def edit_processing_setup():
     try:
         subprocess.run(["python", "04_edit_input.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to edit.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["04_edit_input.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def process_data():
     try:
         subprocess.run(["python", "06_process.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to process.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["06_process.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def make_atlas():
     try:
         subprocess.run(["python", "07_make_atlas.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to process.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["07_make_atlas.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def edit_atlas():
     try:
         subprocess.run(["python", "07_edit_atlas.py"], check=True)
     except subprocess.CalledProcessError:
-        messagebox.showerror("Error", "Failed to process.")
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["07_edit_atlas.exe"], check=True)
+        except subprocess.CalledProcessError:
+            messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def export_qgis():
     messagebox.showinfo("Export Package", "Export package script executed.")
