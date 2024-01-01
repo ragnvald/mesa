@@ -26,6 +26,9 @@ def log_to_gui(log_widget, message):
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
+# # # # # # # # # # # # # # 
+# Core functions
+
 # Thread function to run main without freezing GUI
 def run_main(log_widget, progress_var, gpkg_file):
     main(log_widget, progress_var, gpkg_file)

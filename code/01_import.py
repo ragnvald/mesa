@@ -13,12 +13,17 @@ from sqlalchemy import exc
 from shapely.geometry import box
 
 
+# # # # # # # # # # # # # # 
+# Shared/general functions
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
 
+# # # # # # # # # # # # # # 
+# Core functions
 
 # Get bounding box in EPSG:4326
 def get_bounding_box(data):

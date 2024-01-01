@@ -1,8 +1,21 @@
 import pandas as pd
 import geopandas as gpd
+import configparser
 import fiona
 from datetime import datetime
 from sqlalchemy import create_engine
+
+# # # # # # # # # # # # # # 
+# Shared/general functions
+
+# Read the configuration file
+def read_config(file_name):
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    return config
+
+# # # # # # # # # # # # # # 
+# Core functions
 
 # Function to extract metadata from geopackage layers and export to a geopackage file
 def export_gpkg_metadata_to_gpkg(gpkg_path, destination_gpkg_path, table_name):
@@ -45,10 +58,16 @@ def export_gpkg_metadata_to_gpkg(gpkg_path, destination_gpkg_path, table_name):
     # Write the metadata DataFrame to a geopackage file
     metadata_df.to_sql(table_name, con=engine, if_exists='replace', index=False)
 
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+input_folder_asset = config['DEFAULT']['input_folder_asset']
+input_folder_geocode = config['DEFAULT']['input_folder_geocode']
+gpkg_file = config['DEFAULT']['gpkg_file']
+
 # Paths for the geopackage and the destination geopackage file
-gpkg_path = 'output/mesa.gpkg'
-destination_gpkg_path = 'output/mesa.gpkg'
+#destination_gpkg_path = 'output/mesa.gpkg'
 table_name = 'tbl_asset_group'
 
 # Call the function to export the geopackage metadata to another geopackage
-export_gpkg_metadata_to_gpkg(gpkg_path, destination_gpkg_path, table_name)
+export_gpkg_metadata_to_gpkg(gpkg_file, gpkg_file, table_name)

@@ -5,11 +5,18 @@ import pandas as pd
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
 
+
+# # # # # # # # # # # # # # 
+# Shared/general functions
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
+# # # # # # # # # # # # # # 
+# Core functions
 
 # Function to validate integer input
 def validate_integer(P):

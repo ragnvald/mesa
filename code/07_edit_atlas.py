@@ -5,11 +5,18 @@ import pandas as pd
 from sqlalchemy import create_engine
 import os
 
+# # # # # # # # # # # # # # 
+# Shared/general functions
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
+
+# # # # # # # # # # # # # # 
+# Database management functions
 
 # Function to load data from the database
 def load_data():

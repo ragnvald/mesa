@@ -7,6 +7,9 @@ import configparser
 from shapely.geometry import box
 import datetime
 
+# # # # # # # # # # # # # # 
+# Shared/general functions
+
 # Function to read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -26,6 +29,9 @@ def log_to_gui(log_widget, message):
 def close_application(root):
     root.destroy()
 
+# # # # # # # # # # # # # # 
+# Core functions
+    
 # Thread function to run main without freezing GUI
 def run_main(log_widget, progress_var, gpkg_file):
     main(log_widget, progress_var, gpkg_file)

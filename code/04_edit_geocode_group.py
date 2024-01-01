@@ -4,12 +4,17 @@ import configparser
 import geopandas as gpd
 from sqlalchemy import create_engine
 
+# # # # # # # # # # # # # # 
+# Shared/general functions
 
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
+# # # # # # # # # # # # # # 
+# Core functions
 
 def update_records():
     global df, records
