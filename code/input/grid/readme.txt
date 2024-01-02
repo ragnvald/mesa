@@ -1,4 +1,4 @@
 Place geocodes in this folder. Geocodes could be:
 
-* Shapefiles
+* Shapefiles 
 * Geopackage files with one or more spatial tables
