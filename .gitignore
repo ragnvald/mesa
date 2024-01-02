@@ -11,6 +11,7 @@
 *.bzl
 *.rc
 *.gpkg
+*.spec
 *.html
 build/user_interface/PKG-00.toc
 .gitignore
