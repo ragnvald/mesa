@@ -168,16 +168,19 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True):
-            log_to_gui(log_widget, f"Processing file: {os.path.splitext(os.path.basename(filepath))[0]}.gpkg")
-            progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
+            try:
+                log_to_gui(log_widget, f"Processing file: {os.path.splitext(os.path.basename(filepath))[0]}.gpkg")
+                progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
 
-            group_id_counter, object_id_counter = process_geocode_file(
-                filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
+                group_id_counter, object_id_counter = process_geocode_file(
+                    filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
 
-            processed_files += 1
-            progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
-            update_progress(10 + processed_files * progress_increment)
+                processed_files += 1
+                progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
+                update_progress(10 + processed_files * progress_increment)
 
+            except Exception as e:
+                log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
 
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
     geocode_objects_gdf = gpd.GeoDataFrame(geocode_objects, geometry='geom' if geocode_objects else None)
