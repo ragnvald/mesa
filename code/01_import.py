@@ -156,7 +156,11 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     file_patterns = ['*.shp', '*.gpkg']
     total_files = sum([len(glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
-    progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
+
+    if total_files == 0:
+        progress_increment = 70
+    else:
+        progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
 
     log_to_gui(log_widget, "Working with imports...")
     progress_var.set(10)  # Initial progress after starting
@@ -248,6 +252,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     
     asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
     asset_objects_gdf = gpd.GeoDataFrame(asset_objects, geometry='geom')
+    
+    update_progress(90)
 
     # Calculate total bounding box for all asset objects
     if not asset_objects_gdf.empty:
@@ -257,6 +263,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
     asset_groups_gdf['id'] = asset_groups_gdf['id'].astype('int64')
     asset_objects_gdf['id'] = asset_objects_gdf['id'].astype('int64')
+
+    update_progress(100)
 
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
