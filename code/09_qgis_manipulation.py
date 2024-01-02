@@ -1,39 +1,32 @@
-import sys
+import geopandas as gpd
 
-# Path to the QGIS installation
-# These paths will vary depending on where and how QGIS is installed on your system
-qgis_path = "C:/OSGeo4W/apps/qgis/python"
-qgis_plugins_path = "C:/OSGeo4W/apps/qgis/python/plugins"
+def read_geopackage_layer(geopackage_path, layer_name):
+    """
+    Reads a specified layer from a GeoPackage file and prints its contents.
 
-# Add paths to sys.path
-sys.path.append(qgis_path)
-sys.path.append(qgis_plugins_path)
+    :param geopackage_path: Path to the GeoPackage file
+    :param layer_name: Name of the layer to be read
+    """
+    try:
+        # Reading the layer data using Geopandas
+        layer_data = gpd.read_file(geopackage_path, layer=layer_name)
 
-from qgis.core import QgsProject, QgsApplication
+        # Print the data
+        print(f"Data from layer '{layer_name}':\n{layer_data}")
 
+    except Exception as e:
+        print(f"Error reading layer '{layer_name}' from GeoPackage '{geopackage_path}': {e}")
 
+# Set the path to your GeoPackage file and the layer name
+geopackage_file = 'output/mesa.gpkg'
+layer_to_read = 'tbl_geocode_group'
 
-from qgis.core import QgsProject, QgsApplication
+# Call the function with the specified GeoPackage file and layer name
+read_geopackage_layer(geopackage_file, layer_to_read)
 
-# Supply path to qgis install location
-QgsApplication.setPrefixPath("C:\OSGeo4W\bin\qgis-bin.exe", True)
+# Set the path to your GeoPackage file and the layer name
+geopackage_file = 'output/mesa.gpkg'
+layer_to_read = 'tbl_asset_group'
 
-# Create a reference to the QgsApplication
-app = QgsApplication([], False)
-
-# Initialize the application
-app.initQgis()
-
-# Load and manipulate your project
-project = QgsProject.instance()
-project.read('/qgis/mesa.qgz')
-
-# Perform your operations here
-# e.g., adding layers, changing layer properties, etc.
-
-# Save changes to the project
-project.write()
-
-# Exit the application
-app.exitQgis()
-app.exit()
+# Call the function with the specified GeoPackage file and layer name
+read_geopackage_layer(geopackage_file, layer_to_read)
