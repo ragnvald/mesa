@@ -22,6 +22,7 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
+
 # # # # # # # # # # # # # # 
 # Core functions
 
@@ -58,6 +59,11 @@ def read_and_reproject(filepath, layer=None):
 
 
 # Function to process a layer and add to asset objects
+# Asset objects are all objects form all asset files/geopackages. In this process we will have
+# to harvest all attribute data and place them in one specific attribute. The attributes are all
+# placed within one attribute (attributes). At the time of writing this I am not sure if the 
+# attribute name is kept here. If not it should be placed separately in tbl_asset_group.
+#
 def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
@@ -92,7 +98,12 @@ def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_
     return object_id_counter
 
 
-# Function to process a layer and add to groups and objects
+# Function to process a geocode layer and place it in context.
+# Geocode objects are all objects form all asset files/geopackages. The attributes are all
+# placed within one attribute (attributes) in the tbl_geocode_object table. At the time
+# of writing this I am not sure if the attribute name is kept here. If not it should be
+# placed separately in tbl_geocode_group.
+#
 def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
@@ -185,6 +196,8 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
     geocode_objects_gdf = gpd.GeoDataFrame(geocode_objects, geometry='geom' if geocode_objects else None)
     
+    update_progress(90)
+
     log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}")
     return geocode_groups_gdf, geocode_objects_gdf
 
@@ -201,7 +214,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
         export_to_geopackage(geocode_objects_gdf, gpkg_file, 'tbl_geocode_object', log_widget)
 
     log_to_gui(log_widget, "Import completed.")
-    progress_var.set(100)
+ 
     update_progress(100)
 
 
