@@ -64,37 +64,37 @@ def edit_processing_setup():
         try:
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_input.exe"], check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.CalledProcessError:
             messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def process_data():
     try:
         subprocess.run(["python", "06_process.py"], check=True)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
             subprocess.run(["06_process.exe"], check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.CalledProcessError:
             messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def make_atlas():
     try:
         subprocess.run(["python", "07_make_atlas.py"], check=True)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
             subprocess.run(["07_make_atlas.exe"], check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.CalledProcessError:
             messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def edit_atlas():
     try:
         subprocess.run(["python", "07_edit_atlas.py"], check=True)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
             subprocess.run(["07_edit_atlas.exe"], check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.CalledProcessError:
             messagebox.showerror("Error", "Failed to execute import assets script.")
 
 def export_qgis():
