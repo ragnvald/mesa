@@ -22,11 +22,34 @@ geopackage_file = 'output/mesa.gpkg'
 layer_to_read = 'tbl_geocode_group'
 
 # Call the function with the specified GeoPackage file and layer name
-geocode_group = read_geopackage_layer(geopackage_file, layer_to_read)
+dataframe_tbl_geocode_group = read_geopackage_layer(geopackage_file, layer_to_read)
 
 # Set the path to your GeoPackage file and the layer name
 geopackage_file = 'output/mesa.gpkg'
 layer_to_read = 'tbl_asset_group'
 
 # Call the function with the specified GeoPackage file and layer name
-asset_group = read_geopackage_layer(geopackage_file, layer_to_read)
+dataframe_tbl_asset_group = read_geopackage_layer(geopackage_file, layer_to_read)
+
+
+# Set the path to your GeoPackage file and the layer name
+geopackage_file = 'output/mesa.gpkg'
+layer_to_read = 'tbl_stacked'
+
+# Call the function with the specified GeoPackage file and layer name
+dataframe_tbl_stacked = read_geopackage_layer(geopackage_file, layer_to_read)
+
+
+# Set the path to your GeoPackage file and the layer name
+geopackage_file = 'output/mesa.gpkg'
+layer_to_read = 'tbl_flat'
+
+# Call the function with the specified GeoPackage file and layer name
+dataframe_tbl_flat = read_geopackage_layer(geopackage_file, layer_to_read)
+# Set the path to your GeoPackage file and the layer name
+
+geopackage_file = 'output/mesa.gpkg'
+layer_to_read = 'tbl_atlas'
+
+# Call the function with the specified GeoPackage file and layer name
+dataframe_tbl_atlas = read_geopackage_layer(geopackage_file, layer_to_read)
