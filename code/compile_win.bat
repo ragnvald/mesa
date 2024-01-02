@@ -22,8 +22,7 @@ echo Working in this folder: %BUILD_FOLDER%
 
 echo Distribution folder will be: %DIST_FOLDER%
 
-@echo off
-REM Run PyInstaller for your script
+:: Start the compilation
 echo Working on user_interface.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" user_interface.py >nul 2>&1
 
@@ -51,14 +50,15 @@ pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 05_
 echo Working on 06_process.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 06_process.py >nul 2>&1
 
-echo Working on 06_process.py
+echo Working on 07_edit_atlas.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_edit_atlas.py >nul 2>&1
 
-echo Working on 07_edit_atlas
+echo Working on 07_make_atlas.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
-echo Compilation complete. Check the dist-folder.
+echo Compilation complete. You will finde the compiled code herE: %DIST_FOLDER%
 
+:: Clean up build folders and .spec files
 
 :: Check if the folder exists
 if exist "%BUILD_FOLDER%" (
@@ -70,5 +70,10 @@ if exist "%BUILD_FOLDER%" (
 )
 
 echo Build folders deleted
+
+::Just delete the -spec-files
+del "*.spec" /q
+
+echo All .spec-files deleted
 
 pause
