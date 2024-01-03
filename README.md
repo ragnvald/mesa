@@ -3,8 +3,9 @@
 ## Overview
 The MESA (Methods for Environmental Sensitivity Assessment) tool is a Python-based application designed to assess and map environmental sensitivity, particularly in relation to potential pollution incidents in the petroleum industry. It provides a systematic framework for evaluating the vulnerability and sensitivity of environmental assets such as coastal areas, ecosystems, and wildlife to pollution impacts.
 
-This implementation of the MESA tool compiles a collection of Python scripts into a distributable .exe file, featuring a Graphical User Interface (GUI) created with Tkinter.
-Features
+The python implementation of the MESA tool is rather complex to get up and running. Installing and running Python on a computer could be demanding. On top of that comes the need to install several python libraries. 
+
+The code can be compiled to a series of executable files (.exe) which run nicely on a Windows computer. The compiled files are rather big and in total they are at the last compilation 1.2 GB. This means distributing the files using Github is not possible.
 
 * Environmental Sensitivity Assessment: Systematic evaluation of various environmental assets' vulnerability to pollution.
 * Mapping Capability: Visual representation of sensitivity assessments for easier interpretation and decision-making.
@@ -68,7 +69,6 @@ The plan is to replace the spatial libraries and the user interface with QGIS na
 ### Pocessing capabilities required
 This depends very a lot on the input data to be handled. Generally having a complex geocode with many objects will increase the calculation resource requirements.
 
-The compiled version is being prepared. Cross-platform error handling is one big issue pending.
 
 ## Method background
 Read more about the method and tool here: https://www.mesamethod.org/wiki/Main_Page
