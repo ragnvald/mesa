@@ -19,9 +19,6 @@ The code can be compiled to a series of executable files (.exe) which run nicely
 **01_import.py**
 Importing data or modules (specific details not provided).
 
-**03_data_structure.py**
-Shared/general functions, possibly for data structure definitions.
-
 **04_edit_asset_group.py**
 Shared/general functions for asset group management.
 
