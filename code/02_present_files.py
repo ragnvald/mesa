@@ -1,3 +1,7 @@
+# The intention of this file is to provide a draft overview of assets, geocodes and coded assets
+# Could be used to create the basis for a PDF report showing the database processing.
+# As for now - just a proof of concept.
+
 import geopandas as gpd
 import configparser
 import matplotlib.pyplot as plt
@@ -16,7 +20,7 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
             print(f"Layer {layer_name} is empty, contains invalid geometries, or has no geometry column.")
             return
 
-        fig, ax = plt.subplots(figsize=(40, 40), dpi=600)
+        fig, ax = plt.subplots(figsize=(40, 40), dpi=200)
         common_crs = 'EPSG:4326'
 
         if layer.crs and layer.crs.to_string() != common_crs:
@@ -26,12 +30,13 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
         lines = layer[layer.geom_type.isin(['LineString', 'MultiLineString'])]
         points = layer[layer.geom_type.isin(['Point', 'MultiPoint'])]
 
-        if not polygons.empty:
-            polygons.plot(ax=ax, alpha=0.5, color='green')
-        if not lines.empty:
-            lines.plot(ax=ax, alpha=0.5, color='blue')
+
         if not points.empty:
             points.plot(ax=ax, alpha=0.5, color='red')
+        if not lines.empty:
+            lines.plot(ax=ax, alpha=0.5, color='blue')
+        if not polygons.empty:
+            polygons.plot(ax=ax, alpha=0.5, color='green')
 
         # Default plot limits in case of invalid bounds
         default_limits = (-180, 180, -90, 90)
