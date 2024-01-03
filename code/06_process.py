@@ -106,7 +106,7 @@ def aggregate_data(intersected_data):
 
     grouped.rename(columns=renamed_columns, inplace=True)
 
-    # Count the total assets in each group
+    # Count the total assets in each cell (code is the unique identifier)
     grouped['assets_total'] = intersected_data.groupby('code').size()
 
     return grouped
