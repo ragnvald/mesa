@@ -151,12 +151,15 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
             group_id_counter, object_id_counter = process_geocode_layer(
                 data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
         ds = None
-    else:
+    elif filepath.endswith('.shp'):
         data = read_and_reproject(filepath)
         layer_name = os.path.splitext(os.path.basename(filepath))[0]
         group_id_counter, object_id_counter = process_geocode_layer(
             data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
+    else:
+        log_to_gui(log_widget, f"Unsupported file format for {filepath}")
     return group_id_counter, object_id_counter
+
 
 # Import spatial data and export to geopackage
 def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
@@ -201,11 +204,12 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}")
     return geocode_groups_gdf, geocode_objects_gdf
 
+
 # Thread function to run import without freezing GUI
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
     
-    log_to_gui(log_widget, f"Preparing to export geocode groups and objects.")
+    log_to_gui(log_widget, f"Preparing export of geocode groups and objects.")
 
     if not geocode_groups_gdf.empty:
         export_to_geopackage(geocode_groups_gdf, gpkg_file, 'tbl_geocode_group', log_widget)
@@ -285,7 +289,6 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
 
-
 # Function to export to geopackage -
 def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     engine = create_engine(f'sqlite:///{gpkg_file}')
@@ -315,8 +318,6 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
         log_to_gui(log_widget, "Error: 'geom' column not found in asset_groups_df.")
 
 
-
-
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     log_to_gui(log_widget, "Starting asset import process...")
@@ -336,25 +337,22 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 def close_application():
     root.destroy()
 
+
 # Create the user interface
 root = tk.Tk()
 root.title("Import assets")
 
-
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-
 
 # Create a progress bar
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
 
-
 progress_label = tk.Label(root, text="0%", bg="light grey")
 progress_label.place(in_=progress_bar, relx=0.5, rely=0.5, anchor="center")
-
 
 # Information text field below the progress bar
 info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
@@ -364,11 +362,9 @@ info_label_text = ("Assets are all shapefiles or geopackage files with their lay
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
-
 # Create a frame for buttons
 button_frame = tk.Frame(root)
 button_frame.pack(pady=5)
-
 
 # Add buttons for the different operations within the button frame
 import_btn = ttk.Button(button_frame, text="Import assets", command=lambda: threading.Thread(
@@ -382,7 +378,6 @@ import_btn.pack(side=tk.LEFT, padx=10)
 
 close_btn = ttk.Button(button_frame, text="Close", command=close_application)
 close_btn.pack(side=tk.LEFT, padx=10)
-
 
 # Load configuration settings
 config_file = 'config.ini'
