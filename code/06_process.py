@@ -69,9 +69,10 @@ def aggregate_data(intersected_data):
         'importance': ['min', 'max'],
         'sensitivity': ['min', 'max'],
         'susceptibility': ['min', 'max'],
-        'ref_geocodegroup': 'first',  # Include the first reference to geocode group id
-        'name': 'first',  # Include the first name for each group
-        'geometry': 'first',  # Keeping the first geometry for each group
+        'ref_geocodegroup': 'first',     # Include the first reference to geocode group id
+        'name_gis': 'first',             # Include the first reference to geocode group id
+        'name': 'first',                 # Include the first name for each group
+        'geometry': 'first',             # Keeping the first geometry for each group
         'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
     }
 
@@ -90,6 +91,7 @@ def aggregate_data(intersected_data):
     renamed_columns = {
         'name_first': 'name_geocodegroup',
         'ref_geocodegroup_first': 'ref_geocodegroup',
+        'name_gis_first': 'name_gis',
         'asset_group_name_<lambda>': 'asset_group_names'  # Rename aggregated asset_group_name
     }
 
@@ -130,6 +132,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     progress_var.set(43)  # Progress after polygon intersections
 
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
+    
     progress_var.set(45)  # Progress after concatenating data
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
@@ -159,7 +162,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
 
     # Merge asset_data with geocode_group_data on ref_geocodegroup
     log_to_gui(log_widget, "Merging data...")
-    merged_data = asset_data.merge(geocode_group_data[['id', 'name']],
+    merged_data = asset_data.merge(geocode_group_data[['id', 'name', 'name_gis']],
                                    left_on='ref_geocodegroup',
                                    right_on='id',
                                    how='left',
@@ -171,7 +174,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
 
     # Proceed with aggregation
-    log_to_gui(log_widget, "Aggregating data...")
+    log_to_gui(log_widget, "Building tbl_flat (aggregating data)...")
     aggregated_data = aggregate_data(merged_data)
     progress_var.set(85)  # Update progress after data aggregation
     
