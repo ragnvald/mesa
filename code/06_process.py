@@ -79,7 +79,7 @@ def aggregate_data(intersected_data):
         'sensitivity': ['min', 'max'],
         'susceptibility': ['min', 'max'],
         'ref_geocodegroup': 'first',     # Include the first reference to geocode group id
-        'name_gis': 'first',             # Include the first reference to geocode group id
+        'name_gis': 'first', # Include the first reference to geocode group id
         'name': 'first',                 # Include the first name for each group
         'geometry': 'first',             # Keeping the first geometry for each group
         'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
@@ -127,8 +127,9 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     update_progress(25)  # Progress after reading asset group data
 
     # Merge asset group data with asset data
-    asset_data = asset_data.merge(asset_group_data[['id', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
+    asset_data = asset_data.merge(asset_group_data[['id', 'name_gis', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
                                   left_on='ref_asset_group', right_on='id', how='left')
+   
     update_progress(30)  # Progress after merging data
 
     point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
@@ -145,7 +146,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     update_progress(45)  # Progress after concatenating data
     
     # Drop the unnecessary columns
-    intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right', 'id', 'pk_id'], inplace=True)
+    intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Data processing completed.")
