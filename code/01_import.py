@@ -115,24 +115,24 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     # Calculate bounding box and add to geocode groups
     bounding_box = data.total_bounds
     bbox_geom = box(*bounding_box)
+    name_gis = f"geocode_{group_id_counter:03d}"  # Create name_gis for the group
     geocode_groups.append({
         'id': group_id_counter,  # Group ID
         'name': layer_name,
-        'name_gis': f"geocode_{group_id_counter:03d}",
+        'name_gis': name_gis,
         'title_user': layer_name,
         'description': f'Description for {layer_name}',
         'geom': bbox_geom
     })
 
-    # Add geocode objects with unique IDs
+    # Add geocode objects with unique IDs and name_gis from the group
     for index, row in data.iterrows():
         geom = row.geometry if 'geometry' in data.columns else None
         code = row['qdgc'] if 'qdgc' in data.columns else object_id_counter
         geocode_objects.append({
-            'pk_id': object_id_counter,  # Primary Key ID
-            'id': object_id_counter,  # Object ID
             'code': code,
             'ref_geocodegroup': group_id_counter,
+            'name_gis': name_gis,  # Adding the name_gis from the group
             'geom': geom
         })
         object_id_counter += 1
@@ -183,7 +183,7 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True):
             try:
-                log_to_gui(log_widget, f"Processing file: {os.path.splitext(os.path.basename(filepath))[0]}.gpkg")
+                log_to_gui(log_widget, f"Processing layer: {os.path.splitext(os.path.basename(filepath))[0]}")
                 progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
 
                 group_id_counter, object_id_counter = process_geocode_file(
