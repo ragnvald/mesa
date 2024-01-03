@@ -46,6 +46,10 @@ def log_to_gui(log_widget, message):
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
+def update_progress(new_value):
+    progress_var.set(new_value)
+    progress_label.config(text=f"{int(new_value)}%")
+
 
 # # # # # # # # # # # # # # 
 # Spatial functions
@@ -106,54 +110,58 @@ def aggregate_data(intersected_data):
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Building tbl_stacked...")
-    progress_var.set(10)  # Indicate start
+    update_progress(10)  # Indicate start
 
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-    progress_var.set(15)  # Progress after reading asset data
+    update_progress(15)  # Progress after reading asset data
 
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    progress_var.set(20)  # Progress after reading geocode data
+    update_progress(20)  # Progress after reading geocode data
 
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    progress_var.set(25)  # Progress after reading asset group data
+    update_progress(25)  # Progress after reading asset group data
 
     # Merge asset group data with asset data
     asset_data = asset_data.merge(asset_group_data[['id', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
                                   left_on='ref_asset_group', right_on='id', how='left')
-    progress_var.set(30)  # Progress after merging data
+    update_progress(30)  # Progress after merging data
 
     point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
-    progress_var.set(35)  # Progress after point intersections
+    update_progress(35)  # Progress after point intersections
 
     line_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'LineString', log_widget)
-    progress_var.set(40)  # Progress after line intersections
+    update_progress(40)  # Progress after line intersections
 
     polygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Polygon', log_widget)
-    progress_var.set(43)  # Progress after polygon intersections
+    update_progress(43)  # Progress after polygon intersections
 
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
     
-    progress_var.set(45)  # Progress after concatenating data
+    update_progress(45)  # Progress after concatenating data
+
+    
+    # Drop the unnecessary columns
+    intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right', 'id', 'pk_id'], inplace=True)
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Data processing completed.")
-    progress_var.set(50)  # Final progress
+    update_progress(50)  # Final progress
 
 
 # Create tbl_flat by reading out values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Building tbl_stacked...")
-    progress_var.set(55)  # Indicate start
+    update_progress(55)  # Indicate start
 
     # Reading 'tbl_stacked' data from the GeoPackage
     log_to_gui(log_widget, "Reading 'tbl_stacked' data...")
     asset_data = gpd.read_file(gpkg_file, layer='tbl_stacked')
-    progress_var.set(60)  # Update progress after reading asset data
+    update_progress(60)  # Update progress after reading asset data
 
     # Reading 'tbl_geocode_group' data from the GeoPackage
     log_to_gui(log_widget, "Reading 'tbl_geocode_group' data...")
     geocode_group_data = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
-    progress_var.set(70)  # Update progress after reading geocode group data
+    update_progress(70)  # Update progress after reading geocode group data
     
     # Ensure 'code' column is present in 'tbl_stacked'
     if 'code' not in asset_data.columns:
@@ -168,20 +176,20 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
                                    how='left',
                                    suffixes=('_asset', '_geocode'))
 
-    progress_var.set(80)  # Update progress after merging data
+    update_progress(80)  # Update progress after merging data
 
-    # Drop the unnecessary columns (id_x and id_y)
+    # Drop the unnecessary columns
     merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
 
     # Proceed with aggregation
     log_to_gui(log_widget, "Building tbl_flat (aggregating data)...")
     aggregated_data = aggregate_data(merged_data)
-    progress_var.set(85)  # Update progress after data aggregation
+    update_progress(85)  # Update progress after data aggregation
     
     # Save to GeoPackage
     aggregated_gdf = gpd.GeoDataFrame(aggregated_data, geometry='geometry_first')
     aggregated_gdf.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
-    progress_var.set(92)  # Update progress after saving data
+    update_progress(92)  # Update progress after saving data
 
 
 def process_all(log_widget, progress_var, gpkg_file):
@@ -192,7 +200,7 @@ def process_all(log_widget, progress_var, gpkg_file):
     main_tbl_flat(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 2
     
     log_to_gui(log_widget, "Data processing and aggregation completed.")
-    progress_var.set(100)
+    update_progress(100)
 
 
 # Create the user interface
@@ -207,6 +215,11 @@ log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
+
+
+progress_label = tk.Label(root, text="0%", bg="light grey")
+progress_label.place(in_=progress_bar, relx=0.5, rely=0.5, anchor="center")
+
 
 # Information text field above the buttons
 info_label_text = ("This is where all assets and geocode objects (grids) are processed "
