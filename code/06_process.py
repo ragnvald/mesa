@@ -16,6 +16,7 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
+
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
@@ -34,13 +35,16 @@ def update_progress(new_value):
     progress_var.set(new_value)
     progress_label.config(text=f"{int(new_value)}%")
 
+
 # Thread function to run main without freezing GUI
 def run_main(log_widget, progress_var, gpkg_file):
     main(log_widget, progress_var, gpkg_file)
 
+
 # Function to close the application
 def close_application(root):
     root.destroy()
+
 
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
@@ -139,7 +143,6 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
     
     update_progress(45)  # Progress after concatenating data
-
     
     # Drop the unnecessary columns
     intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right', 'id', 'pk_id'], inplace=True)
