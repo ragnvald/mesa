@@ -7,7 +7,7 @@ from PIL import Image, ImageTk
 
 # Function to check and create folders
 def check_and_create_folders():
-    folders = ["input/code", "input/grid", "output", "qgis"]
+    folders = ["input/code", "input/geocode", "output", "qgis"]
     for folder in folders:
         if not os.path.exists(folder):
             os.makedirs(folder)
