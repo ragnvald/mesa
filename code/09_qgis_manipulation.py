@@ -1,3 +1,20 @@
+# Purpose
+#
+# * Create data frames based on tables tbl_geocode_group, tbl_asset_group
+#   and tbl_atlas. This has been done through making a general function. 
+#   We might want to filter the attributes, at least loose the geom
+#   
+# * Use the data frame tbl_geocode_group to set up layers for tbl_flat and 
+#   tbl_stacked.
+# ** tbl_flat function to establish <maplayer> under <projectlayers>. This
+#    returns a text as well as the unique layer id (layer name+uuid) which 
+#    will be used later in the definitions.
+# ** combine data frame tbl_geocode group with maplayer info to filter (and 
+#    repeat) layers. If there is just one geocode, then just one layer for
+#    each of the tbl_stacked and tbl_flat tables (layers).
+#
+# * Set up atlases based on dataframe tbl_atlas.
+
 import geopandas as gpd
 
 #Function reads a specified layer from a GeoPackage file and prints its contents.
