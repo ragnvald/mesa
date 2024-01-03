@@ -29,6 +29,11 @@ def log_to_gui(log_widget, message):
 # # # # # # # # # # # # # # 
 # Core functions
 
+
+def update_progress(new_value):
+    progress_var.set(new_value)
+    progress_label.config(text=f"{int(new_value)}%")
+
 # Thread function to run main without freezing GUI
 def run_main(log_widget, progress_var, gpkg_file):
     main(log_widget, progress_var, gpkg_file)
@@ -45,10 +50,6 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
-
-def update_progress(new_value):
-    progress_var.set(new_value)
-    progress_label.config(text=f"{int(new_value)}%")
 
 
 # # # # # # # # # # # # # # 
@@ -176,10 +177,10 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
                                    how='left',
                                    suffixes=('_asset', '_geocode'))
 
-    update_progress(80)  # Update progress after merging data
+    update_progress(80)
 
-    # Drop the unnecessary columns
-    merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
+    # Drop the unnecessary columns (id_x and id_y)
+    #merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
 
     # Proceed with aggregation
     log_to_gui(log_widget, "Building tbl_flat (aggregating data)...")
@@ -216,10 +217,8 @@ progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
 progress_bar.pack(pady=5, fill=tk.X)
 
-
 progress_label = tk.Label(root, text="0%", bg="light grey")
 progress_label.place(in_=progress_bar, relx=0.5, rely=0.5, anchor="center")
-
 
 # Information text field above the buttons
 info_label_text = ("This is where all assets and geocode objects (grids) are processed "
