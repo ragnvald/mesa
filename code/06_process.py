@@ -16,6 +16,16 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
+def read_config_classification(file_name):
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    classification = {}
+    for section in config.sections():
+        range_str = config[section]['range']
+        start, end = map(int, range_str.split('-'))
+        classification[section] = range(start, end + 1)
+    return classification
+
 
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
@@ -197,6 +207,30 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     update_progress(92)  # Update progress after saving data
 
 
+def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
+    # Load classification configuration
+    classification = read_config_classification(config_path)
+
+    # Load geopackage data
+    gdf = gpd.read_file(gpkg_file, layer=process_layer)
+
+    # Function to classify each row
+    def classify_row(row):
+        for label, value_range in classification.items():
+            if row[column_name] in value_range:
+                return label
+        return 0  # or any default value
+
+    new_column_name = column_name + "_code"
+    # Apply classification
+    gdf[new_column_name] = gdf.apply(lambda row: classify_row(row), axis=1)
+
+    log_to_gui(log_widget, f"Updated codes for: {process_layer} - {column_name} ")
+    update_progress(97)
+
+    # Save the modified geopackage
+    gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
+
 def process_all(log_widget, progress_var, gpkg_file):
     # Process and create tbl_stacked
     main_tbl_stacked(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 1
@@ -204,6 +238,10 @@ def process_all(log_widget, progress_var, gpkg_file):
     # Process and create tbl_flat
     main_tbl_flat(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 2
     
+    classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
+    classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
+    classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
+
     log_to_gui(log_widget, "Data processing and aggregation completed.")
     update_progress(100)
 
