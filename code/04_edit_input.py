@@ -5,26 +5,18 @@ import pandas as pd
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
 
-
-# # # # # # # # # # # # # # 
 # Shared/general functions
-
-# Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
 
-# # # # # # # # # # # # # # 
 # Core functions
-
-# Function to validate integer input
 def validate_integer(P):
     if P.isdigit() or P == "":
         return True
     return False
 
-# Function to update sensitivity
 def calculate_sensitivity(row_index):
     try:
         susceptibility = int(entries[row_index]['susceptibility'].get())
@@ -37,20 +29,16 @@ def calculate_sensitivity(row_index):
     except ValueError:
         entries[row_index]['sensitivity'].config(text="")
 
-    # Enforce data type after update
     df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
     df['importance'] = df['importance'].astype('int64', errors='ignore')
     df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
 
-# Function to load and refresh data from geopackage
 def load_data():
     global df, entries
     engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
         df = pd.read_sql(f"SELECT * FROM {table_name}", con=engine)
-        print("Column names in the DataFrame:", df.columns)  # Print the column names
 
-        # Set the data types for specific columns
         df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
         df['importance'] = df['importance'].astype('int64', errors='ignore')
         df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
@@ -62,22 +50,16 @@ def load_data():
     for widget in frame.winfo_children():
         widget.destroy()
 
-    add_column_labels()
     entries = []
     for i, row in df.iterrows():
         add_data_row(i, row)
 
-# Function to add column labels
-def add_column_labels():
-    ttk.Label(frame, text="Dataset").grid(row=0, column=0, padx=5)
-    ttk.Label(frame, text="Susceptibility").grid(row=0, column=1, padx=5)
-    ttk.Label(frame, text="Importance").grid(row=0, column=2, padx=5)
-    ttk.Label(frame, text="Sensitivity").grid(row=0, column=3, padx=5)
+    frame.update_idletasks()
+    canvas.configure(scrollregion=canvas.bbox("all"))
 
-# Function to add a data row
 def add_data_row(i, row):
     global entries
-    ttk.Label(frame, text=row['name_original']).grid(row=i+1, column=0, padx=5)  # Corrected column name
+    ttk.Label(frame, text=row['name_original'], anchor='e').grid(row=i+1, column=0, padx=5, sticky='ew')  # Align right
 
     susceptibility_entry = ttk.Entry(frame, width=5, validate='key', validatecommand=vcmd)
     susceptibility_entry.insert(0, row['susceptibility'])
@@ -98,20 +80,11 @@ def add_data_row(i, row):
         'sensitivity': sensitivity_label
     })
 
-# Function to save changes to the geopackage
-# Function to save changes to the geopackage
 def save_to_gpkg():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
-        # Convert 'date_import' to datetime format
         df['date_import'] = pd.to_datetime(df['date_import'], errors='coerce')
 
-        # Handle null values if necessary
-        # df['date_import'] = df['date_import'].fillna(some_default_date)
-
-        print("Data types before saving:", df.dtypes)  # Check data types before saving
-
-        # Specify SQLAlchemy data types for columns
         data_types = {
             'id': Integer,
             'name_original': String,
@@ -122,53 +95,70 @@ def save_to_gpkg():
             'susceptibility': Integer,
             'importance': Integer,
             'sensitivity': Integer
-            # Add other columns if needed
         }
 
         df.to_sql(table_name, con=engine, if_exists='replace', index=False, dtype=data_types)
         messagebox.showinfo("Success", "Data successfully saved to GeoPackage.")
     except exc.SQLAlchemyError as e:
-        messagebox.showerror("Database Error", f"Failed to save data: {e} (try closing QGIS)")
+        messagebox.showerror("Database Error", f"Failed to save data: {e}")
 
-# Function to close the application
 def close_application():
     root.destroy()
 
-# Initialize the main window with a larger size
+def create_scrollable_area(root):
+    # Create a new frame to contain the canvas and the scrollbar
+    scrollable_frame = ttk.Frame(root)
+
+    # Create the canvas and scrollbar
+    canvas = tk.Canvas(scrollable_frame)
+    scrollbar_y = ttk.Scrollbar(scrollable_frame, orient="vertical", command=canvas.yview)
+
+    canvas.configure(yscrollcommand=scrollbar_y.set)
+    canvas.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+    # Pack canvas and scrollbar in the scrollable_frame
+    canvas.pack(side=tk.LEFT, fill="both", expand=True)
+    scrollbar_y.pack(side=tk.RIGHT, fill="y")
+
+    # Pack the scrollable_frame in the root
+    scrollable_frame.pack(side=tk.TOP, fill="both", expand=True)
+
+    return canvas
+
+# Initialize the main window
 root = tk.Tk()
 root.title("Data Editor")
-root.geometry("600x600")  # Set window size (width x height)
+root.geometry("600x600")
 
-# Register the validation command
 vcmd = (root.register(validate_integer), '%P')
 
-# Create a frame for the data rows
-frame = ttk.Frame(root)
-frame.pack(padx=10, pady=10, fill="both", expand=True)
+# Create a frame for column labels (headers)
+header_frame = ttk.Frame(root)
+header_frame.pack(side=tk.TOP, fill="x")
 
-# Text panel above the buttons
-info_text = "This is where you register susceptibility and importance. " \
-            "Importance could be based on local, national or global " \
-            "scale. Susceptibility is usually scientifically based. " \
-            "Valid values are from 1 to 5."
+# Add column labels in the header_frame
+ttk.Label(header_frame, text="Dataset").grid(row=0, column=0, padx=5, sticky='ew')
+ttk.Label(header_frame, text="Susceptibility").grid(row=0, column=1, padx=5)
+ttk.Label(header_frame, text="Importance").grid(row=0, column=2, padx=5)
+ttk.Label(header_frame, text="Sensitivity").grid(row=0, column=3, padx=5)
+
+# Create scrollable area below the header
+canvas = create_scrollable_area(root)
+frame = ttk.Frame(canvas)
+canvas.create_window((0, 0), window=frame, anchor="nw")
+
+# Load configuration settings and data
+config_file = 'config.ini'
+config = read_config(config_file)
+gpkg_file = config['DEFAULT']['gpkg_file']
+table_name = 'tbl_asset_group'
+load_data()
+
+# Text panel and buttons below the scrollable area
+info_text = "This is where you register susceptibility and importance..."
 info_label = tk.Label(root, text=info_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
-# Paths for the geopackage and the table name
-
-# Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-input_folder_asset = config['DEFAULT']['input_folder_asset']
-input_folder_geocode = config['DEFAULT']['input_folder_geocode']
-gpkg_file = config['DEFAULT']['gpkg_file']
-
-table_name = 'tbl_asset_group'
-
-# Load data and populate UI
-load_data()
-
-# Add buttons for saving data and closing the application
 save_button = ttk.Button(root, text="Save", command=save_to_gpkg)
 save_button.pack(side='left', padx=10, pady=10)
 
@@ -178,5 +168,4 @@ refresh_button.pack(side='left', padx=10, pady=10)
 close_button = ttk.Button(root, text="Close", command=close_application)
 close_button.pack(side='right', padx=10, pady=10)
 
-# Start the GUI event loop
 root.mainloop()
