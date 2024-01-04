@@ -36,11 +36,6 @@ def update_progress(new_value):
     progress_label.config(text=f"{int(new_value)}%")
 
 
-# Thread function to run main without freezing GUI
-def run_main(log_widget, progress_var, gpkg_file):
-    main(log_widget, progress_var, gpkg_file)
-
-
 # Function to close the application
 def close_application(root):
     root.destroy()
