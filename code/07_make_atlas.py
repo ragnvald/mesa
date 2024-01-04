@@ -45,7 +45,7 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
     intersecting_geometries = atlas_gdf[filtered_indices].copy()
     id_counter = 1
     for index, row in intersecting_geometries.iterrows():
-        intersecting_geometries.loc[index, 'name_gis'] = f'atlas{id_counter:03}'
+        intersecting_geometries.loc[index, 'name_gis'] = f'atlas_{id_counter:03}'
         intersecting_geometries.loc[index, 'title_user'] = f'Map title for {id_counter:03}'
         id_counter += 1
     return intersecting_geometries
@@ -123,7 +123,7 @@ progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="dete
 progress_bar.pack(pady=5, fill=tk.X)
 
 # Information text field above the buttons
-info_label_text = ("This tool generates and updates atlas geometries based on the provided configurations.")
+info_label_text = ("This tool generates and updates atlas geometries based on the provided configurations. Earlier geometries and asociated information will be deleted.")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
