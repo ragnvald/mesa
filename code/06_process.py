@@ -27,16 +27,6 @@ def read_config_classification(file_name):
     return classification
 
 
-# Logging function to write to the GUI log
-def log_to_gui(log_widget, message):
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    formatted_message = f"{timestamp} - {message}"
-    log_widget.insert(tk.END, formatted_message + "\n")
-    log_widget.see(tk.END)
-
-    with open("log.txt", "a") as log_file:
-        log_file.write(formatted_message + "\n")
-
 # # # # # # # # # # # # # # 
 # Core functions
 
