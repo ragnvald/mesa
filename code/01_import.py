@@ -32,6 +32,7 @@ def get_bounding_box(data):
     bbox_geom = box(*bbox)
     return bbox_geom
 
+
 def update_progress(new_value):
     progress_var.set(new_value)
     progress_label.config(text=f"{int(new_value)}%")
@@ -110,7 +111,7 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
         return group_id_counter, object_id_counter
 
     feature_count = len(data)
-    log_to_gui(log_widget, f"{layer_name} ({feature_count} features)")
+    log_to_gui(log_widget, f"  {layer_name} ({feature_count} features)")
 
     # Calculate bounding box and add to geocode groups
     bounding_box = data.total_bounds
@@ -273,6 +274,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
     asset_objects_gdf = gpd.GeoDataFrame(asset_objects, geometry='geom')
     
+    asset_groups_gdf.set_crs(epsg=4326, inplace=True)
+    
     update_progress(90)
 
     # Calculate total bounding box for all asset objects
@@ -280,6 +283,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
         total_bbox = asset_objects_gdf.geometry.unary_union.bounds
         total_bbox_geom = box(*total_bbox)
         log_to_gui(log_widget, f"Total bounding box for all assets imported.")
+
+    update_progress(95)
 
     asset_groups_gdf['id'] = asset_groups_gdf['id'].astype('int64')
     asset_objects_gdf['id'] = asset_objects_gdf['id'].astype('int64')
@@ -293,7 +298,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     engine = create_engine(f'sqlite:///{gpkg_file}')
     gdf.to_file(gpkg_file, layer=layer_name, driver="GPKG", if_exists='append')
-    log_to_gui(log_widget, f"Data exported to {gpkg_file}, layer {layer_name}")
+    log_to_gui(log_widget, f"  {gpkg_file}, layer {layer_name}")
 
 
 # Function to update asset groups in geopackage
@@ -324,6 +329,7 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     
     asset_objects_gdf, asset_groups_df, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
 
+    log_to_gui(log_widget, "Exporting:")
     export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
     
     update_asset_groups(asset_groups_df, gpkg_file, log_widget)
