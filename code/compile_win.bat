@@ -32,9 +32,6 @@ pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 01_
 echo Working on 02_present_files.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 02_present_files.py >nul 2>&1
 
-echo Working on 03_data_structure.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 03_data_structure.py >nul 2>&1
-
 echo Working on 04_edit_asset_group.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_asset_group.py >nul 2>&1
 
@@ -43,9 +40,6 @@ pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_
 
 echo Working on 04_edit_input.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_input.py >nul 2>&1
-
-echo Working on 05_main_statistics.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 05_main_statistics.py >nul 2>&1
 
 echo Working on 06_process.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 06_process.py >nul 2>&1
