@@ -1,7 +1,10 @@
-@echo off
 echo Compiling Python scripts...
+echo off
 
 setlocal
+
+echo .
+echo Setting up paths etc.
 
 :: Get the full path to the batch script
 set "SCRIPT_PATH=%~dp0"
@@ -18,6 +21,25 @@ set "BUILD_FOLDER=%PARENT_DIR%build"
 :: Define the dist folder path
 set "DIST_FOLDER=%PARENT_DIR%dist"
 
+echo .
+echo Fetching config.ini...
+xcopy "%SCRIPT_PATH%\config.ini" "%DIST_FOLDER%" /Y >nul 2>&1
+
+echo .
+echo Copying folders...
+echo -system_resources...
+xcopy "%SCRIPT_PATH%\system_resources" "%DIST_FOLDER%\system_resources" /E /I /Y >nul 2>&1
+
+echo -input...
+xcopy "%SCRIPT_PATH%\input" "%DIST_FOLDER%\input" /E /I /Y >nul 2>&1
+
+echo -output...
+xcopy "%SCRIPT_PATH%\output" "%DIST_FOLDER%\output" /E /I /Y >nul 2>&1
+
+echo -qgis...
+xcopy "%SCRIPT_PATH%\qgis" "%DIST_FOLDER%\qgis" /E /I /Y >nul 2>&1
+
+echo
 echo Working in this folder: %BUILD_FOLDER%
 
 echo Distribution folder will be: %DIST_FOLDER%
@@ -51,6 +73,9 @@ echo Working on 07_make_atlas.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
 echo Compilation complete. You will finde the compiled code herE: %DIST_FOLDER%
+
+
+
 
 :: Clean up build folders and .spec files
 
