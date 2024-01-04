@@ -2,15 +2,22 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 import subprocess
 import webbrowser
+import datetime
 import os
 from PIL import Image, ImageTk
 
 # Function to check and create folders
 def check_and_create_folders():
-    folders = ["input/code", "input/geocode", "output", "qgis"]
+    folders = ["input/geocode", "output", "qgis"]
     for folder in folders:
         if not os.path.exists(folder):
             os.makedirs(folder)
+
+def log_to_logfile(message):
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message = f"{timestamp} - {message}"
+    with open("log.txt", "a") as log_file:
+        log_file.write(formatted_message + "\n")
 
 # Function to open a web link
 def open_link(url):
@@ -35,17 +42,18 @@ def import_assets():
             # If import.py fails or is not found, try running import.exe
             subprocess.run(["01_import.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute import assets script")
 
 def edit_asset_group():
     try:
         subprocess.run(["python", "04_edit_asset_group.py"], check=True)
+        log_to_logfile("Opened edit asset group")
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_asset_group.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute edit asset group script")
 
 def edit_geocode_group():
     try:
@@ -55,7 +63,7 @@ def edit_geocode_group():
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_geocode_group.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute edit geocode group script")
 
 def edit_processing_setup():
     try:
@@ -65,7 +73,7 @@ def edit_processing_setup():
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_input.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute edit input script")
 
 def process_data():
     try:
@@ -75,7 +83,7 @@ def process_data():
             # If import.py fails, try running import.exe
             subprocess.run(["06_process.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute processing script")
 
 def make_atlas():
     try:
@@ -85,7 +93,7 @@ def make_atlas():
             # If import.py fails, try running import.exe
             subprocess.run(["07_make_atlas.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute make atlas script")
 
 def edit_atlas():
     try:
@@ -95,7 +103,7 @@ def edit_atlas():
             # If import.py fails, try running import.exe
             subprocess.run(["07_edit_atlas.exe"], check=True)
         except subprocess.CalledProcessError:
-            messagebox.showerror("Error", "Failed to execute import assets script.")
+            log_to_logfile("Failed to execute edit atlas script")
 
 def export_qgis():
     messagebox.showinfo("Export Package", "Export package script executed.")
@@ -182,6 +190,8 @@ exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
 
 # Call the function to display the image in the bottom frame
 display_image(bottom_frame)
+
+log_to_logfile("User interface, main dialogue opened")
 
 # Start the GUI event loop
 root.mainloop()
