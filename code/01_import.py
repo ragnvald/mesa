@@ -1,5 +1,13 @@
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+
+import locale
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
+from tkinter import scrolledtext, ttk
+
 import threading
 import geopandas as gpd
 from sqlalchemy import create_engine
@@ -11,6 +19,9 @@ from osgeo import ogr
 import pandas as pd
 from sqlalchemy import exc
 from shapely.geometry import box
+
+import ttkbootstrap as ttk  # Import ttkbootstrap
+from ttkbootstrap.constants import *
 
 
 # # # # # # # # # # # # # # 
@@ -345,26 +356,37 @@ def close_application():
 
 
 # Create the user interface
-root = tk.Tk()
+root = ttk.Window(themename='superhero')  # Use ttkbootstrap Window
 root.title("Import assets")
 
-# Create a log widget
-log_widget = scrolledtext.ScrolledText(root, height=10)
-log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+# Create a LabelFrame for the log output
+log_frame = ttk.LabelFrame(root, text="Log Output", bootstyle="info")  # You can change the bootstyle as needed
+log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+# Create a log widget inside the LabelFrame
+log_widget = scrolledtext.ScrolledText(log_frame, height=10)
+log_widget.pack(fill=tk.BOTH, expand=True)
+
+# Create a frame to hold the progress bar and the label
+progress_frame = tk.Frame(root)
+progress_frame.pack(pady=5)
 
 # Create a progress bar
 progress_var = tk.DoubleVar()
-progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
-progress_bar.pack(pady=5, fill=tk.X)
+progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
+progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the frame
 
-progress_label = tk.Label(root, text="0%", bg="light grey")
-progress_label.place(in_=progress_bar, relx=0.5, rely=0.5, anchor="center")
+# Label for displaying the progress percentage
+progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
+
 
 # Information text field below the progress bar
 info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
                    "that are placed in the folder input/assets-folder. The features will "
                    "be placed in our database and used in the analysis. All assets will "
-                   "be associated with importance and susceptibility values.")
+                   "be associated with importance and susceptibility values."
+                   "Please refer to the log.txt to review the full log.")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
@@ -373,16 +395,16 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=5)
 
 # Add buttons for the different operations within the button frame
-import_btn = ttk.Button(button_frame, text="Import assets", command=lambda: threading.Thread(
+import_btn = ttk.Button(button_frame, text="Import assets", bootstyle=PRIMARY, command=lambda: threading.Thread(
     target=run_import_asset, args=(input_folder_asset, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_btn.pack(side=tk.LEFT, padx=10)
 
 # Add buttons for the different operations within the button frame
-import_btn = ttk.Button(button_frame, text="Import geocodes", command=lambda: threading.Thread(
+import_btn = ttk.Button(button_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: threading.Thread(
     target=run_import_geocode, args=(input_folder_geocode, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_btn.pack(side=tk.LEFT, padx=10)
 
-close_btn = ttk.Button(button_frame, text="Close", command=close_application)
+close_btn = ttk.Button(button_frame, text="Close", command=close_application, bootstyle=WARNING)
 close_btn.pack(side=tk.LEFT, padx=10)
 
 # Load configuration settings
