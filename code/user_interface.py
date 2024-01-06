@@ -168,7 +168,7 @@ edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
 edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width)
 edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
-edit_processing_setup_btn = ttk.Button(left_panel, text="Set up processing", command=edit_processing_setup, width=button_width)
+edit_processing_setup_btn = ttk.Button(left_panel, text="Prioritization", command=edit_processing_setup, width=button_width)
 edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
