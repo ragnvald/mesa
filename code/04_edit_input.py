@@ -12,11 +12,11 @@ import pandas as pd
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
 
-
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 
-
+# Setting variables
+#
 # Define fixed widths for each column
 column_widths = [35, 13, 13, 13]  # Adjust these widths as needed
 

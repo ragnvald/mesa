@@ -1,8 +1,19 @@
 import tkinter as tk
+
+import locale
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
+from tkinter import scrolledtext, ttk
 from tkinter import messagebox, scrolledtext, ttk
 import configparser
 import pandas as pd
 from sqlalchemy import create_engine
+
+import ttkbootstrap as ttk  # Import ttkbootstrap
+from ttkbootstrap.constants import *
 
 
 # # # # # # # # # # # # # # 
@@ -60,9 +71,9 @@ def load_record():
     name_gis_var.set(record['name_gis'])
     title_fromuser_var.set(record['title_fromuser'])
 
-# Initialize the main window
-root = tk.Tk()
-root.title("Edit Asset Groups")
+# Create the user interface
+root = ttk.Window(themename='superhero')  # Use ttkbootstrap Window
+root.title("Import assets")
 
 # Configure column widths
 root.columnconfigure(0, minsize=200)  # Configure the size of the first column
@@ -109,12 +120,12 @@ info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left"
 info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
 
 # Navigation and Update buttons
-ttk.Button(root, text="Previous", command=lambda: navigate('previous')).grid(row=4, column=0, padx=5, pady=5)
-ttk.Button(root, text="Save", command=update_record).grid(row=4, column=1, padx=5, pady=5)
-ttk.Button(root, text="Next", command=lambda: navigate('next')).grid(row=4, column=2, padx=5, pady=5)
+ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=5, pady=5)
+ttk.Button(root, text="Save", command=update_record, bootstyle=PRIMARY).grid(row=4, column=1, padx=5, pady=5)
+ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
 
 # Exit button
-ttk.Button(root, text="Exit", command=root.destroy).grid(row=5, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=root.destroy, bootstyle='warning').grid(row=5, column=0, columnspan=3, pady=5)
 
 # Load the first record
 load_record()

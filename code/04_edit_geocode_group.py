@@ -1,8 +1,19 @@
 import tkinter as tk
-from tkinter import messagebox, ttk
+
+import locale
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
+from tkinter import scrolledtext, ttk
+from tkinter import messagebox, scrolledtext, ttk
 import configparser
 import geopandas as gpd
 from sqlalchemy import create_engine
+
+import ttkbootstrap as ttk  # Import ttkbootstrap
+from ttkbootstrap.constants import *
 
 # # # # # # # # # # # # # # 
 # Shared/general functions
@@ -62,9 +73,9 @@ def save_spatial_data():
 def exit_application():
     root.destroy()
 
-# Initialize the main window
-root = tk.Tk()
-root.title("Edit Geocode Groups")
+# Create the user interface
+root = ttk.Window(themename='superhero')  # Use ttkbootstrap Window
+root.title("Import assets")
 
 
 # Load configuration settings
@@ -132,11 +143,11 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=10)
 
 # Save button
-save_button = ttk.Button(button_frame, text="Save Data", command=save_changes)
+save_button = ttk.Button(button_frame, text="Save Data", command=save_changes, bootstyle=PRIMARY)
 save_button.pack(side=tk.LEFT, padx=10)
 
 # Exit button
-exit_button = ttk.Button(button_frame, text="Exit", command=exit_application)
+exit_button = ttk.Button(button_frame, text="Exit", command=exit_application, bootstyle=WARNING)
 exit_button.pack(side=tk.LEFT, padx=10)
 
 # Styling buttons (rounded corners)
