@@ -1,4 +1,11 @@
 import tkinter as tk
+
+import locale
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
 from tkinter import messagebox, scrolledtext, ttk
 import threading
 import geopandas as gpd
@@ -6,6 +13,9 @@ import pandas as pd
 import configparser
 import datetime
 import os
+
+import ttkbootstrap as ttk  # Import ttkbootstrap
+from ttkbootstrap.constants import *
 
 # # # # # # # # # # # # # # 
 # Shared functions
@@ -74,7 +84,7 @@ def aggregate_data(intersected_data):
         'sensitivity': ['min', 'max'],
         'susceptibility': ['min', 'max'],
         'ref_geocodegroup': 'first',     # Include the first reference to geocode group id
-        'name_gis': 'first', # Include the first reference to geocode group id
+        'name_gis': 'first',             # Include the first reference to geocode group id
         'name': 'first',                 # Include the first name for each group
         'geometry': 'first',             # Keeping the first geometry for each group
         'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
@@ -95,7 +105,7 @@ def aggregate_data(intersected_data):
     renamed_columns = {
         'name_first': 'name_geocodegroup',
         'ref_geocodegroup_first': 'ref_geocodegroup',
-        'name_gis_first': 'name_gis',
+        'name_gis_first': 'geocode_name_gis',  # Updated name
         'asset_group_name_<lambda>': 'asset_group_names'  # Rename aggregated asset_group_name
     }
 
@@ -232,20 +242,25 @@ def process_all(log_widget, progress_var, gpkg_file):
 
 
 # Create the user interface
-root = tk.Tk()
+root = ttk.Window(themename='superhero')
 root.title("Intersect and aggregate analysis")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
+# Create a frame to hold the progress bar and the label
+progress_frame = tk.Frame(root)
+progress_frame.pack(pady=5)
+
 # Create a progress bar
 progress_var = tk.DoubleVar()
-progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
-progress_bar.pack(pady=5, fill=tk.X)
+progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
+progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the frame
 
-progress_label = tk.Label(root, text="0%", bg="light grey")
-progress_label.place(in_=progress_bar, relx=0.5, rely=0.5, anchor="center")
+# Label for displaying the progress percentage
+progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
 
 # Information text field above the buttons
 info_label_text = ("This is where all assets and geocode objects (grids) are processed "
