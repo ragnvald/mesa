@@ -1,10 +1,21 @@
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+import locale
+
+
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
+from tkinter import messagebox, scrolledtext, Label
 import subprocess
 import webbrowser
 import datetime
 import os
 from PIL import Image, ImageTk
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+
 
 # Function to check and create folders
 def check_and_create_folders():
@@ -26,12 +37,25 @@ def open_link(url):
 # Function to load and display the image
 def display_image(bottom_frame):
     image_path = 'system_resources/mesa_illustration.png'
-    image = Image.open(image_path)
-    image = image.resize((200, 200), Image.Resampling.LANCZOS)
-    photo = ImageTk.PhotoImage(image)
-    label = tk.Label(bottom_frame, image=photo)
-    label.image = photo
-    label.pack(side='bottom', pady=10)
+    original_image = Image.open(image_path)
+
+    # Function to resize and update the image
+    def resize_image(event):
+        new_width = event.height
+        new_height = event.height
+        image = original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(image)
+        label.config(image=photo)
+        label.image = photo  # keep a reference!
+
+    # Create and place the label
+    photo = ImageTk.PhotoImage(original_image)
+    label = Label(bottom_frame, image=photo)
+    label.image = photo  # keep a reference!
+    label.pack(side='bottom', fill='both', expand=True)
+
+    # Bind the resize function to the label's configure event
+    bottom_frame.bind("<Configure>", resize_image)
 
 def import_assets():
     try:
@@ -111,31 +135,38 @@ def export_qgis():
 def exit_program():
     root.destroy()
 
+# Function to adjust the wrap length of the label
+def adjust_wrap(event):
+    mesa_label.config(wraplength=right_panel.winfo_width())
+
 # Check and create folders at the beginning
 check_and_create_folders()
 
 # Setup the main Tkinter window
-root = tk.Tk()
+root = ttk.Window(themename='superhero')
 root.title("MESA 4")
 root.geometry("800x540")
+
+
+button_width = 20
+button_padx = 20
+button_pady = 10
 
 # Main frame
 main_frame = tk.Frame(root)
 main_frame.pack(fill='both', expand=True, pady=20)
-main_frame.grid_columnconfigure(0, weight=1)
-main_frame.grid_columnconfigure(1, weight=0)  # Adjust for the separator
-main_frame.grid_columnconfigure(2, weight=1)
+
+# Configure the grid weights
+main_frame.grid_columnconfigure(0, weight=0)  # Left panel has no weight
+main_frame.grid_columnconfigure(1, weight=0)  # Separator has no weight
+main_frame.grid_columnconfigure(2, weight=1)  # Right panel has weight
 
 # Left panel
 left_panel = tk.Frame(main_frame)
 left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
-left_panel.grid_rowconfigure(0, weight=1)
-left_panel.grid_rowconfigure(1, weight=1)
-left_panel.grid_rowconfigure(2, weight=1)
-left_panel.grid_rowconfigure(3, weight=1)
-left_panel.grid_rowconfigure(4, weight=1)
-left_panel.grid_rowconfigure(5, weight=1)
-left_panel.grid_rowconfigure(6, weight=1)
+
+# Set minimum size for left panel
+main_frame.grid_columnconfigure(0, minsize=250)  # Adjust the minsize as needed
 
 # Separator
 separator = ttk.Separator(main_frame, orient='vertical')
@@ -146,29 +177,32 @@ right_panel = tk.Frame(main_frame)
 right_panel.grid(row=0, column=2, sticky="nsew", padx=20)
 right_panel.grid_rowconfigure(0, weight=1)
 
+# Bind the adjust_wrap function to right_panel's configure event
+right_panel.bind("<Configure>", adjust_wrap)
+
 # Label with text on the right panel
 mesa_text = "This is the MESA system. It is an implementation of the MESA method."
 mesa_label = tk.Label(right_panel, text=mesa_text, justify="left", anchor="nw")
 mesa_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-bottom_frame = tk.Frame(root)
-bottom_frame.pack(fill='x', expand=False)
+# Exit button
+exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
+exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
 
-button_width = 20
-button_padx = 20
-button_pady = 10
+bottom_frame = tk.Frame(root)
+bottom_frame.pack(fill='x', expand=True)
 
 # Add buttons to left panel with spacing between buttons
-import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width)
+import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
 import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
-edit_asset_group_btn = ttk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width)
+edit_asset_group_btn = ttk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width, bootstyle=SECONDARY)
 edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
 
-edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width)
+edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width, bootstyle=SECONDARY)
 edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
-edit_processing_setup_btn = ttk.Button(left_panel, text="Prioritization", command=edit_processing_setup, width=button_width)
+edit_processing_setup_btn = ttk.Button(left_panel, text="Set up processing", command=edit_processing_setup, width=button_width)
 edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
@@ -177,16 +211,13 @@ process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pad
 process_stacked_data_btn = ttk.Button(left_panel, text="Make atlas", command=make_atlas, width=button_width)
 process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
-edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width)
+edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
 edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
 export_qgis_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_qgis, width=button_width)
 export_qgis_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
 
-# Exit button
-exit_btn = ttk.Button(left_panel, text="Exit", command=exit_program, width=button_width)
-exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
 
 # Call the function to display the image in the bottom frame
 display_image(bottom_frame)
