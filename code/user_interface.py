@@ -1,7 +1,6 @@
 import tkinter as tk
 import locale
 
-
 try:
     locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
 except locale.Error:
@@ -147,10 +146,9 @@ root = ttk.Window(themename='superhero')
 root.title("MESA 4")
 root.geometry("800x540")
 
-
 button_width = 20
-button_padx = 20
-button_pady = 10
+button_padx  = 20
+button_pady  = 10
 
 # Main frame
 main_frame = tk.Frame(root)
@@ -181,7 +179,12 @@ right_panel.grid_rowconfigure(0, weight=1)
 right_panel.bind("<Configure>", adjust_wrap)
 
 # Label with text on the right panel
-mesa_text = "This is the MESA system. It is an implementation of the MESA method."
+mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windwos platform. To use it you will have to deposit spatial data for assets and geocodes (eg grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated  suceptibilities. 
+
+Contact ragnvald@mindland.com for further information.
+
+Python code is available at https://github.com/ragnvald/mesa """
+
 mesa_label = tk.Label(right_panel, text=mesa_text, justify="left", anchor="nw")
 mesa_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
