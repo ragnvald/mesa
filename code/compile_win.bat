@@ -1,3 +1,6 @@
+:: Compilation script.
+:: Consider using UPX-co-compilation package for smaller files.
+
 echo Compiling Python scripts...
 echo off
 
