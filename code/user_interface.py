@@ -57,16 +57,21 @@ def get_stats(gpkg_file):
     tbl_asset_object   = gpd.read_file(gpkg_file, layer='tbl_asset_object')
     tbl_geocode_group  = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
     tbl_geocode_object = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
+    tbl_stacked        = gpd.read_file(gpkg_file, layer='tbl_stacked')
+    tbl_flat           = gpd.read_file(gpkg_file, layer='tbl_flat')
 
     # Calculate the required statistics
-    asset_layer_count    = len(tbl_asset_group)
-    asset_feature_count  = len(tbl_asset_object)
-    geocode_layer_count  = len(tbl_geocode_group)
-    geocode_object_count = len(tbl_geocode_object)
+    asset_layer_count     = len(tbl_asset_group)
+    asset_feature_count   = len(tbl_asset_object)
+    geocode_layer_count   = len(tbl_geocode_group)
+    geocode_object_count  = len(tbl_geocode_object)
+    geocode_stacked_count = len(tbl_stacked)
+    geocode_flat_count    = len(tbl_flat)
 
     # Create the stats text string
-    stats_text = (f"Asset Layers: {asset_layer_count}, Total Features: {asset_feature_count}\n"
-                  f"Geocode Layers: {geocode_layer_count}, Total Geocode Objects: {geocode_object_count}")
+    stats_text = (f"Asset Layers: {asset_layer_count}\nTotal Features: {asset_feature_count}\n"
+                  f"Geocode Layers: {geocode_layer_count}\nTotal Geocode Objects: {geocode_object_count}\n"
+                  f"Stacked cells: {geocode_stacked_count}\nFlat cells: {geocode_flat_count}")
     
     return stats_text
 
@@ -181,9 +186,9 @@ root = ttk.Window(themename='superhero')
 root.title("MESA 4")
 root.geometry("800x540")
 
-button_width = 17
-button_padx  = 10
-button_pady  = 10
+button_width = 18   
+button_padx  = 7
+button_pady  = 7
 
 # Main frame
 main_frame = tk.Frame(root)
