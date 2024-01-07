@@ -177,12 +177,13 @@ def add_text_to_labelframe(labelframe, text):
 config_file = 'config.ini'
 config = read_config(config_file)
 gpkg_file = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Check and create folders at the beginning
 check_and_create_folders()
 
 # Setup the main Tkinter window
-root = ttk.Window(themename='superhero')
+root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("MESA 4")
 root.geometry("800x540")
 
@@ -244,7 +245,7 @@ right_panel.grid_rowconfigure(1, weight=1)  # Adjust row for info_labelframe to 
 right_panel.grid_rowconfigure(2, weight=0)  # Adjust row for exit button to not grow
 
 # Info label frame (add this above the exit button)
-info_labelframe = ttk.LabelFrame(right_panel, text="Additional Info", bootstyle='info')
+info_labelframe = ttk.LabelFrame(right_panel, text="Additional info", bootstyle='info')
 info_labelframe.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
 # Get text for the stats-label

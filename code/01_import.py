@@ -354,9 +354,16 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 def close_application():
     root.destroy()
 
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+input_folder_asset = config['DEFAULT']['input_folder_asset']
+input_folder_geocode = config['DEFAULT']['input_folder_geocode']
+gpkg_file = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface
-root = ttk.Window(themename='superhero')  # Use ttkbootstrap Window
+root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
 root.title("Import assets")
 
 # Create a LabelFrame for the log output
@@ -406,12 +413,5 @@ import_btn.pack(side=tk.LEFT, padx=10)
 
 close_btn = ttk.Button(button_frame, text="Close", command=close_application, bootstyle=WARNING)
 close_btn.pack(side=tk.LEFT, padx=10)
-
-# Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-input_folder_asset = config['DEFAULT']['input_folder_asset']
-input_folder_geocode = config['DEFAULT']['input_folder_geocode']
-gpkg_file = config['DEFAULT']['gpkg_file']
 
 root.mainloop()

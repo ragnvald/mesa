@@ -1,4 +1,11 @@
 import tkinter as tk
+
+import locale
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
 from tkinter import messagebox, scrolledtext, ttk
 import threading
 import geopandas as gpd
@@ -6,6 +13,9 @@ import pandas as pd
 import configparser
 from shapely.geometry import box
 import datetime
+
+import ttkbootstrap as ttk  # Import ttkbootstrap
+from ttkbootstrap.constants import *
 
 # # # # # # # # # # # # # # 
 # Shared/general functions
@@ -109,8 +119,15 @@ def main(log_widget, progress_var, gpkg_file):
     progress_var.set(100)
     log_to_gui(log_widget, "Completed processing.")
 
+
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+gpkg_file = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+
 # Create the user interface
-root = tk.Tk()
+root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Atlas Generation and Update")
 
 # Create a log widget
@@ -140,9 +157,5 @@ run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
 close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
-# Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-gpkg_file = config['DEFAULT']['gpkg_file']
 
 root.mainloop()

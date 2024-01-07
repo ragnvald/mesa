@@ -241,8 +241,14 @@ def process_all(log_widget, progress_var, gpkg_file):
     update_progress(100)
 
 
+# Load configuration settings
+config_file = 'config.ini'
+config = read_config(config_file)
+gpkg_file = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+
 # Create the user interface
-root = ttk.Window(themename='superhero')
+root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Intersect and aggregate analysis")
 
 # Create a log widget
@@ -286,9 +292,5 @@ process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
 close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
-# Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-gpkg_file = config['DEFAULT']['gpkg_file']
 
 root.mainloop()

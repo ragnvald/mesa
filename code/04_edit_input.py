@@ -140,8 +140,16 @@ def create_scrollable_area(root):
 
     return canvas
 
+
+# Load configuration settings and data
+config_file = 'config.ini'
+config = read_config(config_file)
+gpkg_file = config['DEFAULT']['gpkg_file']
+table_name = 'tbl_asset_group'
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+
 # Initialize the main window
-root = ttk.Window(themename='superhero')  # Choose the theme you like
+root = ttk.Window(themename=ttk_bootstrap_theme)  # Choose the theme you like
 root.title("Prioritization")
 root.geometry("700x700")
 
@@ -174,11 +182,6 @@ canvas = create_scrollable_area(root)
 frame = ttk.Frame(canvas)
 canvas.create_window((0, 0), window=frame, anchor="nw")
 
-# Load configuration settings and data
-config_file = 'config.ini'
-config = read_config(config_file)
-gpkg_file = config['DEFAULT']['gpkg_file']
-table_name = 'tbl_asset_group'
 load_data()
 
 # Text panel and buttons below the scrollable area

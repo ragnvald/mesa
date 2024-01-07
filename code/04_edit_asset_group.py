@@ -71,14 +71,6 @@ def load_record():
     name_gis_var.set(record['name_gis'])
     title_fromuser_var.set(record['title_fromuser'])
 
-# Create the user interface
-root = ttk.Window(themename='superhero')  # Use ttkbootstrap Window
-root.title("Import assets")
-
-# Configure column widths
-root.columnconfigure(0, minsize=200)  # Configure the size of the first column
-root.columnconfigure(1, weight=1)     # Make the second column expandable
-
 
 # Load configuration settings
 config_file = 'config.ini'
@@ -86,7 +78,15 @@ config = read_config(config_file)
 input_folder_asset = config['DEFAULT']['input_folder_asset']
 input_folder_geocode = config['DEFAULT']['input_folder_geocode']
 gpkg_file = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
+# Create the user interface
+root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
+root.title("Import assets")
+
+# Configure column widths
+root.columnconfigure(0, minsize=200)  # Configure the size of the first column
+root.columnconfigure(1, weight=1)     # Make the second column expandable
 
 df = load_data()
 current_index = 0

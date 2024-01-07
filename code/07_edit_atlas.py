@@ -1,9 +1,19 @@
 import tkinter as tk
+
+import locale
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
+
 from tkinter import messagebox, scrolledtext, ttk, filedialog
 import configparser
 import pandas as pd
 from sqlalchemy import create_engine
 import os
+
+import ttkbootstrap as ttk  # Import ttkbootstrap
+from ttkbootstrap.constants import *
 
 # # # # # # # # # # # # # # 
 # Shared/general functions
@@ -13,7 +23,6 @@ def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
-
 
 # # # # # # # # # # # # # # 
 # Database management functions
@@ -82,18 +91,21 @@ def browse_image_2():
     if file_path:
         image_name_2_var.set(file_path)
 
-# Initialize the main window
-root = tk.Tk()
-root.title("Edit Atlas Records")
-
-# Configure column widths
-root.columnconfigure(0, minsize=200)
-root.columnconfigure(1, weight=1)
 
 # Load configuration settings
 config_file = 'config.ini'
 config = read_config(config_file)
 gpkg_file = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+
+# Initialize the main window
+
+root = ttk.Window(themename=ttk_bootstrap_theme)
+root.title("Edit Atlas Records")
+
+# Configure column widths
+root.columnconfigure(0, minsize=200)
+root.columnconfigure(1, weight=1)
 
 df = load_data()
 current_index = 0
