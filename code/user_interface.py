@@ -11,9 +11,38 @@ import subprocess
 import webbrowser
 import datetime
 import os
+import fiona
 from PIL import Image, ImageTk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
+from ttkbootstrap import LabelFrame
+import geopandas as gpd
+
+
+def get_geopackage_stats(geopackage):
+    # List available layers in the geopackage
+    layer_names = fiona.listlayers(geopackage)
+    print("Available layers in the geopackage:", layer_names)
+
+    # Load different tables from the geopackage
+    tbl_asset_group = gpd.read_file(geopackage, layer='tbl_asset_group')
+    tbl_asset_object = gpd.read_file(geopackage, layer='tbl_asset_object')
+    tbl_geocode_group = gpd.read_file(geopackage, layer='tbl_geocode_group')
+    tbl_geocode_object = gpd.read_file(geopackage, layer='tbl_geocode_object')
+
+    # Calculate the required statistics
+    asset_layer_count = len(tbl_asset_group)
+    asset_feature_count = len(tbl_asset_object)
+    geocode_layer_count = len(tbl_geocode_group)
+    geocode_object_count = len(tbl_geocode_object)
+
+    # Create stats string
+    stats_string = [
+        ["", "Layers", "Features"],
+        ["Assets", f"{asset_layer_count}", f"{asset_feature_count}"],
+        ["Geocode", f"{geocode_layer_count}", f"{geocode_object_count}"]
+    ]
+    return stats_string
 
 
 # Function to check and create folders
@@ -34,7 +63,7 @@ def open_link(url):
     webbrowser.open_new_tab(url)
 
 # Function to load and display the image
-def display_image(bottom_frame):
+def display_image(bottom_panel):
     image_path = 'system_resources/mesa_illustration.png'
     original_image = Image.open(image_path)
 
@@ -49,12 +78,12 @@ def display_image(bottom_frame):
 
     # Create and place the label
     photo = ImageTk.PhotoImage(original_image)
-    label = Label(bottom_frame, image=photo)
+    label = Label(bottom_panel, image=photo)
     label.image = photo  # keep a reference!
     label.pack(side='bottom', fill='both', expand=True)
 
     # Bind the resize function to the label's configure event
-    bottom_frame.bind("<Configure>", resize_image)
+    bottom_panel.bind("<Configure>", resize_image)
 
 def import_assets():
     try:
@@ -192,8 +221,8 @@ mesa_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
 exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
 
-bottom_frame = tk.Frame(root)
-bottom_frame.pack(fill='x', expand=True)
+bottom_panel = tk.Frame(root)
+bottom_panel.pack(fill='x', expand=True)
 
 # Add buttons to left panel with spacing between buttons
 import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
@@ -220,10 +249,31 @@ edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 export_qgis_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_qgis, width=button_width)
 export_qgis_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
+# Create a labelframe on the left side of the bottom frame
+labelframe = ttk.LabelFrame(bottom_panel, text="System status", bootstyle='primary')
+labelframe.pack(side='left', fill='y', expand=False, padx=10, pady=10)
 
+# Set a fixed width for the labelframe
+labelframe.config(width=200)
+
+# Prevent the labelframe from growing with the content
+labelframe.pack_propagate(False)
+
+geopackage_path = "output/mesa.gpkg"  # Ensure this path is correct
+table_data = get_geopackage_stats(geopackage_path)
+
+for row_index, row in enumerate(table_data):
+    for col_index, cell in enumerate(row):
+        label = ttk.Label(labelframe, text=cell, borderwidth=0)
+        label.grid(row=row_index, column=col_index, sticky="nsew", padx=4, pady=4)
+        labelframe.grid_columnconfigure(col_index, weight=1)
+        
+# Adjust row weight for all rows
+for row_index in range(len(table_data)):
+    labelframe.grid_rowconfigure(row_index, weight=1)
 
 # Call the function to display the image in the bottom frame
-display_image(bottom_frame)
+display_image(bottom_panel)
 
 log_to_logfile("User interface, main dialogue opened")
 
