@@ -22,18 +22,17 @@ import geopandas as gpd
 def get_geopackage_stats(geopackage):
     # List available layers in the geopackage
     layer_names = fiona.listlayers(geopackage)
-    print("Available layers in the geopackage:", layer_names)
 
     # Load different tables from the geopackage
-    tbl_asset_group = gpd.read_file(geopackage, layer='tbl_asset_group')
-    tbl_asset_object = gpd.read_file(geopackage, layer='tbl_asset_object')
-    tbl_geocode_group = gpd.read_file(geopackage, layer='tbl_geocode_group')
-    tbl_geocode_object = gpd.read_file(geopackage, layer='tbl_geocode_object')
+    tbl_asset_group      = gpd.read_file(geopackage, layer='tbl_asset_group')
+    tbl_asset_object     = gpd.read_file(geopackage, layer='tbl_asset_object')
+    tbl_geocode_group    = gpd.read_file(geopackage, layer='tbl_geocode_group')
+    tbl_geocode_object   = gpd.read_file(geopackage, layer='tbl_geocode_object')
 
     # Calculate the required statistics
-    asset_layer_count = len(tbl_asset_group)
-    asset_feature_count = len(tbl_asset_object)
-    geocode_layer_count = len(tbl_geocode_group)
+    asset_layer_count    = len(tbl_asset_group)
+    asset_feature_count  = len(tbl_asset_object)
+    geocode_layer_count  = len(tbl_geocode_group)
     geocode_object_count = len(tbl_geocode_object)
 
     # Create stats string
