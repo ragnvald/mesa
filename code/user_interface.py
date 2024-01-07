@@ -160,52 +160,25 @@ root = ttk.Window(themename='superhero')
 root.title("MESA 4")
 root.geometry("800x540")
 
-button_width = 15
+button_width = 17
 button_padx  = 10
 button_pady  = 10
 
 # Main frame
 main_frame = tk.Frame(root)
-main_frame.pack(fill='both', expand=True, pady=20)
+main_frame.pack(fill='both', expand=True, pady=10)
 
 # Configure the grid weights
 main_frame.grid_columnconfigure(0, weight=0)  # Left panel has no weight
 main_frame.grid_columnconfigure(1, weight=0)  # Separator has no weight
 main_frame.grid_columnconfigure(2, weight=1)  # Right panel has weight
 
-
 # Left panel
 left_panel = tk.Frame(main_frame)
 left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
 
 # Set minimum size for left panel
-main_frame.grid_columnconfigure(0, minsize=250)  # Adjust the minsize as needed
-
-# Separator
-separator = ttk.Separator(main_frame, orient='vertical')
-separator.grid(row=0, column=1, sticky='ns')
-
-# Right panel
-right_panel = tk.Frame(main_frame)
-right_panel.grid(row=0, column=2, sticky="nsew", padx=20)
-right_panel.grid_rowconfigure(0, weight=1)
-
-# Exit button
-exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
-exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
-
-
-# Bottom panel
-bottom_panel = tk.Frame(root)
-bottom_panel.pack(fill='x', expand=True)
-
-# About label frame
-about_labelframe = ttk.LabelFrame(bottom_panel, text="About", bootstyle='secondary')
-about_labelframe.pack(side='left', fill='both', expand=True, padx=5, pady=5)
-
-mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windows platform. To use it you will have to deposit spatial data for assets and geocodes (e.g., grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated susceptibilities."""
-
-add_text_to_labelframe(about_labelframe, mesa_text)
+main_frame.grid_columnconfigure(0, minsize=220)  # Adjust the minsize as needed
 
 # Add buttons to left panel with spacing between buttons
 import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
@@ -232,6 +205,30 @@ edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 export_qgis_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_qgis, width=button_width)
 export_qgis_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
+# Separator
+separator = ttk.Separator(main_frame, orient='vertical')
+separator.grid(row=0, column=1, sticky='ns')
+
+# Right panel
+right_panel = tk.Frame(main_frame)
+right_panel.grid(row=0, column=2, sticky="nsew", padx=10)
+right_panel.grid_rowconfigure(0, weight=1)
+
+# Exit button
+exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
+exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
+
+# Bottom panel
+bottom_panel = tk.Frame(root)
+bottom_panel.pack(fill='x', expand=True)
+
+# About label frame
+about_labelframe = ttk.LabelFrame(bottom_panel, text="About", bootstyle='secondary')
+about_labelframe.pack(side='left', fill='both', expand=True, padx=5, pady=5)
+
+mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windows platform. To use it you will have to deposit spatial data for assets and geocodes (e.g., grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated susceptibilities."""
+
+add_text_to_labelframe(about_labelframe, mesa_text)
 
 log_to_logfile("User interface, main dialogue opened")
 
