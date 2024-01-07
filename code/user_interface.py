@@ -61,28 +61,7 @@ def log_to_logfile(message):
 def open_link(url):
     webbrowser.open_new_tab(url)
 
-# Function to load and display the image
-def display_image(bottom_panel):
-    image_path = 'system_resources/mesa_illustration.png'
-    original_image = Image.open(image_path)
 
-    # Function to resize and update the image
-    def resize_image(event):
-        new_width = event.height
-        new_height = event.height
-        image = original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image)
-        label.config(image=photo)
-        label.image = photo  # keep a reference!
-
-    # Create and place the label
-    photo = ImageTk.PhotoImage(original_image)
-    label = Label(bottom_panel, image=photo)
-    label.image = photo  # keep a reference!
-    label.pack(side='bottom', fill='both', expand=True)
-
-    # Bind the resize function to the label's configure event
-    bottom_panel.bind("<Configure>", resize_image)
 
 def import_assets():
     try:
@@ -162,9 +141,16 @@ def export_qgis():
 def exit_program():
     root.destroy()
 
-# Function to adjust the wrap length of the label
-def adjust_wrap(event):
-    mesa_label.config(wraplength=right_panel.winfo_width())
+def add_text_to_labelframe(labelframe, text):
+    # The text label will now fill the width of the labelframe
+    # and the wraplength will be set to the width of the labelframe
+    label = tk.Label(labelframe, text=text, justify='left')
+    label.pack(padx=10, pady=10, fill='both', expand=True)
+    
+    # Update the wraplength based on the width of the label
+    # This lambda function will adjust the wraplength whenever the label is resized
+    label.bind('<Configure>', lambda e: label.config(wraplength=label.winfo_width() - 20))
+
 
 # Check and create folders at the beginning
 check_and_create_folders()
@@ -174,8 +160,8 @@ root = ttk.Window(themename='superhero')
 root.title("MESA 4")
 root.geometry("800x540")
 
-button_width = 20
-button_padx  = 20
+button_width = 15
+button_padx  = 10
 button_pady  = 10
 
 # Main frame
@@ -186,6 +172,7 @@ main_frame.pack(fill='both', expand=True, pady=20)
 main_frame.grid_columnconfigure(0, weight=0)  # Left panel has no weight
 main_frame.grid_columnconfigure(1, weight=0)  # Separator has no weight
 main_frame.grid_columnconfigure(2, weight=1)  # Right panel has weight
+
 
 # Left panel
 left_panel = tk.Frame(main_frame)
@@ -203,25 +190,22 @@ right_panel = tk.Frame(main_frame)
 right_panel.grid(row=0, column=2, sticky="nsew", padx=20)
 right_panel.grid_rowconfigure(0, weight=1)
 
-# Bind the adjust_wrap function to right_panel's configure event
-right_panel.bind("<Configure>", adjust_wrap)
-
-# Label with text on the right panel
-mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windwos platform. To use it you will have to deposit spatial data for assets and geocodes (eg grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated  suceptibilities. 
-
-Contact ragnvald@mindland.com for further information.
-
-Python code is available at https://github.com/ragnvald/mesa """
-
-mesa_label = tk.Label(right_panel, text=mesa_text, justify="left", anchor="nw")
-mesa_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-
 # Exit button
 exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
 exit_btn.grid(row=6, column=0, columnspan=2, pady=button_pady)
 
+
+# Bottom panel
 bottom_panel = tk.Frame(root)
 bottom_panel.pack(fill='x', expand=True)
+
+# About label frame
+about_labelframe = ttk.LabelFrame(bottom_panel, text="About", bootstyle='secondary')
+about_labelframe.pack(side='left', fill='both', expand=True, padx=5, pady=5)
+
+mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windows platform. To use it you will have to deposit spatial data for assets and geocodes (e.g., grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated susceptibilities."""
+
+add_text_to_labelframe(about_labelframe, mesa_text)
 
 # Add buttons to left panel with spacing between buttons
 import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
@@ -248,31 +232,6 @@ edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 export_qgis_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_qgis, width=button_width)
 export_qgis_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
-# Create a labelframe on the left side of the bottom frame
-labelframe = ttk.LabelFrame(bottom_panel, text="System status", bootstyle='primary')
-labelframe.pack(side='left', fill='y', expand=False, padx=10, pady=10)
-
-# Set a fixed width for the labelframe
-labelframe.config(width=200)
-
-# Prevent the labelframe from growing with the content
-labelframe.pack_propagate(False)
-
-geopackage_path = "output/mesa.gpkg"  # Ensure this path is correct
-table_data = get_geopackage_stats(geopackage_path)
-
-for row_index, row in enumerate(table_data):
-    for col_index, cell in enumerate(row):
-        label = ttk.Label(labelframe, text=cell, borderwidth=0)
-        label.grid(row=row_index, column=col_index, sticky="nsew", padx=4, pady=4)
-        labelframe.grid_columnconfigure(col_index, weight=1)
-        
-# Adjust row weight for all rows
-for row_index in range(len(table_data)):
-    labelframe.grid_rowconfigure(row_index, weight=1)
-
-# Call the function to display the image in the bottom frame
-display_image(bottom_panel)
 
 log_to_logfile("User interface, main dialogue opened")
 
