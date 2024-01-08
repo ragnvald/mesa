@@ -141,36 +141,31 @@ description_entry.grid(row=2, column=1, sticky='w', padx=10, pady=10)
 
 # Image Name 1 Entry and Browse Button
 tk.Label(main_frame, text="Image Name 1").grid(row=3, column=0, sticky='w')
-
 image_name_1_entry = tk.Entry(main_frame, textvariable=image_name_1_var, width=40)
-image_name_1_entry.grid(row=3, column=1, sticky='w')
+image_name_1_entry.grid(row=3, column=1, sticky='w', padx=10, pady=10)
 
 browse_btn_1 = ttk.Button(main_frame, text="Browse", command=browse_image_1)
-browse_btn_1.grid(row=3, column=2)
+browse_btn_1.grid(row=3, column=2, padx=10, pady=10)
 
 # Image Description 1 Entry
 tk.Label(main_frame, text="Image Description 1").grid(row=4, column=0, sticky='w')
 image_desc_1_entry = tk.Entry(main_frame, textvariable=image_desc_1_var, width=40)
-image_desc_1_entry.grid(row=4, column=1, sticky='w')
+image_desc_1_entry.grid(row=4, column=1, sticky='w', padx=10, pady=10)
 
 # Image Name 2 Entry and Browse Button
 tk.Label(main_frame, text="Image Name 2").grid(row=5, column=0, sticky='w')
 image_name_2_entry = tk.Entry(main_frame, textvariable=image_name_2_var, width=40)
-image_name_2_entry.grid(row=5, column=1, sticky='w')
-browse_btn_2 = ttk.Button(main_frame, text="Browse", command=browse_image_2)
-browse_btn_2.grid(row=5, column=2)
+image_name_2_entry.grid(row=5, column=1, sticky='w', padx=10, pady=10)
 
-# Image Description 2 Entry
-tk.Label(main_frame, text="Image Description 2").grid(row=6, column=0, sticky='w')
-image_desc_2_entry = tk.Entry(main_frame, textvariable=image_desc_2_var, width=40)
-image_desc_2_entry.grid(row=6, column=1, sticky='w')
+browse_btn_2 = ttk.Button(main_frame, text="Browse", command=browse_image_2)
+browse_btn_2.grid(row=5, column=2, padx=10, pady=10)
 
 # Navigation and Update buttons
-ttk.Button(main_frame, text="Previous", command=lambda: navigate('previous')).grid(row=7, column=0, padx=5, pady=5)
-ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=7, column=2, padx=5, pady=5)
+ttk.Button(main_frame, text="Previous", command=lambda: navigate('previous')).grid(row=7, column=0, sticky='w')
+ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=7, column=2, padx=10, pady=10, sticky='e')
 
 # Exit button
-ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=8, column=2, sticky='e', padx=5, pady=5)
+ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=8, column=2, sticky='e', padx=10, pady=10)
 
 # Load the first record
 load_record()
