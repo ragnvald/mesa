@@ -50,7 +50,6 @@ def update_stats():
     my_status = get_status(gpkg_file)
     stats_label.config(text=my_status)
     # Schedule the update_stats function to be called again after 30000 milliseconds (30 seconds)
-    root.after(3000, update_stats)
 
 
 def get_status(gpkg_file):
@@ -135,6 +134,7 @@ def import_assets():
             subprocess.run(["01_import.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute import assets script")
+    update_stats()
 
 def edit_asset_group():
     try:
@@ -146,6 +146,7 @@ def edit_asset_group():
             subprocess.run(["04_edit_asset_group.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit asset group script")
+    update_stats()
 
 
 def edit_geocode_group():
@@ -157,6 +158,7 @@ def edit_geocode_group():
             subprocess.run(["04_edit_geocode_group.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit geocode group script")
+    update_stats()
 
 
 def edit_processing_setup():
@@ -168,6 +170,7 @@ def edit_processing_setup():
             subprocess.run(["04_edit_input.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit input script")
+    update_stats()
 
 
 def process_data():
@@ -179,6 +182,7 @@ def process_data():
             subprocess.run(["06_process.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute processing script")
+    update_stats()
 
 
 def make_atlas():
@@ -190,6 +194,7 @@ def make_atlas():
             subprocess.run(["07_make_atlas.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute make atlas script")
+    update_stats()
 
 
 def edit_atlas():
@@ -201,6 +206,7 @@ def edit_atlas():
             subprocess.run(["07_edit_atlas.exe"], check=True)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit atlas script")
+    update_stats()
 
 
 def export_qgis():
