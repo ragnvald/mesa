@@ -70,7 +70,7 @@ def get_status(gpkg_file):
             try:
                 table = gpd.read_file(gpkg_file, layer=layer_name)
                 if  table['sensitivity'].sum() > 0:
-                    return "You have successfully set values for asset and susceptibility."
+                    return "Everything is set up. Ready for processing."
                 else:
                     return "You need to set up the calculation. Press the 'Set up'-button to proceed."
             except Exception:
