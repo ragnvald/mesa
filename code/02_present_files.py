@@ -32,11 +32,11 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
 
 
         if not points.empty:
-            points.plot(ax=ax, alpha=0.5, color='red')
+            points.plot(ax=ax, alpha=0.5, color='#628C96')
         if not lines.empty:
-            lines.plot(ax=ax, alpha=0.5, color='blue')
+            lines.plot(ax=ax, alpha=0.5, color='#628C96')
         if not polygons.empty:
-            polygons.plot(ax=ax, alpha=0.5, color='green')
+            polygons.plot(ax=ax, alpha=0.5, facecolor='#99D9EA', edgecolor='#8CC7D6')
 
         # Default plot limits in case of invalid bounds
         default_limits = (-180, 180, -90, 90)
@@ -71,4 +71,3 @@ geocode_output_png = 'output/geocode.png'
 
 plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
 plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
-plot_geopackage_layer(gpkg_file, 'tbl_geocode_object', geocode_output_png)
