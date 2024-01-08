@@ -47,32 +47,39 @@ def open_link(url):
 
 
 def get_stats(gpkg_file):
-    # List available layers in the geopackage
-    layer_names = fiona.listlayers(gpkg_file)
+    if not os.path.exists(gpkg_file):
+        return "To initiate the system please import assets. Press the Import-button. Make sure you have asset and geocode files in the respective folders."
 
-    # Load different tables from the geopackage
-    # Make sure the layer names match with those in the list
-    tbl_asset_group    = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    tbl_asset_object   = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-    tbl_geocode_group  = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
-    tbl_geocode_object = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    tbl_stacked        = gpd.read_file(gpkg_file, layer='tbl_stacked')
-    tbl_flat           = gpd.read_file(gpkg_file, layer='tbl_flat')
+    try:
+        # List available layers in the geopackage
+        layer_names = fiona.listlayers(gpkg_file)
 
-    # Calculate the required statistics
-    asset_layer_count     = len(tbl_asset_group)
-    asset_feature_count   = len(tbl_asset_object)
-    geocode_layer_count   = len(tbl_geocode_group)
-    geocode_object_count  = len(tbl_geocode_object)
-    geocode_stacked_count = len(tbl_stacked)
-    geocode_flat_count    = len(tbl_flat)
+        # Load different tables from the geopackage
+        # Make sure the layer names match with those in the list
+        tbl_asset_group    = gpd.read_file(gpkg_file, layer='tbl_asset_group')
+        tbl_asset_object   = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+        tbl_geocode_group  = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
+        tbl_geocode_object = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
+        tbl_stacked        = gpd.read_file(gpkg_file, layer='tbl_stacked')
+        tbl_flat           = gpd.read_file(gpkg_file, layer='tbl_flat')
 
-    # Create the stats text string
-    stats_text = (f"Asset layers: {asset_layer_count}\nFeatures in assets: {asset_feature_count}\n"
-                  f"Geocode layers: {geocode_layer_count}\nFeatures in geocodes: {geocode_object_count}\n"
-                  f"Stacked cells: {geocode_stacked_count}\nFlat cells: {geocode_flat_count}")
-    
-    return stats_text
+        # Calculate the required statistics
+        asset_layer_count     = len(tbl_asset_group)
+        asset_feature_count   = len(tbl_asset_object)
+        geocode_layer_count   = len(tbl_geocode_group)
+        geocode_object_count  = len(tbl_geocode_object)
+        geocode_stacked_count = len(tbl_stacked)
+        geocode_flat_count    = len(tbl_flat)
+
+        # Create the stats text string
+        stats_text = (f"Asset layers: {asset_layer_count}\nFeatures in assets: {asset_feature_count}\n"
+                      f"Geocode layers: {geocode_layer_count}\nFeatures in geocodes: {geocode_object_count}\n"
+                      f"Stacked cells: {geocode_stacked_count}\nFlat cells: {geocode_flat_count}")
+        
+        return stats_text
+    except Exception as e:
+        return f"Error accessing statistics: {e}"
+
 
 
 def import_assets():
@@ -160,16 +167,23 @@ def export_qgis():
 def exit_program():
     root.destroy()
 
+# Function to dynamically update wraplength of label text
+def update_wraplength(event):
+    # Subtract some padding to ensure text does not touch frame borders
+    new_width = event.width - 20
+    stats_label.config(wraplength=new_width)
 
 def add_text_to_labelframe(labelframe, text):
-    # The text label will now fill the width of the labelframe
-    # and the wraplength will be set to the width of the labelframe
     label = tk.Label(labelframe, text=text, justify='left')
     label.pack(padx=10, pady=10, fill='both', expand=True)
-    
-    # Update the wraplength based on the width of the label
-    # This lambda function will adjust the wraplength whenever the label is resized
-    label.bind('<Configure>', lambda e: label.config(wraplength=label.winfo_width() - 20))
+
+    # Function to update the wraplength based on the width of the labelframe
+    def update_wrap(event):
+        label.config(wraplength=labelframe.winfo_width() - 20)
+
+    # Bind the resize event of the labelframe to the update_wrap function
+    labelframe.bind('<Configure>', update_wrap)
+
 
 
 # Load configuration settings
@@ -237,39 +251,47 @@ separator.grid(row=0, column=1, sticky='ns')
 
 # Right panel
 right_panel = tk.Frame(main_frame)
-right_panel.grid(row=0, column=2, sticky="nsew", padx=10)
+right_panel.grid(row=0, column=2, sticky="nsew", padx=5)
 
-# Configure the rows within the right panel where widgets will be placed
-right_panel.grid_rowconfigure(1, weight=1)  # Adjust row for info_labelframe to grow
-right_panel.grid_rowconfigure(2, weight=0)  # Adjust row for exit button to not grow
+# Configure the rows and columns within the right panel where widgets will be placed
+right_panel.grid_rowconfigure(0, weight=1)  # Adjust row for info_labelframe to grow
+right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 
 # Info label frame (add this above the exit button)
 info_labelframe = ttk.LabelFrame(right_panel, text="Additional info", bootstyle='info')
-info_labelframe.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+
 
 # Get text for the stats-label
-my_stats=get_stats(gpkg_file)
+my_stats = get_stats(gpkg_file)
 
-# Add the stats text inside the info_labelframe
+# Add the stats text inside the info_labelframe, aligned to the top
 stats_label = tk.Label(info_labelframe, text=my_stats, justify='left')
-stats_label.pack(padx=10, pady=10, fill='both', expand=True)
+stats_label.pack(side='top', padx=5, pady=5, fill='x')  # Align to the top and expand horizontally
 
-# Adjust the exit button to be below the new info_labelframe
+# Bind the configure event to update the wraplength of the label
+info_labelframe.bind('<Configure>', update_wraplength)
+
+# Adjust the exit button to be below the new info_labelframe and align it to the right
 exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
-exit_btn.grid(row=2, column=0, pady=button_pady)  # row index adjusted to 2
+exit_btn.grid(row=1, column=0, pady=button_pady, sticky='e')  # Align to the right side
 
 
 # Bottom panel
 bottom_panel = tk.Frame(root)
-bottom_panel.pack(fill='x', expand=True)
+bottom_panel.pack(fill='both', expand=True, pady=5)
 
 # About label frame
 about_labelframe = ttk.LabelFrame(bottom_panel, text="About", bootstyle='secondary')
-about_labelframe.pack(side='left', fill='both', expand=True, padx=5, pady=5)
+about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
 mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windows platform. To use it you will have to deposit spatial data for assets and geocodes (e.g., grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated susceptibilities."""
 
 add_text_to_labelframe(about_labelframe, mesa_text)
+
+# Version label aligned bottom right
+version_label = tk.Label(bottom_panel, text="MESA version 3.5 beta", font=("Calibri", 7), anchor='e')
+version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
 log_to_logfile("User interface, main dialogue opened")
 
