@@ -6,13 +6,12 @@ try:
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import scrolledtext, ttk
 import threading
 import geopandas as gpd
 import pandas as pd
 import configparser
 import datetime
-import os
 
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *

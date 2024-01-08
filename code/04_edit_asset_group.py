@@ -6,8 +6,7 @@ try:
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
-from tkinter import scrolledtext, ttk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import ttk
 import configparser
 import pandas as pd
 from sqlalchemy import create_engine
