@@ -315,18 +315,9 @@ def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
         gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
         log_to_gui(log_widget, f"Created new GeoPackage file {gpkg_file} with layer {layer_name}.")
     else:
-        # If the file exists, check if the layer exists
-        if layer_name not in fiona.listlayers(gpkg_file):
-            # Create a new layer in the existing GeoPackage
-            schema = gpd.io.file.infer_schema(gdf)
-            with fiona_open(gpkg_file, 'w', layer=layer_name, driver='GPKG', schema=schema, crs=gdf.crs) as collection:
-                for _, row in gdf.iterrows():
-                    collection.write(row.to_dict())
-            log_to_gui(log_widget, f"Created new layer {layer_name} in existing GeoPackage.")
-        else:
-            # Append data to the existing layer
-            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
-            log_to_gui(log_widget, f"Replaced data for layer {layer_name} in GeoPackage.")
+        # Overwrite the layer if it exists, otherwise create a new layer
+        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+        log_to_gui(log_widget, f"Replaced data for layer {layer_name} in GeoPackage.")
 
 
 # Function to update asset groups in geopackage
