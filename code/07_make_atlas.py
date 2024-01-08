@@ -19,6 +19,11 @@ from ttkbootstrap.constants import *
 # # # # # # # # # # # # # # 
 # Shared/general functions
 
+
+def update_progress(new_value):
+    progress_var.set(new_value)
+    progress_label.config(text=f"{int(new_value)}%")
+
 # Function to read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -103,19 +108,19 @@ def main(log_widget, progress_var, gpkg_file):
 
     # Load tbl_flat from GeoPackage
     tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')
-    progress_var.set(30)
+    update_progress(30)
 
     # Generate atlas geometries
     atlas_geometries = generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
-    progress_var.set(60)
+    update_progress(60)
 
     # Filter atlas geometries and update name_gis
     updated_atlas_geometries = filter_and_update_atlas_geometries(atlas_geometries, tbl_flat)
-    progress_var.set(80)
+    update_progress(80)
 
     # Save updated geometries to GeoPackage
     updated_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
-    progress_var.set(100)
+    update_progress(100)
     log_to_gui(log_widget, "Completed processing.")
 
 
@@ -133,10 +138,19 @@ root.title("Atlas Generation and Update")
 log_widget = scrolledtext.ScrolledText(root, height=10)
 log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
+# Create a frame to hold the progress bar and the label
+progress_frame = tk.Frame(root)
+progress_frame.pack(pady=5)
+
 # Create a progress bar
 progress_var = tk.DoubleVar()
-progress_bar = ttk.Progressbar(root, orient="horizontal", length=200, mode="determinate", variable=progress_var)
-progress_bar.pack(pady=5, fill=tk.X)
+progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
+progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the frame
+
+# Label for displaying the progress percentage
+progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
+
 
 # Information text field above the buttons
 info_label_text = ("This tool generates and updates atlas geometries based on the provided configurations. Earlier geometries and asociated information will be deleted.")
