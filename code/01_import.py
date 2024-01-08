@@ -8,6 +8,9 @@ except locale.Error:
 
 from tkinter import scrolledtext, ttk
 
+import fiona
+from fiona import open as fiona_open    
+
 import threading
 import geopandas as gpd
 from sqlalchemy import create_engine
@@ -221,7 +224,7 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
     
-    log_to_gui(log_widget, f"Preparing export of geocode groups and objects.")
+    log_to_gui(log_widget, f"Preparing import of geocode groups and objects.")
 
     if not geocode_groups_gdf.empty:
         export_to_geopackage(geocode_groups_gdf, gpkg_file, 'tbl_geocode_group', log_widget)
@@ -305,11 +308,25 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
 
-# Function to export to geopackage -
 def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
-    engine = create_engine(f'sqlite:///{gpkg_file}')
-    gdf.to_file(gpkg_file, layer=layer_name, driver="GPKG", if_exists='append')
-    log_to_gui(log_widget, f"  {gpkg_file}, layer {layer_name}")
+    # Check if the GeoPackage file exists
+    if not os.path.exists(gpkg_file):
+        # Create a new GeoPackage file by writing the gdf with the specified layer
+        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
+        log_to_gui(log_widget, f"Created new GeoPackage file {gpkg_file} with layer {layer_name}.")
+    else:
+        # If the file exists, check if the layer exists
+        if layer_name not in fiona.listlayers(gpkg_file):
+            # Create a new layer in the existing GeoPackage
+            schema = gpd.io.file.infer_schema(gdf)
+            with fiona_open(gpkg_file, 'w', layer=layer_name, driver='GPKG', schema=schema, crs=gdf.crs) as collection:
+                for _, row in gdf.iterrows():
+                    collection.write(row.to_dict())
+            log_to_gui(log_widget, f"Created new layer {layer_name} in existing GeoPackage.")
+        else:
+            # Append data to the existing layer
+            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+            log_to_gui(log_widget, f"Replaced data for layer {layer_name} in GeoPackage.")
 
 
 # Function to update asset groups in geopackage
@@ -340,7 +357,7 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     
     asset_objects_gdf, asset_groups_df, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
 
-    log_to_gui(log_widget, "Exporting:")
+    log_to_gui(log_widget, "Importing:")
     export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
     
     update_asset_groups(asset_groups_df, gpkg_file, log_widget)
