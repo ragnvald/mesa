@@ -46,37 +46,80 @@ def open_link(url):
     webbrowser.open_new_tab(url)
 
 
-def get_stats(gpkg_file):
+def update_stats():
+    my_status = get_status(gpkg_file)
+    stats_label.config(text=my_status)
+    # Schedule the update_stats function to be called again after 30000 milliseconds (30 seconds)
+    root.after(3000, update_stats)
+
+
+def get_status(gpkg_file):
     if not os.path.exists(gpkg_file):
-        return "To initiate the system please import assets. Press the Import-button. Make sure you have asset and geocode files in the respective folders."
+        return "To initiate the system please import assets. Do this by pressing the Import-button. Make sure you have asset and geocode files stored in the respective folders."
+
+    stats_text = ""
 
     try:
-        # List available layers in the geopackage
-        layer_names = fiona.listlayers(gpkg_file)
+        def read_table_and_count(layer_name):
+            try:
+                table = gpd.read_file(gpkg_file, layer=layer_name)
+                return len(table)
+            except Exception:
+                return None
 
-        # Load different tables from the geopackage
-        # Make sure the layer names match with those in the list
-        tbl_asset_group    = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-        tbl_asset_object   = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-        tbl_geocode_group  = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
-        tbl_geocode_object = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-        tbl_stacked        = gpd.read_file(gpkg_file, layer='tbl_stacked')
-        tbl_flat           = gpd.read_file(gpkg_file, layer='tbl_flat')
+        def read_table_and_check_sensitivity(layer_name):
+            try:
+                table = gpd.read_file(gpkg_file, layer=layer_name)
+                if  table['sensitivity'].sum() > 0:
+                    return "You have successfully set values for asset and susceptibility."
+                else:
+                    return "You need to set up the calculation. Press the 'Set up'-button to proceed."
+            except Exception:
+                return None
 
-        # Calculate the required statistics
-        asset_layer_count     = len(tbl_asset_group)
-        asset_feature_count   = len(tbl_asset_object)
-        geocode_layer_count   = len(tbl_geocode_group)
-        geocode_object_count  = len(tbl_geocode_object)
-        geocode_stacked_count = len(tbl_stacked)
-        geocode_flat_count    = len(tbl_flat)
+         # Check for tbl_asset_group
+        asset_group_count = read_table_and_count('tbl_asset_group')
+        if asset_group_count is not None:
+            stats_text += f"Asset layers: {asset_group_count}\n"
+        else:
+            stats_text += "Assets are missing. Import assets by pressing the Import button.\n"
 
-        # Create the stats text string
-        stats_text = (f"Asset layers: {asset_layer_count}\nFeatures in assets: {asset_feature_count}\n"
-                      f"Geocode layers: {geocode_layer_count}\nFeatures in geocodes: {geocode_object_count}\n"
-                      f"Stacked cells: {geocode_stacked_count}\nFlat cells: {geocode_flat_count}")
-        
-        return stats_text
+        # Check for tbl_geocode_group
+        geocode_group_count = read_table_and_count('tbl_geocode_group')
+        if geocode_group_count is not None:
+            stats_text += f"Geocode layers: {geocode_group_count}\n"
+        else:
+            stats_text += "Geocodes are missing. Import assets by pressing the Import button.\n"
+
+        # Check for tbl_asset_group sensitivity
+        asset_group_sensitivity = read_table_and_check_sensitivity('tbl_asset_group')
+        if asset_group_sensitivity:
+            stats_text += f"{asset_group_sensitivity}\n"
+
+        # Check for tbl_stacked
+        stacked_cells_count = read_table_and_count('tbl_stacked')
+        if stacked_cells_count is not None:
+            stats_text += f"Stacked cells: {stacked_cells_count}\n"
+        else:
+            stats_text += "Stacked table is missing. Press button Process data to initiate.\n"
+
+        # Check for tbl_flat
+        stacked_cells_count = read_table_and_count('tbl_flat')
+        if stacked_cells_count is not None:
+            stats_text += f"Flat cells: {stacked_cells_count}\n"
+        else:
+            stats_text += "Flat table is missing. Press button Process data to initiate.\n"
+
+        # Check for tbl_atlas
+        stacked_cells_count = read_table_and_count('tbl_atlas')
+        if stacked_cells_count is not None:
+            stats_text += f"Atlas pages: {stacked_cells_count}\n"
+        else:
+            stats_text += "Atlas is missing. Press button 'Create atlas'.\n"
+
+
+        return stats_text.strip()
+
     except Exception as e:
         return f"Error accessing statistics: {e}"
 
@@ -230,13 +273,13 @@ edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
 edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width, bootstyle=SECONDARY)
 edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
-edit_processing_setup_btn = ttk.Button(left_panel, text="Set up processing", command=edit_processing_setup, width=button_width)
+edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
 edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
+process_stacked_data_btn = ttk.Button(left_panel, text="Process", command=process_data, width=button_width)
 process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
-process_stacked_data_btn = ttk.Button(left_panel, text="Make atlas", command=make_atlas, width=button_width)
+process_stacked_data_btn = ttk.Button(left_panel, text="Create atlas", command=make_atlas, width=button_width)
 process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
 edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
@@ -258,23 +301,25 @@ right_panel.grid_rowconfigure(0, weight=1)  # Adjust row for info_labelframe to 
 right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 
 # Info label frame (add this above the exit button)
-info_labelframe = ttk.LabelFrame(right_panel, text="Additional info", bootstyle='info')
+info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
 info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
 
 # Get text for the stats-label
-my_stats = get_stats(gpkg_file)
+my_status = get_status(gpkg_file)
 
 # Add the stats text inside the info_labelframe, aligned to the top
-stats_label = tk.Label(info_labelframe, text=my_stats, justify='left')
+stats_label = tk.Label(info_labelframe, text=my_status, justify='left')
 stats_label.pack(side='top', padx=5, pady=5, fill='x')  # Align to the top and expand horizontally
 
 # Bind the configure event to update the wraplength of the label
 info_labelframe.bind('<Configure>', update_wraplength)
 
-# Adjust the exit button to be below the new info_labelframe and align it to the right
+
+# Adjust the exit button to align it to the right
 exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
 exit_btn.grid(row=1, column=0, pady=button_pady, sticky='e')  # Align to the right side
+
 
 
 # Bottom panel
@@ -294,6 +339,8 @@ version_label = tk.Label(bottom_panel, text="MESA version 3.5 beta", font=("Cali
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
 log_to_logfile("User interface, main dialogue opened")
+
+update_stats()
 
 # Start the GUI event loop
 root.mainloop()
