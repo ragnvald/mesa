@@ -6,13 +6,12 @@ try:
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
-from tkinter import messagebox, scrolledtext, Label
+from tkinter import messagebox
 import subprocess
 import webbrowser
 import datetime
 import os
 import fiona
-from PIL import Image, ImageTk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap import LabelFrame
@@ -69,8 +68,8 @@ def get_stats(gpkg_file):
     geocode_flat_count    = len(tbl_flat)
 
     # Create the stats text string
-    stats_text = (f"Asset Layers: {asset_layer_count}\nTotal Features: {asset_feature_count}\n"
-                  f"Geocode Layers: {geocode_layer_count}\nTotal Geocode Objects: {geocode_object_count}\n"
+    stats_text = (f"Asset layers: {asset_layer_count}\nFeatures in assets: {asset_feature_count}\n"
+                  f"Geocode layers: {geocode_layer_count}\nFeatures in geocodes: {geocode_object_count}\n"
                   f"Stacked cells: {geocode_stacked_count}\nFlat cells: {geocode_flat_count}")
     
     return stats_text
