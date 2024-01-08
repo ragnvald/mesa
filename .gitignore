@@ -18,6 +18,8 @@
 *.sbn
 *.sbx
 *.xml
+*.pyc
+*.pkg
 build/user_interface/PKG-00.toc
 .gitignore
 dist/user_interface/_internal/_bz2.pyd
