@@ -150,7 +150,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     update_progress(45)  # Progress after concatenating data
     
     # Drop the unnecessary columns
-    intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
+    intersected_data.drop(columns=['fid', 'id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Data processing completed.")
