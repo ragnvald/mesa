@@ -21,6 +21,7 @@ import os
 from osgeo import ogr
 import pandas as pd
 from sqlalchemy import exc
+import sqlite3
 from shapely.geometry import box
 
 import ttkbootstrap as ttk  # Import ttkbootstrap
@@ -352,10 +353,40 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
     
     update_asset_groups(asset_groups_df, gpkg_file, log_widget)
+
+    update_asset_objects_with_name_gis(gpkg_file, log_widget)
     
     log_to_gui(log_widget, "Asset import completed.")
     
     progress_var.set(100)
+
+def update_asset_objects_with_name_gis(db_file, log_widget):
+    try:
+        # Connect to SQLite database
+        conn = sqlite3.connect(db_file)
+
+        # Load data into dataframes
+        df_asset_group = pd.read_sql_query("SELECT id, name_gis FROM tbl_asset_group", conn)
+        df_asset_object = pd.read_sql_query("SELECT * FROM tbl_asset_object", conn)
+
+        # Check if 'fid' is part of the dataframe
+        if 'fid' in df_asset_object.columns:
+            df_asset_object.set_index('fid', inplace=True)
+
+        # Join dataframes to get name_gis
+        df_joined = df_asset_object.merge(df_asset_group, left_on='ref_asset_group', right_on='id', how='left')
+
+        # Update tbl_asset_object dataframe with name_gis
+        df_asset_object['ref_name_gis'] = df_joined['name_gis']
+
+        # Write updated dataframe back to SQLite database
+        df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
+
+        log_to_gui(log_widget, "tbl_asset_object updated with name_gis from tbl_asset_group.")
+    except Exception as e:
+        log_to_gui(log_widget, f"Error updating tbl_asset_object: {e}")
+    finally:
+        conn.close()
 
 
 # Function to close the application
