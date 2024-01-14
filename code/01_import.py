@@ -131,24 +131,25 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     # Calculate bounding box and add to geocode groups
     bounding_box = data.total_bounds
     bbox_geom = box(*bounding_box)
-    name_gis = f"geocode_{group_id_counter:03d}"  # Create name_gis for the group
+    name_gis_geocodegroup = f"geocode_{group_id_counter:03d}"  # Renamed from name_gis
+
     geocode_groups.append({
         'id': group_id_counter,  # Group ID
         'name': layer_name,
-        'name_gis': name_gis,
+        'name_gis_geocodegroup': name_gis_geocodegroup,  # Using the renamed attribute
         'title_user': layer_name,
         'description': f'Description for {layer_name}',
         'geom': bbox_geom
     })
 
-    # Add geocode objects with unique IDs and name_gis from the group
+    # Add geocode objects with unique IDs and name_gis_geocodegroup from the group
     for index, row in data.iterrows():
         geom = row.geometry if 'geometry' in data.columns else None
         code = row['qdgc'] if 'qdgc' in data.columns else object_id_counter
         geocode_objects.append({
             'code': code,
             'ref_geocodegroup': group_id_counter,
-            'name_gis': name_gis,  # Adding the name_gis from the group
+            'name_gis_geocodegroup': name_gis_geocodegroup,  # Corrected to use the new attribute name
             'geom': geom
         })
         object_id_counter += 1
@@ -265,7 +266,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                     asset_groups.append({
                         'id': group_id_counter,
                         'name_original': filename,
-                        'name_gis': f"layer_{group_id_counter:03d}",
+                        'name_gis_assetgroup': f"layer_{group_id_counter:03d}",
                         'title_fromuser': filename,
                         'date_import': datetime.datetime.now(),
                         'geom': bbox_geom,
@@ -366,23 +367,24 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
         conn = sqlite3.connect(db_file)
 
         # Load data into dataframes
-        df_asset_group = pd.read_sql_query("SELECT id, name_gis FROM tbl_asset_group", conn)
+        # Update the query to reflect the new column name
+        df_asset_group = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
         df_asset_object = pd.read_sql_query("SELECT * FROM tbl_asset_object", conn)
 
         # Check if 'fid' is part of the dataframe
         if 'fid' in df_asset_object.columns:
             df_asset_object.set_index('fid', inplace=True)
 
-        # Join dataframes to get name_gis
+        # Join dataframes to get name_gis_assetgroup
         df_joined = df_asset_object.merge(df_asset_group, left_on='ref_asset_group', right_on='id', how='left')
 
-        # Update tbl_asset_object dataframe with name_gis
-        df_asset_object['ref_name_gis'] = df_joined['name_gis']
+        # Update tbl_asset_object dataframe with name_gis_assetgroup
+        df_asset_object['ref_name_gis_assetgroup'] = df_joined['name_gis_assetgroup']
 
         # Write updated dataframe back to SQLite database
         df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
 
-        log_to_gui(log_widget, "tbl_asset_object updated with name_gis from tbl_asset_group.")
+        log_to_gui(log_widget, "tbl_asset_object updated with name_gis_assetgroup from tbl_asset_group.")
     except Exception as e:
         log_to_gui(log_widget, f"Error updating tbl_asset_object: {e}")
     finally:

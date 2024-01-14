@@ -83,7 +83,7 @@ def aggregate_data(intersected_data):
         'sensitivity': ['min', 'max'],
         'susceptibility': ['min', 'max'],
         'ref_geocodegroup': 'first',     # Include the first reference to geocode group id
-        'name_gis': 'first',             # Include the first reference to geocode group id
+        'name_gis_geocodegroup': 'first',             # Include the first reference to geocode group id
         'name': 'first',                 # Include the first name for each group
         'geometry': 'first',             # Keeping the first geometry for each group
         'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
@@ -102,9 +102,9 @@ def aggregate_data(intersected_data):
 
     # Rename columns after flattening
     renamed_columns = {
-        'name_first': 'name_geocodegroup',
+        'name_first': 'geocode_name_user',
         'ref_geocodegroup_first': 'ref_geocodegroup',
-        'name_gis_first': 'geocode_name_gis',  # Updated name
+        'name_gis_first': 'name_gis_geocodegroup',  # Updated name
         'asset_group_name_<lambda>': 'asset_group_names'  # Rename aggregated asset_group_name
     }
 
@@ -131,7 +131,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     update_progress(25)  # Progress after reading asset group data
 
     # Merge asset group data with asset data
-    asset_data = asset_data.merge(asset_group_data[['id', 'name_gis', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
+    asset_data = asset_data.merge(asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
                                   left_on='ref_asset_group', right_on='id', how='left')
    
     update_progress(30)  # Progress after merging data
@@ -159,46 +159,58 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
 
 # Create tbl_flat by reading out values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file):
-    log_to_gui(log_widget, "Building tbl_stacked...")
-    update_progress(55)  # Indicate start
-
-    # Reading 'tbl_stacked' data from the GeoPackage
-    log_to_gui(log_widget, "Reading 'tbl_stacked' data...")
-    asset_data = gpd.read_file(gpkg_file, layer='tbl_stacked')
-    update_progress(60)  # Update progress after reading asset data
-
-    # Reading 'tbl_geocode_group' data from the GeoPackage
-    log_to_gui(log_widget, "Reading 'tbl_geocode_group' data...")
-    geocode_group_data = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
-    update_progress(70)  # Update progress after reading geocode group data
     
-    # Ensure 'code' column is present in 'tbl_stacked'
-    if 'code' not in asset_data.columns:
-        log_to_gui(log_widget, "'code' column not found in 'tbl_stacked'.")
-        raise KeyError("'code' column not found in 'tbl_stacked'")
+    log_to_gui(log_widget, "Building tbl_flat ...")
 
-    # Merge asset_data with geocode_group_data on ref_geocodegroup
-    log_to_gui(log_widget, "Merging data...")
-    merged_data = asset_data.merge(geocode_group_data[['id', 'name', 'name_gis']],
-                                   left_on='ref_geocodegroup',
-                                   right_on='id',
-                                   how='left',
-                                   suffixes=('_asset', '_geocode'))
+    tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
-    update_progress(80)
+    update_progress(60)
 
-    # Drop the unnecessary columns (id_x and id_y)
-    #merged_data.drop(columns=['id_asset', 'id_geocode'], inplace=True)
+    # Aggregation functions
+    aggregation_functions = {
+        'importance': ['min', 'max'],
+        'sensitivity': ['min', 'max'],
+        'susceptibility': ['min', 'max'],
+        'ref_geocodegroup': 'first',
+        'name_gis_geocodegroup': 'first',
+        'asset_group_name': lambda x: ', '.join(x.unique()),  # Joining into a comma-separated string
+        'ref_asset_group': 'nunique',
+        'geometry': 'first'
+    }
 
-    # Proceed with aggregation
-    log_to_gui(log_widget, "Building tbl_flat (aggregating data)...")
-    aggregated_data = aggregate_data(merged_data)
-    update_progress(85)  # Update progress after data aggregation
-    
-    # Save to GeoPackage
-    aggregated_gdf = gpd.GeoDataFrame(aggregated_data, geometry='geometry_first')
-    aggregated_gdf.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
-    update_progress(92)  # Update progress after saving data
+    # Group by 'code' and aggregate
+    tbl_flat = tbl_stacked.groupby('code').agg(aggregation_functions)
+
+    # Flatten the MultiIndex columns
+    tbl_flat.columns = ['_'.join(col).strip() for col in tbl_flat.columns.values]
+
+    # Rename columns after flattening
+    renamed_columns = {
+        'importance_min': 'importance_min',
+        'importance_max': 'importance_max',
+        'sensitivity_min': 'sensitivity_min',
+        'sensitivity_max': 'sensitivity_max',
+        'susceptibility_min': 'susceptibility_min',
+        'susceptibility_max': 'susceptibility_max',
+        'ref_geocodegroup_first': 'ref_geocodegroup',
+        'name_gis_geocodegroup_first': 'name_gis_geocodegroup',
+        'asset_group_name_<lambda>': 'asset_group_names',
+        'ref_asset_group_nunique': 'assets_total',
+        'geometry_first': 'geometry'
+    }
+
+    tbl_flat.rename(columns=renamed_columns, inplace=True)
+
+    # Convert to GeoDataFrame
+    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry')
+
+    # Reset index to make 'code' a column
+    tbl_flat.reset_index(inplace=True)
+
+    # Save tbl_flat as a new layer in the GeoPackage
+    tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
+
+
 
 
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
