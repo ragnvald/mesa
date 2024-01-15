@@ -109,7 +109,7 @@ for idx, row in df.iterrows():
     tk.Label(edit_frame, text=row['id']).grid(row=row_number, column=0, sticky='w')
     
     # Read-only field for 'name_gis'
-    tk.Label(edit_frame, text=row['name_gis']).grid(row=row_number, column=1, sticky='w')
+    tk.Label(edit_frame, text=row['name_gis_geocodegroup']).grid(row=row_number, column=1, sticky='w')
     
     
     # Editable field for 'user title'

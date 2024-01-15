@@ -44,7 +44,7 @@ def save_data(df):
 def update_record(save_message=True):
     try:
         df.at[current_index, 'name_original'] = name_original_var.get()
-        df.at[current_index, 'name_gis'] = name_gis_var.get()
+        df.at[current_index, 'name_gis_assetgroup'] = name_gis_var.get()
         df.at[current_index, 'title_fromuser'] = title_fromuser_var.get()
         save_data(df)  # Save changes to the database
         if save_message:
@@ -67,7 +67,7 @@ def navigate(direction):
 def load_record():
     record = df.iloc[current_index]
     name_original_var.set(record['name_original'])
-    name_gis_var.set(record['name_gis'])
+    name_gis_var.set(record['name_gis_assetgroup'])
     title_fromuser_var.set(record['title_fromuser'])
 
 
