@@ -1,3 +1,13 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# This is the most complex part of the mesa python too. It imports
+# files from a set folder and places them in two tables.
+#
+# tbl_assets:   Information about assets like mangroves ant the likes. 
+#               Data is stored as polygons, points and lines.
+#
+# tbl_geocodes: Information about geocodes which could be grids, hexagons
+#               as well as municipalities and other.
+
 import tkinter as tk
 
 import locale
@@ -310,6 +320,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
 
+# Function exports data to geopackage and secures replacing relevant data.
 def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     # Check if the GeoPackage file exists
     if not os.path.exists(gpkg_file):
