@@ -6,8 +6,9 @@ try:
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
-from tkinter import ttk
+from tkinter import messagebox, ttk
 import configparser
+import datetime
 import geopandas as gpd
 from sqlalchemy import create_engine
 
@@ -22,6 +23,14 @@ def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
+
+# Logging function to write to the GUI log
+def write_to_log( message):
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message = f"{timestamp} - {message}"
+    with open("log.txt", "a") as log_file:
+        log_file.write(formatted_message + "\n")
 
 # # # # # # # # # # # # # # 
 # Core functions
@@ -48,6 +57,7 @@ def load_spatial_data(gpkg_file):
     engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
     # Use Geopandas to load a GeoDataFrame
     gdf = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
+    write_to_log("Spatial data loaded")
     return gdf
 
 
@@ -58,8 +68,8 @@ def save_spatial_data():
         engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
         # Use Geopandas to save the GeoDataFrame
         df.to_file(gpkg_file, layer='tbl_geocode_group', driver='GPKG', if_exists='replace')
-        messagebox.showinfo("Success", "Spatial data saved successfully")
     except Exception as e:
+        write_to_log("Error", f"Failed to save spatial data: {e}")
         messagebox.showerror("Error", f"Failed to save spatial data: {e}")
 
 
@@ -70,8 +80,14 @@ def save_spatial_data():
 
 # Function to close the application
 def exit_application():
+    write_to_log("Closing edit geocodes")
     root.destroy()
 
+
+#####################################################################################
+#  Main
+#
+    
 # Load configuration settings
 config_file = 'config.ini'
 config = read_config(config_file)
