@@ -11,7 +11,6 @@ import subprocess
 import webbrowser
 import datetime
 import os
-import fiona
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap import LabelFrame
@@ -116,12 +115,10 @@ def get_status(gpkg_file):
         else:
             stats_text += "Atlas is missing. Press button 'Create atlas'.\n"
 
-
         return stats_text.strip()
 
     except Exception as e:
         return f"Error accessing statistics: {e}"
-
 
 
 def import_assets():
@@ -135,6 +132,7 @@ def import_assets():
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute import assets script")
     update_stats()
+
 
 def edit_asset_group():
     try:
@@ -209,10 +207,6 @@ def edit_atlas():
     update_stats()
 
 
-def export_qgis():
-    messagebox.showinfo("Export Package", "Export package script executed.")
-
-
 def exit_program():
     root.destroy()
 
@@ -221,6 +215,7 @@ def update_wraplength(event):
     # Subtract some padding to ensure text does not touch frame borders
     new_width = event.width - 20
     stats_label.config(wraplength=new_width)
+
 
 def add_text_to_labelframe(labelframe, text):
     label = tk.Label(labelframe, text=text, justify='left')
@@ -233,8 +228,10 @@ def add_text_to_labelframe(labelframe, text):
     # Bind the resize event of the labelframe to the update_wrap function
     labelframe.bind('<Configure>', update_wrap)
 
-
-
+#####################################################################################
+#  Main
+#
+    
 # Load configuration settings
 config_file = 'config.ini'
 config = read_config(config_file)
@@ -310,7 +307,6 @@ right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
 info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-
 # Get text for the stats-label
 my_status = get_status(gpkg_file)
 
@@ -321,12 +317,9 @@ stats_label.pack(side='top', padx=5, pady=5, fill='x')  # Align to the top and e
 # Bind the configure event to update the wraplength of the label
 info_labelframe.bind('<Configure>', update_wraplength)
 
-
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
 exit_btn.grid(row=1, column=0, pady=button_pady, sticky='e')  # Align to the right side
-
-
 
 # Bottom panel
 bottom_panel = tk.Frame(root)
