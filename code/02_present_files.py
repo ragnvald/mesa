@@ -4,6 +4,7 @@
 
 import geopandas as gpd
 import configparser
+import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -11,6 +12,15 @@ def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
+
+# Logging function to write to the GUI log
+def write_to_log( message):
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message = f"{timestamp} - {message}"
+    with open("log.txt", "a") as log_file:
+        log_file.write(formatted_message + "\n")
+
 
 def plot_geopackage_layer(gpkg_file, layer_name, output_png):
     try:
@@ -60,7 +70,11 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
     except Exception as e:
         print(f"Error processing layer {layer_name}: {e}")
 
-# Main execution
+
+#####################################################################################
+#  Main
+#
+        
 config_file = 'config.ini'
 config = read_config(config_file)
 gpkg_file = config['DEFAULT']['gpkg_file']
@@ -70,4 +84,6 @@ flat_output_png    ='output/flat.png'
 geocode_output_png = 'output/geocode.png'
 
 plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
+write_to_log("Overview of assets exported")
 plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
+write_to_log("Overview of flat tables exported")
