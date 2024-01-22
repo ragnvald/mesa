@@ -150,7 +150,7 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Initialize the main window
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Choose the theme you like
-root.title("Prioritization")
+root.title("Set up processing")
 root.geometry("700x700")
 
 vcmd = (root.register(validate_integer), '%P')

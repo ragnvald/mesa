@@ -81,7 +81,7 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
-root.title("Import assets")
+root.title("Edit assets")
 
 # Configure column widths
 root.columnconfigure(0, minsize=200)  # Configure the size of the first column

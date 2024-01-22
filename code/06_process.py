@@ -260,7 +260,7 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("Intersect and aggregate analysis")
+root.title("Process data")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)

@@ -249,7 +249,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
     update_progress(100)
 
 
-# Function to import spatial data for assets
+# Function imports spatial data for assets
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     asset_objects = []
     asset_groups = []

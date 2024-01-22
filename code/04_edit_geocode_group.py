@@ -82,7 +82,7 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
-root.title("Import assets")
+root.title("Edit geocodes")
 
 # Load data
 df = load_spatial_data(gpkg_file)

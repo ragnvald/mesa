@@ -132,7 +132,7 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("Atlas Generation and Update")
+root.title("Create atlas tiles")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)

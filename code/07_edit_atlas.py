@@ -101,7 +101,7 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 # Initialize the main window
 
 root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("Edit Atlas Records")
+root.title("Edit atlas")
 root.columnconfigure(0, weight=1)
 root.rowconfigure(0, weight=1)
 
