@@ -9,6 +9,7 @@ except locale.Error:
 from tkinter import ttk
 import configparser
 import pandas as pd
+import datetime
 from sqlalchemy import create_engine
 
 import ttkbootstrap as ttk  # Import ttkbootstrap
@@ -24,6 +25,14 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
+
+# Logging function to write to the GUI log
+def write_to_log( message):
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message = f"{timestamp} - {message}"
+    with open("log.txt", "a") as log_file:
+        log_file.write(formatted_message + "\n")
+
 # # # # # # # # # # # # # # 
 # Core functions
 
@@ -37,7 +46,9 @@ def save_data(df):
     try:
         engine = create_engine(f'sqlite:///{gpkg_file}')
         df.to_sql('tbl_asset_group', con=engine, if_exists='replace', index=False)
+        write_to_log("Asset group data saved")
     except Exception as e:
+        write_to_log(f"Error saving data: {e}")
         print(f"Error saving data: {e}")
 
 # Function to update record in the DataFrame and save to the database
@@ -48,9 +59,9 @@ def update_record(save_message=True):
         df.at[current_index, 'title_fromuser'] = title_fromuser_var.get()
         save_data(df)  # Save changes to the database
         if save_message:
-            print("Record updated and saved")
+            write_to_log("Record updated and saved")
     except Exception as e:
-        print(f"Error updating and saving record: {e}")
+        write_to_log(f"Error updating and saving record: {e}")
 
 # Navigate through records
 def navigate(direction):
@@ -70,6 +81,15 @@ def load_record():
     name_gis_var.set(record['name_gis_assetgroup'])
     title_fromuser_var.set(record['title_fromuser'])
 
+
+# Function to close the application
+def exit_application():
+    write_to_log("Closing edit assets")
+    root.destroy()
+
+#####################################################################################
+#  Main
+#
 
 # Load configuration settings
 config_file = 'config.ini'
@@ -124,7 +144,7 @@ ttk.Button(root, text="Save", command=update_record, bootstyle=PRIMARY).grid(row
 ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
 
 # Exit button
-ttk.Button(root, text="Exit", command=root.destroy, bootstyle='warning').grid(row=5, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=5, column=0, columnspan=3, pady=5)
 
 # Load the first record
 load_record()
