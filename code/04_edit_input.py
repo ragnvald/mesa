@@ -113,7 +113,6 @@ def save_to_gpkg():
         }
 
         df.to_sql(table_name, con=engine, if_exists='replace', index=False, dtype=data_types)
-        messagebox.showinfo("Success", "Data successfully saved to GeoPackage.")
     except exc.SQLAlchemyError as e:
         messagebox.showerror("Database Error", f"Failed to save data: {e}")
 
@@ -140,6 +139,10 @@ def create_scrollable_area(root):
 
     return canvas
 
+
+#####################################################################################
+#  Main
+#
 
 # Load configuration settings and data
 config_file = 'config.ini'
