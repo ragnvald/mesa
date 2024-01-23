@@ -288,9 +288,6 @@ process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pad
 edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
 edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
-export_qgis_btn = ttk.Button(left_panel, text="Export QGIS file", command=export_qgis, width=button_width)
-export_qgis_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
-
 # Separator
 separator = ttk.Separator(main_frame, orient='vertical')
 separator.grid(row=0, column=1, sticky='ns')
