@@ -2,7 +2,7 @@ import tkinter as tk
 
 import locale
 try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
@@ -54,7 +54,7 @@ def save_changes():
 
 # Function to load spatial data from the database
 def load_spatial_data(gpkg_file):
-    engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
+    engine = create_engine(f'sqlite:///{gpkg_file}')  
     # Use Geopandas to load a GeoDataFrame
     gdf = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
     write_to_log("Spatial data loaded")
@@ -65,17 +65,12 @@ def load_spatial_data(gpkg_file):
 def save_spatial_data():
     global df  # Access the global DataFrame
     try:
-        engine = create_engine(f'sqlite:///{gpkg_file}')  # Adjust as per your database
+        engine = create_engine(f'sqlite:///{gpkg_file}')
         # Use Geopandas to save the GeoDataFrame
         df.to_file(gpkg_file, layer='tbl_geocode_group', driver='GPKG', if_exists='replace')
     except Exception as e:
         write_to_log("Error", f"Failed to save spatial data: {e}")
         messagebox.showerror("Error", f"Failed to save spatial data: {e}")
-
-
-# Your existing code for creating the Tkinter interface would remain the same
-# Just ensure to call load_spatial_data() instead of load_data()
-# and save_spatial_data(gdf) instead of save_data()
 
 
 # Function to close the application
@@ -120,7 +115,7 @@ records = []
 
 # Create labels and entry widgets for each record
 for idx, row in df.iterrows():
-    row_number = idx + 1  # Adjust for the header row
+    row_number = idx + 1
 
     tk.Label(edit_frame, text=row['id']).grid(row=row_number, column=0, sticky='w')
     

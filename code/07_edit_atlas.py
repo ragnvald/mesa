@@ -92,6 +92,10 @@ def browse_image_2():
         image_name_2_var.set(file_path)
 
 
+#####################################################################################
+#  Main
+#
+
 # Load configuration settings
 config_file = 'config.ini'
 config = read_config(config_file)

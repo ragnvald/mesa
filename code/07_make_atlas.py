@@ -2,7 +2,7 @@ import tkinter as tk
 
 import locale
 try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
@@ -84,7 +84,7 @@ def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, at
                 'name_gis': f'atlas{id_counter:03}', 
                 'title_user': f'Map title for {id_counter:03}', 
                 'geom': geom,
-                'description': '',  # Default empty value
+                'description': '',   # Default empty value
                 'image_name_1': '',  # Default empty value
                 'image_desc_1': '',  # Default empty value
                 'image_name_2': '',  # Default empty value
@@ -123,6 +123,10 @@ def main(log_widget, progress_var, gpkg_file):
     update_progress(100)
     log_to_gui(log_widget, "Completed processing.")
 
+
+#####################################################################################
+#  Main
+#
 
 # Load configuration settings
 config_file = 'config.ini'

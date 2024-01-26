@@ -2,7 +2,7 @@ import tkinter as tk
 
 import locale
 try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 

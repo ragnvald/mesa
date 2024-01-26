@@ -2,7 +2,7 @@ import tkinter as tk
 
 import locale
 try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
@@ -18,7 +18,7 @@ from ttkbootstrap.constants import *
 # Setting variables
 #
 # Define fixed widths for each column
-column_widths = [35, 13, 13, 13]  # Adjust these widths as needed
+column_widths = [35, 13, 13, 13]
 
 # Shared/general functions
 def read_config(file_name):
@@ -152,7 +152,7 @@ table_name = 'tbl_asset_group'
 ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Initialize the main window
-root = ttk.Window(themename=ttk_bootstrap_theme)  # Choose the theme you like
+root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Set up processing")
 root.geometry("700x700")
 
