@@ -8,6 +8,7 @@
 #  User selects:
 #     - buffered width of line in meters
 #     - line segment length
+#  Feedback if selected combinations will overwrite existing data.
 #  Analyse overlayng geocode with line segments / polygons
 #     - results in tbl_line_out_flat (we might build a stacked one at a later stage...)
 #
