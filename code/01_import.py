@@ -12,7 +12,7 @@ import tkinter as tk
 
 import locale
 try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
@@ -141,12 +141,12 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     # Calculate bounding box and add to geocode groups
     bounding_box = data.total_bounds
     bbox_geom = box(*bounding_box)
-    name_gis_geocodegroup = f"geocode_{group_id_counter:03d}"  # Renamed from name_gis
+    name_gis_geocodegroup = f"geocode_{group_id_counter:03d}"
 
     geocode_groups.append({
         'id': group_id_counter,  # Group ID
         'name': layer_name,
-        'name_gis_geocodegroup': name_gis_geocodegroup,  # Using the renamed attribute
+        'name_gis_geocodegroup': name_gis_geocodegroup, 
         'title_user': layer_name,
         'description': f'Description for {layer_name}',
         'geom': bbox_geom
@@ -159,7 +159,7 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
         geocode_objects.append({
             'code': code,
             'ref_geocodegroup': group_id_counter,
-            'name_gis_geocodegroup': name_gis_geocodegroup,  # Corrected to use the new attribute name
+            'name_gis_geocodegroup': name_gis_geocodegroup, 
             'geom': geom
         })
         object_id_counter += 1
@@ -378,7 +378,6 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
         conn = sqlite3.connect(db_file)
 
         # Load data into dataframes
-        # Update the query to reflect the new column name
         df_asset_group = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
         df_asset_object = pd.read_sql_query("SELECT * FROM tbl_asset_object", conn)
 
@@ -406,6 +405,11 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
 def close_application():
     root.destroy()
 
+
+#####################################################################################
+#  Main
+#
+
 # Load configuration settings
 config_file = 'config.ini'
 config = read_config(config_file)
@@ -419,7 +423,7 @@ root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
 root.title("Import assets")
 
 # Create a LabelFrame for the log output
-log_frame = ttk.LabelFrame(root, text="Log Output", bootstyle="info")  # You can change the bootstyle as needed
+log_frame = ttk.LabelFrame(root, text="Log Output", bootstyle="info") 
 log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
 # Create a log widget inside the LabelFrame
