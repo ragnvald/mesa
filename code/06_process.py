@@ -2,7 +2,7 @@ import tkinter as tk
 
 import locale
 try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
@@ -82,10 +82,10 @@ def aggregate_data(intersected_data):
         'importance': ['min', 'max'],
         'sensitivity': ['min', 'max'],
         'susceptibility': ['min', 'max'],
-        'ref_geocodegroup': 'first',     # Include the first reference to geocode group id
-        'name_gis_geocodegroup': 'first',             # Include the first reference to geocode group id
-        'name': 'first',                 # Include the first name for each group
-        'geometry': 'first',             # Keeping the first geometry for each group
+        'ref_geocodegroup': 'first',                # Include the first reference to geocode group id
+        'name_gis_geocodegroup': 'first',           # Include the first reference to geocode group id
+        'name': 'first',                            # Include the first name for each group
+        'geometry': 'first',                        # Keeping the first geometry for each group
         'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
     }
 
@@ -104,8 +104,8 @@ def aggregate_data(intersected_data):
     renamed_columns = {
         'name_first': 'geocode_name_user',
         'ref_geocodegroup_first': 'ref_geocodegroup',
-        'name_gis_first': 'name_gis_geocodegroup',  # Updated name
-        'asset_group_name_<lambda>': 'asset_group_names'  # Rename aggregated asset_group_name
+        'name_gis_first': 'name_gis_geocodegroup', 
+        'asset_group_name_<lambda>': 'asset_group_names'  
     }
 
     grouped.rename(columns=renamed_columns, inplace=True)
@@ -239,10 +239,10 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
 
 def process_all(log_widget, progress_var, gpkg_file):
     # Process and create tbl_stacked
-    main_tbl_stacked(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 1
+    main_tbl_stacked(log_widget, progress_var, gpkg_file)
 
     # Process and create tbl_flat
-    main_tbl_flat(log_widget, progress_var, gpkg_file)  # Assuming this is the main function from Script 2
+    main_tbl_flat(log_widget, progress_var, gpkg_file) 
     
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
@@ -251,6 +251,10 @@ def process_all(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Data processing and aggregation completed.")
     update_progress(100)
 
+
+#####################################################################################
+#  Main
+#
 
 # Load configuration settings
 config_file = 'config.ini'
