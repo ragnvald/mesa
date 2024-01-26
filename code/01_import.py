@@ -18,7 +18,6 @@ except locale.Error:
 
 from tkinter import scrolledtext, ttk
 
-import fiona
 from fiona import open as fiona_open    
 
 import threading
