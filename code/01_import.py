@@ -174,12 +174,14 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
             layer = ds.GetLayerByIndex(i)
             layer_name = layer.GetName()
             data = read_and_reproject(filepath, layer=layer_name)
+            log_to_gui(log_widget, f"Importing {layer_name}")
             group_id_counter, object_id_counter = process_geocode_layer(
                 data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
         data = read_and_reproject(filepath)
         layer_name = os.path.splitext(os.path.basename(filepath))[0]
+        log_to_gui(log_widget, f"Importing {layer_name}")
         group_id_counter, object_id_counter = process_geocode_layer(
             data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
     else:
@@ -234,7 +236,7 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
 # Thread function to run import without freezing GUI
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
-    
+
     log_to_gui(log_widget, f"Preparing import of geocode groups and objects.")
 
     if not geocode_groups_gdf.empty:
@@ -244,7 +246,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
         export_to_geopackage(geocode_objects_gdf, gpkg_file, 'tbl_geocode_object', log_widget)
 
     log_to_gui(log_widget, "Import completed.")
- 
+
     update_progress(100)
 
 
@@ -258,7 +260,6 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     total_files = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
     progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
-
     log_to_gui(log_widget, "Working with asset imports...")
     progress_var.set(10)  # Initial progress after starting
     update_progress(10)
