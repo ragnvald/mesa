@@ -90,9 +90,9 @@ def get_status(gpkg_file):
             try:
                 table = gpd.read_file(gpkg_file, layer=layer_name)
                 if table['sensitivity'].sum() > 0:
-                    return "+", "Everything is set up. Ready for processing."
+                    return "+", "Everything is set up. Ready for\nprocessing."
                 else:
-                    return "-", "You need to set up the calculation. Press the 'Set up'-button to proceed."
+                    return "-", "You need to set up the calculation. \nPress the 'Set up'-button to proceed."
             except Exception:
                 return None, None
 
@@ -104,11 +104,11 @@ def get_status(gpkg_file):
 
         # Check for tbl_asset_group
         asset_group_count = read_table_and_count('tbl_asset_group')
-        append_status("+" if asset_group_count is not None else "-", f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing. Import assets by pressing the Import button.")
+        append_status("+" if asset_group_count is not None else "-", f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing.\nImport assets by pressing the Import button.")
 
         # Check for tbl_geocode_group
         geocode_group_count = read_table_and_count('tbl_geocode_group')
-        append_status("+" if geocode_group_count is not None else "-", f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing. Import assets by pressing the Import button.")
+        append_status("+" if geocode_group_count is not None else "-", f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.")
 
         # Check for tbl_asset_group sensitivity
         symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
@@ -118,7 +118,7 @@ def get_status(gpkg_file):
         # Repeat the process for other checks
         for layer_name, label in [('tbl_stacked', 'Stacked cells'), ('tbl_flat', 'Flat cells'), ('tbl_atlas', 'Atlas pages')]:
             count = read_table_and_count(layer_name)
-            append_status("+" if count is not None else "-", f"{label}: {count}" if count is not None else f"{label} table is missing. Press button Process data to initiate.")
+            append_status("+" if count is not None else "-", f"{label}: {count}" if count is not None else f"{label} table is missing.\nPress button Process data to initiate.")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
