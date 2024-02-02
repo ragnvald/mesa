@@ -47,13 +47,32 @@ def open_link(url):
 
 
 def update_stats():
+    # Clear the labels before updating
+    for widget in info_labelframe.winfo_children():
+        widget.destroy()
+
     my_status = get_status(gpkg_file)
-    #stats_label.config(text=my_status)  
+
+    # Check if the DataFrame is not empty and has the expected columns
+    if not my_status.empty and {'Status', 'Message'}.issubset(my_status.columns):
+        for index, row in my_status.iterrows():
+            if row['Status'] == "+":
+                status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success')
+                status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
+            else:
+                status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
+                status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
+
+            message_label = ttk.Label(info_labelframe, text=row['Message'], justify='left')
+            message_label.grid(row=index, column=1, sticky="nsew", padx=5, pady=5)
+    else:
+        print("No status information available.")
+
 
 
 def get_status(gpkg_file):
     if not os.path.exists(gpkg_file):
-        return pd.DataFrame({'Status': ['Error'], 'Message': ["To initiate the system please import assets. Do this by pressing the Import-button. Make sure you have asset and geocode files stored in the respective folders."]})
+        return pd.DataFrame({'Status': ['Error'], 'Message': ["To initiate the system please import assets.\nStart doing this by pressing the Import-button.\nMake sure you have asset and geocode files\nstored in the respective folders."]})
 
     # Initialize an empty list to store each row of the DataFrame
     status_list = []
@@ -293,19 +312,8 @@ right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
 info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-# Get text for the stats-label
-my_status = get_status(gpkg_file)
 
-# Check if the DataFrame is not empty and has the expected columns
-# Consider moving this one to update_stats function. Might be that the updates will only happen once.
-if not my_status.empty and {'Status', 'Message'}.issubset(my_status.columns):
-    for index, row in my_status.iterrows():
-        stats_label = ttk.Label(info_labelframe, text=row['Status'], justify='left', bootstyle='danger')
-        stats_label.grid(row=(index + 1), column=0, sticky="nsew", padx=5, pady=5)  # Align to the top and expand horizontally
-        stats_label = ttk.Label(info_labelframe, text=row['Message'], justify='left')
-        stats_label.grid(row=(index + 1), column=1, sticky="nsew", padx=5, pady=5)  # Align to the top and expand horizontally
-else:
-    print("No status information available.")
+update_stats()
 
 # Bind the configure event to update the wraplength of the label
 info_labelframe.bind('<Configure>', update_wraplength)
@@ -332,7 +340,6 @@ version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
 log_to_logfile("User interface, main dialogue opened")
 
-update_stats()
 
 # Start the GUI event loop
 root.mainloop()
