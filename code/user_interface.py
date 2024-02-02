@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import *
 import locale
 
 try:
@@ -6,7 +7,6 @@ try:
 except locale.Error:
     locale.setlocale(locale.LC_ALL, '') 
 
-from tkinter import messagebox
 import subprocess
 import webbrowser
 import datetime
@@ -14,6 +14,7 @@ import os
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap import LabelFrame
+import pandas as pd
 import geopandas as gpd
 import configparser
 
@@ -47,15 +48,15 @@ def open_link(url):
 
 def update_stats():
     my_status = get_status(gpkg_file)
-    stats_label.config(text=my_status)
-    # Schedule the update_stats function to be called again after 30000 milliseconds (30 seconds)
+    #stats_label.config(text=my_status)  
 
 
 def get_status(gpkg_file):
     if not os.path.exists(gpkg_file):
-        return "To initiate the system please import assets. Do this by pressing the Import-button. Make sure you have asset and geocode files stored in the respective folders."
+        return pd.DataFrame({'Status': ['Error'], 'Message': ["To initiate the system please import assets. Do this by pressing the Import-button. Make sure you have asset and geocode files stored in the respective folders."]})
 
-    stats_text = ""
+    # Initialize an empty list to store each row of the DataFrame
+    status_list = []
 
     try:
         def read_table_and_count(layer_name):
@@ -65,60 +66,48 @@ def get_status(gpkg_file):
             except Exception:
                 return None
 
+
         def read_table_and_check_sensitivity(layer_name):
             try:
                 table = gpd.read_file(gpkg_file, layer=layer_name)
-                if  table['sensitivity'].sum() > 0:
-                    return "Everything is set up. Ready for processing."
+                if table['sensitivity'].sum() > 0:
+                    return "+", "Everything is set up. Ready for processing."
                 else:
-                    return "You need to set up the calculation. Press the 'Set up'-button to proceed."
+                    return "-", "You need to set up the calculation. Press the 'Set up'-button to proceed."
             except Exception:
-                return None
+                return None, None
 
-         # Check for tbl_asset_group
+
+        # Function to append status and message to the list
+        def append_status(symbol, message):
+            status_list.append({'Status': symbol, 'Message': message})
+
+
+        # Check for tbl_asset_group
         asset_group_count = read_table_and_count('tbl_asset_group')
-        if asset_group_count is not None:
-            stats_text += f"Asset layers: {asset_group_count}\n"
-        else:
-            stats_text += "Assets are missing. Import assets by pressing the Import button.\n"
+        append_status("+" if asset_group_count is not None else "-", f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing. Import assets by pressing the Import button.")
 
         # Check for tbl_geocode_group
         geocode_group_count = read_table_and_count('tbl_geocode_group')
-        if geocode_group_count is not None:
-            stats_text += f"Geocode layers: {geocode_group_count}\n"
-        else:
-            stats_text += "Geocodes are missing. Import assets by pressing the Import button.\n"
+        append_status("+" if geocode_group_count is not None else "-", f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing. Import assets by pressing the Import button.")
 
         # Check for tbl_asset_group sensitivity
-        asset_group_sensitivity = read_table_and_check_sensitivity('tbl_asset_group')
-        if asset_group_sensitivity:
-            stats_text += f"{asset_group_sensitivity}\n"
+        symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
+        if symbol:
+            append_status(symbol, message)
 
-        # Check for tbl_stacked
-        stacked_cells_count = read_table_and_count('tbl_stacked')
-        if stacked_cells_count is not None:
-            stats_text += f"Stacked cells: {stacked_cells_count}\n"
-        else:
-            stats_text += "Stacked table is missing. Press button Process data to initiate.\n"
+        # Repeat the process for other checks
+        for layer_name, label in [('tbl_stacked', 'Stacked cells'), ('tbl_flat', 'Flat cells'), ('tbl_atlas', 'Atlas pages')]:
+            count = read_table_and_count(layer_name)
+            append_status("+" if count is not None else "-", f"{label}: {count}" if count is not None else f"{label} table is missing. Press button Process data to initiate.")
 
-        # Check for tbl_flat
-        stacked_cells_count = read_table_and_count('tbl_flat')
-        if stacked_cells_count is not None:
-            stats_text += f"Flat cells: {stacked_cells_count}\n"
-        else:
-            stats_text += "Flat table is missing. Press button Process data to initiate.\n"
+        # Convert the list of statuses to a DataFrame
+        status_df = pd.DataFrame(status_list)
 
-        # Check for tbl_atlas
-        stacked_cells_count = read_table_and_count('tbl_atlas')
-        if stacked_cells_count is not None:
-            stats_text += f"Atlas pages: {stacked_cells_count}\n"
-        else:
-            stats_text += "Atlas is missing. Press button 'Create atlas'.\n"
-
-        return stats_text.strip()
+        return status_df
 
     except Exception as e:
-        return f"Error accessing statistics: {e}"
+        return pd.DataFrame({'Status': ['Error'], 'Message': [f"Error accessing statistics: {e}"]})
 
 
 def import_assets():
@@ -293,7 +282,7 @@ separator = ttk.Separator(main_frame, orient='vertical')
 separator.grid(row=0, column=1, sticky='ns')
 
 # Right panel
-right_panel = tk.Frame(main_frame)
+right_panel = ttk.Frame(main_frame)
 right_panel.grid(row=0, column=2, sticky="nsew", padx=5)
 
 # Configure the rows and columns within the right panel where widgets will be placed
@@ -307,9 +296,16 @@ info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 # Get text for the stats-label
 my_status = get_status(gpkg_file)
 
-# Add the stats text inside the info_labelframe, aligned to the top
-stats_label = tk.Label(info_labelframe, text=my_status, justify='left')
-stats_label.pack(side='top', padx=5, pady=5, fill='x')  # Align to the top and expand horizontally
+# Check if the DataFrame is not empty and has the expected columns
+# Consider moving this one to update_stats function. Might be that the updates will only happen once.
+if not my_status.empty and {'Status', 'Message'}.issubset(my_status.columns):
+    for index, row in my_status.iterrows():
+        stats_label = ttk.Label(info_labelframe, text=row['Status'], justify='left', bootstyle='danger')
+        stats_label.grid(row=(index + 1), column=0, sticky="nsew", padx=5, pady=5)  # Align to the top and expand horizontally
+        stats_label = ttk.Label(info_labelframe, text=row['Message'], justify='left')
+        stats_label.grid(row=(index + 1), column=1, sticky="nsew", padx=5, pady=5)  # Align to the top and expand horizontally
+else:
+    print("No status information available.")
 
 # Bind the configure event to update the wraplength of the label
 info_labelframe.bind('<Configure>', update_wraplength)
@@ -319,7 +315,7 @@ exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=butt
 exit_btn.grid(row=1, column=0, pady=button_pady, sticky='e')  # Align to the right side
 
 # Bottom panel
-bottom_panel = tk.Frame(root)
+bottom_panel = ttk.Frame(root)
 bottom_panel.pack(fill='both', expand=True, pady=5)
 
 # About label frame
@@ -331,7 +327,7 @@ mesa_text = """This version of the MESA tool is a stand-alone desktop based vers
 add_text_to_labelframe(about_labelframe, mesa_text)
 
 # Version label aligned bottom right
-version_label = tk.Label(bottom_panel, text="MESA version 3.5 beta", font=("Calibri", 7), anchor='e')
+version_label = ttk.Label(bottom_panel, text="MESA version 3.5 beta", font=("Calibri", 7), anchor='e')
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
 log_to_logfile("User interface, main dialogue opened")
