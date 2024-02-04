@@ -1,3 +1,10 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# This code allows the user to edit tbl_line using a simple user interface
+# allowing the user to move between the different line objects. 
+# It does not allow for editing name_gis which will be used for filtering
+# in QGIS.
+#
+
 import tkinter as tk
 
 import locale
@@ -126,22 +133,22 @@ tk.Label(root, text="GIS name").grid(row=0, column=0, sticky='w')
 name_gis_label = tk.Label(root, textvariable=name_gis_var, width=50, relief="sunken", anchor="w")
 name_gis_label.grid(row=0, column=1, sticky='w')
 
-# Original Name Entry
+# Users reference to the line
 tk.Label(root, text="Title").grid(row=1, column=0, sticky='w')
 name_user_entry = tk.Entry(root, textvariable=name_user_var, width=50)
 name_user_entry.grid(row=1, column=1, sticky='w')
 
-# Original Name Entry
-tk.Label(root, text="# segments").grid(row=2, column=0, sticky='w')
+# Write number of segments
+tk.Label(root, text="Number of segments").grid(row=2, column=0, sticky='w')
 segment_nr_entry = tk.Entry(root, textvariable=segment_nr_var, width=50)
 segment_nr_entry.grid(row=2, column=1, sticky='w')
 
-# Original Name Entry
-tk.Label(root, text="Segments width").grid(row=3, column=0, sticky='w')
+# Width of the segments
+tk.Label(root, text="Segments width (meters)").grid(row=3, column=0, sticky='w')
 segment_width_entry = tk.Entry(root, textvariable=segment_width_var, width=50)
 segment_width_entry.grid(row=3, column=1, sticky='w')
 
-# Title Entry
+# Users descriptive text of the line
 tk.Label(root, text="Description").grid(row=4, column=0, sticky='w')
 description_entry = tk.Entry(root, textvariable=description_var, width=50)
 description_entry.grid(row=4, column=1, sticky='w')
@@ -149,7 +156,7 @@ description_entry.grid(row=4, column=1, sticky='w')
 # Information text field above the "Update and Save Record" button
 info_label_text = ("Registred lines will be used to create segmente polygons "
                    "along the designated line. You may edit the attributes "
-                   "here or both attributes and line data in QGIS")
+                   "here, or both attributes and line data in QGIS")
 
 info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
 info_label.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
