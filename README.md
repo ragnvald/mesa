@@ -61,7 +61,7 @@ To run this code uncompiled in a python environment the following libraries shou
 + **glob** - Used for Unix style pathname pattern expansion.
 + **shapely** - Used for manipulation and analysis of planar geometric objects.
 
-The plan is to replace the spatial libraries and the user interface with QGIS native libraries/methods.
+The rather prolific use of libraries is due to programming tools. Vasically I am blaming it on ChatGPT which varies somewhat in its use of libraries. This should be revised at some point. Possibly through replacing the spatial libraries and  user interface with QGIS native libraries/methods.
 
 ### Pocessing capabilities required
 This depends very a lot on the input data to be handled. Generally having a complex geocode with many objects will increase the calculation resource requirements.
