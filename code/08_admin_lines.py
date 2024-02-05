@@ -13,12 +13,16 @@
 #     - results in tbl_line_out_flat (we might build a stacked one at a later stage...)
 #
 #
-
+import uuid
 import geopandas as gpd
 import configparser
 import datetime
 import locale
-from shapely.geometry import box, LineString
+from shapely.geometry import box, LineString, Point
+from shapely.ops import unary_union
+from shapely.geometry import mapping
+import fiona
+from fiona.crs import from_epsg
 
 # Set locale
 try:
@@ -102,6 +106,30 @@ def create_lines_table_and_lines(gpkg_file):
     gdf_lines.to_file(gpkg_file, layer='tbl_lines', if_exists='replace')
 
 
+def buffer_lines(gpkg_file, line, name_gis, name_user, segment_width, segment_nr, description):
+
+    # Ensure the line is in a GeoDataFrame and set the original CRS
+    gdf = gpd.GeoDataFrame([[name_gis, name_user, segment_nr, description, line]],
+                           columns=['name_gis', 'name_user', 'segment_nr', 'description', 'geometry'],
+                           geometry='geometry', crs="EPSG:4326")
+    
+    segment_width = float(segment_width)
+
+    # Reproject to EPSG:4087 for buffering
+    gdf_projected = gdf.to_crs("EPSG:4087")
+    
+    # Buffer using the specified width in meters
+    gdf_projected['geometry'] = gdf_projected.geometry.buffer(segment_width)
+    
+    # Reproject buffered geometries back to EPSG:4326
+    gdf_buffered = gdf_projected.to_crs("EPSG:4326")
+   
+    # Prepare the GeoDataFrame for saving
+    gdf_to_save = gpd.GeoDataFrame(gdf_buffered, geometry=gdf_buffered.geometry, crs=gdf_buffered.crs)
+    
+    # Save to GeoPackage
+    gdf_to_save.to_file(gpkg_file, layer='tbl_lines_buffered', if_exists='append')
+
 
 #####################################################################################
 #  Main
@@ -133,9 +161,25 @@ line_df = load_lines_table(gpkg_file)
 
 if line_df is not None:
     log_to_gui(log_widget, "Lines exist")
+    for index, row in line_df.iterrows():
+        try:
+    
+            # Access the line geometry
+            line            = row['geometry']
+            name_gis        = row['name_gis'] 
+            name_user       = row['name_user'] 
+            segment_width   = row['segment_width'] 
+            segment_nr      = row['segment_nr'] 
+            description     = row['description'] 
+            buffer_lines(gpkg_file, line, name_gis, name_user, segment_width, segment_nr, description)
+            log_to_gui(log_widget, f"Added a buffered version of {name_gis}.")
+
+        except Exception as e:
+            log_to_gui(log_widget, f"Error processing line {index}: {e}")
 else:
     log_to_gui(log_widget, "Lines do not exist. Will create three template lines.")
     create_lines_table_and_lines(gpkg_file)
+    
 
 # Create a frame to hold the progress bar and the label
 progress_frame = tk.Frame(root)
