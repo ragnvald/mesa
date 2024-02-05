@@ -17,8 +17,8 @@
 import geopandas as gpd
 import configparser
 import datetime
-import fiona
 import locale
+from shapely.geometry import box, LineString
 
 # Set locale
 try:
@@ -27,6 +27,7 @@ except locale.Error:
     locale.setlocale(locale.LC_ALL, '')
 
 import os
+import numpy as np
 import tkinter as tk
 import tkinter.scrolledtext as scrolledtext
 import ttkbootstrap as ttk
@@ -48,86 +49,58 @@ def log_to_gui(log_widget, message):
         log_file.write(formatted_message + "\n")
 
 
+def load_lines_table(gpkg_file):
 
-def check_and_update_geopackage(gpkg_path, log_widget):
-
-    geocode_table='tbl_geocode_group'
-    line_table='tbl_line'
-
-    if not os.path.exists(gpkg_path):
-        log_to_gui(log_widget, f"GeoPackage file {gpkg_path} not found.")
-        return
+    # Check if the GeoPackage file exists
+    if not os.path.exists(gpkg_file):
+        return None  # File not found, return None without printing an error message
 
     try:
-        # Check if the GeoPackage contains the specified tables
-        layer_list = gpd.io.file.fiona.listlayers(gpkg_path)
+        # Attempt to load 'tbl_lines' from the specified GeoPackage file
+        gdf = gpd.read_file(gpkg_file, layer='tbl_lines')
         
-        if geocode_table not in layer_list:
-            log_to_gui(log_widget, f"{geocode_table} not found in the GeoPackage.")
-            return
+        # Check if the loaded GeoDataFrame is empty
+        if gdf.empty:
+            return None  # The table 'tbl_lines' is empty, return None
+        else:
+            return gdf
+    except ValueError:
+        return None  # The table 'tbl_lines' does not exist, return None
 
-        if line_table not in layer_list:
-            log_to_gui(log_widget, f"{line_table} not found in the GeoPackage.")
-            return
 
-        # Read and process lines from the line table within the GeoPackage
-        lines = gpd.read_file(gpkg_path, layer=line_table)
-        
-        # Count and list lines, excluding the geometry attribute
-        line_count = 0
-        for _, line in lines.iterrows():
-            line_info = line.drop('geometry').to_dict()
-            line_count += 1
-            log_to_gui(log_widget, f"Line {line_count}: {line_info}")
-
-        log_to_gui(log_widget, f"Total number of lines in {line_table}: {line_count}")
-
-        return lines
-
-    except Exception as e:
-        log_to_gui(log_widget, f"Error accessing GeoPackage: {e}")
+def create_lines_table_and_lines(gpkg_file):
+    gdf_geocode_group = gpd.read_file(gpkg_file, layer='tbl_geocode_group', rows=1)
+    if gdf_geocode_group.empty:
+        print("The 'tbl_geocode_group' table is empty or does not exist.")
         return
-
-
-
-def read_lines_from_geopackage(gpkg_local):
-    """
-    Reads lines from a specified table within a GeoPackage and returns them as a DataFrame.
     
-    Parameters:
-    - gpkg_path: Path to the GeoPackage file.
-    - line_table: Name of the table containing lines.
+    # Extract bounding box
+    minx, miny, maxx, maxy = gdf_geocode_group.total_bounds
     
-    Returns:
-    - A DataFrame containing the lines from the specified table, excluding the geometry attribute.
-      Returns None if the GeoPackage or the specified table is not found or an error occurs.
-    """
+    # Generate three random lines within this bounding box
+    lines = []
+    for i in range(3):
+        # Generate random start and end points within the bounding box
+        start_x = np.random.uniform(minx, maxx)
+        start_y = np.random.uniform(miny, maxy)
+        end_x = np.random.uniform(minx, maxx)
+        end_y = np.random.uniform(miny, maxy)
+        line = LineString([(start_x, start_y), (end_x, end_y)])
+        lines.append(line)
     
-    line_table='tbl_line'
+    # Create a GeoDataFrame for the lines
+    gdf_lines = gpd.GeoDataFrame({
+        'name_gis': [f'line_{i:03}' for i in range(1, 4)],
+        'name_user': [f'line_{i:03}' for i in range(1, 4)],
+        'segment_nr': [10, 10, 10],
+        'segment_width': [1000, 1000, 1000],
+        'description': ['another line', 'another line', 'another line'],
+        'geometry': lines
+    }, crs=gdf_geocode_group.crs)
+    
+    # Save to the GeoPackage
+    gdf_lines.to_file(gpkg_file, layer='tbl_lines', if_exists='replace')
 
-    if not os.path.exists(gpkg_local):
-        print(f"GeoPackage file {gpkg_local} not found.")
-        return None
-
-    try:
-        # Check if the GeoPackage contains the specified table
-        layer_list = gpd.read_file(gpkg_local,log_widget, line_table)
-        
-        if line_table not in layer_list:
-            print(f"{line_table} not found in the GeoPackage.")
-            return None
-
-        # Read lines from the line table within the GeoPackage
-        lines = gpd.read_file(gpkg_local, layer=line_table)
-        
-        # Exclude the geometry attribute and return as a DataFrame
-        lines_df = lines.drop(columns=['geometry'])
-        
-        return lines_df
-
-    except Exception as e:
-        print(f"Error accessing GeoPackage: {e}")
-        return None
 
 
 #####################################################################################
@@ -156,9 +129,13 @@ log_widget = scrolledtext.ScrolledText(log_frame, height=10)
 log_widget.pack(fill=tk.BOTH, expand=True)
 
 
-line_df = read_lines_from_geopackage(gpkg_file)
-row_count = len(line_df)
-print (row_count)
+line_df = load_lines_table(gpkg_file)
+
+if line_df is not None:
+    log_to_gui(log_widget, "Lines exist")
+else:
+    log_to_gui(log_widget, "Lines do not exist. Will create three template lines.")
+    create_lines_table_and_lines(gpkg_file)
 
 # Create a frame to hold the progress bar and the label
 progress_frame = tk.Frame(root)
