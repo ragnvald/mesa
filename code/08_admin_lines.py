@@ -176,7 +176,11 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
         create_lines_table_and_lines(gpkg_file, log_widget)
 
 
+# To cut the polygons which will be made based on a line we will need to 
+# create lines which are perpendicular to the line. These lines will later
+# work as "knives" to for the polygons (buffered lines).
 def create_perpendicular_lines(line_input, segment_width, segment_nr):
+
     # Define the projection transformation: EPSG:4326 to EPSG:4087 (for accurate distance calculations) and back
     transformer_to_4087 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=True)
     transformer_to_4326 = pyproj.Transformer.from_crs("EPSG:4087", "EPSG:4326", always_xy=True)
@@ -188,7 +192,9 @@ def create_perpendicular_lines(line_input, segment_width, segment_nr):
     distances = [i/segment_nr * line_transformed.length for i in range(1, segment_nr + 1)]
     
     perpendicular_lines = []
+
     for d in distances:
+
         # Interpolate point on the line to find where the perpendicular line should cross
         point = line_transformed.interpolate(d)
         
@@ -235,11 +241,11 @@ def create_perpendicular_lines(line_input, segment_width, segment_nr):
     return multi_line
 
 
-def create_segments(perpendicular_lines, buffered_line_geometry):
-    """
-    Attempts to split a Polygon with a MultiLineString by combining the lines and the polygon boundary,
-    then reconstructing polygons from the resulting network.
-    """
+# Receives a set of perpendicular lines (knives) and a polygon
+# which is buffered lines. The polygon is cut into segments which
+# are then returned.
+def cut_into_segments(perpendicular_lines, buffered_line_geometry):
+
     # Ensure the geometries are of the correct type
     if not isinstance(buffered_line_geometry, Polygon):
         raise TypeError("The buffered_line_geometry must be a Polygon.")
@@ -258,12 +264,11 @@ def create_segments(perpendicular_lines, buffered_line_geometry):
     # Create a GeoDataFrame from the resulting polygons
     segments_gdf = gpd.GeoDataFrame(geometry=result_polygons)
 
-    print(segments_gdf)
-
     return segments_gdf
 
 
 def create_segments_from_buffered_lines(gpkg_file, log_widget):
+
     # Load clean lines from the tbl_lines-table
     lines_df = load_lines_table(gpkg_file)
     
@@ -293,7 +298,7 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
             buffered_line_geometry = match_row.geometry
 
             # Create segments using the perpendicular lines and the matching buffered line geometry
-            segments_gdf = create_segments(perpendicular_lines, buffered_line_geometry)
+            segments_gdf = cut_into_segments(perpendicular_lines, buffered_line_geometry)
 
             # Add attributes to the segments GeoDataFrame
             segments_gdf['name_gis'] = name_gis
@@ -329,12 +334,20 @@ gpkg_file = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface using ttkbootstrap
-style = Style(theme=ttk_bootstrap_theme)
-root = style.master
+root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Line processing")
+root.geometry("800x540")
+
+button_width = 18   
+button_padx  = 7
+button_pady  = 7
+
+# Main frame defined
+main_frame = tk.Frame(root)
+main_frame.pack(fill='both', expand=True, pady=10)
 
 # Create a LabelFrame for the log output
-log_frame = ttk.LabelFrame(root, text="Log Output", bootstyle="info") 
+log_frame = ttk.LabelFrame(main_frame, text="Log Output", bootstyle="info") 
 log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
 # Create a log widget inside the LabelFrame
@@ -342,7 +355,7 @@ log_widget = scrolledtext.ScrolledText(log_frame, height=10)
 log_widget.pack(fill=tk.BOTH, expand=True)
 
 # Create a frame to hold the progress bar and the label
-progress_frame = tk.Frame(root)
+progress_frame = tk.Frame(main_frame)
 progress_frame.pack(pady=5)
 
 # Create a progress bar
@@ -354,16 +367,19 @@ progress_bar.pack(side=tk.LEFT)
 progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
 progress_label.pack(side=tk.LEFT, padx=5)
 
-# Create the Initiate button
-initiate_button = ttk.Button(root, text="Initiate", command=lambda: create_lines_table_and_lines(gpkg_file, log_widget))
-initiate_button.pack(pady=10)
+buttons_frame = tk.Frame(main_frame)
+buttons_frame.pack(side='left', fill='y', padx=20, pady=5)  # Corrected this line
 
 # Create the Initiate button
-initiate_button = ttk.Button(root, text="Process and buffer", command=lambda: process_and_buffer_lines(gpkg_file, log_widget))
-initiate_button.pack(pady=10)
+initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: create_lines_table_and_lines(gpkg_file, log_widget), width=button_width)
+initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
-# Create the Initiate button
-initiate_button = ttk.Button(root, text="Create segments", command=lambda: create_segments_from_buffered_lines(gpkg_file,log_widget))
-initiate_button.pack(pady=10)
+# Create the Process and buffer button
+process_button = ttk.Button(buttons_frame, text="Process and buffer", command=lambda: process_and_buffer_lines(gpkg_file, log_widget), width=button_width)
+process_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
+
+# Create the Create segments button
+createsegments_button = ttk.Button(buttons_frame, text="Create segments", command=lambda: create_segments_from_buffered_lines(gpkg_file,log_widget), width=button_width)
+createsegments_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 root.mainloop()
