@@ -359,49 +359,61 @@ def intersection_with_segments(asset_data, segment_data, log_widget):
         return pd.DataFrame()
 
 def main_tbl_segment_stacked(gpkg_file, log_widget):
+
     log_to_gui(log_widget, "Building tbl_segment_stacked...")
+
     update_progress(10)  # Indicate start
 
     # Read necessary layers from the GeoPackage
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+
     update_progress(15)
 
+    asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
+
+    update_progress(25)  # Progress after reading asset group data
+
+    # Merge asset group data with asset data
+    asset_data = asset_data.merge(asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
+                                  left_on='ref_asset_group', right_on='id', how='left')
+
     lines_data = gpd.read_file(gpkg_file, layer='tbl_lines')
-    update_progress(20)
+
+    update_progress(29)
 
     segments_data = gpd.read_file(gpkg_file, layer='tbl_segments')
-    update_progress(25)
+
+    update_progress(35)
 
     # Ensure 'name_gis' is included from both DataFrames but rename them for clarity
-    lines_data_renamed = lines_data.rename(columns={'name_gis': 'lines_name_gis'})
-    segments_related = segments_data.merge(lines_data_renamed[['lines_name_gis']], left_on='name_gis', right_on='lines_name_gis', how='left', suffixes=('_seg', '_line'))
+    lines_data_renamed  = lines_data.rename(columns={'name_gis': 'lines_name_gis'})
+    segments_related    = segments_data.merge(lines_data_renamed[['lines_name_gis']], left_on='name_gis', right_on='lines_name_gis', how='left', suffixes=('_seg', '_line'))
     
-    update_progress(30)
+    update_progress(40)
 
     print(segments_related)
 
     point_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Point', log_widget)
-    update_progress(35)  # Progress after point intersections
+
+    update_progress(45)  # Progress after point intersections
 
     line_intersections = intersection_with_geocode_data(asset_data, segments_related, 'LineString', log_widget)
-    update_progress(40)  # Progress after line intersections
+
+    update_progress(49)  # Progress after line intersections
 
     polygon_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Polygon', log_widget)
-    update_progress(43)  # Progress after polygon intersections
+
+    update_progress(50)  # Progress after polygon intersections
 
     segment_intersections = pd.concat([point_intersections, line_intersections, polygon_intersections])
 
-    update_progress(35)
-
-    # Assuming you want to merge additional attributes from segments or lines, you can do so here
-    # For example, merging some attributes from lines_data if needed
-    # This step is optional and depends on the desired attributes in the final table
-    # segment_intersections = segment_intersections.merge(lines_data[<desired_columns>], on='gis_name', how='left')
-    print(segment_intersections)
-
+    update_progress(60)
+    
     # Drop the unnecessary columns, adjust according to your final table requirements
-    segment_intersections.drop(columns=['name_user', 'lines_name_gis', 'index_right', 'id', 'process', 'area_m2'], inplace=True)
+    segment_intersections.drop(columns=['id_x', 'id_y', 'line_name_gis'], inplace=True)
 
+    print(segment_intersections)
+    
     # Assuming 'segment_intersections' is the GeoDataFrame you're trying to write
     segment_intersections.reset_index(drop=True, inplace=True)  # Resets the index
     segment_intersections['fid'] = segment_intersections.index  # Uses the new index as 'fid'
@@ -411,7 +423,7 @@ def main_tbl_segment_stacked(gpkg_file, log_widget):
 
     log_to_gui(log_widget, "Data processing completed.")
     
-    update_progress(50)  # Final progress
+    update_progress(70)  # Final progress
 
 
 def exit_program():
