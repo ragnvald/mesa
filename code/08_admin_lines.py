@@ -12,11 +12,11 @@
 #  Analyse overlayng geocode with line segments / polygons
 #     - results in tbl_line_out_flat (we might build a stacked one at a later stage...)
 #
-#
-import uuid
+
 import geopandas as gpd
 import pandas as pd
 import configparser
+import subprocess
 import datetime
 import locale
 import math
@@ -55,6 +55,11 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
+
+
+def update_progress(new_value):
+    progress_var.set(new_value)
+    progress_label.config(text=f"{int(new_value)}%")
 
 
 def load_lines_table(gpkg_file):
@@ -164,7 +169,7 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
 
             all_buffered_lines_df.to_file(gpkg_file, layer="tbl_lines_buffered", driver="GPKG")
             
-            log_to_gui(log_widget, "All buffered lines added to GeoPackage.")
+            log_to_gui(log_widget, "All buffered lines added to the database.")
 
         else:
             log_to_gui(log_widget, "No lines were processed.")
@@ -320,6 +325,97 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
     else:
         log_to_gui(log_widget, "No segments were created.")
     
+def edit_lines():
+    try:
+        subprocess.run(["python", "08_edit_lines.py"], check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["08_edit_lines.exe"], check=True)
+        except subprocess.CalledProcessError:
+            log_to_gui(log_widget, "Failed to execute edit lines script")
+
+
+# Function to perform intersection with geocode data
+def intersection_with_geocode_data(asset_df, segment_df, geom_type, log_widget):
+    log_to_gui(log_widget, f"Processing {geom_type} intersections")
+    asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
+
+    if asset_filtered.empty:
+        return gpd.GeoDataFrame()
+
+    return gpd.sjoin(segment_df, asset_filtered, how='inner', predicate='intersects')
+
+
+# Function to perform intersection based on geometry type
+def intersection_with_segments(asset_data, segment_data, log_widget):
+    try:
+        # Perform spatial intersection
+        intersected_data = gpd.overlay(asset_data, segment_data, how='intersection')
+        print(intersected_data)
+        return intersected_data
+    except Exception as e:
+        log_to_gui(log_widget, f"Error in intersection: {str(e)}")
+        return pd.DataFrame()
+
+def main_tbl_segment_stacked(gpkg_file, log_widget):
+    log_to_gui(log_widget, "Building tbl_segment_stacked...")
+    update_progress(10)  # Indicate start
+
+    # Read necessary layers from the GeoPackage
+    asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+    update_progress(15)
+
+    lines_data = gpd.read_file(gpkg_file, layer='tbl_lines')
+    update_progress(20)
+
+    segments_data = gpd.read_file(gpkg_file, layer='tbl_segments')
+    update_progress(25)
+
+    # Ensure 'name_gis' is included from both DataFrames but rename them for clarity
+    lines_data_renamed = lines_data.rename(columns={'name_gis': 'lines_name_gis'})
+    segments_related = segments_data.merge(lines_data_renamed[['lines_name_gis']], left_on='name_gis', right_on='lines_name_gis', how='left', suffixes=('_seg', '_line'))
+    
+    update_progress(30)
+
+    print(segments_related)
+
+    point_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Point', log_widget)
+    update_progress(35)  # Progress after point intersections
+
+    line_intersections = intersection_with_geocode_data(asset_data, segments_related, 'LineString', log_widget)
+    update_progress(40)  # Progress after line intersections
+
+    polygon_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Polygon', log_widget)
+    update_progress(43)  # Progress after polygon intersections
+
+    segment_intersections = pd.concat([point_intersections, line_intersections, polygon_intersections])
+
+    update_progress(35)
+
+    # Assuming you want to merge additional attributes from segments or lines, you can do so here
+    # For example, merging some attributes from lines_data if needed
+    # This step is optional and depends on the desired attributes in the final table
+    # segment_intersections = segment_intersections.merge(lines_data[<desired_columns>], on='gis_name', how='left')
+    print(segment_intersections)
+
+    # Drop the unnecessary columns, adjust according to your final table requirements
+    segment_intersections.drop(columns=['name_user', 'lines_name_gis', 'index_right', 'id', 'process', 'area_m2'], inplace=True)
+
+    # Assuming 'segment_intersections' is the GeoDataFrame you're trying to write
+    segment_intersections.reset_index(drop=True, inplace=True)  # Resets the index
+    segment_intersections['fid'] = segment_intersections.index  # Uses the new index as 'fid'
+
+    # Write the intersected data to a new layer in the GeoPackage
+    segment_intersections.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG', if_exists='replace')
+
+    log_to_gui(log_widget, "Data processing completed.")
+    
+    update_progress(50)  # Final progress
+
+
+def exit_program():
+    root.destroy()
 
 #####################################################################################
 #  Main
@@ -336,8 +432,9 @@ ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Line processing")
-root.geometry("800x540")
+root.geometry("1000x700")
 
+# Define button sizes and width
 button_width = 18   
 button_padx  = 7
 button_pady  = 7
@@ -374,12 +471,36 @@ buttons_frame.pack(side='left', fill='y', padx=20, pady=5)  # Corrected this lin
 initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: create_lines_table_and_lines(gpkg_file, log_widget), width=button_width)
 initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
+# Button for editing lines. This opens a sub-process to set up the line generation.
+edit_lines_button = ttk.Button(buttons_frame, text="Edit lines", command=edit_lines, width=button_width, bootstyle="secondary")
+edit_lines_button.grid(row=0, column=1, padx=button_padx, pady=button_pady)
+
+# Explanatory label next to the "Edit lines" button
+explanatory_label = tk.Label(buttons_frame, text="Remember that you can import and edit\nthese lines by opening the database using QGIS.", bg="light grey", anchor='w')
+explanatory_label.grid(row=0, column=2, padx=button_padx, sticky='w')  # Align to the west (left)
+
 # Create the Process and buffer button
 process_button = ttk.Button(buttons_frame, text="Process and buffer", command=lambda: process_and_buffer_lines(gpkg_file, log_widget), width=button_width)
 process_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
+# Explanatory label next to the "Edit lines" button
+explanatory_label = tk.Label(buttons_frame, text="Press this button if you have established lines\nor updated line data.", bg="light grey", anchor='w')
+explanatory_label.grid(row=1, column=2, padx=button_padx, sticky='w')  # Align to the west (left)
+
 # Create the Create segments button
 createsegments_button = ttk.Button(buttons_frame, text="Create segments", command=lambda: create_segments_from_buffered_lines(gpkg_file,log_widget), width=button_width)
 createsegments_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
+
+# Create the Create segments button
+createsegments_button = ttk.Button(buttons_frame, text="Create segments", command=lambda: create_segments_from_buffered_lines(gpkg_file,log_widget), width=button_width)
+createsegments_button.grid(row=3, column=0, padx=button_padx, pady=button_pady)
+
+# Create the Create segments button
+createsegments_button = ttk.Button(buttons_frame, text="Linear sensitivity", command=lambda: main_tbl_segment_stacked(gpkg_file, log_widget), width=button_width)
+createsegments_button.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+
+# Adjust the exit button to align it to the right
+exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
+exit_btn.grid(row=3, column=5, pady=button_pady, sticky='e')  # Align to the right side
 
 root.mainloop()
