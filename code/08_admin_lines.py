@@ -1,4 +1,4 @@
-#
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #
 #  User selects input geocode group
 #  List of lines is provided (tbl_line_in)
@@ -88,6 +88,7 @@ def create_lines_table_and_lines(gpkg_file, log_widget):
         return
     
     log_to_gui(log_widget, "Creating table and lines")
+
     # Extract bounding box
     minx, miny, maxx, maxy = gdf_geocode_group.total_bounds
     
@@ -116,6 +117,10 @@ def create_lines_table_and_lines(gpkg_file, log_widget):
     gdf_lines.to_file(gpkg_file, layer='tbl_lines', mode="w")
 
 
+# Buffering lines so that we will get a width in meters. To do this we will have to
+# reproject the data to a projection which works decently well worldwide in converting
+# between degrees and meters. At a later stage one might want to facilitate for 
+# the user selecting an appropriate local projection.
 def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs="EPSG:4087"):
     
     lines_df = load_lines_table(gpkg_file)
@@ -183,7 +188,9 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
 
 # To cut the polygons which will be made based on a line we will need to 
 # create lines which are perpendicular to the line. These lines will later
-# work as "knives" to for the polygons (buffered lines).
+# work as "knives" to for the polygons (buffered lines). We are making
+# sure that the lines are wider then the combined buffer size (length from
+# the centerline to the outer buffer).
 def create_perpendicular_lines(line_input, segment_width, segment_nr):
 
     # Define the projection transformation: EPSG:4326 to EPSG:4087 (for accurate distance calculations) and back
@@ -221,8 +228,10 @@ def create_perpendicular_lines(line_input, segment_width, segment_nr):
         else:
             angle = math.pi / 2 if dy > 0 else -math.pi / 2
 
-        # Define the extended length of the perpendicular line
-        length = (segment_width / 2) * 3  # Extending the line by a factor of 3
+        # Define the extended length of the perpendicular line.
+        # Extending the line by a factor of 3 just so that we are sure
+        # the line is long enough.
+        length = (segment_width / 2) * 3  
         
         # Calculate the offsets for the perpendicular line ends
         dx_perp = math.cos(angle) * length
@@ -273,7 +282,6 @@ def cut_into_segments(perpendicular_lines, buffered_line_geometry):
 
 
 def create_segments_from_buffered_lines(gpkg_file, log_widget):
-
     # Load clean lines from the tbl_lines-table
     lines_df = load_lines_table(gpkg_file)
     
@@ -282,13 +290,20 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
 
     # Initialize an empty GeoDataFrame for accumulating segments
     all_segments_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'segment_nr', 'geometry'])
-    
+
+    # Initialize a counter for segment_id generation
+    segment_id_counter = {}
+
     for index, row in lines_df.iterrows():
         line_input = row.geometry
         name_gis = row['name_gis']
         name_user = row['name_user']
         segment_width = row['segment_width']
         segment_nr = row['segment_nr']
+
+        # Initialize or update the counter for the current name_gis
+        if name_gis not in segment_id_counter:
+            segment_id_counter[name_gis] = 1
 
         # Generate perpendicular lines for the current line
         perpendicular_lines = create_perpendicular_lines(line_input, segment_width, segment_nr)
@@ -304,6 +319,10 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
 
             # Create segments using the perpendicular lines and the matching buffered line geometry
             segments_gdf = cut_into_segments(perpendicular_lines, buffered_line_geometry)
+
+            # Assign segment_id and increment the counter for each segment
+            segments_gdf['segment_id'] = [f"{name_gis}_{segment_id_counter[name_gis]+i}" for i in range(len(segments_gdf))]
+            segment_id_counter[name_gis] += len(segments_gdf)
 
             # Add attributes to the segments GeoDataFrame
             segments_gdf['name_gis'] = name_gis
@@ -324,7 +343,8 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
         log_to_gui(log_widget, "All segments have been accumulated and saved to 'tbl_segments'.")
     else:
         log_to_gui(log_widget, "No segments were created.")
-    
+
+
 def edit_lines():
     try:
         subprocess.run(["python", "08_edit_lines.py"], check=True)
@@ -358,7 +378,8 @@ def intersection_with_segments(asset_data, segment_data, log_widget):
         log_to_gui(log_widget, f"Error in intersection: {str(e)}")
         return pd.DataFrame()
 
-def main_tbl_segment_stacked(gpkg_file, log_widget):
+
+def build_stacked_data(gpkg_file, log_widget):
 
     log_to_gui(log_widget, "Building tbl_segment_stacked...")
 
@@ -410,7 +431,7 @@ def main_tbl_segment_stacked(gpkg_file, log_widget):
     update_progress(60)
     
     # Drop the unnecessary columns, adjust according to your final table requirements
-    segment_intersections.drop(columns=['id_x', 'id_y', 'line_name_gis'], inplace=True)
+    segment_intersections.drop(columns=['id_x', 'id_y', 'lines_name_gis'], inplace=True)
 
     print(segment_intersections)
     
@@ -424,6 +445,63 @@ def main_tbl_segment_stacked(gpkg_file, log_widget):
     log_to_gui(log_widget, "Data processing completed.")
     
     update_progress(70)  # Final progress
+
+
+# Create tbl_segment_flat by reading out values from tbl_segment_stacked
+def build_flat_data(gpkg_file, log_widget):
+    
+    log_to_gui(log_widget, "Building tbl_segmentflat ...")
+
+    tbl_segmemt_stacked = gpd.read_file(gpkg_file, layer='tbl_segment_stacked')
+
+    update_progress(60)
+
+    # Aggregation functions
+    aggregation_functions = {
+        'importance': ['min', 'max'],
+        'sensitivity': ['min', 'max'],
+        'susceptibility': ['min', 'max'],
+        'name_gis': 'first',
+        'segment_id': 'first',
+        'asset_group_name': lambda x: ', '.join(x.unique()),  # Joining into a comma-separated string
+        'geometry': 'first'
+    }
+
+    # Group by 'code' and aggregate
+    tbl_segment_flat = tbl_segmemt_stacked.groupby('segment_id').agg(aggregation_functions)
+
+    # Flatten the MultiIndex columns
+    tbl_segment_flat.columns = ['_'.join(col).strip() for col in tbl_segment_flat.columns.values]
+
+    # Rename columns after flattening
+    renamed_columns = {
+        'name_gis_first': 'name_gis',
+        'importance_min': 'importance_min',
+        'importance_max': 'importance_max',
+        'sensitivity_min': 'sensitivity_min',
+        'sensitivity_max': 'sensitivity_max',
+        'susceptibility_min': 'susceptibility_min',
+        'susceptibility_max': 'susceptibility_max',
+        'asset_group_name_<lambda>': 'asset_group_names',
+        'ref_asset_group_nunique': 'assets_total',
+        'geometry_first': 'geometry'
+    }
+
+    tbl_segment_flat.rename(columns=renamed_columns, inplace=True)
+
+    # Convert to GeoDataFrame
+    tbl_segment_flat = gpd.GeoDataFrame(tbl_segment_flat, geometry='geometry')
+
+    # Reset index to make 'code' a column
+    tbl_segment_flat.reset_index(inplace=True)
+    
+    # Drop the unnecessary columns, adjust according to your final table requirements
+    tbl_segment_flat.drop(columns=['segment_id_first'], inplace=True)
+
+    # Save tbl_flat as a new layer in the GeoPackage
+    tbl_segment_flat.to_file(gpkg_file, layer='tbl_segment_flat', driver='GPKG')
+    
+    log_to_gui(log_widget, "Completed flat segments...")
 
 
 def exit_program():
@@ -504,15 +582,15 @@ createsegments_button = ttk.Button(buttons_frame, text="Create segments", comman
 createsegments_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 # Create the Create segments button
-createsegments_button = ttk.Button(buttons_frame, text="Create segments", command=lambda: create_segments_from_buffered_lines(gpkg_file,log_widget), width=button_width)
+createsegments_button = ttk.Button(buttons_frame, text="Linear sensitivity", command=lambda: build_stacked_data(gpkg_file, log_widget), width=button_width)
 createsegments_button.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
 # Create the Create segments button
-createsegments_button = ttk.Button(buttons_frame, text="Linear sensitivity", command=lambda: main_tbl_segment_stacked(gpkg_file, log_widget), width=button_width)
+createsegments_button = ttk.Button(buttons_frame, text="Flatten data", command=lambda: build_flat_data(gpkg_file, log_widget), width=button_width)
 createsegments_button.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
-exit_btn.grid(row=3, column=5, pady=button_pady, sticky='e')  # Align to the right side
+exit_btn.grid(row=4, column=5, pady=button_pady, sticky='e')  # Align to the right side
 
 root.mainloop()
