@@ -133,11 +133,9 @@ def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widg
         attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
 
         line_objects.append({
-            'id': int(line_id_counter),
             'name_gis': int(index),
             'name_user': layer_name,
             'attributes': attributes,
-            'process': True,
             'geom': row.geometry  # Original geometry in EPSG:4326
         })
         line_id_counter += 1
@@ -336,6 +334,50 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
 
     update_progress(100)
 
+def initialize_empty_table(gpkg_file, dest_table, schema):
+    # Create an empty GeoDataFrame with the specified schema
+    empty_gdf = gpd.GeoDataFrame(columns=schema.keys(), geometry='geometry')
+    for column, dtype in schema.items():
+        empty_gdf[column] = pd.Series(dtype=dtype)
+    
+    # Save the empty GeoDataFrame to the destination table, replacing any existing content
+    empty_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
+
+
+def copy_original_lines_to_tbl_lines(gpkg_file):
+    
+    src_table='tbl_lines_original'
+    dest_table='tbl_lines'
+
+    # Ensure the destination table is empty
+    schema = {
+        'name_gis': 'str',
+        'name_user': 'str',
+        'segment_nr': 'int',
+        'segment_width': 'int',
+        'description': 'str',
+        'geometry': 'geometry'
+    }
+
+    initialize_empty_table(gpkg_file, dest_table, schema)
+    
+    # Load the source table as a GeoDataFrame
+    src_gdf = gpd.read_file(gpkg_file, layer=src_table)
+    
+    # Transform the source data to match the destination table's schema
+    dest_gdf = src_gdf.copy()
+    dest_gdf['name_gis']        = dest_gdf.index.to_series().apply(lambda x: f"line_{x+1:03}")
+    dest_gdf['name_user']       = dest_gdf['name_gis']
+    dest_gdf['segment_nr']      = 100
+    dest_gdf['segment_width']   = 100
+    dest_gdf['description']     = dest_gdf.apply(lambda row: f"{row['name_user']} + {row['attributes']}", axis=1)
+    
+    # Adjust to ensure only the necessary columns are included
+    dest_gdf = dest_gdf[['name_gis', 'name_user', 'segment_nr', 'segment_width', 'description', 'geometry']]
+    
+    # Save the transformed GeoDataFrame to the now-empty destination table
+    dest_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
+
 
 # Thread function to run import without freezing GUI
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
@@ -349,6 +391,8 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
         export_to_geopackage(line_objects_gdf, gpkg_file, 'tbl_lines_original', log_widget)
 
     log_to_gui(log_widget, "Import of completed.")
+
+    copy_original_lines_to_tbl_lines(gpkg_file)
 
     update_progress(100)
 
