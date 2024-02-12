@@ -28,7 +28,7 @@ def read_config(file_name):
 
 # Function to check and create folders
 def check_and_create_folders():
-    folders = ["input/geocode", "output", "qgis"]
+    folders = ["input/geocode", "output", "qgis", "input/lines"]
     for folder in folders:
         if not os.path.exists(folder):
             os.makedirs(folder)
@@ -59,6 +59,10 @@ def update_stats():
             if row['Status'] == "+":
                 status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success')
                 status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
+            elif row['Status'] == "/":
+                # Orange is an option where it is not necessary to have registered data.
+                status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='warning')
+                status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
             else:
                 status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
                 status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
@@ -67,7 +71,6 @@ def update_stats():
             message_label.grid(row=index, column=1, sticky="nsew", padx=5, pady=5)
     else:
         print("No status information available.")
-
 
 
 def get_status(gpkg_file):
@@ -90,7 +93,7 @@ def get_status(gpkg_file):
             try:
                 table = gpd.read_file(gpkg_file, layer=layer_name)
                 if table['sensitivity'].sum() > 0:
-                    return "+", "Everything is set up. Ready for\nprocessing."
+                    return "+", "All good. You may revise your parameters."
                 else:
                     return "-", "You need to set up the calculation. \nPress the 'Set up'-button to proceed."
             except Exception:
@@ -108,7 +111,7 @@ def get_status(gpkg_file):
 
         # Check for tbl_geocode_group
         geocode_group_count = read_table_and_count('tbl_geocode_group')
-        append_status("+" if geocode_group_count is not None else "-", f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.")
+        append_status("+" if geocode_group_count is not None else "/", f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.")
 
         # Check for tbl_asset_group sensitivity
         symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
@@ -119,6 +122,10 @@ def get_status(gpkg_file):
         for layer_name, label in [('tbl_stacked', 'Stacked cells'), ('tbl_flat', 'Flat cells'), ('tbl_atlas', 'Atlas pages')]:
             count = read_table_and_count(layer_name)
             append_status("+" if count is not None else "-", f"{label}: {count}" if count is not None else f"{label} table is missing.\nPress button Process data to initiate.")
+
+        # Check for tbl_geocode_group
+        lines_original_count = read_table_and_count('tbl_lines_original')
+        append_status("+" if lines_original_count is not None else "/", f"Line layers: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
@@ -215,14 +222,38 @@ def edit_atlas():
     update_stats()
 
 
+def admin_lines():
+    try:
+        subprocess.run(["python", "08_admin_lines.py"], check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["08_admin_lines.exe"], check=True)
+        except subprocess.CalledProcessError:
+            log_to_logfile("Failed to execute admin lines")
+    update_stats()
+
+
+def edit_lines():
+    try:
+        subprocess.run(["python", "08_edit_lines.py"], check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            # If import.py fails, try running import.exe
+            subprocess.run(["08_edit_lines.exe"], check=True)
+        except subprocess.CalledProcessError:
+            log_to_logfile("Failed to execute edit lines script")
+    update_stats()
+
+
 def exit_program():
     root.destroy()
 
 # Function to dynamically update wraplength of label text
-def update_wraplength(event):
-    # Subtract some padding to ensure text does not touch frame borders
-    new_width = event.width - 20
-    stats_label.config(wraplength=new_width)
+#def update_wraplength(event):
+#    # Subtract some padding to ensure text does not touch frame borders
+#    new_width = event.width - 20
+#    stats_label.config(wraplength=new_width)
 
 
 def add_text_to_labelframe(labelframe, text):
@@ -296,6 +327,10 @@ process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pad
 edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
 edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
+admin_lines_btn = ttk.Button(left_panel, text="Work with lines", command=admin_lines, width=button_width)
+admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
+
+
 # Separator
 separator = ttk.Separator(main_frame, orient='vertical')
 separator.grid(row=0, column=1, sticky='ns')
@@ -316,10 +351,10 @@ info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 update_stats()
 
 # Bind the configure event to update the wraplength of the label
-info_labelframe.bind('<Configure>', update_wraplength)
+#info_labelframe.bind('<Configure>', update_wraplength)
 
 # Adjust the exit button to align it to the right
-exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle=WARNING)
+exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
 exit_btn.grid(row=1, column=0, pady=button_pady, sticky='e')  # Align to the right side
 
 # Bottom panel
