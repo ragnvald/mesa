@@ -1,5 +1,5 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-# This code allows the user to edit tbl_line using a simple user interface
+# This code allows the user to edit tbl_lines using a simple user interface
 # allowing the user to move between the different line objects. 
 # It does not allow for editing name_gis which will be used for filtering
 # in QGIS.
@@ -46,13 +46,13 @@ def write_to_log( message):
 # Function to load data from the database
 def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
-    return pd.read_sql_table('tbl_line', engine)
+    return pd.read_sql_table('tbl_lines', engine)
 
 # Function to save data to the database
 def save_data(df):
     try:
         engine = create_engine(f'sqlite:///{gpkg_file}')
-        df.to_sql('tbl_line', con=engine, if_exists='replace', index=False)
+        df.to_sql('tbl_lines', con=engine, if_exists='replace', index=False)
         write_to_log("Line data saved")
     except Exception as e:
         write_to_log(f"Error saving data: {e}")
