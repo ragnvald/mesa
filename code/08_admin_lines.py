@@ -132,8 +132,11 @@ def create_lines_table_and_lines(gpkg_file, log_widget):
 # reproject the data to a projection which works decently well worldwide in converting
 # between degrees and meters. At a later stage one might want to facilitate for 
 # the user selecting an appropriate local projection.
-def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs="EPSG:4087"):
+def process_and_buffer_lines(gpkg_file, log_widget):
     
+    crs         = "EPSG:4326"
+    target_crs  = "EPSG:4087"
+
     lines_df = load_lines_table(gpkg_file)
 
     if lines_df is not None:
@@ -203,6 +206,12 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
 # sure that the lines are wider then the combined buffer size (length from
 # the centerline to the outer buffer).
 def create_perpendicular_lines(line_input, segment_width, segment_length):
+    # Ensure line_input is a LineString and convert segment_width and segment_length to float
+    if not isinstance(line_input, LineString):
+        raise ValueError("line_input must be a LineString")
+    segment_width = float(segment_width)
+    segment_length = float(segment_length)
+
     # Define the projection transformation: EPSG:4326 to EPSG:4087 (for accurate distance calculations) and back
     transformer_to_4087 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=True)
     transformer_to_4326 = pyproj.Transformer.from_crs("EPSG:4087", "EPSG:4326", always_xy=True)
@@ -212,15 +221,12 @@ def create_perpendicular_lines(line_input, segment_width, segment_length):
     
     # Calculate the number of segments based on the segment_length
     full_length = line_transformed.length
-    num_segments = int(full_length / segment_length) # This ensures we cover as much of the line as possible with equal segments
-    
-    # Calculate distances where perpendicular lines will be created
-    distances = [segment_length * i for i in range(num_segments)] + [full_length] # Adding the last segment, even if smaller
+    num_segments = math.ceil(full_length / segment_length)  # Use ceil to ensure covering the entire line
     
     perpendicular_lines = []
 
-    for d in distances:
-        # Interpolate point on the line to find where the perpendicular line should cross
+    for i in range(num_segments + 1):  # +1 to include the end of the line
+        d = min(i * segment_length, full_length)  # Ensure d does not exceed the length of the line
         point = line_transformed.interpolate(d)
         
         # Calculate the slope of the line at this point to find the perpendicular direction
@@ -369,7 +375,9 @@ def edit_lines():
 
 # Function to perform intersection with geocode data
 def intersection_with_geocode_data(asset_df, segment_df, geom_type, log_widget):
+
     log_to_gui(log_widget, f"Processing {geom_type} intersections")
+
     asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
 
     if asset_filtered.empty:
@@ -380,13 +388,16 @@ def intersection_with_geocode_data(asset_df, segment_df, geom_type, log_widget):
 
 # Function to perform intersection based on geometry type
 def intersection_with_segments(asset_data, segment_data, log_widget):
+
     try:
         # Perform spatial intersection
         intersected_data = gpd.overlay(asset_data, segment_data, how='intersection')
-        print(intersected_data)
+        
         return intersected_data
     except Exception as e:
+
         log_to_gui(log_widget, f"Error in intersection: {str(e)}")
+
         return pd.DataFrame()
 
 
@@ -423,8 +434,6 @@ def build_stacked_data(gpkg_file, log_widget):
     
     update_progress(40)
 
-    print(segments_related)
-
     point_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Point', log_widget)
 
     update_progress(45)  # Progress after point intersections
@@ -443,8 +452,6 @@ def build_stacked_data(gpkg_file, log_widget):
     
     # Drop the unnecessary columns, adjust according to your final table requirements
     segment_intersections.drop(columns=['id_x', 'id_y', 'lines_name_gis'], inplace=True)
-
-    print(segment_intersections)
     
     # Assuming 'segment_intersections' is the GeoDataFrame you're trying to write
     segment_intersections.reset_index(drop=True, inplace=True)  # Resets the index
@@ -556,6 +563,25 @@ def build_flat_and_stacked(gpkg_file, log_widget):
     update_progress(100)
 
 
+def process_all(gpkg_file, log_widget):
+
+    # Process and create tbl_stacked
+    process_and_buffer_lines(gpkg_file, log_widget)
+    
+    update_progress(30)  # Indicate start
+
+    create_segments_from_buffered_lines(gpkg_file, log_widget)
+    
+    update_progress(60)  # Indicate start
+
+    build_flat_and_stacked(gpkg_file, log_widget)
+    
+    update_progress(90)  # Indicate start
+
+    log_to_gui(log_widget, "Data processing and aggregation completed.")
+
+    update_progress(100)
+
 
 def exit_program():
     root.destroy()
@@ -565,17 +591,19 @@ def exit_program():
 #
 
 # Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-input_folder_asset = config['DEFAULT']['input_folder_asset']
-input_folder_geocode = config['DEFAULT']['input_folder_geocode']
-gpkg_file = config['DEFAULT']['gpkg_file']
-ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+config_file             = 'config.ini'
+config                  = read_config(config_file)
+input_folder_asset      = config['DEFAULT']['input_folder_asset']
+input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
+segment_width           = config['DEFAULT']['segment_width']
+segment_length          = config['DEFAULT']['segment_length']
+gpkg_file               = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Line processing")
-root.geometry("1000x700")
+root.geometry("850x700")
 
 # Define button sizes and width
 button_width = 18   
@@ -614,32 +642,28 @@ buttons_frame.pack(side='left', fill='y', padx=20, pady=5)  # Corrected this lin
 initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: create_lines_table_and_lines(gpkg_file, log_widget), width=button_width)
 initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
+# Explanatory label next to the Initiate-button
+explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help\nin establishing lines.", bg="light grey", anchor='w')
+explanatory_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
+
 # Button for editing lines. This opens a sub-process to set up the line generation.
 edit_lines_button = ttk.Button(buttons_frame, text="Edit lines", command=edit_lines, width=button_width, bootstyle="secondary")
-edit_lines_button.grid(row=0, column=1, padx=button_padx, pady=button_pady)
+edit_lines_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the "Edit lines" button
 explanatory_label = tk.Label(buttons_frame, text="Remember that you can import and edit\nthese lines by opening the database using QGIS.", bg="light grey", anchor='w')
-explanatory_label.grid(row=0, column=2, padx=button_padx, sticky='w')  # Align to the west (left)
+explanatory_label.grid(row=1, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Create the Process and buffer button
-process_button = ttk.Button(buttons_frame, text="Process and buffer", command=lambda: process_and_buffer_lines(gpkg_file, log_widget), width=button_width)
-process_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
+process_button = ttk.Button(buttons_frame, text="Process", command=lambda: process_all(gpkg_file, log_widget), width=button_width)
+process_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-# Explanatory label next to the "Edit lines" button
-explanatory_label = tk.Label(buttons_frame, text="Press this button if you have established lines\nor updated line data.", bg="light grey", anchor='w')
-explanatory_label.grid(row=1, column=2, padx=button_padx, sticky='w')  # Align to the west (left)
-
-# Create the Create segments button
-createsegments_button = ttk.Button(buttons_frame, text="Create segments", command=lambda: create_segments_from_buffered_lines(gpkg_file,log_widget), width=button_width)
-createsegments_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
-
-# Create the Create segments button
-createsegments_button = ttk.Button(buttons_frame, text="Flatten data", command=lambda: build_flat_and_stacked(gpkg_file, log_widget), width=button_width)
-createsegments_button.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+# Explanatory label next to the Process-button
+explanatory_label = tk.Label(buttons_frame, text="Process all things related to lines.", bg="light grey", anchor='w')
+explanatory_label.grid(row=2, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
-exit_btn.grid(row=4, column=5, pady=button_pady, sticky='e')  # Align to the right side
+exit_btn.grid(row=3, column=4, pady=button_pady, sticky='e')  # Align to the right side
 
 root.mainloop()
