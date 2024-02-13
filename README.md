@@ -37,6 +37,12 @@ Main processing logic of the MESA tool (specific details not provided).
 **07_edit_atlas.py**
 Functions for editing or managing atlas data.
 
+**08_admin_lines.py**
+Admin lines processing.
+
+**08_edit_lines.py**
+Edit lines using this code.
+
 **user_interface.py**
 Functions related to checking and creating folders, and user interface aspects.
 
