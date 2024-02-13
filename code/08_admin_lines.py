@@ -620,7 +620,7 @@ ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Line processing")
-root.geometry("850x700")
+root.geometry("750x550")
 
 # Define button sizes and width
 button_width = 18   
@@ -660,27 +660,27 @@ initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: cre
 initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Initiate-button
-explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help\nto create sample lines lines.", bg="light grey", anchor='w')
+explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help to create sample lines.\nDo NOT use it if you have already imported lines.", bg="light grey",  justify='left')
 explanatory_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Button for editing lines. This opens a sub-process to set up the line generation.
-edit_lines_button = ttk.Button(buttons_frame, text="Edit lines", command=edit_lines, width=button_width, bootstyle="secondary")
+edit_lines_button = ttk.Button(buttons_frame, text="Edit segments", command=edit_lines, width=button_width, bootstyle="secondary")
 edit_lines_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the "Edit lines" button
-explanatory_label = tk.Label(buttons_frame, text="Remember that you can import and edit\nthese lines by opening the database using QGIS.", bg="light grey", anchor='w')
+explanatory_label = tk.Label(buttons_frame, text="Edit names, segment width/length and mnoe. Remember that\nyou can edit these lines by opening the database using QGIS.", bg="light grey",  justify='left')
 explanatory_label.grid(row=1, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Create the Process and buffer button
-process_button = ttk.Button(buttons_frame, text="Process", command=lambda: process_all(gpkg_file, log_widget), width=button_width)
+process_button = ttk.Button(buttons_frame, text="Process segments", command=lambda: process_all(gpkg_file, log_widget), width=button_width)
 process_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Process-button
-explanatory_label = tk.Label(buttons_frame, text="Process all things related to lines.", bg="light grey", anchor='w')
+explanatory_label = tk.Label(buttons_frame, text="Create sensitivity values for the segments.", bg="light grey",  justify='left')
 explanatory_label.grid(row=2, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
-exit_btn.grid(row=3, column=4, pady=button_pady, sticky='e')  # Align to the right side
+exit_btn.grid(row=3, column=1, pady=button_pady, sticky='e')  # Align to the right side
 
 root.mainloop()
