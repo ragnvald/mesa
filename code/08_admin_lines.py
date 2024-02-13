@@ -150,10 +150,12 @@ def process_and_buffer_lines(gpkg_file, log_widget):
                 gdf_line = row['geometry']
                 name_gis = row['name_gis']
                 name_user = row['name_user']
-                segment_length = row['segment_length']
-                segment_width = row['segment_width']
+                segment_length = int(row['segment_length'])
+                segment_width = int(row['segment_width'])
                 description = row['description']
                 
+                log_to_gui(log_widget, f"Processing line {index}, Geometry type: {type(gdf_line)}")
+        
                 # Create a temporary GeoDataFrame for buffering
                 temp_gdf = gpd.GeoDataFrame([{'geometry': gdf_line}], geometry='geometry', crs=crs)
                 
@@ -165,6 +167,11 @@ def process_and_buffer_lines(gpkg_file, log_widget):
                 
                 # Reproject buffered geometries back to original CRS
                 temp_gdf_buffered = temp_gdf_projected.to_crs(crs)
+
+                if isinstance(temp_gdf_buffered.iloc[0].geometry, (Polygon, MultiPolygon)):
+                    log_to_gui(log_widget, "Buffered geometry is a Polygon/MultiPolygon as expected.")
+                else:
+                    log_to_gui(log_widget, f"Buffered geometry is not a Polygon/MultiPolygon. Actual type: {type(temp_gdf_buffered.iloc[0].geometry)}")
 
                 # Append the buffered geometry and attributes as a new dictionary
                 buffered_lines_data.append({
@@ -186,7 +193,7 @@ def process_and_buffer_lines(gpkg_file, log_widget):
         if buffered_lines_data:  # Check if there's any data to save
             all_buffered_lines_df = gpd.GeoDataFrame(buffered_lines_data, geometry='geometry', crs=crs)
 
-            all_buffered_lines_df.to_file(gpkg_file, layer="tbl_lines_buffered", driver="GPKG")
+            all_buffered_lines_df.to_file(gpkg_file, layer="tbl_lines_buffered", driver="GPKG", if_exists='replace')
             
             log_to_gui(log_widget, "All buffered lines added to the database.")
 
@@ -279,7 +286,7 @@ def cut_into_segments(perpendicular_lines, buffered_line_geometry):
 
     # Ensure the geometries are of the correct type
     if not isinstance(buffered_line_geometry, Polygon):
-        raise TypeError("The buffered_line_geometry must be a Polygon.")
+        raise TypeError("Second call: The buffered_line_geometry must be a Polygon.")
     if not isinstance(perpendicular_lines, MultiLineString):
         raise TypeError("The perpendicular_lines must be a MultiLineString.")
 
@@ -299,6 +306,7 @@ def cut_into_segments(perpendicular_lines, buffered_line_geometry):
 
 
 def create_segments_from_buffered_lines(gpkg_file, log_widget):
+
     # Load clean lines from the tbl_lines-table
     lines_df = load_lines_table(gpkg_file)
     
@@ -332,22 +340,37 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
 
         # If there are any matching records, process each match
         for _, match_row in matches.iterrows():
+
             buffered_line_geometry = match_row.geometry
+            
+            # Ensure the geometries are of the correct type
+            if not isinstance(buffered_line_geometry, Polygon):
+                log_to_gui(log_widget, "Geometry is not a Polygon. Skipping.")
+                continue  # Skip non-Polygon geometries
 
             # Create segments using the perpendicular lines and the matching buffered line geometry
             segments_gdf = cut_into_segments(perpendicular_lines, buffered_line_geometry)
 
+            # Filter out invalid geometries
+            valid_segments_gdf = segments_gdf[segments_gdf.is_valid]
+
+            # Check if there are valid segments to process
+            if valid_segments_gdf.empty:
+                log_to_gui(log_widget, f"No valid segments created for {name_gis}. Skipping.")
+                continue  # Skip if no valid segments
+
+
             # Assign segment_id and increment the counter for each segment
-            segments_gdf['segment_id'] = [f"{name_gis}_{segment_id_counter[name_gis]+i}" for i in range(len(segments_gdf))]
-            segment_id_counter[name_gis] += len(segments_gdf)
+            valid_segments_gdf['segment_id'] = [f"{name_gis}_{segment_id_counter[name_gis]+i}" for i in range(len(valid_segments_gdf))]
+            segment_id_counter[name_gis] += len(valid_segments_gdf)
 
-            # Add attributes to the segments GeoDataFrame
-            segments_gdf['name_gis'] = name_gis
-            segments_gdf['name_user'] = name_user
-            segments_gdf['segment_length'] = segment_length
+             # Add attributes to the segments GeoDataFrame
+            valid_segments_gdf['name_gis'] = name_gis
+            valid_segments_gdf['name_user'] = name_user
+            valid_segments_gdf['segment_length'] = segment_length
 
-            # Accumulate the created segments
-            all_segments_gdf = pd.concat([all_segments_gdf, segments_gdf], ignore_index=True)
+             # Accumulate the created segments
+            all_segments_gdf = pd.concat([all_segments_gdf, valid_segments_gdf], ignore_index=True)
 
     # After processing all lines, check if there are any segments to save
     if not all_segments_gdf.empty:
@@ -595,8 +618,6 @@ config_file             = 'config.ini'
 config                  = read_config(config_file)
 input_folder_asset      = config['DEFAULT']['input_folder_asset']
 input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
-segment_width           = config['DEFAULT']['segment_width']
-segment_length          = config['DEFAULT']['segment_length']
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 
@@ -643,7 +664,7 @@ initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: cre
 initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Initiate-button
-explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help\nin establishing lines.", bg="light grey", anchor='w')
+explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help\nto create sample lines lines.", bg="light grey", anchor='w')
 explanatory_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Button for editing lines. This opens a sub-process to set up the line generation.
