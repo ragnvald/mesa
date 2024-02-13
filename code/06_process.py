@@ -118,7 +118,7 @@ def aggregate_data(intersected_data):
 
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
-    log_to_gui(log_widget, "Building tbl_stacked...")
+    log_to_gui(log_widget, "Building data mining database (tbl_stacked).")
     update_progress(10)  # Indicate start
 
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
@@ -160,7 +160,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
 # Create tbl_flat by reading out values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file):
     
-    log_to_gui(log_widget, "Building tbl_flat ...")
+    log_to_gui(log_widget, "Building map database (tbl_flat).")
 
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
@@ -209,8 +209,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
 
     # Save tbl_flat as a new layer in the GeoPackage
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
-
-
 
 
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
