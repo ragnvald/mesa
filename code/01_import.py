@@ -313,7 +313,7 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
     print (line_id_counter)
     update_progress(90)
 
-    log_to_gui(log_widget, f"Total geocodes added: {line_id_counter - 1}")
+    log_to_gui(log_widget, f"Total lines added: {line_id_counter - 1}")
 
     return line_objects_gdf
 
@@ -353,7 +353,7 @@ def copy_original_lines_to_tbl_lines(gpkg_file):
     schema = {
         'name_gis': 'str',
         'name_user': 'str',
-        'segment_nr': 'int',
+        'segment_length': 'int',
         'segment_width': 'int',
         'description': 'str',
         'geometry': 'geometry'
@@ -368,12 +368,12 @@ def copy_original_lines_to_tbl_lines(gpkg_file):
     dest_gdf = src_gdf.copy()
     dest_gdf['name_gis']        = dest_gdf.index.to_series().apply(lambda x: f"line_{x+1:03}")
     dest_gdf['name_user']       = dest_gdf['name_gis']
-    dest_gdf['segment_nr']      = 100
+    dest_gdf['segment_length']      = 100
     dest_gdf['segment_width']   = 100
     dest_gdf['description']     = dest_gdf.apply(lambda row: f"{row['name_user']} + {row['attributes']}", axis=1)
     
     # Adjust to ensure only the necessary columns are included
-    dest_gdf = dest_gdf[['name_gis', 'name_user', 'segment_nr', 'segment_width', 'description', 'geometry']]
+    dest_gdf = dest_gdf[['name_gis', 'name_user', 'segment_length', 'segment_width', 'description', 'geometry']]
     
     # Save the transformed GeoDataFrame to the now-empty destination table
     dest_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
