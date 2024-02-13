@@ -1,17 +1,11 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 #
-#  User selects input geocode group
-#  List of lines is provided (tbl_line_in)
-#   1) No tbl_line_input means a line should be created based on tbl_flat.
-#   2) tbl_line_input has one of more lines
-#  User selects lines
-#  User selects:
-#     - buffered width of line in meters
-#     - line segment length
-#  Feedback if selected combinations will overwrite existing data.
-#  Analyse overlayng geocode with line segments / polygons
-#     - results in tbl_line_out_flat (we might build a stacked one at a later stage...)
-#
+# File opens a dialog window. Initiate lines creates some random lines.
+# The initiated, random lines, or ordinary lines imported, can be
+# edited so that segment length and segment width can be defined by user.
+# Default values are set in the config file.
+# Processing the lines to segments is simplified for the user. So the
+# user will not learn about the stacked and flat segments.
 
 import geopandas as gpd
 import pandas as pd
@@ -67,6 +61,8 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
+    root.update_idletasks()  # Force the GUI to update
+
 
 def update_progress(new_value):
     progress_var.set(new_value)
