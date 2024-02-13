@@ -118,7 +118,7 @@ def create_lines_table_and_lines(gpkg_file, log_widget):
     gdf_lines = gpd.GeoDataFrame({
         'name_gis': [f'line_{i:03}' for i in range(1, 4)],
         'name_user': [f'line_{i:03}' for i in range(1, 4)],
-        'segment_nr': [15, 30, 10],
+        'segment_length': [15, 30, 10],
         'segment_width': [1000, 20000, 5000],
         'description': ['another line', 'another line', 'another line'],
         'geometry': lines
@@ -147,7 +147,7 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
                 gdf_line = row['geometry']
                 name_gis = row['name_gis']
                 name_user = row['name_user']
-                segment_nr = row['segment_nr']
+                segment_length = row['segment_length']
                 segment_width = row['segment_width']
                 description = row['description']
                 
@@ -168,7 +168,7 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
                     'fid': fid, 
                     'name_gis': name_gis, 
                     'name_user': name_user, 
-                    'segment_nr': segment_nr, 
+                    'segment_length': segment_length, 
                     'segment_width': segment_width, 
                     'description': description,
                     'geometry': temp_gdf_buffered.iloc[0].geometry  # Access the buffered geometry
@@ -202,8 +202,7 @@ def process_and_buffer_lines(gpkg_file, log_widget, crs="EPSG:4326", target_crs=
 # work as "knives" to for the polygons (buffered lines). We are making
 # sure that the lines are wider then the combined buffer size (length from
 # the centerline to the outer buffer).
-def create_perpendicular_lines(line_input, segment_width, segment_nr):
-
+def create_perpendicular_lines(line_input, segment_width, segment_length):
     # Define the projection transformation: EPSG:4326 to EPSG:4087 (for accurate distance calculations) and back
     transformer_to_4087 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=True)
     transformer_to_4326 = pyproj.Transformer.from_crs("EPSG:4087", "EPSG:4326", always_xy=True)
@@ -211,13 +210,16 @@ def create_perpendicular_lines(line_input, segment_width, segment_nr):
     # Reproject the line to EPSG:4087 for accurate distance measurements
     line_transformed = transform(transformer_to_4087.transform, line_input)
     
-    # Calculate equal intervals along the line
-    distances = [i/segment_nr * line_transformed.length for i in range(1, segment_nr + 1)]
+    # Calculate the number of segments based on the segment_length
+    full_length = line_transformed.length
+    num_segments = int(full_length / segment_length) # This ensures we cover as much of the line as possible with equal segments
+    
+    # Calculate distances where perpendicular lines will be created
+    distances = [segment_length * i for i in range(num_segments)] + [full_length] # Adding the last segment, even if smaller
     
     perpendicular_lines = []
 
     for d in distances:
-
         # Interpolate point on the line to find where the perpendicular line should cross
         point = line_transformed.interpolate(d)
         
@@ -225,8 +227,8 @@ def create_perpendicular_lines(line_input, segment_width, segment_nr):
         # This involves getting a small segment around the point and calculating its slope
         if d < segment_width:  # Handle start of line
             segment = LineString([line_transformed.interpolate(0), line_transformed.interpolate(segment_width)])
-        elif d > line_transformed.length - segment_width:  # Handle end of line
-            segment = LineString([line_transformed.interpolate(line_transformed.length - segment_width), line_transformed.interpolate(line_transformed.length)])
+        elif d > full_length - segment_width:  # Handle end of line
+            segment = LineString([line_transformed.interpolate(full_length - segment_width), line_transformed.interpolate(full_length)])
         else:
             segment = LineString([line_transformed.interpolate(d - segment_width/2), line_transformed.interpolate(d + segment_width/2)])
         
@@ -240,8 +242,6 @@ def create_perpendicular_lines(line_input, segment_width, segment_nr):
             angle = math.pi / 2 if dy > 0 else -math.pi / 2
 
         # Define the extended length of the perpendicular line.
-        # Extending the line by a factor of 3 just so that we are sure
-        # the line is long enough.
         length = (segment_width / 2) * 3  
         
         # Calculate the offsets for the perpendicular line ends
@@ -300,7 +300,7 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
     buffered_lines_gdf = gpd.read_file(gpkg_file, layer='tbl_lines_buffered')
 
     # Initialize an empty GeoDataFrame for accumulating segments
-    all_segments_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'segment_nr', 'geometry'])
+    all_segments_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'segment_length', 'geometry'])
 
     # Initialize a counter for segment_id generation
     segment_id_counter = {}
@@ -310,14 +310,14 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
         name_gis = row['name_gis']
         name_user = row['name_user']
         segment_width = row['segment_width']
-        segment_nr = row['segment_nr']
+        segment_length = row['segment_length']
 
         # Initialize or update the counter for the current name_gis
         if name_gis not in segment_id_counter:
             segment_id_counter[name_gis] = 1
 
         # Generate perpendicular lines for the current line
-        perpendicular_lines = create_perpendicular_lines(line_input, segment_width, segment_nr)
+        perpendicular_lines = create_perpendicular_lines(line_input, segment_width, segment_length)
 
         # Find matching buffered lines by 'name_gis'
         matches = buffered_lines_gdf[buffered_lines_gdf['name_gis'] == name_gis]
@@ -338,7 +338,7 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
             # Add attributes to the segments GeoDataFrame
             segments_gdf['name_gis'] = name_gis
             segments_gdf['name_user'] = name_user
-            segments_gdf['segment_nr'] = segment_nr
+            segments_gdf['segment_length'] = segment_length
 
             # Accumulate the created segments
             all_segments_gdf = pd.concat([all_segments_gdf, segments_gdf], ignore_index=True)
