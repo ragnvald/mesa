@@ -93,7 +93,7 @@ def get_status(gpkg_file):
             try:
                 table = gpd.read_file(gpkg_file, layer=layer_name)
                 if table['sensitivity'].sum() > 0:
-                    return "+", "All good. You may revise your parameters."
+                    return "+", "Parameters ok. Feel free to revise them."
                 else:
                     return "-", "You need to set up the calculation. \nPress the 'Set up'-button to proceed."
             except Exception:
@@ -118,10 +118,14 @@ def get_status(gpkg_file):
         if symbol:
             append_status(symbol, message)
 
-        # Repeat the process for other checks
-        for layer_name, label in [('tbl_stacked', 'Stacked cells'), ('tbl_flat', 'Flat cells'), ('tbl_atlas', 'Atlas pages')]:
-            count = read_table_and_count(layer_name)
-            append_status("+" if count is not None else "-", f"{label}: {count}" if count is not None else f"{label} table is missing.\nPress button Process data to initiate.")
+        # Check for tbl_geocode_group
+        stacked_cells_count = read_table_and_count('tbl_stacked')
+        flat_original_count = read_table_and_count('tbl_flat')
+        append_status("+" if stacked_cells_count is not None else "-", f"Processing success ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the Processing button.")
+        
+        # Check for tbl_geocode_group
+        atlas_count = read_table_and_count('tbl_atlas')
+        append_status("+" if atlas_count is not None else "/", f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please process atlas.")
 
         # Check for tbl_geocode_group
         lines_original_count = read_table_and_count('tbl_lines_original')
