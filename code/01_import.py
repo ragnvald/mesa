@@ -65,8 +65,8 @@ def update_progress(new_value):
 
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    formatted_message = f"{timestamp} - {message}"
+    timestamp           = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message   = f"{timestamp} - {message}"
     log_widget.insert(tk.END, formatted_message + "\n")
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
@@ -158,8 +158,8 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     log_to_gui(log_widget, f"  {layer_name} ({feature_count} features)")
 
     # Calculate bounding box and add to geocode groups
-    bounding_box = data.total_bounds
-    bbox_geom = box(*bounding_box)
+    bounding_box    = data.total_bounds
+    bbox_geom       = box(*bounding_box)
     name_gis_geocodegroup = f"geocode_{group_id_counter:03d}"
 
     geocode_groups.append({
@@ -191,16 +191,16 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
     if filepath.endswith('.gpkg'):
         ds = ogr.Open(filepath)
         for i in range(ds.GetLayerCount()):
-            layer = ds.GetLayerByIndex(i)
-            layer_name = layer.GetName()
-            data = read_and_reproject(filepath, layer=layer_name)
+            layer       = ds.GetLayerByIndex(i)
+            layer_name  = layer.GetName()
+            data        = read_and_reproject(filepath, layer=layer_name)
             log_to_gui(log_widget, f"Importing {layer_name}")
             group_id_counter, object_id_counter = process_geocode_layer(
                 data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
-        data = read_and_reproject(filepath)
-        layer_name = os.path.splitext(os.path.basename(filepath))[0]
+        data            = read_and_reproject(filepath)
+        layer_name      = os.path.splitext(os.path.basename(filepath))[0]
         log_to_gui(log_widget, f"Importing {layer_name}")
         group_id_counter, object_id_counter = process_geocode_layer(
             data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
@@ -214,9 +214,9 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
     if filepath.endswith('.gpkg'):
         ds = ogr.Open(filepath)
         for i in range(ds.GetLayerCount()):
-            layer = ds.GetLayerByIndex(i)
-            layer_name = layer.GetName()
-            data = read_and_reproject(filepath, layer=layer_name)
+            layer       = ds.GetLayerByIndex(i)
+            layer_name  = layer.GetName()
+            data        = read_and_reproject(filepath, layer=layer_name)
             log_to_gui(log_widget, f"Importing {layer_name}")
             line_id_counter = process_line_layer(
                 data, line_objects, line_id_counter, layer_name, log_widget)
@@ -234,13 +234,13 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
 
 # Import spatial data and export to geopackage
 def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
-    geocode_groups = []
-    geocode_objects = []
-    group_id_counter = 1
-    object_id_counter = 1
-    file_patterns = ['*.shp', '*.gpkg']
-    total_files = sum([len(glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)) for pattern in file_patterns])
-    processed_files = 0
+    geocode_groups      = []
+    geocode_objects     = []
+    group_id_counter    = 1
+    object_id_counter   = 1
+    file_patterns       = ['*.shp', '*.gpkg']
+    total_files         = sum([len(glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)) for pattern in file_patterns])
+    processed_files     = 0
 
     if total_files == 0:
         progress_increment = 70
@@ -278,10 +278,10 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
 
 # Import line data and export to geopackage
 def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
-    line_objects = []
+    line_objects    = []
     line_id_counter = 1
-    file_patterns = ['*.shp', '*.gpkg']
-    total_files = sum([len(glob.glob(os.path.join(input_folder_lines, '**', pattern), recursive=True)) for pattern in file_patterns])
+    file_patterns   = ['*.shp', '*.gpkg']
+    total_files     = sum([len(glob.glob(os.path.join(input_folder_lines, '**', pattern), recursive=True)) for pattern in file_patterns])
     processed_files = 0
 
     if total_files == 0:
@@ -310,7 +310,6 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
     line_objects_gdf = gpd.GeoDataFrame(line_objects, geometry='geom' if line_objects else None)
     
-    print (line_id_counter)
     update_progress(90)
 
     log_to_gui(log_widget, f"Total lines added: {line_id_counter - 1}")
@@ -344,10 +343,10 @@ def initialize_empty_table(gpkg_file, dest_table, schema):
     empty_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
 
 
-def copy_original_lines_to_tbl_lines(gpkg_file):
+def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
     
-    src_table='tbl_lines_original'
-    dest_table='tbl_lines'
+    src_table   = 'tbl_lines_original'
+    dest_table  = 'tbl_lines'
 
     # Ensure the destination table is empty
     schema = {
@@ -365,11 +364,11 @@ def copy_original_lines_to_tbl_lines(gpkg_file):
     src_gdf = gpd.read_file(gpkg_file, layer=src_table)
     
     # Transform the source data to match the destination table's schema
-    dest_gdf = src_gdf.copy()
+    dest_gdf                    = src_gdf.copy()
     dest_gdf['name_gis']        = dest_gdf.index.to_series().apply(lambda x: f"line_{x+1:03}")
     dest_gdf['name_user']       = dest_gdf['name_gis']
-    dest_gdf['segment_length']      = 100
-    dest_gdf['segment_width']   = 100
+    dest_gdf['segment_length']  = segment_length
+    dest_gdf['segment_width']   = segment_width
     dest_gdf['description']     = dest_gdf.apply(lambda row: f"{row['name_user']} + {row['attributes']}", axis=1)
     
     # Adjust to ensure only the necessary columns are included
@@ -383,8 +382,6 @@ def copy_original_lines_to_tbl_lines(gpkg_file):
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
-    print(line_objects_gdf)
-
     log_to_gui(log_widget, f"Preparing import of lines.")
 
     if not line_objects_gdf.empty:
@@ -392,21 +389,21 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
 
     log_to_gui(log_widget, "Import of completed.")
 
-    copy_original_lines_to_tbl_lines(gpkg_file)
+    copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length)
 
     update_progress(100)
 
 
 # Function imports spatial data for assets
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
-    asset_objects = []
-    asset_groups = []
-    group_id_counter = 1
-    object_id_counter = 1
-    file_patterns = ['*.shp', '*.gpkg']
-    total_files = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
-    processed_files = 0
-    progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
+    asset_objects       = []
+    asset_groups        = []
+    group_id_counter    = 1
+    object_id_counter   = 1
+    file_patterns       = ['*.shp', '*.gpkg']
+    total_files         = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
+    processed_files     = 0
+    progress_increment  = 70 / total_files  # Distribute 70% of progress bar over file processing
     log_to_gui(log_widget, "Working with asset imports...")
     progress_var.set(10)  # Initial progress after starting
     update_progress(10)
@@ -565,6 +562,8 @@ config                  = read_config(config_file)
 input_folder_asset      = config['DEFAULT']['input_folder_asset']
 input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
 input_folder_lines      = config['DEFAULT']['input_folder_lines']
+segment_width           = config['DEFAULT']['segment_width']
+segment_length          = config['DEFAULT']['segment_length']
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 
