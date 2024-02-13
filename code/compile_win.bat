@@ -75,6 +75,12 @@ pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_
 echo Working on 07_make_atlas.py
 pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
+echo Working on 08_admin_lines.py
+pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+
+echo Working on 08_edit_lines.py
+pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+
 echo Compilation complete. You will finde the compiled code herE: %DIST_FOLDER%
 
 
