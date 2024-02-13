@@ -63,7 +63,7 @@ def update_record(save_message=True):
     try:
         df.at[current_index, 'name_gis']        = name_gis_var.get()
         df.at[current_index, 'name_user']       = name_user_var.get()
-        df.at[current_index, 'segment_nr']      = segment_nr_var.get()
+        df.at[current_index, 'segment_length']      = segment_length_var.get()
         df.at[current_index, 'segment_width']   = segment_width_var.get()
         df.at[current_index, 'description']     = description_var.get()
         save_data(df)  # Save changes to the database
@@ -88,7 +88,7 @@ def load_record():
     record = df.iloc[current_index]
     name_gis_var.set(record['name_gis'])
     name_user_var.set(record['name_user'])
-    segment_nr_var.set(record['segment_nr'])
+    segment_length_var.set(record['segment_length'])
     segment_width_var.set(record['segment_width'])
     description_var.set(record['description'])
 
@@ -124,7 +124,7 @@ current_index = 0
 # Variables for form fields
 name_gis_var = tk.StringVar()
 name_user_var = tk.StringVar()
-segment_nr_var = tk.StringVar()
+segment_length_var = tk.StringVar()
 segment_width_var = tk.StringVar()
 description_var = tk.StringVar()
 
@@ -140,8 +140,8 @@ name_user_entry.grid(row=1, column=1, sticky='w')
 
 # Write number of segments
 tk.Label(root, text="Number of segments").grid(row=2, column=0, sticky='w')
-segment_nr_entry = tk.Entry(root, textvariable=segment_nr_var, width=50)
-segment_nr_entry.grid(row=2, column=1, sticky='w')
+segment_length_entry = tk.Entry(root, textvariable=segment_length_var, width=50)
+segment_length_entry.grid(row=2, column=1, sticky='w')
 
 # Width of the segments
 tk.Label(root, text="Segments width (meters)").grid(row=3, column=0, sticky='w')
