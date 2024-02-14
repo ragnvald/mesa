@@ -594,11 +594,10 @@ progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, ne
 
 
 # Information text field below the progress bar
-info_label_text = ("Assets are all shapefiles or geopackage files with their layers "
-                   "that are placed in the folder input/assets-folder. The features will "
-                   "be placed in our database and used in the analysis. All assets will "
-                   "be associated with importance and susceptibility values."
-                   "Please refer to the log.txt to review the full log.")
+info_label_text = ("Assets are geopackage files with layers or shapefiles placed in the input/assets-folder. "
+                   "On this page you can import assets, geocodes (grids) and lines. The features will "
+                   "be placed in our database and used in the analysis. All assets will be associated "
+                   "with importance and susceptibility values. Please refer to the log.txt to review the full log.")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 

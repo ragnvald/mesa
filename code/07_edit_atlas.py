@@ -120,9 +120,9 @@ df = load_data()
 current_index = 0
 
 # Variables for form fields
-name_gis_var = tk.StringVar()
-title_user_var = tk.StringVar()
-description_var = tk.StringVar()
+name_gis_var     = tk.StringVar()
+title_user_var   = tk.StringVar()
+description_var  = tk.StringVar()
 image_name_1_var = tk.StringVar()
 image_desc_1_var = tk.StringVar()
 image_name_2_var = tk.StringVar()

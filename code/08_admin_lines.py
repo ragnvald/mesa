@@ -35,6 +35,7 @@ import tkinter.scrolledtext as scrolledtext
 import ttkbootstrap as ttk
 from ttkbootstrap import Style
 
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()

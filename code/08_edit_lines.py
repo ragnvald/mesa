@@ -63,7 +63,7 @@ def update_record(save_message=True):
     try:
         df.at[current_index, 'name_gis']        = name_gis_var.get()
         df.at[current_index, 'name_user']       = name_user_var.get()
-        df.at[current_index, 'segment_length']      = segment_length_var.get()
+        df.at[current_index, 'segment_length']  = segment_length_var.get()
         df.at[current_index, 'segment_width']   = segment_width_var.get()
         df.at[current_index, 'description']     = description_var.get()
         save_data(df)  # Save changes to the database
@@ -139,7 +139,7 @@ name_user_entry = tk.Entry(root, textvariable=name_user_var, width=50)
 name_user_entry.grid(row=1, column=1, sticky='w')
 
 # Write number of segments
-tk.Label(root, text="Number of segments").grid(row=2, column=0, sticky='w')
+tk.Label(root, text="Length of segments").grid(row=2, column=0, sticky='w')
 segment_length_entry = tk.Entry(root, textvariable=segment_length_var, width=50)
 segment_length_entry.grid(row=2, column=1, sticky='w')
 
