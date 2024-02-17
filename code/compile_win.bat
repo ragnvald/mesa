@@ -6,7 +6,7 @@ echo off
 
 setlocal
 
-echo .
+echo
 echo Setting up paths etc.
 
 :: Get the full path to the batch script
@@ -24,11 +24,11 @@ set "BUILD_FOLDER=%PARENT_DIR%build"
 :: Define the dist folder path
 set "DIST_FOLDER=%PARENT_DIR%dist"
 
-echo .
+echo
 echo Fetching config.ini...
 xcopy "%SCRIPT_PATH%\config.ini" "%DIST_FOLDER%" /Y >nul 2>&1
 
-echo .
+echo
 echo Copying folders...
 echo -system_resources...
 xcopy "%SCRIPT_PATH%\system_resources" "%DIST_FOLDER%\system_resources" /E /I /Y >nul 2>&1
@@ -48,43 +48,46 @@ echo Working in this folder: %BUILD_FOLDER%
 echo Distribution folder will be: %DIST_FOLDER%
 
 :: Start the compilation
+
 echo Working on user_interface.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" user_interface.py >nul 2>&1
+
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" user_interface.py >nul 2>&1
 
 echo Working on 01_import.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 01_import.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 01_import.py >nul 2>&1
 
 echo Working on 02_present_files.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 02_present_files.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 02_present_files.py >nul 2>&1
 
 echo Working on 04_edit_asset_group.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_asset_group.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_asset_group.py >nul 2>&1
 
 echo Working on 04_edit_geocode_group.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_geocode_group.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_geocode_group.py >nul 2>&1
 
 echo Working on 04_edit_input.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_input.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 04_edit_input.py >nul 2>&1
 
 echo Working on 06_process.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 06_process.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 06_process.py >nul 2>&1
 
 echo Working on 07_edit_atlas.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_edit_atlas.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_edit_atlas.py >nul 2>&1
 
 echo Working on 07_make_atlas.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
 echo Working on 08_admin_lines.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
 echo Working on 08_edit_lines.py
-pyinstaller --onefile --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
 echo Compilation complete. You will finde the compiled code herE: %DIST_FOLDER%
 
 
 
+echo
 
 :: Clean up build folders and .spec files
 
@@ -97,10 +100,12 @@ if exist "%BUILD_FOLDER%" (
     echo Work folder does not exist: %BUILD_FOLDER%
 )
 
-echo Build folders deleted
+ echo Build folders deleted
 
-::Just delete the -spec-files
-del "*.spec" /q
+echo
+
+:: Just delete the -spec-files
+ del "*.spec" /q
 
 echo All .spec-files deleted
 
