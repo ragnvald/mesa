@@ -89,7 +89,7 @@ def get_status(gpkg_file):
             try:
                 table = gpd.read_file(gpkg_file, layer=layer_name)
                 if table['sensitivity'].sum() > 0:
-                    return "+", "Parameters ok. Feel free to revise them."
+                    return "+", "Set up ok. Feel free to adjust it."
                 else:
                     return "-", "You need to set up the calculation. \nPress the 'Set up'-button to proceed."
             except Exception:
