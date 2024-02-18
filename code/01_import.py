@@ -11,8 +11,10 @@
 import tkinter as tk
 
 import locale
-
-locale.setlocale(locale.LC_ALL, 'C') 
+try:
+    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
+except locale.Error:
+    locale.setlocale(locale.LC_ALL, '') 
 
 from tkinter import scrolledtext, ttk
 
@@ -20,7 +22,7 @@ from fiona import open as fiona_open
 
 import threading
 import geopandas as gpd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 import configparser
 import datetime
 import glob
@@ -69,16 +71,6 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
-
-
-def clear_table_data(gpkg_file, table_name, log_widget):
-    try:
-        engine = create_engine(f'sqlite:///{gpkg_file}')
-        with engine.connect() as conn:
-            conn.execute(text(f"DELETE FROM {table_name}"))
-            log_to_gui(log_widget, f"Data cleared from table: {table_name}")
-    except Exception as e:
-        log_to_gui(log_widget, f"Error clearing data from {table_name}: {e}")
 
 
 # Function to read and reproject spatial data
@@ -327,11 +319,6 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
 # Thread function to run import without freezing GUI
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
-
-    log_to_gui(log_widget, f"Deleting old geocode table")
-    clear_table_data(gpkg_file, 'tbl_geocode_group', log_widget)
-    clear_table_data(gpkg_file, 'tbl_geocode_object', log_widget)
-
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
 
     log_to_gui(log_widget, f"Preparing import of geocode groups and objects.")
@@ -393,10 +380,6 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
 
 # Thread function to run import without freezing GUI
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
-
-    log_to_gui(log_widget, f"Deleting lines_table.")
-    clear_table_data(gpkg_file, 'tbl_lines_original', log_widget)
-
     line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
     log_to_gui(log_widget, f"Preparing import of lines.")
@@ -481,7 +464,33 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
 
-# Function exports data to geopackage and secures replacing relevant data.
+def delete_layer(gpkg_file, layer_name):
+    """
+    Attempts to delete a layer from a GeoPackage file.
+
+    Parameters:
+    - gpkg_file: Path to the GeoPackage file.
+    - layer_name: Name of the layer to delete.
+    - log_function: Function to log messages, e.g., print or a custom logging function.
+    """
+    try:
+        ds = ogr.Open(gpkg_file, update=True)  # Open in update mode
+        if ds is not None:
+            layer = ds.GetLayerByName(layer_name)
+            if layer is not None:
+                ds.DeleteLayer(layer_name)
+                log_to_gui(f"Layer {layer_name} deleted from {gpkg_file}.")
+            else:
+                log_to_gui(log_widget, f"Layer {layer_name} does not exist in {gpkg_file}.")
+            ds = None  # Ensure the data source is closed
+        else:
+            log_to_gui(log_widget, f"Failed to open {gpkg_file}.")
+    except Exception as e:
+        log_to_gui(log_widget, f"An error occurred while attempting to delete layer {layer_name} from {gpkg_file}: {e}")
+
+
+
+# Function exports data to geopackage and secures replacing relevant data.  
 def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     # Check if the GeoPackage file exists
     if not os.path.exists(gpkg_file):
@@ -489,9 +498,16 @@ def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
         gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
         log_to_gui(log_widget, f"Created new GeoPackage file {gpkg_file} with layer {layer_name}.")
     else:
-        # Overwrite the layer if it exists, otherwise create a new layer
-        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
-        log_to_gui(log_widget, f"Replaced data for layer {layer_name} in GeoPackage.")
+
+        if not gdf.empty:
+
+            delete_layer(gpkg_file, layer_name)
+
+            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+            log_to_gui(log_widget, f"Data for layer {layer_name} saved in GeoPackage.")
+        else:
+            log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
+
 
 
 # Function to update asset groups in geopackage
@@ -518,11 +534,6 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
 
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
-
-    log_to_gui(log_widget, f"Deleting assets data in database.")
-    clear_table_data(gpkg_file, 'tbl_asset_object', log_widget)
-    clear_table_data(gpkg_file, 'tbl_asset_group', log_widget)
-
     log_to_gui(log_widget, "Starting asset import process...")
     
     asset_objects_gdf, asset_groups_df, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
