@@ -20,7 +20,7 @@ from fiona import open as fiona_open
 
 import threading
 import geopandas as gpd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import configparser
 import datetime
 import glob
@@ -69,6 +69,16 @@ def log_to_gui(log_widget, message):
     log_widget.see(tk.END)
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
+
+
+def clear_table_data(gpkg_file, table_name, log_widget):
+    try:
+        engine = create_engine(f'sqlite:///{gpkg_file}')
+        with engine.connect() as conn:
+            conn.execute(text(f"DELETE FROM {table_name}"))
+            log_to_gui(log_widget, f"Data cleared from table: {table_name}")
+    except Exception as e:
+        log_to_gui(log_widget, f"Error clearing data from {table_name}: {e}")
 
 
 # Function to read and reproject spatial data
@@ -317,6 +327,11 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
 # Thread function to run import without freezing GUI
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
+
+    log_to_gui(log_widget, f"Deleting old geocode table")
+    clear_table_data(gpkg_file, 'tbl_geocode_group', log_widget)
+    clear_table_data(gpkg_file, 'tbl_geocode_object', log_widget)
+
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
 
     log_to_gui(log_widget, f"Preparing import of geocode groups and objects.")
@@ -378,6 +393,10 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
 
 # Thread function to run import without freezing GUI
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
+
+    log_to_gui(log_widget, f"Deleting lines_table.")
+    clear_table_data(gpkg_file, 'tbl_lines_original', log_widget)
+
     line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
     log_to_gui(log_widget, f"Preparing import of lines.")
@@ -499,6 +518,11 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
 
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
+
+    log_to_gui(log_widget, f"Deleting assets data in database.")
+    clear_table_data(gpkg_file, 'tbl_asset_object', log_widget)
+    clear_table_data(gpkg_file, 'tbl_asset_group', log_widget)
+
     log_to_gui(log_widget, "Starting asset import process...")
     
     asset_objects_gdf, asset_groups_df, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
