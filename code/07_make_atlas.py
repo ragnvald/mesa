@@ -155,7 +155,9 @@ progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, ne
 
 
 # Information text field above the buttons
-info_label_text = ("This tool generates and updates atlas geometries based on the provided configurations. Earlier geometries and asociated information will be deleted.")
+info_label_text = ("This is where you can generate and update atlas geometries. "
+                   "The size of an atlas frame is set in the config.ini-file. "
+                   "Earlier atlas frames and their asociated information will be deleted.")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
 info_label.pack(padx=10, pady=10)
 
