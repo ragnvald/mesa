@@ -1,19 +1,15 @@
 import tkinter as tk
 from tkinter import *
 import locale
+import os
 
-try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')  # For US English, adjust as needed
-except locale.Error:
-    locale.setlocale(locale.LC_ALL, '') 
+locale.setlocale(locale.LC_ALL, 'C') 
 
 import subprocess
 import webbrowser
 import datetime
-import os
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
-from ttkbootstrap import LabelFrame
 import pandas as pd
 import geopandas as gpd
 import configparser

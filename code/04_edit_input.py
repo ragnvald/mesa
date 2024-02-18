@@ -1,10 +1,8 @@
 import tkinter as tk
 
 import locale
-try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
-except locale.Error:
-    locale.setlocale(locale.LC_ALL, '') 
+
+locale.setlocale(locale.LC_ALL, 'C') 
 
 from tkinter import messagebox, ttk
 import configparser
