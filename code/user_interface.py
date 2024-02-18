@@ -117,15 +117,15 @@ def get_status(gpkg_file):
         # Check for tbl_geocode_group
         stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
-        append_status("+" if stacked_cells_count is not None else "-", f"Processing success ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the Processing button.")
+        append_status("+" if stacked_cells_count is not None else "-", f"Processing success ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.")
         
         # Check for tbl_geocode_group
         atlas_count = read_table_and_count('tbl_atlas')
-        append_status("+" if atlas_count is not None else "/", f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please process atlas.")
+        append_status("+" if atlas_count is not None else "/", f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please create atlas.")
 
         # Check for tbl_geocode_group
         lines_original_count = read_table_and_count('tbl_lines_original')
-        append_status("+" if lines_original_count is not None else "/", f"Line layers: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
+        append_status("+" if lines_original_count is not None else "/", f"Atlas in place with {lines_original_count}\nmap plates" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
