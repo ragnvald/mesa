@@ -124,6 +124,7 @@ def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_
     return object_id_counter
 
 
+# Process the lines in a layer. Add appropriate attributes.
 def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
@@ -148,7 +149,6 @@ def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widg
 # placed within one attribute (attributes) in the tbl_geocode_object table. At the time
 # of writing this I am not sure if the attribute name is kept here. If not it should be
 # placed separately in tbl_geocode_group.
-#
 def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
@@ -186,7 +186,7 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     return group_id_counter + 1, object_id_counter
 
 
-# Function to process each file
+# Function to process each geocode file
 def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget):
     if filepath.endswith('.gpkg'):
         ds = ogr.Open(filepath)
@@ -209,7 +209,8 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
     return group_id_counter, object_id_counter
 
 
-# Function to process each file
+# Function to process each file while readint through the filepath.
+# Supposedly being done recursively.
 def process_line_file(filepath, line_objects, line_id_counter, log_widget):
     if filepath.endswith('.gpkg'):
         ds = ogr.Open(filepath)
@@ -317,7 +318,7 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
     return line_objects_gdf
 
 
-# Thread function to run import without freezing GUI
+# Thread function to run import of geocodes
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
 
@@ -333,6 +334,9 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
 
     update_progress(100)
 
+
+# Emtpy the destination table. Not sure if this one works 100%, but we will
+# stick with it for now.
 def initialize_empty_table(gpkg_file, dest_table, schema):
     # Create an empty GeoDataFrame with the specified schema
     empty_gdf = gpd.GeoDataFrame(columns=schema.keys(), geometry='geometry')
@@ -343,6 +347,9 @@ def initialize_empty_table(gpkg_file, dest_table, schema):
     empty_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
 
 
+# Original lines are copied to tbl_lines where the user can make
+# edits to segment width and length. Furthermore name (title) and description
+# can also be reviewed by the user.
 def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
     
     src_table   = 'tbl_lines_original'
@@ -378,7 +385,7 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
     dest_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
 
 
-# Thread function to run import without freezing GUI
+# Thread function to run import lines
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
