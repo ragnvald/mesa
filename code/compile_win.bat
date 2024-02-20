@@ -42,6 +42,9 @@ xcopy "%SCRIPT_PATH%\output" "%DIST_FOLDER%\output" /E /I /Y >nul 2>&1
 echo -qgis...
 xcopy "%SCRIPT_PATH%\qgis" "%DIST_FOLDER%\qgis" /E /I /Y >nul 2>&1
 
+echo -docs...
+xcopy "%SCRIPT_PATH%\docs" "%DIST_FOLDER%\docs" /E /I /Y >nul 2>&1
+
 echo
 echo Working in this folder: %BUILD_FOLDER%
 
@@ -78,10 +81,10 @@ echo Working on 07_make_atlas.py
 pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
 
 echo Working on 08_admin_lines.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 08_admin_lines.py >nul 2>&1
 
 echo Working on 08_edit_lines.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 07_make_atlas.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 08_edit_lines.py >nul 2>&1
 
 echo Compilation complete. You will finde the compiled code herE: %DIST_FOLDER%
 
