@@ -46,9 +46,11 @@ def update_records():
         df.loc[df['id'] == row_id, 'title_user'] = title_user
         df.loc[df['id'] == row_id, 'description'] = description
 
+
 def save_changes():
     update_records()
     save_spatial_data()
+
 
 # Function to load spatial data from the database
 def load_spatial_data(gpkg_file):
@@ -107,7 +109,6 @@ tk.Label(edit_frame, text="Layer name").grid(row=0, column=2, sticky='w')
 tk.Label(edit_frame, text="User Title").grid(row=0, column=3, sticky='w')
 tk.Label(edit_frame, text="Description").grid(row=0, column=4, sticky='w')
 
-
 # Store references to the variables
 records = []
 
@@ -119,7 +120,6 @@ for idx, row in df.iterrows():
     
     # Read-only field for 'name_gis'
     tk.Label(edit_frame, text=row['name_gis_geocodegroup']).grid(row=row_number, column=1, sticky='w')
-    
     
     # Editable field for 'user title'
     name_var = tk.StringVar(value=row.get('name', ''))

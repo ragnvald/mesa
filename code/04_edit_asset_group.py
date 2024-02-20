@@ -1,5 +1,4 @@
 import tkinter as tk
-
 import locale
 
 locale.setlocale(locale.LC_ALL, 'C') 
@@ -39,6 +38,7 @@ def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     return pd.read_sql_table('tbl_asset_group', engine)
 
+
 # Function to save data to the database
 def save_data(df):
     try:
@@ -48,6 +48,7 @@ def save_data(df):
     except Exception as e:
         write_to_log(f"Error saving data: {e}")
         print(f"Error saving data: {e}")
+
 
 # Function to update record in the DataFrame and save to the database
 def update_record(save_message=True):
@@ -60,6 +61,7 @@ def update_record(save_message=True):
             write_to_log("Record updated and saved")
     except Exception as e:
         write_to_log(f"Error updating and saving record: {e}")
+
 
 # Navigate through records
 def navigate(direction):
@@ -142,7 +144,7 @@ ttk.Button(root, text="Save", command=update_record, bootstyle=PRIMARY).grid(row
 ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
 
 # Exit button
-ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=5, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=2, columnspan=3, pady=5)
 
 # Load the first record
 load_record()

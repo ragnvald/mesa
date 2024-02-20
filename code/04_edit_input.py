@@ -1,5 +1,4 @@
 import tkinter as tk
-
 import locale
 
 locale.setlocale(locale.LC_ALL, 'C') 
@@ -9,7 +8,6 @@ import configparser
 import pandas as pd
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
-
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 

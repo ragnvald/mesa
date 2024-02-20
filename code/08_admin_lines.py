@@ -23,7 +23,6 @@ import pyproj
 from functools import partial
 
 # Set locale
-
 locale.setlocale(locale.LC_ALL, 'C') 
 
 import os

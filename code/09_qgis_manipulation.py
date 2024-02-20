@@ -1,3 +1,7 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# 
+# Work in progress
+#
 # Purpose
 #
 # * Create data frames based on tables tbl_geocode_group, tbl_asset_group

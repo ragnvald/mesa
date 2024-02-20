@@ -1,3 +1,7 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# This is where evertthing comes together for the gridded assets.
+#
+
 import tkinter as tk
 
 import locale

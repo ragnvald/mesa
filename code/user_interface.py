@@ -42,6 +42,8 @@ def open_link(url):
     webbrowser.open_new_tab(url)
 
 
+# This function updates the stats in the labelframe. Clear labels first,
+# then write the updates.
 def update_stats():
     # Clear the labels before updating
     for widget in info_labelframe.winfo_children():
@@ -53,6 +55,7 @@ def update_stats():
     if not my_status.empty and {'Status', 'Message'}.issubset(my_status.columns):
         for index, row in my_status.iterrows():
             if row['Status'] == "+":
+                # Green is for success - data has been added.
                 status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success')
                 status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
             elif row['Status'] == "/":
@@ -60,6 +63,7 @@ def update_stats():
                 status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='warning')
                 status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
             else:
+                # Red is for data missing.
                 status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
                 status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -125,7 +129,7 @@ def get_status(gpkg_file):
 
         # Check for tbl_geocode_group
         lines_original_count = read_table_and_count('tbl_lines_original')
-        append_status("+" if lines_original_count is not None else "/", f"Atlas in place with {lines_original_count}\nmap plates" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
+        append_status("+" if lines_original_count is not None else "/", f"{lines_original_count} lines in place." if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
@@ -145,7 +149,7 @@ def import_assets():
             # If import.py fails or is not found, try running import.exe
             subprocess.run(["01_import.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute import assets script")
+            log_to_logfile("Failed to execute import assets script.")
     update_stats()
 
 
@@ -158,7 +162,7 @@ def edit_asset_group():
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_asset_group.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute edit asset group script")
+            log_to_logfile("Failed to execute edit asset group script.")
     update_stats()
 
 
@@ -170,7 +174,7 @@ def edit_geocode_group():
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_geocode_group.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute edit geocode group script")
+            log_to_logfile("Failed to execute edit geocode group script.")
     update_stats()
 
 
@@ -182,7 +186,7 @@ def edit_processing_setup():
             # If import.py fails, try running import.exe
             subprocess.run(["04_edit_input.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute edit input script")
+            log_to_logfile("Failed to execute edit input script.")
     update_stats()
 
 
@@ -194,7 +198,7 @@ def process_data():
             # If import.py fails, try running import.exe
             subprocess.run(["06_process.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute processing script")
+            log_to_logfile("Failed to execute processing script.")
     update_stats()
 
 
@@ -206,7 +210,7 @@ def make_atlas():
             # If import.py fails, try running import.exe
             subprocess.run(["07_make_atlas.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute make atlas script")
+            log_to_logfile("Failed to execute make atlas script.")
     update_stats()
 
 
@@ -218,7 +222,7 @@ def edit_atlas():
             # If import.py fails, try running import.exe
             subprocess.run(["07_edit_atlas.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute edit atlas script")
+            log_to_logfile("Failed to execute edit atlas script.")
     update_stats()
 
 
@@ -230,7 +234,7 @@ def admin_lines():
             # If import.py fails, try running import.exe
             subprocess.run(["08_admin_lines.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute admin lines")
+            log_to_logfile("Failed to execute admin lines.")
     update_stats()
 
 
@@ -242,7 +246,7 @@ def edit_lines():
             # If import.py fails, try running import.exe
             subprocess.run(["08_edit_lines.exe"], check=True)
         except subprocess.CalledProcessError:
-            log_to_logfile("Failed to execute edit lines script")
+            log_to_logfile("Failed to execute edit lines script.")
     update_stats()
 
 
@@ -347,7 +351,7 @@ right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
 info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-
+log_to_logfile("User interface, statistics updated.")
 update_stats()
 
 # Bind the configure event to update the wraplength of the label
@@ -370,10 +374,10 @@ mesa_text = """This version of the MESA tool is a stand-alone desktop based vers
 add_text_to_labelframe(about_labelframe, mesa_text)
 
 # Version label aligned bottom right
-version_label = ttk.Label(bottom_panel, text="MESA version 3.5 beta", font=("Calibri", 7), anchor='e')
+version_label = ttk.Label(bottom_panel, text="MESA version 4.0.0-alpha", font=("Calibri", 7), anchor='e')
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
-log_to_logfile("User interface, main dialogue opened")
+log_to_logfile("User interface, main dialogue opened.")
 
 
 # Start the GUI event loop

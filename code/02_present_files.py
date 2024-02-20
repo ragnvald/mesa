@@ -1,3 +1,7 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# 
+# Work in progress
+#
 # The intention of this file is to provide a draft overview of assets, geocodes and coded assets
 # Could be used to create the basis for a PDF report showing the database processing.
 # As for now - just a proof of concept.

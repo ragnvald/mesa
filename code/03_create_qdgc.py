@@ -1,3 +1,10 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# 
+# Work in progress
+# The plan is to create grid cells at a requested level based on the imported
+# assets.
+#
+
 import geopandas as gpd
 from shapely.geometry import Polygon, box
 import numpy as np

@@ -9,17 +9,12 @@
 #               as well as municipalities and other.
 
 import tkinter as tk
-
 import locale
-try:
-    locale.setlocale(locale.LC_ALL, 'de_DE.utf8')
-except locale.Error:
-    locale.setlocale(locale.LC_ALL, '') 
+
+locale.setlocale(locale.LC_ALL, 'C') 
 
 from tkinter import scrolledtext, ttk
-
 from fiona import open as fiona_open    
-
 import threading
 import geopandas as gpd
 from sqlalchemy import create_engine
@@ -32,8 +27,7 @@ import pandas as pd
 from sqlalchemy import exc
 import sqlite3
 from shapely.geometry import box
-
-import ttkbootstrap as ttk  # Import ttkbootstrap
+import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
 
@@ -471,15 +465,9 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
 
+# Attempts to delete a layer from a geopacakge file. Necessary to avoid invalid
+# spatial indexes when new data is added to an existing layer.
 def delete_layer(gpkg_file, layer_name):
-    """
-    Attempts to delete a layer from a GeoPackage file.
-
-    Parameters:
-    - gpkg_file: Path to the GeoPackage file.
-    - layer_name: Name of the layer to delete.
-    - log_function: Function to log messages, e.g., print or a custom logging function.
-    """
     try:
         ds = ogr.Open(gpkg_file, update=True)  # Open in update mode
         if ds is not None:
@@ -514,7 +502,6 @@ def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
             log_to_gui(log_widget, f"Data for layer {layer_name} saved in GeoPackage.")
         else:
             log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
-
 
 
 # Function to update asset groups in geopackage

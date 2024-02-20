@@ -1,5 +1,4 @@
 import tkinter as tk
-
 import locale
 
 locale.setlocale(locale.LC_ALL, 'C') 
@@ -9,7 +8,6 @@ import configparser
 import pandas as pd
 from sqlalchemy import create_engine
 import os
-
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 
@@ -30,6 +28,7 @@ def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     return pd.read_sql_table('tbl_atlas', engine)
 
+
 # Function to save data to the database
 def save_data(df):
     try:
@@ -37,6 +36,7 @@ def save_data(df):
         df.to_sql('tbl_atlas', con=engine, if_exists='replace', index=False)
     except Exception as e:
         messagebox.showerror("Error", f"Error saving data: {e}")
+
 
 # Function to update record in the DataFrame and save to the database
 def update_record(save_message=True):
@@ -54,6 +54,7 @@ def update_record(save_message=True):
     except Exception as e:
         messagebox.showerror("Error", f"Error updating and saving record: {e}")
 
+
 # Navigate through records
 def navigate(direction):
     global current_index
@@ -63,6 +64,7 @@ def navigate(direction):
     elif direction == 'previous' and current_index > 0:
         current_index -= 1
     load_record()
+
 
 # Load a record into the form
 def load_record():
@@ -75,12 +77,14 @@ def load_record():
     image_name_2_var.set(record['image_name_2'])
     image_desc_2_var.set(record['image_desc_2'])
 
+
 # Function to browse for image file for image_name_1
 def browse_image_1():
     initial_dir = os.path.join(os.getcwd(), "input", "images")
     file_path = filedialog.askopenfilename(initialdir=initial_dir, title="Select file", filetypes=(("JPEG files", "*.jpg"), ("PNG files", "*.png"), ("All files", "*.*")))
     if file_path:
         image_name_1_var.set(file_path)
+
 
 # Function to browse for image file for image_name_2
 def browse_image_2():

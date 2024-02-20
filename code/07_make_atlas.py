@@ -1,5 +1,4 @@
 import tkinter as tk
-
 import locale
 
 locale.setlocale(locale.LC_ALL, 'C') 
@@ -10,7 +9,6 @@ import geopandas as gpd
 import configparser
 from shapely.geometry import box
 import datetime
-
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 
