@@ -13,7 +13,7 @@ from ttkbootstrap.constants import *
 import pandas as pd
 import geopandas as gpd
 import configparser
-
+import sqlite3
 
 # Read the configuration file
 def read_config(file_name):
@@ -81,11 +81,24 @@ def get_status(gpkg_file):
     status_list = []
 
     try:
+        # Count using an SQL-query. loading big data frames for counting them only is not
+        # very efficient.
         def read_table_and_count(layer_name):
             try:
-                table = gpd.read_file(gpkg_file, layer=layer_name)
-                return len(table)
-            except Exception:
+                # Connect to the GeoPackage
+                conn = sqlite3.connect(gpkg_file)
+                cur = conn.cursor()
+
+                # Execute a SQL query to count the records in the specified layer
+                cur.execute(f"SELECT COUNT(*) FROM {layer_name}")
+                count = cur.fetchone()[0]  # Fetch the count result
+
+                # Close the connection
+                conn.close()
+
+                return count
+            except Exception as e:
+                print(f"Error counting records in {layer_name}: {e}")
                 return None
 
 
