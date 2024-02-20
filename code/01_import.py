@@ -149,7 +149,7 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
         return group_id_counter, object_id_counter
 
     feature_count = len(data)
-    log_to_gui(log_widget, f"  {layer_name} ({feature_count} features)")
+    log_to_gui(log_widget, f"Imported {layer_name} with {feature_count}.")
 
     # Calculate bounding box and add to geocode groups
     bounding_box    = data.total_bounds
@@ -212,7 +212,7 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
             layer       = ds.GetLayerByIndex(i)
             layer_name  = layer.GetName()
             data        = read_and_reproject(filepath, layer=layer_name)
-            log_to_gui(log_widget, f"Importing {layer_name}")
+            log_to_gui(log_widget, f"Importing the layer {layer_name}.")
             line_id_counter = process_line_layer(
                 data, line_objects, line_id_counter, layer_name, log_widget)
         ds = None
@@ -249,7 +249,7 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True):
             try:
-                log_to_gui(log_widget, f"Processing layer: {os.path.splitext(os.path.basename(filepath))[0]}")
+                log_to_gui(log_widget, f"Processing the layer {os.path.splitext(os.path.basename(filepath))[0]}")
                 progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
 
                 group_id_counter, object_id_counter = process_geocode_file(
@@ -324,7 +324,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
     if not geocode_objects_gdf.empty:
         export_to_geopackage(geocode_objects_gdf, gpkg_file, 'tbl_geocode_object', log_widget)
 
-    log_to_gui(log_widget, "Import completed.")
+    log_to_gui(log_widget, "COMPLETED: Geocoding imports done.")
 
     update_progress(100)
 
@@ -388,7 +388,7 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     if not line_objects_gdf.empty:
         export_to_geopackage(line_objects_gdf, gpkg_file, 'tbl_lines_original', log_widget)
 
-    log_to_gui(log_widget, "Import of completed.")
+    log_to_gui(log_widget, "COMPLETED: Line imports done.")
 
     copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length)
 
@@ -456,6 +456,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
         log_to_gui(log_widget, f"Total bounding box for all assets imported.")
 
     update_progress(95)
+    
+    log_to_gui(log_widget, "COMPLETED: Asset imports done.")
 
     asset_groups_gdf['id'] = asset_groups_gdf['id'].astype('int64')
     asset_objects_gdf['id'] = asset_objects_gdf['id'].astype('int64')
@@ -476,7 +478,8 @@ def delete_layer(gpkg_file, layer_name):
                 ds.DeleteLayer(layer_name)
                 log_to_gui(f"Layer {layer_name} deleted from {gpkg_file}.")
             else:
-                log_to_gui(log_widget, f"Layer {layer_name} does not exist in {gpkg_file}.")
+                #log_to_gui(log_widget, f"Layer {layer_name} does not exist in {gpkg_file}.")
+                log_to_gui(log_widget, "Cleaning up...")
             ds = None  # Ensure the data source is closed
         else:
             log_to_gui(log_widget, f"Failed to open {gpkg_file}.")
@@ -539,7 +542,7 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 
     update_asset_objects_with_name_gis(gpkg_file, log_widget)
     
-    log_to_gui(log_widget, "Asset import completed.")
+    log_to_gui(log_widget, "COMPLETED: Assets imported done.")
     
     progress_var.set(100)
 

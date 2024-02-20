@@ -117,7 +117,7 @@ def main(log_widget, progress_var, gpkg_file):
     # Save updated geometries to GeoPackage
     updated_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
     update_progress(100)
-    log_to_gui(log_widget, "Completed processing.")
+    log_to_gui(log_widget, "COMPLETED: Atlas processing done.")
 
 
 #####################################################################################

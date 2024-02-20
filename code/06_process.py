@@ -155,7 +155,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     intersected_data.drop(columns=['fid', 'id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
-    log_to_gui(log_widget, "Data processing completed.")
+    log_to_gui(log_widget, "COMPLETED: Data processing done.")
     update_progress(50)  # Final progress
 
 
@@ -248,7 +248,7 @@ def process_all(log_widget, progress_var, gpkg_file):
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
     classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
 
-    log_to_gui(log_widget, "Data processing and aggregation completed.")
+    log_to_gui(log_widget, "COMPLETED: Data processing and aggregation completed.")
     update_progress(100)
 
 
@@ -307,5 +307,7 @@ process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
 close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
+
+log_to_gui(log_widget, "Opened processing subprocess.")
 
 root.mainloop()
