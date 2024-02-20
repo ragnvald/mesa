@@ -5,7 +5,7 @@ The MESA (Methods for Environmental Sensitivity Assessment) tool is a Python-bas
 
 The python implementation of the MESA tool is rather complex to get up and running. Installing and running Python on a computer could be demanding. On top of that comes the need to install several python libraries. 
 
-The code can be compiled to a series of executable files (.exe) which run nicely on a Windows computer. The compiled files are rather big and in total they are at the last compilation 1.2 GB. This means distributing the files using Github is not possible.
+The code can be compiled to a series of executable files (.exe) which run nicely on a Windows computer. The compiled files are rather big and in total they are at the last compilation 1.4 GB. This means distributing the files using Github is not possible.
 
 * Environmental Sensitivity Assessment: Systematic evaluation of various environmental assets' vulnerability to pollution.
 * Mapping Capability: Visual representation of sensitivity assessments for easier interpretation and decision-making.
@@ -67,7 +67,7 @@ To run this code uncompiled in a python environment the following libraries shou
 + **glob** - Used for Unix style pathname pattern expansion.
 + **shapely** - Used for manipulation and analysis of planar geometric objects.
 
-The rather prolific use of libraries is due to programming tools. Vasically I am blaming it on ChatGPT which varies somewhat in its use of libraries. This should be revised at some point. Possibly through replacing the spatial libraries and  user interface with QGIS native libraries/methods.
+The rather prolific use of libraries is due to programming tools. Basically I am blaming it on ChatGPT which varies somewhat in its use of libraries. The use of libraries shold at some point be harmonised. One way forward is to replacing the spatial libraries and user interface with QGIS native libraries/methods.
 
 ### Pocessing capabilities required
 This depends very a lot on the input data to be handled. Generally having a complex geocode with many objects will increase the calculation resource requirements.
