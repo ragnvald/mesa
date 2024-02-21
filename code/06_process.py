@@ -148,6 +148,11 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     update_progress(43)  # Progress after polygon intersections
 
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
+    # To list the columns:
+    columns_list = intersected_data.columns.tolist()
+
+    # To print the list of columns:
+    print(columns_list)
     
     update_progress(45)  # Progress after concatenating data
     
