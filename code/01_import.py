@@ -93,6 +93,7 @@ def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_
 
     # Create a temporary GeoSeries for area calculation if the CRS is geographic
     if data.crs.is_geographic:
+        
         temp_data = data.copy()
         temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
 
@@ -388,7 +389,7 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     log_to_gui(log_widget, f"Preparing import of lines.")
 
     if not line_objects_gdf.empty:
-        export_to_geopackage(line_objects_gdf, gpkg_file, 'tbl_lines_original', log_widget)
+        export_line_to_geopackage(line_objects_gdf, gpkg_file, 'tbl_lines_original', log_widget)
 
     log_to_gui(log_widget, "COMPLETED: Line imports done.")
 
@@ -397,26 +398,23 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     update_progress(100)
 
 
-def read_and_reproject(filepath, layer=None):
-    data = gpd.read_file(filepath, layer=layer)
-    if data.crs is None:
-        log_to_gui(log_widget, f"Warning: No CRS found for {filepath}. Setting CRS to EPSG:4326.")
-        data.set_crs(epsg=4326, inplace=True)
-    elif data.crs.to_epsg() != 4326:
-        data = data.to_crs(epsg=4326)
-    return data
 
-
-def append_to_asset_groups(filename, data, asset_groups, group_id_counter):
+def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
     # Assuming data.total_bounds gives you [minx, miny, maxx, maxy]
     bbox = data.total_bounds
     bbox_polygon = box(*bbox)  # Create a Polygon geometry from the bounding box
     
     asset_groups.append({
         'id': group_id_counter,
-        'name_original': filename,
-        'geom': bbox_polygon,  # Using the Polygon geometry here
-        # Include other attributes as needed
+        'name_original': layer_name, 
+        'name_gis_assetgroup': f"layer_{group_id_counter:03d}",
+        'title_fromuser': layer_name,
+        'date_import': datetime.datetime.now(),
+        'geom': bbox_polygon,
+        'total_asset_objects': int(0),
+        'importance': int(0),
+        'susceptibility': int(0),
+        'sensitivity': int(0)
     })
     return group_id_counter + 1
 
@@ -519,27 +517,48 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                             'sensitivity': int(0)
                         })
                         for _, row in data.iterrows():
+
+                            attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
+
                             asset_objects.append({
                                 'id': object_id_counter,
                                 'ref_asset_group': group_id_counter,
-                                'geom': row.geometry,
+                                'asset_group_name': layer_name,
+                                'attributes': attributes,
+                                'process': True,
+                                'geom': row.geometry  # Original geometry in EPSG:4326
                             })
                             object_id_counter += 1
                         group_id_counter += 1
             elif filepath.endswith('.shp'):
+                layer_name = filename
                 data = read_and_reproject(filepath)
                 if not data.empty:
                     bbox_polygon = box(*data.total_bounds)
                     asset_groups.append({
                         'id': group_id_counter,
-                        'name_original': filename,
+                        'name_original': filename, 
+                        'name_gis_assetgroup': f"layer_{group_id_counter:03d}",
+                        'title_fromuser': filename,
+                        'date_import': datetime.datetime.now(),
                         'geom': bbox_polygon,
+                        'total_asset_objects': int(0),
+                        'importance': int(0),
+                        'susceptibility': int(0),
+                        'sensitivity': int(0)
                     })
-                    for _, row in data.iterrows():
+
+                    for index, row in data.iterrows():
+                        
+                        attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
+
                         asset_objects.append({
                             'id': object_id_counter,
                             'ref_asset_group': group_id_counter,
-                            'geom': row.geometry,
+                            'asset_group_name': layer_name,
+                            'attributes': attributes,
+                            'process': True,
+                            'geom': row.geometry  # Original geometry in EPSG:4326
                         })
                         object_id_counter += 1
                     group_id_counter += 1
@@ -614,6 +633,25 @@ def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
         log_to_gui(log_widget, f"Failed to export data to GeoPackage: {str(e)}")
 
 
+# Function exports data to geopackage and secures replacing relevant data.  
+def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
+    # Check if the GeoPackage file exists
+    if not os.path.exists(gpkg_file):
+        # Create a new GeoPackage file by writing the gdf with the specified layer
+        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
+        log_to_gui(log_widget, f"Created new GeoPackage file {gpkg_file} with layer {layer_name}.")
+    else:
+
+        if not gdf.empty:
+
+            delete_layer(gpkg_file, layer_name)
+
+            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+            log_to_gui(log_widget, f"Data for layer {layer_name} saved in GeoPackage.")
+        else:
+            log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
+
+
 # Function to update asset groups in geopackage
 def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
     engine = create_engine(f'sqlite:///{gpkg_file}')
@@ -636,24 +674,6 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
         log_to_gui(log_widget, "Error: 'geom' column not found in asset_groups_df.")
 
 
-# Thread function to run import without freezing GUI
-def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
-    asset_objects_gdf, asset_groups_gdf, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
-
-    # Check if the GeoDataFrame is not empty before exporting
-    if not asset_objects_gdf.empty:  # Corrected line
-        export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
-    else:
-        log_to_gui(log_widget, "No asset objects to export.")
-    
-    if not asset_groups_gdf.empty:
-        export_to_geopackage(asset_groups_gdf, gpkg_file, 'tbl_asset_group', log_widget)
-    else:
-        log_to_gui(log_widget, "No asset groups to export.")
-
-    log_to_gui(log_widget, "COMPLETED: Asset import done.")
-    progress_var.set(100)
-
 
 # Name gis should be part of the asset objects table
 def update_asset_objects_with_name_gis(db_file, log_widget):
@@ -662,7 +682,7 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
         conn = sqlite3.connect(db_file)
 
         # Load data into dataframes
-        df_asset_group = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
+        df_asset_group  = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
         df_asset_object = pd.read_sql_query("SELECT * FROM tbl_asset_object", conn)
 
         # Check if 'fid' is part of the dataframe
@@ -679,10 +699,39 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
         df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
 
         log_to_gui(log_widget, "tbl_asset_object updated with name_gis_assetgroup from tbl_asset_group.")
+
     except Exception as e:
         log_to_gui(log_widget, f"Error updating tbl_asset_object: {e}")
     finally:
         conn.close()
+
+
+
+# Thread function to run import without freezing GUI
+def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
+    
+    log_to_gui(log_widget, "Starting asset import process...")
+
+    asset_objects_gdf, asset_groups_gdf, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
+
+    # Check if the GeoDataFrame is not empty before exporting
+    if not asset_objects_gdf.empty:  # Corrected line
+        log_to_gui(log_widget, "Importing:")
+        export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
+    else:
+        log_to_gui(log_widget, "No asset objects to export.")
+    
+    
+    if not asset_groups_gdf.empty:
+        export_to_geopackage(asset_groups_gdf, gpkg_file, 'tbl_asset_group', log_widget)
+    else:
+        log_to_gui(log_widget, "No asset groups to export.")
+        
+    update_asset_objects_with_name_gis(gpkg_file, log_widget)
+
+    log_to_gui(log_widget, "COMPLETED: Asset import done.")
+    progress_var.set(100)
+
 
 
 # Function to close the application
