@@ -29,6 +29,8 @@ import sqlite3
 from shapely.geometry import box
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
+from shapely.geometry import shape
+import fiona
 
 
 # # # # # # # # # # # # # # 
@@ -395,74 +397,167 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     update_progress(100)
 
 
-# Function imports spatial data for assets
+def read_and_reproject(filepath, layer=None):
+    data = gpd.read_file(filepath, layer=layer)
+    if data.crs is None:
+        log_to_gui(log_widget, f"Warning: No CRS found for {filepath}. Setting CRS to EPSG:4326.")
+        data.set_crs(epsg=4326, inplace=True)
+    elif data.crs.to_epsg() != 4326:
+        data = data.to_crs(epsg=4326)
+    return data
+
+
+def append_to_asset_groups(filename, data, asset_groups, group_id_counter):
+    # Assuming data.total_bounds gives you [minx, miny, maxx, maxy]
+    bbox = data.total_bounds
+    bbox_polygon = box(*bbox)  # Create a Polygon geometry from the bounding box
+    
+    asset_groups.append({
+        'id': group_id_counter,
+        'name_original': filename,
+        'geom': bbox_polygon,  # Using the Polygon geometry here
+        # Include other attributes as needed
+    })
+    return group_id_counter + 1
+
+
+def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
+    # Example logic to append to asset_objects based on processed data
+    for _, row in data.iterrows():
+        asset_objects.append({
+            'id': object_id_counter,
+            'ref_asset_group': group_id,
+            'geom': row.geometry,  # Directly use geometry
+            # Add other necessary attributes here
+        })
+        object_id_counter += 1
+    return object_id_counter
+
+
+def process_geopackage_layer(filepath, layer_name, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
+    data = read_and_reproject(filepath, layer=layer_name)
+    if not data.empty:
+        group_id_counter = append_to_asset_groups(layer_name, data, asset_groups, group_id_counter)
+        object_id_counter = append_to_asset_objects(data, asset_objects, object_id_counter, group_id_counter - 1)
+    return group_id_counter, object_id_counter
+
+
+def process_geopackage_layers(filepath, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
+    """
+    Process each layer in a GeoPackage file, adding each layer's data to the asset_objects list,
+    and creating a new entry in asset_groups for each layer.
+    """
+    # Open the GeoPackage file
+    with fiona.open(filepath) as src:
+        layer_names = src.layer_names()
+    
+    # Process each layer individually
+    for layer_name in layer_names:
+        data = read_and_reproject(filepath, layer=layer_name)
+        if not data.empty:
+            # Process layer data and update asset_objects and asset_groups
+            bbox_polygon = box(*data.total_bounds)  # Create a Polygon geometry from the bounding box
+            asset_groups.append({
+                'id': group_id_counter,
+                'name_original': layer_name,
+                'geom': bbox_polygon,  # Using the Polygon geometry here
+                # Add other necessary attributes here
+            })
+            for _, row in data.iterrows():
+                asset_objects.append({
+                    'id': object_id_counter,
+                    'ref_asset_group': group_id_counter,
+                    'geom': row.geometry,  # Directly use geometry
+                    # Add other necessary attributes here
+                })
+                object_id_counter += 1
+            group_id_counter += 1
+            log_to_gui(log_widget, f"Processed layer {layer_name} from GeoPackage {os.path.basename(filepath)}")
+        else:
+            log_to_gui(log_widget, f"Layer {layer_name} in GeoPackage {os.path.basename(filepath)} is empty")
+
+    return asset_objects, asset_groups, object_id_counter, group_id_counter
+
+
+
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
-    asset_objects       = []
-    asset_groups        = []
-    group_id_counter    = 1
-    object_id_counter   = 1
-    file_patterns       = ['*.shp', '*.gpkg']
-    total_files         = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
-    processed_files     = 0
-    progress_increment  = 70 / total_files  # Distribute 70% of progress bar over file processing
+    asset_objects = []
+    asset_groups = []
+    group_id_counter = 1
+    object_id_counter = 1
+    file_patterns = ['*.shp', '*.gpkg']
+    processed_files = 0
+
+    total_files = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
+    if total_files > 0:
+        progress_increment = 70 / total_files  # Progress increment for each file
+    else:
+        progress_increment = 0  # Avoid division by zero if no files found
+
     log_to_gui(log_widget, "Working with asset imports...")
     progress_var.set(10)  # Initial progress after starting
-    update_progress(10)
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
-            try:
-                filename = os.path.splitext(os.path.basename(filepath))[0]
-                log_to_gui(log_widget, f"Processing file: {filename}")
-
+            filename = os.path.splitext(os.path.basename(filepath))[0]
+            if filepath.endswith('.gpkg'):
+                # Handle geopackage: iterate over each layer
+                for layer_name in fiona.listlayers(filepath):
+                    data = read_and_reproject(filepath, layer=layer_name)
+                    if not data.empty:
+                        bbox_polygon = box(*data.total_bounds)
+                        asset_groups.append({
+                            'id': group_id_counter,
+                            'name_original': layer_name, 
+                            'name_gis_assetgroup': f"layer_{group_id_counter:03d}",
+                            'title_fromuser': filename,
+                            'date_import': datetime.datetime.now(),
+                            'geom': bbox_polygon,
+                            'total_asset_objects': int(0),
+                            'importance': int(0),
+                            'susceptibility': int(0),
+                            'sensitivity': int(0)
+                        })
+                        for _, row in data.iterrows():
+                            asset_objects.append({
+                                'id': object_id_counter,
+                                'ref_asset_group': group_id_counter,
+                                'geom': row.geometry,
+                            })
+                            object_id_counter += 1
+                        group_id_counter += 1
+            elif filepath.endswith('.shp'):
                 data = read_and_reproject(filepath)
                 if not data.empty:
-                    bbox_geom = get_bounding_box(data)
+                    bbox_polygon = box(*data.total_bounds)
                     asset_groups.append({
                         'id': group_id_counter,
                         'name_original': filename,
-                        'name_gis_assetgroup': f"layer_{group_id_counter:03d}",
-                        'title_fromuser': filename,
-                        'date_import': datetime.datetime.now(),
-                        'geom': bbox_geom,
-                        'total_asset_objects': int(0),
-                        'importance': int(0),
-                        'susceptibility': int(0),
-                        'sensitivity': int(0)
+                        'geom': bbox_polygon,
                     })
-
-                    object_id_counter = process_asset_layer(
-                        data, asset_objects, object_id_counter, group_id_counter, filename, log_widget)
+                    for _, row in data.iterrows():
+                        asset_objects.append({
+                            'id': object_id_counter,
+                            'ref_asset_group': group_id_counter,
+                            'geom': row.geometry,
+                        })
+                        object_id_counter += 1
                     group_id_counter += 1
+            else:
+                log_to_gui(log_widget, f"Unsupported file format for {filepath}")
+            processed_files += 1
+            progress_var.set(10 + processed_files * progress_increment)
 
-                processed_files += 1
-                progress_var.set(10 + processed_files * progress_increment)
-                update_progress(10 + processed_files * progress_increment)
-
-            except Exception as e:
-                log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
-    
     asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
     asset_objects_gdf = gpd.GeoDataFrame(asset_objects, geometry='geom')
     
-    asset_groups_gdf.set_crs(epsg=4326, inplace=True)
-    
-    update_progress(90)
-
-    # Calculate total bounding box for all asset objects
     if not asset_objects_gdf.empty:
-        total_bbox = asset_objects_gdf.geometry.unary_union.bounds
-        total_bbox_geom = box(*total_bbox)
-        log_to_gui(log_widget, f"Total bounding box for all assets imported.")
+        total_bbox_geom = box(*asset_objects_gdf.total_bounds)
+    else:
+        total_bbox_geom = None
 
-    update_progress(95)
-    
     log_to_gui(log_widget, "COMPLETED: Asset imports done.")
-
-    asset_groups_gdf['id'] = asset_groups_gdf['id'].astype('int64')
-    asset_objects_gdf['id'] = asset_objects_gdf['id'].astype('int64')
-
-    update_progress(100)
+    progress_var.set(100)
 
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
@@ -489,22 +584,34 @@ def delete_layer(gpkg_file, layer_name):
 
 
 # Function exports data to geopackage and secures replacing relevant data.  
-def export_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
-    # Check if the GeoPackage file exists
-    if not os.path.exists(gpkg_file):
-        # Create a new GeoPackage file by writing the gdf with the specified layer
-        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
-        log_to_gui(log_widget, f"Created new GeoPackage file {gpkg_file} with layer {layer_name}.")
-    else:
-
-        if not gdf.empty:
-
-            delete_layer(gpkg_file, layer_name)
-
-            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
-            log_to_gui(log_widget, f"Data for layer {layer_name} saved in GeoPackage.")
+def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
+    # Check if the input is a list and convert it to a GeoDataFrame
+    if isinstance(gdf_or_list, list):
+        # Assuming each dictionary in the list has a 'geom' key with geometry data
+        if gdf_or_list and 'geom' in gdf_or_list[0]:
+            gdf = gpd.GeoDataFrame(gdf_or_list)
+            # Convert geometries from WKT or GeoJSON to Shapely geometries if they are not already
+            gdf['geometry'] = gdf['geom'].apply(lambda x: shape(x) if not isinstance(x, gpd.geoseries.GeoSeries) else x)
+            gdf.drop('geom', axis=1, inplace=True)
         else:
-            log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
+            log_to_gui(log_widget, "The list is empty or does not contain 'geom' key.")
+            return
+    elif isinstance(gdf_or_list, gpd.GeoDataFrame):
+        gdf = gdf_or_list
+    else:
+        log_to_gui(log_widget, "Unsupported data type for exporting to GeoPackage.")
+        return
+    
+    # Set the CRS for the GeoDataFrame if it's not already set
+    if gdf.crs is None:
+        gdf.set_crs(epsg=4326, inplace=True)
+    
+    # Attempt to save the GeoDataFrame to the specified layer in the GeoPackage
+    try:
+        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+        log_to_gui(log_widget, f"Data successfully exported to {layer_name} in {gpkg_file}.")
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed to export data to GeoPackage: {str(e)}")
 
 
 # Function to update asset groups in geopackage
@@ -531,19 +638,20 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
 
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
-    log_to_gui(log_widget, "Starting asset import process...")
-    
-    asset_objects_gdf, asset_groups_df, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
+    asset_objects_gdf, asset_groups_gdf, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
 
-    log_to_gui(log_widget, "Importing:")
-    export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
+    # Check if the GeoDataFrame is not empty before exporting
+    if not asset_objects_gdf.empty:  # Corrected line
+        export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
+    else:
+        log_to_gui(log_widget, "No asset objects to export.")
     
-    update_asset_groups(asset_groups_df, gpkg_file, log_widget)
+    if not asset_groups_gdf.empty:
+        export_to_geopackage(asset_groups_gdf, gpkg_file, 'tbl_asset_group', log_widget)
+    else:
+        log_to_gui(log_widget, "No asset groups to export.")
 
-    update_asset_objects_with_name_gis(gpkg_file, log_widget)
-    
-    log_to_gui(log_widget, "COMPLETED: Assets imported done.")
-    
+    log_to_gui(log_widget, "COMPLETED: Asset import done.")
     progress_var.set(100)
 
 
