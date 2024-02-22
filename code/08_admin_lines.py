@@ -163,7 +163,7 @@ def process_and_buffer_lines(gpkg_file, log_widget):
                 temp_gdf_buffered = temp_gdf_projected.to_crs(crs)
 
                 if isinstance(temp_gdf_buffered.iloc[0].geometry, (Polygon, MultiPolygon)):
-                    log_to_gui(log_widget, "Buffered geometry is a Polygon/MultiPolygon as expected.")
+                    log_to_gui(log_widget, "Confirmed expected geometry.")
                 else:
                     log_to_gui(log_widget, f"Buffered geometry is not a Polygon/MultiPolygon. Actual type: {type(temp_gdf_buffered.iloc[0].geometry)}")
 
@@ -449,6 +449,8 @@ def build_stacked_data(gpkg_file, log_widget):
     lines_data_renamed  = lines_data.rename(columns={'name_gis': 'lines_name_gis'})
     segments_related    = segments_data.merge(lines_data_renamed[['lines_name_gis']], left_on='name_gis', right_on='lines_name_gis', how='left', suffixes=('_seg', '_line'))
     
+    segments_related = segments_related.set_crs("EPSG:4326", allow_override=True)
+
     update_progress(40)
 
     point_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Point', log_widget)
