@@ -246,8 +246,7 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
         progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
 
     log_to_gui(log_widget, "Working with imports...")
-    progress_var.set(10)  # Initial progress after starting
-    update_progress(10)
+    update_progress(10)  # Initial progress after starting
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True):
@@ -288,8 +287,7 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
         progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
 
     log_to_gui(log_widget, "Working with imports...")
-    progress_var.set(10)  # Initial progress after starting
-    update_progress(10)
+    update_progress(10)  # Initial progress after starting
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_lines, '**', pattern), recursive=True):
@@ -300,7 +298,6 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
                 line_id_counter = process_line_file(filepath, line_objects, line_id_counter, log_widget)
 
                 processed_files += 1
-                progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
                 update_progress(10 + processed_files * progress_increment)
 
             except Exception as e:
@@ -486,6 +483,9 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     file_patterns = ['*.shp', '*.gpkg']
     processed_files = 0
 
+    progress_var.set(10)
+    update_progress(10)
+
     total_files = sum([len(glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True)) for pattern in file_patterns])
     if total_files > 0:
         progress_increment = 70 / total_files  # Progress increment for each file
@@ -493,7 +493,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
         progress_increment = 0  # Avoid division by zero if no files found
 
     log_to_gui(log_widget, "Working with asset imports...")
-    progress_var.set(10)  # Initial progress after starting
+    progress_var.set(15)  # Initial progress after starting
+    update_progress(15)
 
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
