@@ -46,7 +46,7 @@ def read_config(file_name):
 # # # # # # # # # # # # # # 
 # Core functions
 
-# Get bounding box in EPSG:4326
+# Get bounding box
 def get_bounding_box(data):
     bbox = data.total_bounds
     bbox_geom = box(*bbox)
@@ -72,11 +72,13 @@ def log_to_gui(log_widget, message):
 # Function to read and reproject spatial data
 def read_and_reproject(filepath, layer=None):
     data = gpd.read_file(filepath, layer=layer)
+    # if no projection indicated, assume workingprojection_epsg
     if data.crs is None:
-        log_to_gui(log_widget, f"Warning: No CRS found for {filepath}. Setting CRS to EPSG:4326.")
-        data.set_crs(epsg=4326, inplace=True)
-    elif data.crs.to_epsg() != 4326:
-        data = data.to_crs(epsg=4326)
+        log_to_gui(log_widget, f"Warning: No CRS found for {filepath}. Setting CRS to EPSG:{workingprojection_epsg}.")
+        data.set_crs(epsg=workingprojection_epsg, inplace=True)
+    # any other projection, reproject to workingprojection_epsg
+    elif data.crs.to_epsg() != workingprojection_epsg:
+        data = data.to_crs(epsg=workingprojection_epsg)
     return data
 
 
@@ -114,7 +116,7 @@ def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_
             'attributes': attributes,
             'process': True,
             'area_m2': int(area_m2),
-            'geom': row.geometry  # Original geometry in EPSG:4326
+            'geom': row.geometry  # Original geometry in workingprojection_epsg
         })
         object_id_counter += 1
 
@@ -134,7 +136,7 @@ def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widg
             'name_gis': int(index),
             'name_user': layer_name,
             'attributes': attributes,
-            'geom': row.geometry  # Original geometry in EPSG:4326
+            'geom': row.geometry  # Original geometry in workingprojection_epsg
         })
         line_id_counter += 1
 
@@ -527,7 +529,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                                 'asset_group_name': layer_name,
                                 'attributes': attributes,
                                 'process': True,
-                                'geom': row.geometry  # Original geometry in EPSG:4326
+                                'geom': row.geometry  # Original geometry in workingprojection_epsg
                             })
                             object_id_counter += 1
                         group_id_counter += 1
@@ -559,7 +561,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                             'asset_group_name': layer_name,
                             'attributes': attributes,
                             'process': True,
-                            'geom': row.geometry  # Original geometry in EPSG:4326
+                            'geom': row.geometry  # Original geometry in workingprojection_epsg
                         })
                         object_id_counter += 1
                     group_id_counter += 1
@@ -624,7 +626,7 @@ def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
     
     # Set the CRS for the GeoDataFrame if it's not already set
     if gdf.crs is None:
-        gdf.set_crs(epsg=4326, inplace=True)
+        gdf.set_crs(epsg=workingprojection_epsg, inplace=True)
     
     # Attempt to save the GeoDataFrame to the specified layer in the GeoPackage
     try:

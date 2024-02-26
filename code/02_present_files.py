@@ -35,7 +35,7 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
             return
 
         fig, ax = plt.subplots(figsize=(40, 40), dpi=200)
-        common_crs = 'EPSG:4326'
+        common_crs = workingprojection_epsg
 
         if layer.crs and layer.crs.to_string() != common_crs:
             layer = layer.to_crs(common_crs)
@@ -79,13 +79,14 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
 #  Main
 #
         
-config_file         = 'config.ini'
-config              = read_config(config_file)
-gpkg_file           = config['DEFAULT']['gpkg_file']
-output_png          = config['DEFAULT']['output_png']
-asset_output_png    = 'output/asset.png'
-flat_output_png     = 'output/flat.png'
-geocode_output_png  = 'output/geocode.png'
+config_file             = 'config.ini'
+config                  = read_config(config_file)
+gpkg_file               = config['DEFAULT']['gpkg_file']
+output_png              = config['DEFAULT']['output_png']
+asset_output_png        = 'output/asset.png'
+flat_output_png         = 'output/flat.png'
+geocode_output_png      = 'output/geocode.png'
+workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
 write_to_log("Overview of assets exported")

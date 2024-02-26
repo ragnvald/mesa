@@ -128,7 +128,7 @@ def create_lines_table_and_lines(gpkg_file, log_widget):
 # the user selecting an appropriate local projection.
 def process_and_buffer_lines(gpkg_file, log_widget):
     
-    crs         = "EPSG:4326"
+    crs         = workingprojection_epsg
     target_crs  = "EPSG:4087"
 
     lines_df = load_lines_table(gpkg_file)
@@ -213,9 +213,9 @@ def create_perpendicular_lines(line_input, segment_width, segment_length):
     segment_width = float(segment_width)
     segment_length = float(segment_length)
 
-    # Define the projection transformation: EPSG:4326 to EPSG:4087 (for accurate distance calculations) and back
-    transformer_to_4087 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:4087", always_xy=True)
-    transformer_to_4326 = pyproj.Transformer.from_crs("EPSG:4087", "EPSG:4326", always_xy=True)
+    # Define the projection transformation: workingprojection_epsg to EPSG:4087 (for accurate distance calculations) and back
+    transformer_to_4087 = pyproj.Transformer.from_crs(workingprojection_epsg, "EPSG:4087", always_xy=True)
+    transformer_to_workingprojection = pyproj.Transformer.from_crs("EPSG:4087", workingprojection_epsg, always_xy=True)
     
     # Reproject the line to EPSG:4087 for accurate distance measurements
     line_transformed = transform(transformer_to_4087.transform, line_input)
@@ -259,12 +259,12 @@ def create_perpendicular_lines(line_input, segment_width, segment_length):
         p1 = Point(point.x - dx_perp, point.y - dy_perp)
         p2 = Point(point.x + dx_perp, point.y + dy_perp)
         
-        # Reproject points back to EPSG:4326
-        p1_4326 = transform(transformer_to_4326.transform, p1)
-        p2_4326 = transform(transformer_to_4326.transform, p2)
+        # Reproject points back to workingprojection
+        p1_workingprojection = transform(transformer_to_workingprojection.transform, p1)
+        p2_workingprojection = transform(transformer_to_workingprojection.transform, p2)
         
         # Create the perpendicular line with reprojected points
-        perpendicular_line = LineString([p1_4326, p2_4326])
+        perpendicular_line = LineString([p1_workingprojection, p2_workingprojection])
         perpendicular_lines.append(perpendicular_line)
     
     # Combine all perpendicular lines into a MultiLineString
@@ -449,7 +449,7 @@ def build_stacked_data(gpkg_file, log_widget):
     lines_data_renamed  = lines_data.rename(columns={'name_gis': 'lines_name_gis'})
     segments_related    = segments_data.merge(lines_data_renamed[['lines_name_gis']], left_on='name_gis', right_on='lines_name_gis', how='left', suffixes=('_seg', '_line'))
     
-    segments_related = segments_related.set_crs("EPSG:4326", allow_override=True)
+    segments_related = segments_related.set_crs(workingprojection_epsg, allow_override=True)
 
     update_progress(40)
 
