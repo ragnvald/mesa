@@ -13,6 +13,11 @@ The code can be compiled to a series of executable files (.exe) which run nicely
 * Compiled Executable: Distributable .exe version for convenient deployment and usage.
 * Customizable Framework: Allows adaptation to different environmental contexts and sensitivity parameters.
 
+## Getting started
+This is what you do to start using MESA:
+* Download the compiled package.
+* Run user_interface.exe
+* Follow the instructions on the screen.
 
 ## Script Descriptions
 
