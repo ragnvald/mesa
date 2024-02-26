@@ -99,10 +99,11 @@ def browse_image_2():
 #
 
 # Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-gpkg_file = config['DEFAULT']['gpkg_file']
-ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+config_file             = 'config.ini'
+config                  = read_config(config_file)
+gpkg_file               = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 # Initialize the main window
 

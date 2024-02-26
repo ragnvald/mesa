@@ -754,6 +754,7 @@ segment_width           = config['DEFAULT']['segment_width']
 segment_length          = config['DEFAULT']['segment_length']
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
