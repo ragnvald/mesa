@@ -2,12 +2,16 @@ import tkinter as tk
 from tkinter import *
 import locale
 import os
+import json
+import platform
+import getpass
+from datetime import datetime
+
 
 locale.setlocale(locale.LC_ALL, 'C') 
 
 import subprocess
 import webbrowser
-import datetime
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import pandas as pd
@@ -31,7 +35,7 @@ def check_and_create_folders():
 
 
 def log_to_logfile(message):
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    timestamp = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
@@ -84,23 +88,31 @@ def get_status(gpkg_file):
         # Count using an SQL-query. loading big data frames for counting them only is not
         # very efficient.
         def read_table_and_count(layer_name):
+            """
+            Counts the records in the specified layer of a GeoPackage.
+            
+            Parameters:
+            - layer_name: The name of the layer to count records in.
+            
+            Returns:
+            - The count of records in the layer, or None if an error occurs or the layer does not exist.
+            """
             try:
-                # Connect to the GeoPackage
-                conn = sqlite3.connect(gpkg_file)
-                cur = conn.cursor()
-
-                # Execute a SQL query to count the records in the specified layer
-                cur.execute(f"SELECT COUNT(*) FROM {layer_name}")
-                count = cur.fetchone()[0]  # Fetch the count result
-
-                # Close the connection
-                conn.close()
-
-                return count
-            except Exception as e:
-                print(f"Error counting records in {layer_name}: {e}")
+                # Use a context manager to ensure the connection is closed automatically
+                with sqlite3.connect(gpkg_file) as conn:
+                    cur = conn.cursor()
+                    # Check if the table exists to handle non-existent tables gracefully
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (layer_name,))
+                    if cur.fetchone() is None:
+                        log_to_logfile(f"Table {layer_name} does not exist.")
+                        return None
+                    # Execute a SQL query to count the records in the specified layer
+                    cur.execute(f"SELECT COUNT(*) FROM {layer_name}")
+                    count = cur.fetchone()[0]  # Fetch the count result
+                    return count
+            except sqlite3.Error as e:
+                log_to_logfile(f"Error counting records in {layer_name}: {e}")
                 return None
-
 
         def read_table_and_check_sensitivity(layer_name):
             try:
@@ -266,6 +278,9 @@ def edit_lines():
 def exit_program():
     root.destroy()
 
+
+
+
 # Function to dynamically update wraplength of label text
 #def update_wraplength(event):
 #    # Subtract some padding to ensure text does not touch frame borders
@@ -289,10 +304,11 @@ def add_text_to_labelframe(labelframe, text):
 #
     
 # Load configuration settings
-config_file = 'config.ini'
-config = read_config(config_file)
-gpkg_file = config['DEFAULT']['gpkg_file']
-ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+config_file             = 'config.ini'
+config                  = read_config(config_file)
+gpkg_file               = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 # Check and create folders at the beginning
 check_and_create_folders()
