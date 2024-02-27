@@ -192,7 +192,7 @@ info_label.pack(padx=10, pady=10)
 save_button = ttk.Button(root, text="Save", command=save_to_gpkg, bootstyle=PRIMARY)
 save_button.pack(side='left', padx=10, pady=10)
 
-close_button = ttk.Button(root, text="Close", command=close_application, bootstyle=WARNING)
+close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
 close_button.pack(side='right', padx=10, pady=10)
 
 root.mainloop()

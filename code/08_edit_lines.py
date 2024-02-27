@@ -153,18 +153,20 @@ description_entry.grid(row=4, column=1, sticky='w')
 # Information text field above the "Update and Save Record" button
 info_label_text = ("Registred lines will be used to create segmente polygons "
                    "along the designated line. You may edit the attributes "
-                   "here, or both attributes and line data in QGIS")
+                   "here, or both attributes and line data in QGIS. Edits "
+                   "are saved when you click on the buttons Previous or "
+                   "next.")
 
 info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
 info_label.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
 
 # Navigation and Update buttons
 ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=6, column=0, padx=5, pady=5)
-ttk.Button(root, text="Save", command=update_record, bootstyle=PRIMARY).grid(row=6, column=1, padx=5, pady=5)
-ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=6, column=2, padx=5, pady=5)
+
+ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=6, column=1, padx=5, pady=5)
 
 # Exit button
-ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=7, column=0, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=2, columnspan=3, pady=5)
 
 # Load the first record
 load_record()

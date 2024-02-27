@@ -20,19 +20,21 @@ import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 
+
 # # # # # # # # # # # # # # 
 # Shared/general functions
-
 
 def update_progress(new_value):
     progress_var.set(new_value)
     progress_label.config(text=f"{int(new_value)}%")
+
 
 # Function to read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
 
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
@@ -43,16 +45,24 @@ def log_to_gui(log_widget, message):
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
+
 # Function to close the application
 def close_application(root):
     root.destroy()
+
 
 # # # # # # # # # # # # # # 
 # Core functions
     
 # Thread function to run main without freezing GUI
-def run_main(log_widget, progress_var, gpkg_file):
+def run_create_atlas(log_widget, progress_var, gpkg_file):
     main(log_widget, progress_var, gpkg_file)
+
+    
+# Thread function to run main without freezing GUI
+def run_import_atlas(log_widget, progress_var, gpkg_file):
+    main_import_atlas(log_widget, progress_var, gpkg_file)
+
 
 # Function to filter and update atlas geometries
 def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
@@ -67,6 +77,7 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
         intersecting_geometries.loc[index, 'title_user'] = f'Map title for {id_counter:03}'
         id_counter += 1
     return intersecting_geometries
+
 
 # Function to generate atlas geometries
 def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent):
@@ -99,8 +110,9 @@ def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, at
         y += lat_size_deg * (1 - overlap)
     return atlas_geometries
 
+
 # Main function with GUI integration
-def main(log_widget, progress_var, gpkg_file):
+def main_create_atlas(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Starting processing...")
     progress_var.set(10)  # Indicate start
 
@@ -125,8 +137,16 @@ def main(log_widget, progress_var, gpkg_file):
     # Save updated geometries to GeoPackage
     updated_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
     update_progress(100)
-    log_to_gui(log_widget, "COMPLETED: Atlas processing done.")
+    log_to_gui(log_widget, "COMPLETED: Atlas creation done. Old ones deleted.")
 
+
+# Function imports polygon from the first and best layer in the atlas-folder.
+def main_import_atlas(log_widget, progress_var, gpkg_file):
+    log_to_gui(log_widget, "Starting imports...")
+    progress_var.set(10)  # Indicate start
+
+    update_progress(100)
+    log_to_gui(log_widget, "COMPLETED: Atlas polygons imported. Old ones deleted.")
 
 #####################################################################################
 #  Main
@@ -162,7 +182,7 @@ progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, ne
 
 
 # Information text field above the buttons
-info_label_text = ("This is where you can generate and update atlas geometries. "
+info_label_text = ("This is where you can import, generate and update atlas geometries. "
                    "The size of an atlas frame is set in the config.ini-file. "
                    "Earlier atlas frames and their asociated information will be deleted.")
 info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
@@ -172,14 +192,18 @@ info_label.pack(padx=10, pady=10)
 button_frame = tk.Frame(root)
 button_frame.pack(pady=5)
 
+# Add 'Import' button to the button frame
+run_btn = ttk.Button(button_frame, text="Import", command=lambda: threading.Thread(
+    target=run_import_atlas, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
 # Add 'Run' button to the button frame
-run_btn = ttk.Button(button_frame, text="Run", command=lambda: threading.Thread(
-    target=run_main, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+run_btn = ttk.Button(button_frame, text="Create", command=lambda: threading.Thread(
+    target=run_create_atlas, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
 run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
 # Add 'Close' button to the button frame
-close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
+close_btn = ttk.Button(button_frame, bootstyle=WARNING, text="Exit", command=lambda: close_application(root))
 close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
-
 
 root.mainloop()

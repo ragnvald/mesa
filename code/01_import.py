@@ -811,7 +811,7 @@ import_btn = ttk.Button(button_frame, text="Import lines", bootstyle=PRIMARY, co
     target=run_import_lines, args=(input_folder_lines, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_btn.pack(side=tk.LEFT, padx=10)
 
-close_btn = ttk.Button(button_frame, text="Close", command=close_application, bootstyle=WARNING)
+close_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
 close_btn.pack(side=tk.LEFT, padx=10)
 
 root.mainloop()

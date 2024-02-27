@@ -310,7 +310,7 @@ process_all_btn = ttk.Button(button_frame, text="Process All", command=lambda: t
 process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
 # Add 'Close' button to the button frame
-close_btn = ttk.Button(button_frame, text="Close", command=lambda: close_application(root))
+close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root))
 close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
 
