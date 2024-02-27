@@ -139,9 +139,8 @@ info_label_text = ("All assets that are imported are associated with a file "
 info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
 info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
 
-# Navigation and Update buttons
+# Navigation buttons
 ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=5, pady=5)
-ttk.Button(root, text="Save", command=update_record, bootstyle=PRIMARY).grid(row=4, column=1, padx=5, pady=5)
 ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
 
 # Exit button
