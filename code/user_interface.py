@@ -19,6 +19,7 @@ import geopandas as gpd
 import configparser
 import sqlite3
 
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -39,11 +40,6 @@ def log_to_logfile(message):
     formatted_message = f"{timestamp} - {message}"
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
-
-
-# Function to open a web link
-def open_link(url):
-    webbrowser.open_new_tab(url)
 
 
 # This function updates the stats in the labelframe. Clear labels first,
@@ -280,14 +276,11 @@ def exit_program():
 
 
 
-
 # Function to dynamically update wraplength of label text
 #def update_wraplength(event):
 #    # Subtract some padding to ensure text does not touch frame borders
 #    new_width = event.width - 20
 #    stats_label.config(wraplength=new_width)
-
-
 def add_text_to_labelframe(labelframe, text):
     label = tk.Label(labelframe, text=text, justify='left')
     label.pack(padx=10, pady=10, fill='both', expand=True)
@@ -319,8 +312,8 @@ root.title("MESA 4")
 root.geometry("800x540")
 
 button_width = 18   
-button_padx  = 7
-button_pady  = 7
+button_padx  =  7
+button_pady  =  7
 
 # Main frame
 main_frame = tk.Frame(root)
@@ -362,7 +355,6 @@ edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
 admin_lines_btn = ttk.Button(left_panel, text="Work with lines", command=admin_lines, width=button_width)
 admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
-
 
 # Separator
 separator = ttk.Separator(main_frame, orient='vertical')
@@ -407,7 +399,6 @@ version_label = ttk.Label(bottom_panel, text="MESA version 4.0.0-alpha", font=("
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
 log_to_logfile("User interface, main dialogue opened.")
-
 
 # Start the GUI event loop
 root.mainloop()
