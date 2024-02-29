@@ -19,6 +19,8 @@ from shapely.geometry import box
 import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
+import glob
+import os
 
 
 # # # # # # # # # # # # # # 
@@ -56,12 +58,7 @@ def close_application(root):
     
 # Thread function to run main without freezing GUI
 def run_create_atlas(log_widget, progress_var, gpkg_file):
-    main(log_widget, progress_var, gpkg_file)
-
-    
-# Thread function to run main without freezing GUI
-def run_import_atlas(log_widget, progress_var, gpkg_file):
-    main_import_atlas(log_widget, progress_var, gpkg_file)
+    main_create_atlas(log_widget, progress_var, gpkg_file)
 
 
 # Function to filter and update atlas geometries
@@ -117,10 +114,10 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
     progress_var.set(10)  # Indicate start
 
     # Read configuration
-    config = read_config('config.ini')
-    atlas_lon_size_km = float(config['DEFAULT']['atlas_lon_size_km'])
-    atlas_lat_size_km = float(config['DEFAULT']['atlas_lat_size_km'])
-    atlas_overlap_percent = float(config['DEFAULT']['atlas_overlap_percent'])
+    config                  = read_config('config.ini')
+    atlas_lon_size_km       = float(config['DEFAULT']['atlas_lon_size_km'])
+    atlas_lat_size_km       = float(config['DEFAULT']['atlas_lat_size_km'])
+    atlas_overlap_percent   = float(config['DEFAULT']['atlas_overlap_percent'])
 
     # Load tbl_flat from GeoPackage
     tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')
@@ -140,13 +137,88 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "COMPLETED: Atlas creation done. Old ones deleted.")
 
 
-# Function imports polygon from the first and best layer in the atlas-folder.
-def main_import_atlas(log_widget, progress_var, gpkg_file):
-    log_to_gui(log_widget, "Starting imports...")
-    progress_var.set(10)  # Indicate start
+def process_spatial_file(filepath, atlas_objects, atlas_id_counter):
+    # Load the file using Geopandas
+    gdf = gpd.read_file(filepath)
+    
+    # Filter only polygon geometries (this includes MultiPolygon geometries as well)
+    polygons = gdf[gdf.geometry.type.isin(['Polygon'])]
+    
+    # Process each polygon feature
+    for _, row in polygons.iterrows():
+        # Create a dictionary representing the atlas object
+        # Modify this part according to how you want to structure your atlas objects
+        atlas_object = {
+            'id': atlas_id_counter,
+            'geometry': row.geometry
+        }
+        atlas_objects.append(atlas_object)
+        atlas_id_counter += 1
 
-    update_progress(100)
+    return atlas_id_counter
+
+
+def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
+    atlas_objects = []
+    atlas_id_counter = 1
+    file_patterns = ['*.shp', '*.gpkg']
+    total_files = sum([len(glob.glob(os.path.join(input_folder_atlas, '**', pattern), recursive=True)) for pattern in file_patterns])
+    processed_files = 0
+
+    if total_files == 0:
+        progress_increment = 70
+    else:
+        progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
+
+    log_to_gui(log_widget, "Working with imports...")
+
+    update_progress(10)  # Initial progress after starting
+
+    for pattern in file_patterns:
+        for filepath in glob.glob(os.path.join(input_folder_atlas, '**', pattern), recursive=True):
+            try:
+                log_to_gui(log_widget, f"Processing layer: {os.path.splitext(os.path.basename(filepath))[0]}")
+                processed_files += 1
+                update_progress(10 + processed_files * progress_increment)  # Update progress before processing each file
+
+                atlas_id_counter = process_spatial_file(filepath, atlas_objects, atlas_id_counter)
+
+            except Exception as e:
+                log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
+
+    # Creating a GeoDataFrame from the list of atlas objects
+    if atlas_objects:
+        atlas_objects_gdf = gpd.GeoDataFrame(atlas_objects)
+    else:
+        atlas_objects_gdf = gpd.GeoDataFrame(columns=['id', 'geometry'])
+
+    update_progress(90)
+
+    log_to_gui(log_widget, f"Total atlas polygons added: {atlas_id_counter - 1}")
+
+    return atlas_objects_gdf
+
+
+# Thread function to run import without freezing GUI
+def run_import_atlas(input_folder_atlas, gpkg_file, log_widget, progress_var):
+
+    print(f"Debug Info - log_widget: {type(log_widget)}, progress_var: {type(progress_var)}")
+
+    log_to_gui(log_widget, "Starting atlas import process...")
+
+    atlas_objects_gdf = import_atlas_objects(input_folder_atlas, log_widget, progress_var)
+
+    # Check if the GeoDataFrame is not empty before exporting
+    if not atlas_objects_gdf.empty:  # Corrected atlas
+        log_to_gui(log_widget, "Importing:")
+        atlas_objects_gdf.to_file(gpkg_file, layer='tbl_atlas_object', driver='GPKG')
+    else:
+        log_to_gui(log_widget, "No atlas objects to export.")
+    
     log_to_gui(log_widget, "COMPLETED: Atlas polygons imported. Old ones deleted.")
+    progress_var.set(100)
+
+
 
 #####################################################################################
 #  Main
@@ -158,6 +230,7 @@ config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+input_folder_atlas      = config['DEFAULT']['input_folder_atlas']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
@@ -194,10 +267,10 @@ button_frame.pack(pady=5)
 
 # Add 'Import' button to the button frame
 run_btn = ttk.Button(button_frame, text="Import", command=lambda: threading.Thread(
-    target=run_import_atlas, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+    target=run_import_atlas, args=(input_folder_atlas, gpkg_file, log_widget, progress_var, ), daemon=True).start())
 run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
-# Add 'Run' button to the button frame
+# Add 'Run' button to the button frame  
 run_btn = ttk.Button(button_frame, text="Create", command=lambda: threading.Thread(
     target=run_create_atlas, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
 run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
