@@ -76,7 +76,8 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
     return intersecting_geometries
 
 
-# Function to generate atlas geometries
+# Function to generate atlas geometries. This is done by making a bounding box around the gridded data
+# which can be found in tbl_flat.
 def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent):
     log_to_gui(log_widget, "Generating atlas geometries...")
     lon_size_deg = atlas_lon_size_km / 111
@@ -137,6 +138,7 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "COMPLETED: Atlas creation done. Old ones deleted.")
 
 
+# Process the spatial file. Make sure it is a single polygon, not a multipolygon or any other geometry.
 def process_spatial_file(filepath, atlas_objects, atlas_id_counter):
     # Load the file using Geopandas
     gdf = gpd.read_file(filepath)
@@ -158,6 +160,7 @@ def process_spatial_file(filepath, atlas_objects, atlas_id_counter):
     return atlas_id_counter
 
 
+# Import atlas objects from the atlas folder.
 def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
     atlas_objects = []
     atlas_id_counter = 1
@@ -252,7 +255,6 @@ progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the
 # Label for displaying the progress percentage
 progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
 progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
-
 
 # Information text field above the buttons
 info_label_text = ("This is where you can import, generate and update atlas geometries. "
