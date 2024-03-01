@@ -4,9 +4,13 @@
 #
 # tbl_assets:   Information about assets like mangroves ant the likes. 
 #               Data is stored as polygons, points and lines.
+#               The assets are grouped into tbl_asset_groups. Objects are
+#               kept in tbl_asset_objects.
 #
 # tbl_geocodes: Information about geocodes which could be grids, hexagons
 #               as well as municipalities and other.
+#               The geocodes are grouped into tbl_geocode_groups. Objects are
+#               kept in tbl_geocode_objects.
 
 import tkinter as tk
 import locale
@@ -106,8 +110,8 @@ def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_
         area_m2_series = data.geometry.area
 
     for index, row in data.iterrows():
-        attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
-        area_m2 = area_m2_series.iloc[index] if row.geometry.geom_type == 'Polygon' else 0
+        attributes  = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
+        area_m2     = area_m2_series.iloc[index] if row.geometry.geom_type == 'Polygon' else 0
 
         asset_objects.append({
             'id': int(object_id_counter),
@@ -157,9 +161,9 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     log_to_gui(log_widget, f"Imported {layer_name} with {feature_count}.")
 
     # Calculate bounding box and add to geocode groups
-    bounding_box    = data.total_bounds
-    bbox_geom       = box(*bounding_box)
-    name_gis_geocodegroup = f"geocode_{group_id_counter:03d}"
+    bounding_box            = data.total_bounds
+    bbox_geom               = box(*bounding_box)
+    name_gis_geocodegroup   = f"geocode_{group_id_counter:03d}"
 
     geocode_groups.append({
         'id': group_id_counter,  # Group ID
@@ -397,7 +401,6 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     update_progress(100)
 
 
-
 def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
     # Assuming data.total_bounds gives you [minx, miny, maxx, maxy]
     bbox = data.total_bounds
@@ -476,14 +479,13 @@ def process_geopackage_layers(filepath, asset_objects, asset_groups, object_id_c
     return asset_objects, asset_groups, object_id_counter, group_id_counter
 
 
-
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
-    asset_objects = []
-    asset_groups = []
-    group_id_counter = 1
-    object_id_counter = 1
-    file_patterns = ['*.shp', '*.gpkg']
-    processed_files = 0
+    asset_objects       = []
+    asset_groups        = []
+    group_id_counter    = 1
+    object_id_counter   = 1
+    file_patterns       = ['*.shp', '*.gpkg']
+    processed_files     = 0
 
     progress_var.set(10)
     update_progress(10)
@@ -604,7 +606,6 @@ def delete_layer(gpkg_file, layer_name):
         log_to_gui(log_widget, f"An error occurred while attempting to delete layer {layer_name} from {gpkg_file}: {e}")
 
 
-
 # Function exports data to geopackage and secures replacing relevant data.  
 def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
     # Check if the input is a list and convert it to a GeoDataFrame
@@ -677,7 +678,6 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
         log_to_gui(log_widget, "Error: 'geom' column not found in asset_groups_df.")
 
 
-
 # Name gis should be part of the asset objects table
 def update_asset_objects_with_name_gis(db_file, log_widget):
     try:
@@ -709,7 +709,6 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
         conn.close()
 
 
-
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     
@@ -734,7 +733,6 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 
     log_to_gui(log_widget, "COMPLETED: Asset import done.")
     progress_var.set(100)
-
 
 
 # Function to close the application
