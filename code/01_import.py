@@ -57,11 +57,12 @@ def get_bounding_box(data):
     return bbox_geom
 
 
-# Update progress labl
+# Update progress label
 def update_progress(new_value):
-    progress_var.set(new_value)
-    progress_label.config(text=f"{int(new_value)}%")
-
+    def task():
+        progress_var.set(new_value)
+        progress_label.config(text=f"{int(new_value)}%")
+    root.after(0, task)
 
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
@@ -197,14 +198,14 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
             layer       = ds.GetLayerByIndex(i)
             layer_name  = layer.GetName()
             data        = read_and_reproject(filepath, layer=layer_name)
-            log_to_gui(log_widget, f"Importing {layer_name}")
+            log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
             group_id_counter, object_id_counter = process_geocode_layer(
                 data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
         data            = read_and_reproject(filepath)
         layer_name      = os.path.splitext(os.path.basename(filepath))[0]
-        log_to_gui(log_widget, f"Importing {layer_name}")
+        log_to_gui(log_widget, f"Importing shapefile layyer: {layer_name}")
         group_id_counter, object_id_counter = process_geocode_layer(
             data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
     else:
@@ -221,14 +222,14 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
             layer       = ds.GetLayerByIndex(i)
             layer_name  = layer.GetName()
             data        = read_and_reproject(filepath, layer=layer_name)
-            log_to_gui(log_widget, f"Importing the layer {layer_name}.")
+            log_to_gui(log_widget, f"Importing geopackage layer {layer_name}.")
             line_id_counter = process_line_layer(
                 data, line_objects, line_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
         data = read_and_reproject(filepath)
         layer_name = os.path.splitext(os.path.basename(filepath))[0]
-        log_to_gui(log_widget, f"Importing {layer_name}")
+        log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
         line_id_counter = process_line_layer(
             data, line_objects, line_id_counter, layer_name, log_widget)
     else:
@@ -331,7 +332,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
         export_to_geopackage(geocode_objects_gdf, gpkg_file, 'tbl_geocode_object', log_widget)
 
     log_to_gui(log_widget, "COMPLETED: Geocoding imports done.")
-
+    progress_var.set(100)
     update_progress(100)
 
 
@@ -504,8 +505,12 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
             filename = os.path.splitext(os.path.basename(filepath))[0]
             if filepath.endswith('.gpkg'):
+
                 # Handle geopackage: iterate over each layer
                 for layer_name in fiona.listlayers(filepath):
+                    
+                    log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
+                    
                     data = read_and_reproject(filepath, layer=layer_name)
                     if not data.empty:
                         bbox_polygon = box(*data.total_bounds)
@@ -536,7 +541,11 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                             object_id_counter += 1
                         group_id_counter += 1
             elif filepath.endswith('.shp'):
+                
                 layer_name = filename
+
+                log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
+                
                 data = read_and_reproject(filepath)
                 if not data.empty:
                     bbox_polygon = box(*data.total_bounds)
@@ -571,6 +580,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                 log_to_gui(log_widget, f"Unsupported file format for {filepath}")
             processed_files += 1
             progress_var.set(10 + processed_files * progress_increment)
+            update_progress(10 + processed_files * progress_increment)
 
     asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
     asset_objects_gdf = gpd.GeoDataFrame(asset_objects, geometry='geom')
@@ -580,8 +590,8 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     else:
         total_bbox_geom = None
 
-    log_to_gui(log_widget, "COMPLETED: Asset imports done.")
-    progress_var.set(100)
+    progress_var.set(90)
+    update_progress(90)
 
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
@@ -633,6 +643,8 @@ def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
     try:
         gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
         log_to_gui(log_widget, f"Data successfully exported to {layer_name} in {gpkg_file}.")
+        progress_var.set(95)
+        update_progress(95)
     except Exception as e:
         log_to_gui(log_widget, f"Failed to export data to GeoPackage: {str(e)}")
 
@@ -718,13 +730,14 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 
     # Check if the GeoDataFrame is not empty before exporting
     if not asset_objects_gdf.empty:  # Corrected line
-        log_to_gui(log_widget, "Importing:")
+        log_to_gui(log_widget, "Starting export of asset objects to geopackage")
         export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
     else:
         log_to_gui(log_widget, "No asset objects to export.")
     
     
     if not asset_groups_gdf.empty:
+        log_to_gui(log_widget, "Starting export of asset groups to geopackage")
         export_to_geopackage(asset_groups_gdf, gpkg_file, 'tbl_asset_group', log_widget)
     else:
         log_to_gui(log_widget, "No asset groups to export.")
@@ -733,6 +746,7 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 
     log_to_gui(log_widget, "COMPLETED: Asset import done.")
     progress_var.set(100)
+    update_progress(100)
 
 
 # Function to close the application
