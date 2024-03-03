@@ -160,11 +160,11 @@ def get_status(gpkg_file):
 def import_assets():
     try:
         # First try running import.py
-        subprocess.run(["python", "01_import.py"], check=True)
+        subprocess.run(["python", "01_import.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails or is not found, try running import.exe
-            subprocess.run(["01_import.exe"], check=True)
+            subprocess.run(["01_import.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute import assets script.")
     update_stats()
@@ -172,12 +172,12 @@ def import_assets():
 
 def edit_asset_group():
     try:
-        subprocess.run(["python", "04_edit_asset_group.py"], check=True)
+        subprocess.run(["python", "04_edit_asset_group.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log_to_logfile("Opened edit asset group")
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["04_edit_asset_group.exe"], check=True)
+            subprocess.run(["04_edit_asset_group.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit asset group script.")
     update_stats()
@@ -185,11 +185,11 @@ def edit_asset_group():
 
 def edit_geocode_group():
     try:
-        subprocess.run(["python", "04_edit_geocode_group.py"], check=True)
+        subprocess.run(["python", "04_edit_geocode_group.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["04_edit_geocode_group.exe"], check=True)
+            subprocess.run(["04_edit_geocode_group.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit geocode group script.")
     update_stats()
@@ -197,11 +197,11 @@ def edit_geocode_group():
 
 def edit_processing_setup():
     try:
-        subprocess.run(["python", "04_edit_input.py"], check=True)
+        subprocess.run(["python", "04_edit_input.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["04_edit_input.exe"], check=True)
+            subprocess.run(["04_edit_input.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit input script.")
     update_stats()
@@ -209,11 +209,11 @@ def edit_processing_setup():
 
 def process_data():
     try:
-        subprocess.run(["python", "06_process.py"], check=True)
+        subprocess.run(["python", "06_process.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["06_process.exe"], check=True)
+            subprocess.run(["06_process.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute processing script.")
     update_stats()
@@ -221,11 +221,11 @@ def process_data():
 
 def make_atlas():
     try:
-        subprocess.run(["python", "07_make_atlas.py"], check=True)
+        subprocess.run(["python", "07_make_atlas.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["07_make_atlas.exe"], check=True)
+            subprocess.run(["07_make_atlas.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute make atlas script.")
     update_stats()
@@ -233,11 +233,11 @@ def make_atlas():
 
 def edit_atlas():
     try:
-        subprocess.run(["python", "07_edit_atlas.py"], check=True)
+        subprocess.run(["python", "07_edit_atlas.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["07_edit_atlas.exe"], check=True)
+            subprocess.run(["07_edit_atlas.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit atlas script.")
     update_stats()
@@ -245,11 +245,11 @@ def edit_atlas():
 
 def admin_lines():
     try:
-        subprocess.run(["python", "08_admin_lines.py"], check=True)
+        subprocess.run(["python", "08_admin_lines.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["08_admin_lines.exe"], check=True)
+            subprocess.run(["08_admin_lines.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute admin lines.")
     update_stats()
@@ -257,11 +257,11 @@ def admin_lines():
 
 def edit_lines():
     try:
-        subprocess.run(["python", "08_edit_lines.py"], check=True)
+        subprocess.run(["python", "08_edit_lines.py"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             # If import.py fails, try running import.exe
-            subprocess.run(["08_edit_lines.exe"], check=True)
+            subprocess.run(["08_edit_lines.exe"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_logfile("Failed to execute edit lines script.")
     update_stats()
