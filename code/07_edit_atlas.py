@@ -106,7 +106,6 @@ ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 # Initialize the main window
-
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Edit atlas")
 root.columnconfigure(0, weight=1)

@@ -14,9 +14,6 @@
 
 import tkinter as tk
 import locale
-
-locale.setlocale(locale.LC_ALL, 'C') 
-
 from tkinter import scrolledtext, ttk
 from fiona import open as fiona_open    
 import threading

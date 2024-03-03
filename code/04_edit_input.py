@@ -1,8 +1,5 @@
 import tkinter as tk
 import locale
-
-locale.setlocale(locale.LC_ALL, 'C') 
-
 from tkinter import messagebox, ttk
 import configparser
 import pandas as pd

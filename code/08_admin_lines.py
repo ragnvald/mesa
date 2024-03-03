@@ -21,10 +21,6 @@ from fiona.crs import from_epsg
 from shapely.ops import transform
 import pyproj
 from functools import partial
-
-# Set locale
-locale.setlocale(locale.LC_ALL, 'C') 
-
 import os
 import numpy as np
 import tkinter as tk

@@ -6,10 +6,6 @@ import json
 import platform
 import getpass
 from datetime import datetime
-
-
-locale.setlocale(locale.LC_ALL, 'C') 
-
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk

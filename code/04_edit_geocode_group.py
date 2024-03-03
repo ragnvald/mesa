@@ -1,15 +1,10 @@
 import tkinter as tk
-
 import locale
-
-locale.setlocale(locale.LC_ALL, 'C') 
-
 from tkinter import messagebox, ttk
 import configparser
 import datetime
 import geopandas as gpd
 from sqlalchemy import create_engine
-
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 

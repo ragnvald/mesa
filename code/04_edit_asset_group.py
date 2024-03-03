@@ -1,8 +1,5 @@
 import tkinter as tk
 import locale
-
-locale.setlocale(locale.LC_ALL, 'C') 
-
 from tkinter import ttk
 import configparser
 import pandas as pd
@@ -133,7 +130,7 @@ title_fromuser_entry.grid(row=2, column=1, sticky='w')
 
 # Information text field above the "Update and Save Record" button
 info_label_text = ("All assets that are imported are associated with a file "
-                   " or table name. This table name is the original name. If "
+                   "or table name. This table name is the original name. If "
                    "you want to use a different name in presenting the analysis "
                    "we suggest that you add that name here.")
 info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
