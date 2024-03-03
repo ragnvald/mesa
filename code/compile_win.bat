@@ -53,7 +53,6 @@ echo Distribution folder will be: %DIST_FOLDER%
 :: Start the compilation
 
 echo Working on user_interface.py
-
 pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" user_interface.py >nul 2>&1
 
 echo Working on 01_import.py
@@ -87,7 +86,6 @@ echo Working on 08_edit_lines.py
 pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 08_edit_lines.py >nul 2>&1
 
 echo Compilation complete. You will finde the compiled code herE: %DIST_FOLDER%
-
 
 
 echo
