@@ -196,7 +196,7 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
     else:
         atlas_objects_gdf = gpd.GeoDataFrame(columns=['id', 'name_gis', 'title_user', 'description', 'image_name_1', 'image_desc_1', 'image_name_2', 'image_desc_2', 'geom'])
 
-    update_progress(90)
+    update_progress(100)
 
     log_to_gui(log_widget, f"Total atlas polygons added: {atlas_id_counter - 1}")
 
