@@ -59,7 +59,14 @@ def load_data():
         widget.destroy()
 
     entries = []
-    for i, row in df.iterrows():
+
+    # Add text labels as the first row in the frame
+    ttk.Label(frame, text="Dataset", anchor='w').grid(row=0, column=0, padx=5, sticky='ew')
+    ttk.Label(frame, text="Susceptibility", anchor='w').grid(row=0, column=1, padx=5, sticky='ew')
+    ttk.Label(frame, text="Importance", anchor='w').grid(row=0, column=2, padx=5, sticky='ew')
+    ttk.Label(frame, text="Sensitivity", anchor='w').grid(row=0, column=3, padx=5, sticky='ew')
+
+    for i, row in enumerate(df.itertuples(), start=1):  # Adjust to use itertuples() for efficiency
         add_data_row(i, row)
 
     frame.update_idletasks()
@@ -67,20 +74,20 @@ def load_data():
 
 def add_data_row(i, row):
     global entries
-    ttk.Label(frame, text=row['name_original'], anchor='e').grid(row=i+1, column=0, padx=5, sticky='ew')  # Align right
+    ttk.Label(frame, text=getattr(row, 'name_original', ''), anchor='e').grid(row=i, column=0, padx=5, sticky='ew')  # Adjusted for namedtuple access
 
     susceptibility_entry = ttk.Entry(frame, width=column_widths[1], validate='key', validatecommand=vcmd)
-    susceptibility_entry.insert(0, row['susceptibility'])
-    susceptibility_entry.grid(row=i+1, column=1, padx=5)
-    susceptibility_entry.bind('<KeyRelease>', lambda event, index=i: calculate_sensitivity(index))
+    susceptibility_entry.insert(0, getattr(row, 'susceptibility', ''))
+    susceptibility_entry.grid(row=i, column=1, padx=5)
+    susceptibility_entry.bind('<KeyRelease>', lambda event, index=i-1: calculate_sensitivity(index))  # Adjusted index for zero-based
 
     importance_entry = ttk.Entry(frame, width=column_widths[2], validate='key', validatecommand=vcmd)
-    importance_entry.insert(0, row['importance'])
-    importance_entry.grid(row=i+1, column=2, padx=5)
-    importance_entry.bind('<KeyRelease>', lambda event, index=i: calculate_sensitivity(index))
+    importance_entry.insert(0, getattr(row, 'importance', ''))
+    importance_entry.grid(row=i, column=2, padx=5)
+    importance_entry.bind('<KeyRelease>', lambda event, index=i-1: calculate_sensitivity(index))  # Adjusted index for zero-based
 
-    sensitivity_label = ttk.Label(frame, text=str(row['sensitivity']), width=column_widths[3])
-    sensitivity_label.grid(row=i+1, column=3, padx=5)
+    sensitivity_label = ttk.Label(frame, text=str(getattr(row, 'sensitivity', '')), width=column_widths[3])
+    sensitivity_label.grid(row=i, column=3, padx=5)
 
     entries.append({
         'susceptibility': susceptibility_entry,
@@ -151,28 +158,6 @@ root.title("Set up processing")
 root.geometry("700x700")
 
 vcmd = (root.register(validate_integer), '%P')
-
-# Header frame setup
-header_frame = ttk.Frame(root)
-header_frame.pack(side=tk.TOP, fill="x")
-
-# Create and grid header labels with fixed widths
-headers = ["Dataset", "Susceptibility", "Importance", "Sensitivity"]
-for i, (header, width) in enumerate(zip(headers, column_widths)):
-    label = ttk.Label(header_frame, text=header, width=width)
-    label.grid(row=0, column=i, padx=5, sticky='ew')
-
-# Add column labels in the header_frame with centered alignment
-ttk.Label(header_frame, text="Dataset").grid(row=0, column=0, padx=5, sticky='nsew')
-ttk.Label(header_frame, text="Susceptibility").grid(row=0, column=1, padx=5, sticky='nsew')
-ttk.Label(header_frame, text="Importance").grid(row=0, column=2, padx=5, sticky='nsew')
-ttk.Label(header_frame, text="Sensitivity").grid(row=0, column=3, padx=5, sticky='nsew')
-
-# Configure the column weights to ensure they expand and allow centering
-header_frame.grid_columnconfigure(0, weight=1)
-header_frame.grid_columnconfigure(1, weight=1)
-header_frame.grid_columnconfigure(2, weight=1)
-header_frame.grid_columnconfigure(3, weight=1)
 
 # Create scrollable area below the header
 canvas = create_scrollable_area(root)
