@@ -115,7 +115,7 @@ def aggregate_data(intersected_data):
 
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
-    log_to_gui(log_widget, "Building data mining database (tbl_stacked).")
+    log_to_gui(log_widget, "Building analysis table (tbl_stacked).")
     update_progress(10)  # Indicate start
 
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
@@ -152,7 +152,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     intersected_data.drop(columns=['fid', 'id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
-    log_to_gui(log_widget, "Data processing done.")
+    log_to_gui(log_widget, "Done processing the analysis layer.")
     update_progress(50)  # Final progress
 
 
@@ -164,7 +164,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
 
     # Calculate overlap counts per 'code'
     overlap_counts = tbl_stacked['code'].value_counts().reset_index()
-    overlap_counts.columns = ['code', 'overlap_count']
+    overlap_counts.columns = ['code', 'assets_overlap_total']
 
     # Aggregation functions
     aggregation_functions = {
@@ -195,7 +195,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
         'ref_geocodegroup_first': 'ref_geocodegroup',
         'name_gis_geocodegroup_first': 'name_gis_geocodegroup',
         'asset_group_name_<lambda>': 'asset_group_names',
-        'ref_asset_group_nunique': 'assets_total',
+        'ref_asset_group_nunique': 'assets_groups_total',
         'geometry_first': 'geometry'
     }
 
@@ -249,7 +249,7 @@ def process_all(log_widget, progress_var, gpkg_file):
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
     classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
 
-    log_to_gui(log_widget, "COMPLETED: Data processing and aggregation completed.")
+    log_to_gui(log_widget, "COMPLETED: Processing of nalysis and presentation layers completed.")
     update_progress(100)
 
 
