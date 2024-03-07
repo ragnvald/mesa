@@ -145,10 +145,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
     # To list the columns:
     columns_list = intersected_data.columns.tolist()
-
-    # To print the list of columns:
-    print(columns_list)
-    
+  
     update_progress(45)  # Progress after concatenating data
     
     # Drop the unnecessary columns
@@ -161,12 +158,13 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
 
 # Create tbl_flat by reading out values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file):
-    
     log_to_gui(log_widget, "Building map database (tbl_flat).")
-
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
-
     update_progress(60)
+
+    # Calculate overlap counts per 'code'
+    overlap_counts = tbl_stacked['code'].value_counts().reset_index()
+    overlap_counts.columns = ['code', 'overlap_count']
 
     # Aggregation functions
     aggregation_functions = {
@@ -175,7 +173,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
         'susceptibility': ['min', 'max'],
         'ref_geocodegroup': 'first',
         'name_gis_geocodegroup': 'first',
-        'asset_group_name': lambda x: ', '.join(x.unique()),  # Joining into a comma-separated string
+        'asset_group_name': lambda x: ', '.join(x.unique()),
         'ref_asset_group': 'nunique',
         'geometry': 'first'
     }
@@ -208,6 +206,9 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
 
     # Reset index to make 'code' a column
     tbl_flat.reset_index(inplace=True)
+
+    # Merge tbl_flat with overlap_counts to add the overlap_count column
+    tbl_flat = tbl_flat.merge(overlap_counts, on='code', how='left')
 
     # Save tbl_flat as a new layer in the GeoPackage
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
