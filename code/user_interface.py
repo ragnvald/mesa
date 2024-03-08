@@ -14,6 +14,7 @@ import pandas as pd
 import geopandas as gpd
 import configparser
 import sqlite3
+import uuid
 
 
 # Read the configuration file
@@ -288,6 +289,26 @@ def add_text_to_labelframe(labelframe, text):
     # Bind the resize event of the labelframe to the update_wrap function
     labelframe.bind('<Configure>', update_wrap)
 
+
+def update_config_with_uuid(config_file, uuid_value):
+    lines = []
+    with open(config_file, 'r') as file:
+        lines = file.readlines()
+    
+    uuid_found = False
+    for i, line in enumerate(lines):
+        if line.startswith('id_uuid'):
+            uuid_found = True
+            lines[i] = f"id_uuid = {uuid_value}\n"
+            break
+    
+    if not uuid_found:  # If id_uuid is not found in the file, you might need to decide where to add it
+        lines.append(f"id_uuid = {uuid_value}\n")  # Example: appending at the end or find a specific section
+    
+    with open(config_file, 'w') as file:
+        file.writelines(lines)
+
+
 #####################################################################################
 #  Main
 #
@@ -298,6 +319,15 @@ config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+
+# Check and populate id_uuid if empty
+id_uuid = config['DEFAULT'].get('id_uuid', '').strip()
+if not id_uuid:  # if id_uuid is empty
+    id_uuid = str(uuid.uuid4())  # Generate a new UUID
+    update_config_with_uuid(config_file, id_uuid)  # Update the config file manually to preserve structure and comments
+
+print(f"UUID: {id_uuid}")  # To verify the result
+
 
 # Check and create folders at the beginning
 check_and_create_folders()
@@ -311,7 +341,7 @@ button_width = 18
 button_padx  =  7
 button_pady  =  7
 
-# Main frame
+# Main frame set up
 main_frame = tk.Frame(root)
 main_frame.pack(fill='both', expand=True, pady=10)
 
@@ -324,8 +354,7 @@ main_frame.grid_columnconfigure(2, weight=1)  # Right panel has weight
 left_panel = tk.Frame(main_frame)
 left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
 
-# Set minimum size for left panel
-main_frame.grid_columnconfigure(0, minsize=220)  # Adjust the minsize as needed
+main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
 # Add buttons to left panel with spacing between buttons
 import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
@@ -369,6 +398,7 @@ info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootst
 info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
 log_to_logfile("User interface, statistics updated.")
+
 update_stats()
 
 # Bind the configure event to update the wraplength of the label
@@ -391,7 +421,7 @@ mesa_text = """This version of the MESA tool is a stand-alone desktop based vers
 add_text_to_labelframe(about_labelframe, mesa_text)
 
 # Version label aligned bottom right
-version_label = ttk.Label(bottom_panel, text="MESA version 4.0.0-alpha", font=("Calibri", 7), anchor='e')
+version_label = ttk.Label(bottom_panel, text="MESA version 4.0.2-alpha", font=("Calibri", 7), anchor='e')
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
 log_to_logfile("User interface, main dialogue opened.")
