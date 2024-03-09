@@ -9,12 +9,14 @@ from datetime import datetime
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
+import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 import pandas as pd
 import geopandas as gpd
 import configparser
 import sqlite3
 import uuid
+
 
 
 # Read the configuration file
@@ -272,24 +274,6 @@ def exit_program():
     root.destroy()
 
 
-
-# Function to dynamically update wraplength of label text
-#def update_wraplength(event):
-#    # Subtract some padding to ensure text does not touch frame borders
-#    new_width = event.width - 20
-#    stats_label.config(wraplength=new_width)
-def add_text_to_labelframe(labelframe, text):
-    label = tk.Label(labelframe, text=text, justify='left')
-    label.pack(padx=10, pady=10, fill='both', expand=True)
-
-    # Function to update the wraplength based on the width of the labelframe
-    def update_wrap(event):
-        label.config(wraplength=labelframe.winfo_width() - 20)
-
-    # Bind the resize event of the labelframe to the update_wrap function
-    labelframe.bind('<Configure>', update_wrap)
-
-
 def update_config_with_uuid(config_file, uuid_value):
     lines = []
     with open(config_file, 'r') as file:
@@ -307,6 +291,19 @@ def update_config_with_uuid(config_file, uuid_value):
     
     with open(config_file, 'w') as file:
         file.writelines(lines)
+
+
+# Function to toggle between main frame and about page
+def toggle_frame():
+    global toggle_button  # Ensure you can access the toggle button globally
+    if main_frame.winfo_ismapped():
+        main_frame.pack_forget()
+        about_frame.pack(fill='both', expand=True)
+        toggle_button.config(text="Workbench...", bootstyle="primary")  # Change button text to Workbench
+    else:
+        about_frame.pack_forget()
+        main_frame.pack(fill='both', expand=True, pady=10)
+        toggle_button.config(text="About...", bootstyle="primary")  # Change button text to About
 
 
 #####################################################################################
@@ -337,9 +334,10 @@ root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("MESA 4")
 root.geometry("800x540")
 
-button_width = 18   
+button_width = 18
 button_padx  =  7
 button_pady  =  7
+button_text  = 'About...'
 
 # Main frame set up
 main_frame = tk.Frame(root)
@@ -401,30 +399,36 @@ log_to_logfile("User interface, statistics updated.")
 
 update_stats()
 
-# Bind the configure event to update the wraplength of the label
-#info_labelframe.bind('<Configure>', update_wraplength)
 
-# Adjust the exit button to align it to the right
-exit_btn = ttk.Button(right_panel, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
-exit_btn.grid(row=1, column=0, pady=button_pady, sticky='e')  # Align to the right side
+# Adjusted Content for About Page
+about_frame = ttk.Frame(root)  # This frame is for the alternate screen
 
-# Bottom panel
-bottom_panel = ttk.Frame(root)
-bottom_panel.pack(fill='both', expand=True, pady=5)
+# "Welcome to this page!" - Stays as is, directly packed into about_frame
+welcome_label = ttk.Label(about_frame, text="Welcome to MESA 4.0!", font=('Calibri', 12))
+welcome_label.pack(pady=(20, 10))
 
-# About label frame
-about_labelframe = ttk.LabelFrame(bottom_panel, text="About", bootstyle='secondary')
-about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
+# Now include the about information directly in the about_frame below the welcome message
+about_info_text = """This is the back info text."""
+about_info_labelframe = ttk.LabelFrame(about_frame, text="About", bootstyle='secondary')
+about_info_labelframe.pack(fill='both', expand=True, padx=5, pady=5)
+about_info_label = tk.Label(about_info_labelframe, text=about_info_text, justify='left')
+about_info_label.pack(padx=10, pady=10, fill='both', expand=True)
 
-mesa_text = """This version of the MESA tool is a stand-alone desktop based version prepared for use on the Windows platform. To use it you will have to deposit spatial data for assets and geocodes (e.g., grids). The result of the processing is a sensitivity data set. To balance the resulting scores you will have to provide values for assets and their associated susceptibilities."""
 
-add_text_to_labelframe(about_labelframe, mesa_text)
+# Bottom Panel in Main Interface for toggling to About Page
+bottom_frame_both= ttk.Frame(root)
+bottom_frame_both.pack(side='bottom', fill='x', padx=10, pady=5)
 
-# Version label aligned bottom right
-version_label = ttk.Label(bottom_panel, text="MESA version 4.0.2-alpha", font=("Calibri", 7), anchor='e')
+
+# Create toggle button as a named object
+toggle_button = ttkb.Button(bottom_frame_both, text="About...", command=toggle_frame, bootstyle="primary")
+toggle_button.pack(side='left', padx=(0, 10))
+
+# Continue with the Exit button and version label as before
+ttkb.Button(bottom_frame_both, text="Exit", command=root.destroy, bootstyle="warning").pack(side='left')  # Assuming `root.destroy` for exiting
+version_label = ttk.Label(bottom_frame_both, text="MESA version 4.0.2-alpha", font=("Calibri", 7), anchor='e')
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
-log_to_logfile("User interface, main dialogue opened.")
 
 # Start the GUI event loop
 root.mainloop()
