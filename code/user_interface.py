@@ -487,12 +487,16 @@ about_frame_btn.pack(side='left', padx=(0, 10))
 registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register", command=show_registration_frame, bootstyle="primary")
 registration_frame_btn.pack(side='left', padx=(0, 10))
 
+# Center frame for version label
+center_frame = ttk.Frame(bottom_frame_buttons)
+center_frame.pack(side='left', expand=True, fill='x')
+
+version_label = ttk.Label(center_frame, text="MESA version 4.0.2-alpha", font=("Calibri", 7))
+version_label.pack(side='left', padx=50, pady=5)  # Adjust side and padding as needed
+
 # Continue with the Exit button and version label as before
 exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, bootstyle="warning")
-exit_btn.pack(side='left')  # Assuming `root.destroy` for exiting
-
-version_label = ttk.Label(bottom_frame_buttons, text="MESA version 4.0.2-alpha", font=("Calibri", 7), anchor='e')
-version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
+exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
 
 show_main_frame()
 
