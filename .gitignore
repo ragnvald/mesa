@@ -7,7 +7,6 @@
 *.bzl
 *.rc
 *.spec
-*.html
 *.xml
 *.pyc
 *.pkg
