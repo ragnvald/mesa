@@ -5,6 +5,7 @@ import os
 import json
 import platform
 import getpass
+from tkinterweb import HtmlFrame 
 from datetime import datetime
 import subprocess
 import webbrowser
@@ -274,36 +275,40 @@ def exit_program():
     root.destroy()
 
 
-def update_config_with_uuid(config_file, uuid_value):
-    lines = []
+def update_config_with_values(config_file, **kwargs):
+    # Read the entire config file to keep the layout and comments
     with open(config_file, 'r') as file:
         lines = file.readlines()
-    
-    uuid_found = False
-    for i, line in enumerate(lines):
-        if line.startswith('id_uuid'):
-            uuid_found = True
-            lines[i] = f"id_uuid = {uuid_value}\n"
-            break
-    
-    if not uuid_found:  # If id_uuid is not found in the file, you might need to decide where to add it
-        lines.append(f"id_uuid = {uuid_value}\n")  # Example: appending at the end or find a specific section
-    
+
+    # Update each key in kwargs if it exists, preserve layout
+    for key, value in kwargs.items():
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith(f'{key} ='):
+                lines[i] = f"{key} = {value}\n"
+                found = True
+                break
+
+    # Write the updated content back to the file
     with open(config_file, 'w') as file:
         file.writelines(lines)
 
 
-# Function to toggle between main frame and about page
-def toggle_frame():
-    global toggle_button  # Ensure you can access the toggle button globally
-    if main_frame.winfo_ismapped():
-        main_frame.pack_forget()
-        about_frame.pack(fill='both', expand=True)
-        toggle_button.config(text="Workbench...", bootstyle="primary")  # Change button text to Workbench
-    else:
-        about_frame.pack_forget()
-        main_frame.pack(fill='both', expand=True, pady=10)
-        toggle_button.config(text="About...", bootstyle="primary")  # Change button text to About
+# Define functions for showing each frame
+def show_main_frame():
+    about_frame.pack_forget()
+    registration_frame.pack_forget()
+    main_frame.pack(fill='both', expand=True, pady=10)
+
+def show_about_frame():
+    main_frame.pack_forget()
+    registration_frame.pack_forget()
+    about_frame.pack(fill='both', expand=True)
+
+def show_registration_frame():
+    main_frame.pack_forget()
+    about_frame.pack_forget()
+    registration_frame.pack(fill='both', expand=True)
 
 
 #####################################################################################
@@ -316,14 +321,24 @@ config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+id_uuid                 = config['DEFAULT'].get('id_uuid', '').strip()
+id_name                 = config['DEFAULT'].get('id_name', '').strip()
+id_email                = config['DEFAULT'].get('id_email', '').strip()
+    
+# Function to handle the submission of the form
+def submit_form():
+    id_name = name_entry.get()
+    id_email = email_entry.get()
+    # Assuming id_uuid is generated and available globally or passed appropriately
+    update_config_with_values(config_file, id_uuid=id_uuid, id_name=id_name, id_email=id_email)
+    print(f"Updated: id_uuid={id_uuid}, id_name={id_name}, id_email={id_email}")
+
+
 
 # Check and populate id_uuid if empty
-id_uuid = config['DEFAULT'].get('id_uuid', '').strip()
 if not id_uuid:  # if id_uuid is empty
     id_uuid = str(uuid.uuid4())  # Generate a new UUID
-    update_config_with_uuid(config_file, id_uuid)  # Update the config file manually to preserve structure and comments
-
-print(f"UUID: {id_uuid}")  # To verify the result
+    update_config_with_values(config_file, id_uuid)  # Update the config file manually to preserve structure and comments
 
 
 # Check and create folders at the beginning
@@ -339,7 +354,9 @@ button_padx  =  7
 button_pady  =  7
 button_text  = 'About...'
 
+###################################################
 # Main frame set up
+#
 main_frame = tk.Frame(root)
 main_frame.pack(fill='both', expand=True, pady=10)
 
@@ -399,36 +416,85 @@ log_to_logfile("User interface, statistics updated.")
 
 update_stats()
 
+###################################################
+# About frame set up
+#
 
 # Adjusted Content for About Page
 about_frame = ttk.Frame(root)  # This frame is for the alternate screen
 
-# "Welcome to this page!" - Stays as is, directly packed into about_frame
-welcome_label = ttk.Label(about_frame, text="Welcome to MESA 4.0!", font=('Calibri', 12))
-welcome_label.pack(pady=(20, 10))
-
-# Now include the about information directly in the about_frame below the welcome message
-about_info_text = """This is the back info text."""
-about_info_labelframe = ttk.LabelFrame(about_frame, text="About", bootstyle='secondary')
-about_info_labelframe.pack(fill='both', expand=True, padx=5, pady=5)
-about_info_label = tk.Label(about_info_labelframe, text=about_info_text, justify='left')
-about_info_label.pack(padx=10, pady=10, fill='both', expand=True)
+# Create a HtmlFrame widget
+html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto")
 
 
-# Bottom Panel in Main Interface for toggling to About Page
-bottom_frame_both= ttk.Frame(root)
-bottom_frame_both.pack(side='bottom', fill='x', padx=10, pady=5)
+# Define the path to your HTML content file
+file_path = "system_resources/userguide.html"
+
+# Read the HTML content from the file
+with open(file_path, "r", encoding="utf-8") as file:
+    html_content = file.read()
+
+html_frame.load_html(html_content)
+
+# Pack the HtmlFrame into the ttkbootstrap window
+html_frame.pack(fill=BOTH, expand=YES)
+
+###################################################
+# Registration frame set up
+#
+
+# Setup for the registration frame (assuming root is your Tk window)
+registration_frame = ttk.Frame(root)
+registration_frame.pack(fill='both', expand=True)
+
+# Display id_uuid
+id_uuid_label = ttk.Label(registration_frame, text=f"UUID: {id_uuid}")
+id_uuid_label.pack()
+
+# Name entry
+name_label = ttk.Label(registration_frame, text="Name:")
+name_label.pack()
+name_entry = ttk.Entry(registration_frame)
+name_entry.pack()
+
+# Email entry
+email_label = ttk.Label(registration_frame, text="Email:")
+email_label.pack()
+email_entry = ttk.Entry(registration_frame)
+email_entry.pack()
+
+name_entry.insert(0, id_name)
+email_entry.insert(0, id_email)
+
+# Submit button
+submit_button = ttk.Button(registration_frame, text="Submit", command=submit_form)
+submit_button.pack()
 
 
-# Create toggle button as a named object
-toggle_button = ttkb.Button(bottom_frame_both, text="About...", command=toggle_frame, bootstyle="primary")
-toggle_button.pack(side='left', padx=(0, 10))
+###################################################
+# Bottom frame in Main Interface for toggling to About Page
+#
+bottom_frame_buttons = ttk.Frame(root)
+bottom_frame_buttons.pack(side='bottom', fill='x', padx=10, pady=5)
+
+# Create buttons for each frame
+main_frame_btn = ttk.Button(bottom_frame_buttons, text="Main", command=show_main_frame, bootstyle="primary")
+main_frame_btn.pack(side='left', padx=(0, 10))
+
+about_frame_btn = ttk.Button(bottom_frame_buttons, text="About", command=show_about_frame, bootstyle="primary")
+about_frame_btn.pack(side='left', padx=(0, 10))
+
+registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register", command=show_registration_frame, bootstyle="primary")
+registration_frame_btn.pack(side='left', padx=(0, 10))
 
 # Continue with the Exit button and version label as before
-ttkb.Button(bottom_frame_both, text="Exit", command=root.destroy, bootstyle="warning").pack(side='left')  # Assuming `root.destroy` for exiting
-version_label = ttk.Label(bottom_frame_both, text="MESA version 4.0.2-alpha", font=("Calibri", 7), anchor='e')
+exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, bootstyle="warning")
+exit_btn.pack(side='left')  # Assuming `root.destroy` for exiting
+
+version_label = ttk.Label(bottom_frame_buttons, text="MESA version 4.0.2-alpha", font=("Calibri", 7), anchor='e')
 version_label.pack(side='bottom', anchor='e', padx=10, pady=5)
 
+show_main_frame()
 
 # Start the GUI event loop
 root.mainloop()
