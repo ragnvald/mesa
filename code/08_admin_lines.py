@@ -516,7 +516,7 @@ def build_flat_data(gpkg_file, log_widget):
         'susceptibility_min': 'susceptibility_min',
         'susceptibility_max': 'susceptibility_max',
         'asset_group_name_<lambda>': 'asset_group_names',
-        'ref_asset_group_nunique': 'assets_total',
+        'ref_asset_group_nunique': 'asset_groups_total',
         'geometry_first': 'geometry'
     }
 
