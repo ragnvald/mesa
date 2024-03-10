@@ -142,7 +142,7 @@ def get_status(gpkg_file):
         # Check for tbl_geocode_group
         stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
-        append_status("+" if stacked_cells_count is not None else "-", f"Processing success ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.")
+        append_status("+" if stacked_cells_count is not None else "-", f"Processing completed ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.")
         
         # Check for tbl_geocode_group
         atlas_count = read_table_and_count('tbl_atlas')
@@ -150,7 +150,7 @@ def get_status(gpkg_file):
 
         # Check for tbl_geocode_group
         lines_original_count = read_table_and_count('tbl_lines_original')
-        append_status("+" if lines_original_count is not None else "/", f"{lines_original_count} lines in place." if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
+        append_status("+" if lines_original_count is not None else "/", f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
@@ -294,6 +294,43 @@ def update_config_with_values(config_file, **kwargs):
         file.writelines(lines)
 
 
+def increment_stat_value(config_file, stat_name, increment_value):
+    # Check if the config file exists
+    if not os.path.isfile(config_file):
+        print(f"Configuration file {config_file} not found.")
+        return
+    
+    # Read the entire config file to preserve the layout and comments
+    with open(config_file, 'r') as file:
+        lines = file.readlines()
+    
+    # Initialize a flag to check if the variable was found and updated
+    updated = False
+    
+    # Update the specified variable's value if it exists
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f'{stat_name} ='):
+            # Extract the current value, increment it, and update the line
+            parts = line.split('=')
+            if len(parts) == 2:
+                current_value = parts[1].strip()
+                try:
+                    # Attempt to convert the current value to an integer and increment it
+                    new_value = int(current_value) + increment_value
+                    lines[i] = f"{stat_name} = {new_value}\n"
+                    updated = True
+                    break
+                except ValueError:
+                    # Handle the case where the conversion fails
+                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    return
+    
+    # Write the updated content back to the file if the variable was found and updated
+    if updated:
+        with open(config_file, 'w') as file:
+            file.writelines(lines)
+
+
 # Define functions for showing each frame
 def show_main_frame():
     about_frame.pack_forget()
@@ -359,7 +396,7 @@ def submit_form():
 # Check and populate id_uuid if empty
 if not id_uuid:  # if id_uuid is empty
     id_uuid = str(uuid.uuid4())  # Generate a new UUID
-    update_config_with_values(config_file, id_uuid)  # Update the config file manually to preserve structure and comments
+    update_config_with_values(config_file, id_uuid=id_uuid)  # Update the config file manually to preserve structure and comments
 
 
 # Check and create folders at the beginning
@@ -444,6 +481,8 @@ update_stats()
 # Adjusted Content for About Page
 about_frame = ttk.Frame(root)  # This frame is for the alternate screen
 
+increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
+
 # Create a HtmlFrame widget
 html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto")
 
@@ -475,19 +514,19 @@ id_personalinfo_ok       = tk.BooleanVar(value=id_personalinfo_ok_value)
 about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
 about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-mesa_text = ("MESA 4.0 is fully open source software. It is available be used under an OpenSource license "
-             "(GNU GPLv3). This means you can use the sotware for free. You can even download and change "
-             "the software for commercial purposes and more. "
+mesa_text = ("MESA 4.0 is open source software. It is available be used under the "
+             "GNU GPLv3 license. This means you can use the software for free."
              "\n\n"
-             "In MESA, a unique identifier (UUID) is automatically generated to ensure that we can know "
-             "how many times the system has been used. This the UUID is a completely random identifier "
-             "and is not associated with where you are or who you are. The UUID together with system "
-             "information will be sent to one of our servers. You can opt out of using this functionality "
-             "by unticking the associated box below."
+             "In MESA, a unique random identifier (UUID) is automatically generated. "
+             "It can be used to count how many times the system has been used. It "
+             "is not associated with where you are or who you are. The UUID together "
+             "with usage information will be sent to one of our servers. You can opt "
+             "out of using this functionality by unticking the associated box below."
              "\n\n"
-             "Adittionally you can select to register your name and email for our reference by ticking "
-             "the box below. The can be used to send you information about updates of MESA tool and "
-             "method at a later stage."
+             "Additionally you can tick of the pox next to your name and register your "
+             "name and email for our reference by ticking the box below. The cmay be used "
+             "to send you questionaires and information about updates of the MESA "
+             "tool/method at a later stage."
              "\n\n"
              "Your email and name is also stored locally in the config.ini-file.")
 
@@ -495,7 +534,7 @@ add_text_to_labelframe(about_labelframe, mesa_text)
 
 # Create a new frame for the grid layout within registration_frame
 grid_frame = ttk.Frame(registration_frame)
-grid_frame.pack(fill='both', expand=True)
+grid_frame.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
 # Labels in the first column
  # Checkboxes in the first column
@@ -558,6 +597,7 @@ exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, b
 exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
 
 show_main_frame()
+
 
 # Start the GUI event loop
 root.mainloop()
