@@ -195,7 +195,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
         'ref_geocodegroup_first': 'ref_geocodegroup',
         'name_gis_geocodegroup_first': 'name_gis_geocodegroup',
         'asset_group_name_<lambda>': 'asset_group_names',
-        'ref_asset_group_nunique': 'assets_groups_total',
+        'ref_asset_group_nunique': 'asset_groups_total',
         'geometry_first': 'geometry'
     }
 
@@ -233,7 +233,7 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     gdf[new_column_name] = gdf.apply(lambda row: classify_row(row), axis=1)
 
     log_to_gui(log_widget, f"Updated codes for: {process_layer} - {column_name} ")
-    update_progress(97)
+    update_progress(93)
 
     # Save the modified geopackage
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
@@ -244,10 +244,16 @@ def process_all(log_widget, progress_var, gpkg_file):
 
     # Process and create tbl_flat
     main_tbl_flat(log_widget, progress_var, gpkg_file) 
-    
+    update_progress(94)
+
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
+    update_progress(95)
+
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
+    update_progress(97)
+
     classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
+    update_progress(99)
 
     log_to_gui(log_widget, "COMPLETED: Processing of nalysis and presentation layers completed.")
     update_progress(100)
