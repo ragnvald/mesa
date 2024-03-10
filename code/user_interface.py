@@ -310,30 +310,51 @@ def show_registration_frame():
     about_frame.pack_forget()
     registration_frame.pack(fill='both', expand=True)
 
+def add_text_to_labelframe(labelframe, text):
+    label = tk.Label(labelframe, text=text, justify='left')
+    label.pack(padx=10, pady=10, fill='both', expand=True)
+
+    # Function to update the wraplength based on the width of the labelframe
+    def update_wrap(event):
+        label.config(wraplength=labelframe.winfo_width() - 20)
+
+    # Bind the resize event of the labelframe to the update_wrap function
+    labelframe.bind('<Configure>', update_wrap)
+
 
 #####################################################################################
 #  Main
 #
     
 # Load configuration settings
-config_file             = 'config.ini'
-config                  = read_config(config_file)
-gpkg_file               = config['DEFAULT']['gpkg_file']
-ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
-id_uuid                 = config['DEFAULT'].get('id_uuid', '').strip()
-id_name                 = config['DEFAULT'].get('id_name', '').strip()
-id_email                = config['DEFAULT'].get('id_email', '').strip()
+config_file              = 'config.ini'
+config                   = read_config(config_file)
+gpkg_file                = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme      = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg   = config['DEFAULT']['workingprojection_epsg']
+id_uuid                  = config['DEFAULT'].get('id_uuid', '').strip()
+id_name                  = config['DEFAULT'].get('id_name', '').strip()
+id_email                 = config['DEFAULT'].get('id_email', '').strip()
+id_uuid_ok_value         = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't')
+id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
+
     
 # Function to handle the submission of the form
 def submit_form():
+    global id_name, id_email  # If they're used globally; adjust according to your application's structure
     id_name = name_entry.get()
     id_email = email_entry.get()
-    # Assuming id_uuid is generated and available globally or passed appropriately
-    update_config_with_values(config_file, id_uuid=id_uuid, id_name=id_name, id_email=id_email)
-    print(f"Updated: id_uuid={id_uuid}, id_name={id_name}, id_email={id_email}")
-
-
+    # Capture the current states of the checkboxes
+    id_uuid_ok_str = str(id_uuid_ok.get())
+    id_personalinfo_ok_str = str(id_personalinfo_ok.get())
+    # Update the config file with these values
+    update_config_with_values(config_file, 
+                              id_uuid=id_uuid, 
+                              id_name=id_name, 
+                              id_email=id_email, 
+                              id_uuid_ok=id_uuid_ok_str, 
+                              id_personalinfo_ok=id_personalinfo_ok_str)
+    
 
 # Check and populate id_uuid if empty
 if not id_uuid:  # if id_uuid is empty
@@ -447,28 +468,66 @@ html_frame.pack(fill=BOTH, expand=YES)
 registration_frame = ttk.Frame(root)
 registration_frame.pack(fill='both', expand=True)
 
-# Display id_uuid
-id_uuid_label = ttk.Label(registration_frame, text=f"UUID: {id_uuid}")
-id_uuid_label.pack()
+id_uuid_ok               = tk.BooleanVar(value=id_uuid_ok_value)
+id_personalinfo_ok       = tk.BooleanVar(value=id_personalinfo_ok_value)
 
-# Name entry
-name_label = ttk.Label(registration_frame, text="Name:")
-name_label.pack()
-name_entry = ttk.Entry(registration_frame)
-name_entry.pack()
+# About label frame
+about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
+about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-# Email entry
-email_label = ttk.Label(registration_frame, text="Email:")
-email_label.pack()
-email_entry = ttk.Entry(registration_frame)
-email_entry.pack()
+mesa_text = ("MESA 4.0 is fully open source software. It is available be used under an OpenSource license "
+             "(GNU GPLv3). This means you can use the sotware for free. You can even download and change "
+             "the software for commercial purposes and more. "
+             "\n\n"
+             "In MESA, a unique identifier (UUID) is automatically generated to ensure that we can know "
+             "how many times the system has been used. This the UUID is a completely random identifier "
+             "and is not associated with where you are or who you are. The UUID together with system "
+             "information will be sent to one of our servers. You can opt out of using this functionality "
+             "by unticking the associated box below."
+             "\n\n"
+             "Adittionally you can select to register your name and email for our reference by ticking "
+             "the box below. The can be used to send you information about updates of MESA tool and "
+             "method at a later stage."
+             "\n\n"
+             "Your email and name is also stored locally in the config.ini-file.")
 
+add_text_to_labelframe(about_labelframe, mesa_text)
+
+# Create a new frame for the grid layout within registration_frame
+grid_frame = ttk.Frame(registration_frame)
+grid_frame.pack(fill='both', expand=True)
+
+# Labels in the first column
+ # Checkboxes in the first column
+uuid_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok)
+uuid_ok_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+personalinfo_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok)
+personalinfo_ok_checkbox.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+
+
+# Labels for UUID, Name, Email in the second column
+ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
+ttk.Label(grid_frame, text="Name:").grid(row=1, column=1, padx=10, pady=5, sticky="w")
+ttk.Label(grid_frame, text="Email:").grid(row=2, column=1, padx=10, pady=5, sticky="w")
+
+# UUID value, Name and Email entries in the third column
+ttk.Label(grid_frame, text=id_uuid).grid(row=0, column=2, padx=10, pady=5, sticky="w")
+    
+name_entry = ttk.Entry(grid_frame)
+name_entry.grid(row=1, column=2, padx=10, pady=5, sticky="we")
 name_entry.insert(0, id_name)
+
+email_entry = ttk.Entry(grid_frame)
+email_entry.grid(row=2, column=2, padx=10, pady=5, sticky="we")
 email_entry.insert(0, id_email)
 
-# Submit button
-submit_button = ttk.Button(registration_frame, text="Submit", command=submit_form)
-submit_button.pack()
+# Submit button in the fourth column's bottom cell
+submit_btn = ttk.Button(grid_frame, text="Submit", command=submit_form)
+submit_btn.grid(row=2, column=3, padx=10, pady=5, sticky="e")
+
+# Optional: Configure the grid_frame column 2 (Entries) to take extra space
+grid_frame.columnconfigure(2, weight=1)
 
 
 ###################################################
