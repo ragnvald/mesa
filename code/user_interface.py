@@ -368,6 +368,7 @@ config_file              = 'config.ini'
 config                   = read_config(config_file)
 gpkg_file                = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme      = config['DEFAULT']['ttk_bootstrap_theme']
+mesa_version             = config['DEFAULT']['mesa_version']
 workingprojection_epsg   = config['DEFAULT']['workingprojection_epsg']
 id_uuid                  = config['DEFAULT'].get('id_uuid', '').strip()
 id_name                  = config['DEFAULT'].get('id_name', '').strip()
@@ -589,7 +590,7 @@ registration_frame_btn.pack(side='left', padx=(0, 10))
 center_frame = ttk.Frame(bottom_frame_buttons)
 center_frame.pack(side='left', expand=True, fill='x')
 
-version_label = ttk.Label(center_frame, text="MESA version 4.0.2-alpha", font=("Calibri", 7))
+version_label = ttk.Label(center_frame, text=mesa_version, font=("Calibri", 7))
 version_label.pack(side='left', padx=50, pady=5)  # Adjust side and padding as needed
 
 # Continue with the Exit button and version label as before
