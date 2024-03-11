@@ -331,6 +331,8 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
     log_to_gui(log_widget, "COMPLETED: Geocoding imports done.")
     progress_var.set(100)
     update_progress(100)
+    
+    increment_stat_value(config_file, 'mesa_stat_import_geocodes', increment_value=1)
 
 
 # Emtpy the destination table. Not sure if this one works 100%, but we will
@@ -397,6 +399,8 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length)
 
     update_progress(100)
+    
+    increment_stat_value(config_file, 'mesa_stat_import_lines', increment_value=1)
 
 
 def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
@@ -744,6 +748,46 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     log_to_gui(log_widget, "COMPLETED: Asset import done.")
     progress_var.set(100)
     update_progress(100)
+
+    increment_stat_value(config_file, 'mesa_stat_import_assets', increment_value=1)
+
+
+def increment_stat_value(config_file, stat_name, increment_value):
+    # Check if the config file exists
+    if not os.path.isfile(config_file):
+        print(f"Configuration file {config_file} not found.")
+        return
+
+    # Read the entire config file to preserve the layout and comments
+    with open(config_file, 'r') as file:
+        lines = file.readlines()
+
+    # Initialize a flag to check if the variable was found and updated
+    updated = False
+
+    # Update the specified variable's value if it exists
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f'{stat_name} ='):
+            # Extract the current value, increment it, and update the line
+            parts = line.split('=')
+            if len(parts) == 2:
+                current_value = parts[1].strip()
+                try:
+                    # Attempt to convert the current value to an integer and increment it
+                    new_value = int(current_value) + increment_value
+                    lines[i] = f"{stat_name} = {new_value}\n"
+                    updated = True
+                    break
+                except ValueError:
+                    # Handle the case where the conversion fails
+                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    return
+
+    # Write the updated content back to the file if the variable was found and updated
+    if updated:
+        with open(config_file, 'w') as file:
+            file.writelines(lines)
+
 
 
 # Function to close the application

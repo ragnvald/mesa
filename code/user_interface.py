@@ -599,6 +599,5 @@ exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
 
 show_main_frame()
 
-
 # Start the GUI event loop
 root.mainloop()
