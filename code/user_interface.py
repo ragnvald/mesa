@@ -397,7 +397,7 @@ log_date_lastupdate       = config['DEFAULT']['log_date_lastupdate']
 log_org                   = config['DEFAULT']['log_org']
 log_bucket                = config['DEFAULT']['log_bucket']
 log_host                  = config['DEFAULT']['log_host']
-log_token                 = "bFSDlkgbmN_BlfzEZykKSbjwV0XKwwNe424NOc7uCODM1F82Agm8S1nTKTabL6mVmo3snQeXZXNwZv8isjwlUw=="
+log_token                 = config['DEFAULT']['log_token']
 
 mesa_stat_startup         = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process         = config['DEFAULT']['mesa_stat_process']
@@ -435,11 +435,13 @@ if not id_uuid:  # if id_uuid is empty
     id_uuid = str(uuid.uuid4())  # Generate a new UUID
     update_config_with_values(config_file, id_uuid=id_uuid)  # Update the config file manually to preserve structure and comments
 
-if not log_date_initiated:  # if id_uuid is empty
-    update_config_with_values(config_file, log_date_initiated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+if not log_date_initiated:  # if log_date_initiated is empty
+    log_date_initiated=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    update_config_with_values(config_file, log_date_initiated)
 
-if not log_date_lastupdate:  # if id_uuid is empty
-    update_config_with_values(config_file, log_date_lastupdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+if not log_date_lastupdate:  # if log_date_lastupdate is empty
+    log_date_lastupdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    update_config_with_values(config_file, log_date_lastupdate)
 
 now = datetime.now()
 log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:%S")
