@@ -6,7 +6,6 @@ import json
 import platform
 import getpass
 from tkinterweb import HtmlFrame 
-from datetime import datetime
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
@@ -17,6 +16,9 @@ import geopandas as gpd
 import configparser
 import sqlite3
 import uuid
+import datetime
+from datetime import datetime, timedelta
+from influxdb_client import InfluxDBClient, Point, WriteOptions
 
 
 
@@ -359,22 +361,56 @@ def add_text_to_labelframe(labelframe, text):
     labelframe.bind('<Configure>', update_wrap)
 
 
+def store_logs_online(log_host, log_token, log_org, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines):
+
+    client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
+
+    # Create a single Point
+    point = Point("mesa_4_python") \
+        .tag("uuid", id_uuid) \
+        .field("mesa_stat_startup", mesa_stat_startup)\
+        .field("mesa_stat_process", mesa_stat_process)\
+        .field("mesa_stat_import_assets", mesa_stat_import_assets)\
+        .field("mesa_stat_import_geocodes", mesa_stat_import_geocodes)\
+        .field("mesa_stat_import_atlas", mesa_stat_import_atlas)\
+        .field("mesa_stat_import_lines", mesa_stat_import_lines)
+
+    # Write the point to the bucket
+    write_api = client.write_api(write_options=WriteOptions(batch_size=1))
+    write_api.write(bucket=log_bucket, org=log_org, record=point)
+
 #####################################################################################
 #  Main
 #
-    
+
 # Load configuration settings
-config_file              = 'config.ini'
-config                   = read_config(config_file)
-gpkg_file                = config['DEFAULT']['gpkg_file']
-ttk_bootstrap_theme      = config['DEFAULT']['ttk_bootstrap_theme']
-mesa_version             = config['DEFAULT']['mesa_version']
-workingprojection_epsg   = config['DEFAULT']['workingprojection_epsg']
-id_uuid                  = config['DEFAULT'].get('id_uuid', '').strip()
-id_name                  = config['DEFAULT'].get('id_name', '').strip()
-id_email                 = config['DEFAULT'].get('id_email', '').strip()
-id_uuid_ok_value         = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't')
-id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
+config_file               = 'config.ini'
+config                    = read_config(config_file)
+
+gpkg_file                 = config['DEFAULT']['gpkg_file']
+ttk_bootstrap_theme       = config['DEFAULT']['ttk_bootstrap_theme']
+mesa_version              = config['DEFAULT']['mesa_version']
+workingprojection_epsg    = config['DEFAULT']['workingprojection_epsg']
+
+log_date_initiated        = config['DEFAULT']['log_date_initiated']
+log_date_lastupdate       = config['DEFAULT']['log_date_lastupdate']
+log_org                   = config['DEFAULT']['log_org']
+log_bucket                = config['DEFAULT']['log_bucket']
+log_host                  = config['DEFAULT']['log_host']
+log_token                 = "bFSDlkgbmN_BlfzEZykKSbjwV0XKwwNe424NOc7uCODM1F82Agm8S1nTKTabL6mVmo3snQeXZXNwZv8isjwlUw=="
+
+mesa_stat_startup         = config['DEFAULT']['mesa_stat_startup']
+mesa_stat_process         = config['DEFAULT']['mesa_stat_process']
+mesa_stat_import_assets   = config['DEFAULT']['mesa_stat_import_assets']
+mesa_stat_import_geocodes = config['DEFAULT']['mesa_stat_import_geocodes']
+mesa_stat_import_atlas    = config['DEFAULT']['mesa_stat_import_atlas']
+mesa_stat_import_lines    = config['DEFAULT']['mesa_stat_import_lines']
+
+id_uuid                   = config['DEFAULT'].get('id_uuid', '').strip()
+id_name                   = config['DEFAULT'].get('id_name', '').strip()
+id_email                  = config['DEFAULT'].get('id_email', '').strip()
+id_uuid_ok_value          = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't')
+id_personalinfo_ok_value  = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
 
     
 # Function to handle the submission of the form
@@ -399,7 +435,22 @@ if not id_uuid:  # if id_uuid is empty
     id_uuid = str(uuid.uuid4())  # Generate a new UUID
     update_config_with_values(config_file, id_uuid=id_uuid)  # Update the config file manually to preserve structure and comments
 
+if not log_date_initiated:  # if id_uuid is empty
+    update_config_with_values(config_file, log_date_initiated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
+if not log_date_lastupdate:  # if id_uuid is empty
+    update_config_with_values(config_file, log_date_lastupdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+now = datetime.now()
+log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:%S")
+
+if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value == True):
+    # Parameters for store_logs_online function should be provided accordingly
+    store_logs_online(log_host, log_token, log_org, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines)
+    
+    # Update log_date_lastupdate with the current datetime, formatted as a string
+    update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
+    
 # Check and create folders at the beginning
 check_and_create_folders()
 
