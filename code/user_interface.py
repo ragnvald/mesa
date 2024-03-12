@@ -385,17 +385,16 @@ def store_logs_online(
             client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
             point = Point("mesa_4_python") \
                 .tag("uuid", id_uuid) \
-                .field("mesa_stat_startup", mesa_stat_startup) \
-                .field("mesa_stat_process", mesa_stat_process) \
-                .field("mesa_stat_import_assets", mesa_stat_import_assets) \
-                .field("mesa_stat_import_geocodes", mesa_stat_import_geocodes) \
-                .field("mesa_stat_import_atlas", mesa_stat_import_atlas) \
-                .field("mesa_stat_import_lines", mesa_stat_import_lines) \
-                .field("mesa_stat_setup", mesa_stat_setup) \
-                .field("mesa_stat_edit_atlas", mesa_stat_edit_atlas) \
-                .field("mesa_stat_create_atlas", mesa_stat_create_atlas) \
-                .field("mesa_stat_process_lines", mesa_stat_process_lines)
-
+                .field("mesa_stat_startup", int(mesa_stat_startup)) \
+                .field("mesa_stat_process", int(mesa_stat_process)) \
+                .field("mesa_stat_import_assets", int(mesa_stat_import_assets)) \
+                .field("mesa_stat_import_geocodes", int(mesa_stat_import_geocodes)) \
+                .field("mesa_stat_import_atlas", int(mesa_stat_import_atlas)) \
+                .field("mesa_stat_import_lines", int(mesa_stat_import_lines)) \
+                .field("mesa_stat_setup", int(mesa_stat_setup)) \
+                .field("mesa_stat_edit_atlas", int(mesa_stat_edit_atlas)) \
+                .field("mesa_stat_create_atlas", int(mesa_stat_create_atlas)) \
+                .field("mesa_stat_process_lines", int(mesa_stat_process_lines))
 
             write_api = client.write_api(write_options=WriteOptions(batch_size=1))
             write_api.write(bucket=log_bucket, org=log_org, record=point)
@@ -524,7 +523,7 @@ left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
 main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
 # Add buttons to left panel with spacing between buttons
-import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
+import_assets_btn = ttk.Button(left_panel, text="Import data", command=import_assets, width=button_width, bootstyle=PRIMARY)
 import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
 edit_asset_group_btn = ttk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width, bootstyle=SECONDARY)
@@ -536,7 +535,7 @@ edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
 edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-process_stacked_data_btn = ttk.Button(left_panel, text="Process", command=process_data, width=button_width)
+process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
 process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
 process_stacked_data_btn = ttk.Button(left_panel, text="Create atlas", command=make_atlas, width=button_width)
@@ -545,7 +544,7 @@ process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pad
 edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
 edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
-admin_lines_btn = ttk.Button(left_panel, text="Work with lines", command=admin_lines, width=button_width)
+admin_lines_btn = ttk.Button(left_panel, text="Lines", command=admin_lines, width=button_width)
 admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
 # Separator
@@ -578,7 +577,7 @@ about_frame = ttk.Frame(root)  # This frame is for the alternate screen
 increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
 
 # Create a HtmlFrame widget
-html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto")
+html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
 
 
 # Define the path to your HTML content file
@@ -608,7 +607,7 @@ id_personalinfo_ok       = tk.BooleanVar(value=id_personalinfo_ok_value)
 about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
 about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-mesa_text = ("MESA 4.0 is open source software. It is available be used under the "
+mesa_text = ("MESA 4.0 is open source software. It is available under the "
              "GNU GPLv3 license. This means you can use the software for free."
              "\n\n"
              "In MESA, a unique random identifier (UUID) is automatically generated. "
@@ -617,8 +616,8 @@ mesa_text = ("MESA 4.0 is open source software. It is available be used under th
              "with usage information will be sent to one of our servers. You can opt "
              "out of using this functionality by unticking the associated box below."
              "\n\n"
-             "Additionally you can tick of the pox next to your name and register your "
-             "name and email for our reference by ticking the box below. The cmay be used "
+             "Additionally you can tick the pox next to name and email registration "
+             "and add your name and email for our reference. This might be used "
              "to send you questionaires and information about updates of the MESA "
              "tool/method at a later stage."
              "\n\n"
@@ -637,7 +636,6 @@ uuid_ok_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
 personalinfo_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok)
 personalinfo_ok_checkbox.grid(row=1, column=0, padx=10, pady=5, sticky="w")
-
 
 # Labels for UUID, Name, Email in the second column
 ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
