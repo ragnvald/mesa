@@ -6,6 +6,7 @@ import tkinter as tk
 import locale
 from tkinter import scrolledtext, ttk
 import threading
+import os
 import geopandas as gpd
 import pandas as pd
 import configparser
@@ -56,6 +57,42 @@ def log_to_gui(log_widget, message):
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
+
+def increment_stat_value(config_file, stat_name, increment_value):
+    # Check if the config file exists
+    if not os.path.isfile(config_file):
+        print(f"Configuration file {config_file} not found.")
+        return
+
+    # Read the entire config file to preserve the layout and comments
+    with open(config_file, 'r') as file:
+        lines = file.readlines()
+
+    # Initialize a flag to check if the variable was found and updated
+    updated = False
+
+    # Update the specified variable's value if it exists
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f'{stat_name} ='):
+            # Extract the current value, increment it, and update the line
+            parts = line.split('=')
+            if len(parts) == 2:
+                current_value = parts[1].strip()
+                try:
+                    # Attempt to convert the current value to an integer and increment it
+                    new_value = int(current_value) + increment_value
+                    lines[i] = f"{stat_name} = {new_value}\n"
+                    updated = True
+                    break
+                except ValueError:
+                    # Handle the case where the conversion fails
+                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    return
+
+    # Write the updated content back to the file if the variable was found and updated
+    if updated:
+        with open(config_file, 'w') as file:
+            file.writelines(lines)
 
 # # # # # # # # # # # # # # 
 # Spatial functions
@@ -238,7 +275,7 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     # Save the modified geopackage
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
 
-def process_all(log_widget, progress_var, gpkg_file):
+def process_all(log_widget, progress_var, gpkg_file, config_file):
     # Process and create tbl_stacked
     main_tbl_stacked(log_widget, progress_var, gpkg_file)
 
@@ -255,47 +292,11 @@ def process_all(log_widget, progress_var, gpkg_file):
     classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
     update_progress(99)
 
-    log_to_gui(log_widget, "COMPLETED: Processing of nalysis and presentation layers completed.")
-    update_progress(100)
-
     increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
 
+    log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
+    update_progress(100)
 
-def increment_stat_value(config_file, stat_name, increment_value):
-    # Check if the config file exists
-    if not os.path.isfile(config_file):
-        print(f"Configuration file {config_file} not found.")
-        return
-
-    # Read the entire config file to preserve the layout and comments
-    with open(config_file, 'r') as file:
-        lines = file.readlines()
-
-    # Initialize a flag to check if the variable was found and updated
-    updated = False
-
-    # Update the specified variable's value if it exists
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f'{stat_name} ='):
-            # Extract the current value, increment it, and update the line
-            parts = line.split('=')
-            if len(parts) == 2:
-                current_value = parts[1].strip()
-                try:
-                    # Attempt to convert the current value to an integer and increment it
-                    new_value = int(current_value) + increment_value
-                    lines[i] = f"{stat_name} = {new_value}\n"
-                    updated = True
-                    break
-                except ValueError:
-                    # Handle the case where the conversion fails
-                    print(f"Error: Current value of {stat_name} is not an integer.")
-                    return
-
-    # Write the updated content back to the file if the variable was found and updated
-    if updated:
-        with open(config_file, 'w') as file:
-            file.writelines(lines)
 
 
 #####################################################################################
@@ -306,6 +307,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
 config_file             = 'config.ini'
 config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
+mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
@@ -347,7 +349,7 @@ button_frame.pack(pady=5)
 
 # Add 'Process All' button to the button frame
 process_all_btn = ttk.Button(button_frame, text="Process All", command=lambda: threading.Thread(
-    target=process_all, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+    target=process_all, args=(log_widget, progress_var, gpkg_file, config_file), daemon=True).start())
 process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
 # Add 'Close' button to the button frame

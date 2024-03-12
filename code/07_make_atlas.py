@@ -134,7 +134,7 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
     update_progress(100)
     log_to_gui(log_widget, "COMPLETED: Atlas creation done. Old ones deleted.")
 
-    increment_stat_value(config_file, 'mesa_stat_import_atlas', increment_value=1)
+    increment_stat_value(config_file, 'mesa_stat_create_atlas', increment_value=1)
 
 
 # Process the spatial file. Make sure it is a single polygon, not a multipolygon or any other geometry.
@@ -201,6 +201,9 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
     update_progress(100)
 
     log_to_gui(log_widget, f"Total atlas polygons added: {atlas_id_counter - 1}")
+
+    
+    increment_stat_value(config_file, 'mesa_stat_import_atlas', increment_value=1)
 
     return atlas_objects_gdf
 

@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
+import os
 
 # Setting variables
 #
@@ -139,6 +140,42 @@ def create_scrollable_area(root):
 
     return canvas
 
+def increment_stat_value(config_file, stat_name, increment_value):
+    # Check if the config file exists
+    if not os.path.isfile(config_file):
+        print(f"Configuration file {config_file} not found.")
+        return
+    
+    # Read the entire config file to preserve the layout and comments
+    with open(config_file, 'r') as file:
+        lines = file.readlines()
+    
+    # Initialize a flag to check if the variable was found and updated
+    updated = False
+    
+    # Update the specified variable's value if it exists
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f'{stat_name} ='):
+            # Extract the current value, increment it, and update the line
+            parts = line.split('=')
+            if len(parts) == 2:
+                current_value = parts[1].strip()
+                try:
+                    # Attempt to convert the current value to an integer and increment it
+                    new_value = int(current_value) + increment_value
+                    lines[i] = f"{stat_name} = {new_value}\n"
+                    updated = True
+                    break
+                except ValueError:
+                    # Handle the case where the conversion fails
+                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    return
+    
+    # Write the updated content back to the file if the variable was found and updated
+    if updated:
+        with open(config_file, 'w') as file:
+            file.writelines(lines)
+
 
 #####################################################################################
 #  Main
@@ -151,6 +188,9 @@ gpkg_file               = config['DEFAULT']['gpkg_file']
 table_name              = 'tbl_asset_group'
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+
+
+increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 
 # Initialize the main window
 root = ttk.Window(themename=ttk_bootstrap_theme)
