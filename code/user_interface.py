@@ -19,6 +19,7 @@ import uuid
 import datetime
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 
 
@@ -361,23 +362,58 @@ def add_text_to_labelframe(labelframe, text):
     labelframe.bind('<Configure>', update_wrap)
 
 
-def store_logs_online(log_host, log_token, log_org, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines):
+def store_logs_online(
+        log_host, 
+        log_token, 
+        log_org, 
+        log_bucket, 
+        id_uuid, 
+        mesa_stat_startup, 
+        mesa_stat_process, 
+        mesa_stat_import_assets, 
+        mesa_stat_import_geocodes, 
+        mesa_stat_import_atlas, 
+        mesa_stat_import_lines, 
+        mesa_stat_setup, 
+        mesa_stat_edit_atlas, 
+        mesa_stat_create_atlas, 
+        mesa_stat_process_lines
+        ):
+    try:
+        # Function to execute the writing process
+        def write_point():
+            client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
+            point = Point("mesa_4_python") \
+                .tag("uuid", id_uuid) \
+                .field("mesa_stat_startup", mesa_stat_startup) \
+                .field("mesa_stat_process", mesa_stat_process) \
+                .field("mesa_stat_import_assets", mesa_stat_import_assets) \
+                .field("mesa_stat_import_geocodes", mesa_stat_import_geocodes) \
+                .field("mesa_stat_import_atlas", mesa_stat_import_atlas) \
+                .field("mesa_stat_import_lines", mesa_stat_import_lines) \
+                .field("mesa_stat_setup", mesa_stat_setup) \
+                .field("mesa_stat_edit_atlas", mesa_stat_edit_atlas) \
+                .field("mesa_stat_create_atlas", mesa_stat_create_atlas) \
+                .field("mesa_stat_process_lines", mesa_stat_process_lines)
 
-    client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
 
-    # Create a single Point
-    point = Point("mesa_4_python") \
-        .tag("uuid", id_uuid) \
-        .field("mesa_stat_startup", mesa_stat_startup)\
-        .field("mesa_stat_process", mesa_stat_process)\
-        .field("mesa_stat_import_assets", mesa_stat_import_assets)\
-        .field("mesa_stat_import_geocodes", mesa_stat_import_geocodes)\
-        .field("mesa_stat_import_atlas", mesa_stat_import_atlas)\
-        .field("mesa_stat_import_lines", mesa_stat_import_lines)
+            write_api = client.write_api(write_options=WriteOptions(batch_size=1))
+            write_api.write(bucket=log_bucket, org=log_org, record=point)
 
-    # Write the point to the bucket
-    write_api = client.write_api(write_options=WriteOptions(batch_size=1))
-    write_api.write(bucket=log_bucket, org=log_org, record=point)
+        # Using ThreadPoolExecutor to enforce a timeout
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(write_point)
+            # Adjust timeout as needed (2-3 seconds as per the requirement)
+            future.result(timeout=3)
+
+    except TimeoutError:
+        return "No network access, logs not updated"
+    except Exception as e:
+        # Handle other exceptions, if needed
+        return f"An error occurred: {str(e)}"
+
+    return "Logs updated successfully"
+
 
 #####################################################################################
 #  Main
@@ -405,6 +441,10 @@ mesa_stat_import_assets   = config['DEFAULT']['mesa_stat_import_assets']
 mesa_stat_import_geocodes = config['DEFAULT']['mesa_stat_import_geocodes']
 mesa_stat_import_atlas    = config['DEFAULT']['mesa_stat_import_atlas']
 mesa_stat_import_lines    = config['DEFAULT']['mesa_stat_import_lines']
+mesa_stat_setup           = config['DEFAULT']['mesa_stat_setup']
+mesa_stat_edit_atlas      = config['DEFAULT']['mesa_stat_edit_atlas']
+mesa_stat_create_atlas    = config['DEFAULT']['mesa_stat_create_atlas']
+mesa_stat_process_lines   = config['DEFAULT']['mesa_stat_process_lines']
 
 id_uuid                   = config['DEFAULT'].get('id_uuid', '').strip()
 id_name                   = config['DEFAULT'].get('id_name', '').strip()
@@ -448,7 +488,7 @@ log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:
 
 if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value == True):
     # Parameters for store_logs_online function should be provided accordingly
-    store_logs_online(log_host, log_token, log_org, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines)
+    store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
     
     # Update log_date_lastupdate with the current datetime, formatted as a string
     update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
@@ -630,13 +670,13 @@ bottom_frame_buttons = ttk.Frame(root)
 bottom_frame_buttons.pack(side='bottom', fill='x', padx=10, pady=5)
 
 # Create buttons for each frame
-main_frame_btn = ttk.Button(bottom_frame_buttons, text="Main", command=show_main_frame, bootstyle="primary")
+main_frame_btn = ttk.Button(bottom_frame_buttons, text="MESA desktop", command=show_main_frame, bootstyle="primary")
 main_frame_btn.pack(side='left', padx=(0, 10))
 
-about_frame_btn = ttk.Button(bottom_frame_buttons, text="About", command=show_about_frame, bootstyle="primary")
+about_frame_btn = ttk.Button(bottom_frame_buttons, text="About...", command=show_about_frame, bootstyle="primary")
 about_frame_btn.pack(side='left', padx=(0, 10))
 
-registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register", command=show_registration_frame, bootstyle="primary")
+registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register...", command=show_registration_frame, bootstyle="primary")
 registration_frame_btn.pack(side='left', padx=(0, 10))
 
 # Center frame for version label
