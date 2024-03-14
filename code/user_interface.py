@@ -383,7 +383,7 @@ def store_logs_online(
         # Function to execute the writing process
         def write_point():
             client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
-            point = Point("mesa_4_python") \
+            point = Point("usage") \
                 .tag("uuid", id_uuid) \
                 .field("mesa_stat_startup", int(mesa_stat_startup)) \
                 .field("mesa_stat_process", int(mesa_stat_process)) \
@@ -432,7 +432,7 @@ log_date_lastupdate       = config['DEFAULT']['log_date_lastupdate']
 log_org                   = config['DEFAULT']['log_org']
 log_bucket                = config['DEFAULT']['log_bucket']
 log_host                  = config['DEFAULT']['log_host']
-log_token                 = config['DEFAULT']['log_token']
+log_token                 = "[insert_here]"
 
 mesa_stat_startup         = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process         = config['DEFAULT']['mesa_stat_process']
@@ -476,18 +476,20 @@ if not id_uuid:  # if id_uuid is empty
 
 if not log_date_initiated:  # if log_date_initiated is empty
     log_date_initiated=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    update_config_with_values(config_file, log_date_initiated)
+    update_config_with_values(config_file, log_date_initiated=log_date_initiated)
 
 if not log_date_lastupdate:  # if log_date_lastupdate is empty
     log_date_lastupdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    update_config_with_values(config_file, log_date_lastupdate)
+    update_config_with_values(config_file, log_date_lastupdate=log_date_lastupdate)
 
 now = datetime.now()
 log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:%S")
 
 if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value == True):
     # Parameters for store_logs_online function should be provided accordingly
-    store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
+    storing_status_message = store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
+
+    log_to_logfile(storing_status_message)
     
     # Update log_date_lastupdate with the current datetime, formatted as a string
     update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
@@ -616,7 +618,7 @@ mesa_text = ("MESA 4.0 is open source software. It is available under the "
              "with usage information will be sent to one of our servers. You can opt "
              "out of using this functionality by unticking the associated box below."
              "\n\n"
-             "Additionally you can tick the pox next to name and email registration "
+             "Additionally you can tick the box next to name and email registration "
              "and add your name and email for our reference. This might be used "
              "to send you questionaires and information about updates of the MESA "
              "tool/method at a later stage."
