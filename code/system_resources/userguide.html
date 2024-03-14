@@ -5,25 +5,25 @@ body {  background-color: #2b3e50;
         color: #FFFFFF; /* Dark grey text color */
         font-family: 'Calibri', sans-serif; /* Set the font family to Calibri */
         font-size: 10pt; /* Set the font size to 10 points */
-        }
+      }
         
 div {
-  text-align: center;
-}
+        text-align: center;
+    }
 table {
-  border: thin dotted #8d8d8d;
-  padding: 4px;
-  width: 100%;
-  margin: 5px;
-}
+        border: thin dotted #8d8d8d;
+        padding: 4px;
+        width: 100%;
+        margin: 5px;
+      }
 
 tr:hover {
-  background-color: rgb(170, 197, 161);
-  }
+        background-color: rgb(170, 197, 161);
+        }
 
 th {
-  text-align: left;
-}
+        text-align: left;
+    }
 </style>
 </head>
 <body>
@@ -31,6 +31,17 @@ th {
 You are now in the quick guide for our tool. Our aim with this page is to give you some basic information about how to use the system.</p>
 <p>
 <div><img src="system_resources/system_overview.png" alt="System overview graphic" width=720 halign=center></div> 
+</p>
+<h3>User interface overview</h3>
+<p>The MESA user interface can be divided into two types; imports/processing and data entry/edit. When data is imported or processed 
+  you will find that the log window provides information about the progress. 
+</p>
+<p>
+<div><img src="system_resources/processing_logoutput.png" alt="Sample log output" width=600 halign=center></div> 
+</p>
+<p>Aprogress bare will give you a visual indication of the progress. It however may not always represent an accurate account of the progress.
+</p>
+<p>When you edit data, move to the next record or close the dialogue, your edits will be automatically saved.
 </p>
 <h3>Import data</h3>
 <p>To work with MESA you will have to provide input data. This is part of building up the database. Eventually your 
@@ -63,26 +74,58 @@ You are now in the quick guide for our tool. Our aim with this page is to give y
     <td>Lines are only valid data format</td>
   </tr>
 </table>
+<p>If you import new data after having processed your data you will have to enter the setup data again.</p>
 <h3>Set up processing</h3>
-<p>Processing data for a sensitivity atlas involves registering asset values and suceptibilitis. This is done by pressing the <b>Set up</b>-button.
+<p>Processing data for a sensitivity atlas involves registering asset values and 
+  suceptibilitis. This is done by pressing the <b>Set up</b>-button.
 </p>
+<p>
+  <div><img src="system_resources/processing_setup.png" alt="Processing set up" width=700 halign=center></div> 
+  </p>
 <h3>Process data data</h3>
-<p>This is where you initiate the processing. Processing time will tepend on how many 
+<p>This is where you initiate the processing. Processing time will depend on how many 
 assets you have and the granularity of your geocode objects. It could take anything 
 a couple of minutes to an hour.</p>
-<p></p>
 <h3>Work with lines</h3>
-<p>If you would like to work with line segments you will need to store appropriate lines in the lines-folder. You will have three options in this user interface.
+<p>If you would like to work with line segments you will need to store appropriate 
+  lines in the lines-folder. You will have three options in this user interface.
 <ul>
   <li>Initiate - creates some random lines for you to work on</li>
-  <li>Edit segments - here you can edit the width and length of the line segments per line. This means you can have individual lengts and withs.</li>
-  <li>Process segments does the same for line segments as the processing does for the geocode objects. Map and analysis layers are created.</li>
+  <li>Edit segments - here you can edit the width and length of the line segments per 
+    line. This means you can have individual lengts and withs.</li>
+  <li>Process segments does the same for line segments as the processing does for the 
+    geocode objects. Map and analysis layers are created.</li>
   <li>Lines (input/lines)</li>
 </ul>
 <p>The system can also generate some random lines for you. You can then 
 adjust these lines later.</p>
 <h3>Making maps</h3>
-<p>We have prepared a QGIS project file. The file contains prepared styles and map templates making it dtraight forward to produce a sensitivity atlas.</p>
-<p>Since all MESA-data is stored in a database file other desktop or server tools may be used. It will however require detailed knowledge about the GIS-tool.</p>
+<p>We have prepared a QGIS project file. The file contains prepared styles and map templates 
+  making it straight forward to produce a sensitivity atlas.</p>
+<p>Since all MESA-data is stored in a database file other desktop or server tools may be 
+  used. It will however require deailed knowledge about the GIS-tool.</p>
+  
+<h3>Resetting the system</h3>
+<p>At any time, if you want to give your project a fresh start, you can do so by deleting 
+  the existing database. This is the procedure:</p>
+<ol>
+  <li>Stop this program by pressing the Exit-button</li>
+  <li>Delete the database file. Its name is mesa.gpkg. You will find it in the folder /output</li>
+</ol>
+<h3>Handling your data</h3>
+<p>National regulations might stop you from sending your data abroad for processing. In MESA 3.0 we 
+  facilitated for cloud based processing. In this version we are back on processing on the 
+  desktop this way you will always have your data with you.</p>
+  <p>The system will by default send usage statistics to an online server. On the Registration-page 
+  you may turn of this functionality. Statistics are sent when you start up the system. It will 
+  only do this once every 24th hour. If you do not have any internet access the statistics will 
+  not be sent.</p>
+  <h3>An open system for all</h3>
+<p>MESA 4.0 is open source code. It uses open source libraries and will not require any paid 
+  licenses for use.
+</p>
+  <p>If you would like to look at the code or even contribute with comments, bug messages or 
+    even updates to the code you can do this on GitHub.
+  </p>
 </body>
 </html>

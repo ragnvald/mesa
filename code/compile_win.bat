@@ -53,7 +53,7 @@ echo Distribution folder will be: %DIST_FOLDER%
 :: Start the compilation
 
 echo Working on user_interface.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" user_interface.py >nul 2>&1
+pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" user_interface.py >nul 2>&1
 
 echo Working on 01_import.py
 pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER%" 01_import.py >nul 2>&1
