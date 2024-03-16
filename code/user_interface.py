@@ -2,14 +2,10 @@ import tkinter as tk
 from tkinter import *
 import locale
 import os
-import json
-import platform
-import getpass
 from tkinterweb import HtmlFrame 
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
-import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 import pandas as pd
 import geopandas as gpd
@@ -20,7 +16,6 @@ import datetime
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-
 
 
 # Read the configuration file
