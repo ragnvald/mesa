@@ -151,6 +151,9 @@ def create_lines_table_and_lines(gpkg_file, log_widget):
         'geometry': lines
     }, crs=gdf_geocode_group.crs)
     
+    # Before saving tbl_flat
+    gdf_lines.crs = workingprojection_epsg
+
     # Save to the GeoPackage
     gdf_lines.to_file(gpkg_file, layer='tbl_lines', mode="w")
 
@@ -509,6 +512,9 @@ def build_stacked_data(gpkg_file, log_widget):
     segment_intersections.reset_index(drop=True, inplace=True)  # Resets the index
     segment_intersections['fid'] = segment_intersections.index  # Uses the new index as 'fid'
 
+    # Before saving tbl_flat
+    segment_intersections.crs = workingprojection_epsg
+
     # Write the intersected data to a new layer in the GeoPackage
     segment_intersections.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG', if_exists='replace')
 
@@ -567,6 +573,9 @@ def build_flat_data(gpkg_file, log_widget):
     
     # Drop the unnecessary columns, adjust according to your final table requirements
     tbl_segment_flat.drop(columns=['segment_id_first'], inplace=True)
+
+    # Before saving tbl_flat
+    tbl_segment_flat.crs = workingprojection_epsg
 
     # Save tbl_flat as a new layer in the GeoPackage
     tbl_segment_flat.to_file(gpkg_file, layer='tbl_segment_flat', driver='GPKG')
@@ -651,7 +660,7 @@ input_folder_asset      = config['DEFAULT']['input_folder_asset']
 input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
@@ -704,7 +713,7 @@ edit_lines_button = ttk.Button(buttons_frame, text="Edit segments", command=edit
 edit_lines_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the "Edit lines" button
-explanatory_label = tk.Label(buttons_frame, text="Edit names, segment width/length and mnoe. Remember that\nyou can edit these lines by opening the database using QGIS.", bg="light grey",  justify='left')
+explanatory_label = tk.Label(buttons_frame, text="Edit names, segment width/length and more. Remember that\nyou can edit these lines by opening the database using QGIS.", bg="light grey",  justify='left')
 explanatory_label.grid(row=1, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Create the Process and buffer button

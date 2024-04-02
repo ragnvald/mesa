@@ -188,6 +188,9 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     # Drop the unnecessary columns
     intersected_data.drop(columns=['fid', 'id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
 
+    # Before saving, assign the CRS to the GeoDataFrame
+    intersected_data.crs = workingprojection_epsg
+
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Done processing the analysis layer.")
     update_progress(50)  # Final progress
@@ -247,6 +250,9 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     # Merge tbl_flat with overlap_counts to add the overlap_count column
     tbl_flat = tbl_flat.merge(overlap_counts, on='code', how='left')
 
+    # Before saving tbl_flat
+    tbl_flat.crs = workingprojection_epsg
+
     # Save tbl_flat as a new layer in the GeoPackage
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
 
@@ -275,6 +281,7 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     # Save the modified geopackage
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
 
+
 def process_all(log_widget, progress_var, gpkg_file, config_file):
     # Process and create tbl_stacked
     main_tbl_stacked(log_widget, progress_var, gpkg_file)
@@ -298,7 +305,6 @@ def process_all(log_widget, progress_var, gpkg_file, config_file):
     update_progress(100)
 
 
-
 #####################################################################################
 #  Main
 #
@@ -309,7 +315,7 @@ config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
 mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
@@ -355,7 +361,6 @@ process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 # Add 'Close' button to the button frame
 close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root))
 close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
-
 
 log_to_gui(log_widget, "Opened processing subprocess.")
 
