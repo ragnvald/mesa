@@ -363,6 +363,7 @@ def store_logs_online(
         log_org, 
         log_bucket, 
         id_uuid, 
+        mesa_version,
         mesa_stat_startup, 
         mesa_stat_process, 
         mesa_stat_import_assets, 
@@ -378,8 +379,9 @@ def store_logs_online(
         # Function to execute the writing process
         def write_point():
             client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
-            point = Point("usage") \
+            point = Point("tbl_usage") \
                 .tag("uuid", id_uuid) \
+                .field("mesa_version", mesa_version) \
                 .field("mesa_stat_startup", int(mesa_stat_startup)) \
                 .field("mesa_stat_process", int(mesa_stat_process)) \
                 .field("mesa_stat_import_assets", int(mesa_stat_import_assets)) \
@@ -402,11 +404,48 @@ def store_logs_online(
 
     except TimeoutError:
         return "No network access, logs not updated"
+    
     except Exception as e:
         # Handle other exceptions, if needed
         return f"An error occurred: {str(e)}"
 
-    return "Logs updated successfully"
+    return "Usage logs updated successfully"
+
+
+def store_userinfo_online(
+        log_host, 
+        log_token, 
+        log_org, 
+        log_bucket, 
+        id_uuid, 
+        id_name, 
+        id_email
+        ):
+    try:
+        # Function to execute the writing process
+        def write_point():
+            client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
+            point = Point("tbl_user") \
+                .tag("uuid", id_uuid) \
+                .field("id_name", id_name) \
+                .field("id_email", id_email)
+
+            write_api = client.write_api(write_options=WriteOptions(batch_size=1))
+            write_api.write(bucket=log_bucket, org=log_org, record=point)
+
+        # Using ThreadPoolExecutor to enforce a timeout
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(write_point)
+            # Adjust timeout as needed (2-3 seconds as per the requirement)
+            future.result(timeout=3)
+
+    except TimeoutError:
+        return "No network access, logs not updated"
+    except Exception as e:
+        # Handle other exceptions, if needed
+        return f"An error occurred: {str(e)}"
+
+    return "User logs updated successfully"
 
 
 #####################################################################################
@@ -427,7 +466,7 @@ log_date_lastupdate       = config['DEFAULT']['log_date_lastupdate']
 log_org                   = config['DEFAULT']['log_org']
 log_bucket                = config['DEFAULT']['log_bucket']
 log_host                  = config['DEFAULT']['log_host']
-log_token                 = "[insert_here]"
+log_token                 = config['DEFAULT']['log_token']
 
 mesa_stat_startup         = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process         = config['DEFAULT']['mesa_stat_process']
@@ -482,10 +521,12 @@ log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:
 
 if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value == True):
     # Parameters for store_logs_online function should be provided accordingly
-    storing_status_message = store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
-
-    log_to_logfile(storing_status_message)
+    storing_usage_message = store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_version, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
+    log_to_logfile(storing_usage_message)
     
+    storing_user_message = store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email )
+    log_to_logfile(storing_user_message)
+   
     # Update log_date_lastupdate with the current datetime, formatted as a string
     update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
     
