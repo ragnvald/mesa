@@ -14,33 +14,80 @@ import os
 # Define fixed widths for each column
 column_widths = [35, 13, 13, 13]
 
+# Define global variable for valid input values
+valid_input_values = []
+
+# Global declaration
+classification = {}
+
 # Shared/general functions
 def read_config(file_name):
+    global valid_input_values
     config = configparser.ConfigParser()
     config.read(file_name)
+    # Convert valid input values from config to a list of integers
+    valid_input_values = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
     return config
 
-# Core functions
-def validate_integer(P):
-    if P.isdigit() or P == "":
+
+def read_config_classification(file_name):
+    global classification  # This line is crucial
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    # Clear the existing global classification dictionary before populating it
+    classification.clear()
+    for section in config.sections():
+        if section in ['A', 'B', 'C', 'D', 'E']:  # Make sure we're only dealing with your classification sections
+            range_str = config[section]['range']
+            description = config[section].get('description', '')  # Safely get the description if it exists
+            start, end = map(int, range_str.split('-'))
+            classification[section] = {
+                'range': range(start, end + 1),  # Adjust the end value to make the range inclusive
+                'description': description
+            }
+
+
+# Updated validation function
+def validate_input_value(P):
+    if P.isdigit() and int(P) in valid_input_values or P == "":
         return True
     return False
+
+
+def determine_category(sensitivity):
+    for category, info in classification.items():
+        if sensitivity in info['range']:
+            return category, info['description']
+    print("No match found.")
+    return '', ''  
+
 
 def calculate_sensitivity(row_index):
     try:
         susceptibility = int(entries[row_index]['susceptibility'].get())
         importance = int(entries[row_index]['importance'].get())
         sensitivity = susceptibility * importance
+        code, description = determine_category(sensitivity)  # Function to implement
+
+        # Update the GUI elements
         entries[row_index]['sensitivity'].config(text=str(sensitivity))
-        df.at[row_index, 'susceptibility'] = susceptibility
-        df.at[row_index, 'importance'] = importance
-        df.at[row_index, 'sensitivity'] = susceptibility * importance
+        entries[row_index]['code'].config(text=code)
+        entries[row_index]['description'].config(text=description)
+
+        # Update DataFrame if necessary
+        df.at[row_index, 'sensitivity'] = sensitivity
+        df.at[row_index, 'code'] = code
+        df.at[row_index, 'description'] = description
+
     except ValueError:
         entries[row_index]['sensitivity'].config(text="")
+        entries[row_index]['code'].config(text="")
+        entries[row_index]['description'].config(text="")
 
     df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
     df['importance'] = df['importance'].astype('int64', errors='ignore')
     df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
+
 
 def load_data():
     global df, entries
@@ -66,6 +113,8 @@ def load_data():
     ttk.Label(frame, text="Susceptibility", anchor='w').grid(row=0, column=1, padx=5, sticky='ew')
     ttk.Label(frame, text="Importance", anchor='w').grid(row=0, column=2, padx=5, sticky='ew')
     ttk.Label(frame, text="Sensitivity", anchor='w').grid(row=0, column=3, padx=5, sticky='ew')
+    ttk.Label(frame, text="Code", anchor='w').grid(row=0, column=4, padx=5, sticky='ew')
+    ttk.Label(frame, text="Description", anchor='w').grid(row=0, column=5, padx=5, sticky='ew')
 
     for i, row in enumerate(df.itertuples(), start=1):  # Adjust to use itertuples() for efficiency
         add_data_row(i, row)
@@ -75,7 +124,7 @@ def load_data():
 
 def add_data_row(i, row):
     global entries
-    ttk.Label(frame, text=getattr(row, 'name_original', ''), anchor='e').grid(row=i, column=0, padx=5, sticky='ew')  # Adjusted for namedtuple access
+    ttk.Label(frame, text=getattr(row, 'name_original', ''), anchor='e').grid(row=i, column=0, padx=5, sticky='ew')
 
     susceptibility_entry = ttk.Entry(frame, width=column_widths[1], validate='key', validatecommand=vcmd)
     susceptibility_entry.insert(0, getattr(row, 'susceptibility', ''))
@@ -89,11 +138,19 @@ def add_data_row(i, row):
 
     sensitivity_label = ttk.Label(frame, text=str(getattr(row, 'sensitivity', '')), width=column_widths[3])
     sensitivity_label.grid(row=i, column=3, padx=5)
+    
+    code_label = ttk.Label(frame, width=5)
+    code_label.grid(row=i, column=4, padx=5)
+    
+    description_label = ttk.Label(frame, width=30)
+    description_label.grid(row=i, column=5, padx=5)
 
     entries.append({
         'susceptibility': susceptibility_entry,
         'importance': importance_entry,
-        'sensitivity': sensitivity_label
+        'sensitivity': sensitivity_label,
+        'code': code_label,
+        'description': description_label
     })
 
 def save_to_gpkg():
@@ -177,6 +234,10 @@ def increment_stat_value(config_file, stat_name, increment_value):
             file.writelines(lines)
 
 
+def update_all_rows_immediately():
+    for index, entry in enumerate(entries):
+        calculate_sensitivity(index)
+
 #####################################################################################
 #  Main
 #
@@ -189,15 +250,16 @@ table_name              = 'tbl_asset_group'
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
+read_config_classification(config_file)
 
 increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 
 # Initialize the main window
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Set up processing")
-root.geometry("700x700")
+root.geometry("900x800")
 
-vcmd = (root.register(validate_integer), '%P')
+vcmd = (root.register(validate_input_value), '%P')
 
 # Create scrollable area below the header
 canvas = create_scrollable_area(root)
@@ -206,9 +268,11 @@ canvas.create_window((0, 0), window=frame, anchor="nw")
 
 load_data()
 
+update_all_rows_immediately()
+
 # Text panel and buttons below the scrollable area
-info_text = "This is where you register values for susceptibility and importance."
-info_label = tk.Label(root, text=info_text, wraplength=400, justify="center")
+info_text = "This is where you register values for susceptibility and importance. Tabulate through the table to make sure sensitivity is calulated properly."
+info_label = tk.Label(root, text=info_text, wraplength=600, justify="center")
 info_label.pack(padx=10, pady=10)
 
 save_button = ttk.Button(root, text="Save", command=save_to_gpkg, bootstyle=PRIMARY)
