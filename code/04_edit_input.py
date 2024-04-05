@@ -31,7 +31,7 @@ def read_config(file_name):
 
 
 def read_config_classification(file_name):
-    global classification  # Don't really like globals, but...
+
     config = configparser.ConfigParser()
     config.read(file_name)
     # Clear the existing global classification dictionary before populating it
@@ -45,7 +45,7 @@ def read_config_classification(file_name):
                 'range': range(start, end + 1),  # Adjust the end value to make the range inclusive
                 'description': description
             }
-
+    return classification
 
 # Updated validation function
 def validate_input_value(P):
@@ -260,7 +260,7 @@ table_name              = 'tbl_asset_group'
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
-read_config_classification(config_file)
+classification = read_config_classification(config_file)
 
 increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 
