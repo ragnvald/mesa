@@ -31,7 +31,7 @@ def read_config(file_name):
 
 
 def read_config_classification(file_name):
-    global classification  # This line is crucial
+    global classification  # Don't really like globals, but...
     config = configparser.ConfigParser()
     config.read(file_name)
     # Clear the existing global classification dictionary before populating it
@@ -75,6 +75,8 @@ def calculate_sensitivity(row_index):
         entries[row_index]['description'].config(text=description)
 
         # Update DataFrame if necessary
+        df.at[row_index, 'susceptibility'] = susceptibility
+        df.at[row_index, 'importance'] = importance
         df.at[row_index, 'sensitivity'] = sensitivity
         df.at[row_index, 'code'] = code
         df.at[row_index, 'description'] = description
@@ -94,7 +96,7 @@ def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
         df = pd.read_sql(f"SELECT * FROM {table_name}", con=engine)
-
+        print(df.head())
         df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
         df['importance'] = df['importance'].astype('int64', errors='ignore')
         df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
@@ -121,6 +123,7 @@ def load_data():
 
     frame.update_idletasks()
     canvas.configure(scrollregion=canvas.bbox("all"))
+
 
 def add_data_row(i, row):
     global entries
@@ -153,6 +156,7 @@ def add_data_row(i, row):
         'description': description_label
     })
 
+
 def save_to_gpkg():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
@@ -167,15 +171,20 @@ def save_to_gpkg():
             'total_asset_objects': Integer,
             'susceptibility': Integer,
             'importance': Integer,
-            'sensitivity': Integer
+            'sensitivity': Integer,
+            'code': String,
+            'description':String
         }
 
         df.to_sql(table_name, con=engine, if_exists='replace', index=False, dtype=data_types)
     except exc.SQLAlchemyError as e:
         messagebox.showerror("Database Error", f"Failed to save data: {e}")
 
+
+# Application closes without saving. Not sure if this is the way or if I should add default save on exit.
 def close_application():
     root.destroy()
+
 
 def create_scrollable_area(root):
     # Create a new frame to contain the canvas and the scrollbar
@@ -196,6 +205,7 @@ def create_scrollable_area(root):
     scrollable_frame.pack(side=tk.TOP, fill="both", expand=True)
 
     return canvas
+
 
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
