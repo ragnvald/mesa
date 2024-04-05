@@ -3,6 +3,7 @@ import locale
 from tkinter import messagebox, ttk
 import configparser
 import pandas as pd
+import datetime
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
 import ttkbootstrap as ttk  # Import ttkbootstrap
@@ -96,7 +97,7 @@ def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     try:
         df = pd.read_sql(f"SELECT * FROM {table_name}", con=engine)
-        print(df.head())
+        
         df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
         df['importance'] = df['importance'].astype('int64', errors='ignore')
         df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
@@ -248,6 +249,14 @@ def update_all_rows_immediately():
     for index, entry in enumerate(entries):
         calculate_sensitivity(index)
 
+
+# Logging function to write to the GUI log
+def log_to_file(message):
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message = f"{timestamp} - {message}"
+    with open("log.txt", "a") as log_file:
+        log_file.write(formatted_message + "\n")
+
 #####################################################################################
 #  Main
 #
@@ -268,6 +277,8 @@ increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Set up processing")
 root.geometry("900x800")
+
+log_to_file("Started user interface for editing importance and susceptibility.")
 
 vcmd = (root.register(validate_input_value), '%P')
 
