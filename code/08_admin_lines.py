@@ -630,7 +630,7 @@ def build_flat_and_stacked(gpkg_file, log_widget):
     
     classify_data(log_widget, gpkg_file, 'tbl_segment_flat', 'sensitivity_min', config_file)
     classify_data(log_widget, gpkg_file, 'tbl_segment_flat', 'sensitivity_max', config_file)
-    classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
+    classify_data(log_widget, gpkg_file, 'tbl_segment_stacked', 'sensitivity', config_file)
 
 
     log_to_gui(log_widget, "Finalising processing.")
