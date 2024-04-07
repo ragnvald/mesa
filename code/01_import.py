@@ -418,7 +418,9 @@ def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
         'total_asset_objects': int(0),
         'importance': int(0),
         'susceptibility': int(0),
-        'sensitivity': int(0)
+        'sensitivity': int(0),
+        'sensitivity_code': int(0),
+        'sensitivity_description': int(0)
     })
     return group_id_counter + 1
 
@@ -525,7 +527,9 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                             'total_asset_objects': int(0),
                             'importance': int(0),
                             'susceptibility': int(0),
-                            'sensitivity': int(0)
+                            'sensitivity': int(0),
+                            'sensitivity_code': '',  # Default or placeholder value
+                            'sensitivity_description': ''  # Default or placeholder value
                         })
                         for _, row in data.iterrows():
 
@@ -560,7 +564,9 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                         'total_asset_objects': int(0),
                         'importance': int(0),
                         'susceptibility': int(0),
-                        'sensitivity': int(0)
+                        'sensitivity': int(0),
+                        'sensitivity_code': '',  # Default or placeholder value
+                        'sensitivity_description': '',  # Default or placeholder value
                     })
 
                     for index, row in data.iterrows():
