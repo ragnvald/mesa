@@ -3,17 +3,23 @@ import locale
 from tkinter import messagebox, ttk
 import configparser
 import pandas as pd
+import geopandas as gpd
 import datetime
 from sqlalchemy import create_engine, exc
 from sqlalchemy.types import Integer, String, DateTime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import os
+from shapely import wkb
+import binascii
+from fiona import listlayers
+import sys
+
 
 # Setting variables
 #
 # Define fixed widths for each column
-column_widths = [35, 13, 13, 13]
+column_widths = [35, 13, 13, 13, 13, 30]
 
 # Define global variable for valid input values
 valid_input_values = []
@@ -62,129 +68,223 @@ def determine_category(sensitivity):
     print("No match found.")
     return '', ''  
 
+def determine_category(sensitivity):
+    for category, info in classification.items():
+        if sensitivity in info['range']:
+            return category, info['description']
+    print("No match found.")
+    return '', ''
 
-def calculate_sensitivity(row_index):
+
+# Function to safely load WKB or indicate error
+def load_wkb_or_flag(wkb_data):
+    if wkb_data is None or wkb_data == '':
+        print("No WKB data found.")
+        return None
     try:
-        susceptibility = int(entries[row_index]['susceptibility'].get())
-        importance = int(entries[row_index]['importance'].get())
+        # Assuming the WKB data might be in hexadecimal string format
+        if isinstance(wkb_data, str):
+            wkb_data = binascii.unhexlify(wkb_data)
+        return wkb.loads(wkb_data)
+    except binascii.Error as e:
+        print(f"Failed to convert hex: {e}")
+        return None
+    except Exception as e:
+        print(f"Failed to load WKB: {e}")
+        return None
+
+
+def calculate_sensitivity(entry_susceptibility, entry_importance, index, entries, df_assetgroup):
+    try:
+        susceptibility = int(entry_susceptibility.get())
+        importance = int(entry_importance.get())
         sensitivity = susceptibility * importance
-        code, description = determine_category(sensitivity)  # Function to implement
+        sensitivity_code, sensitivity_description = determine_category(sensitivity)
 
-        # Update the GUI elements
-        entries[row_index]['sensitivity'].config(text=str(sensitivity))
-        entries[row_index]['code'].config(text=code)
-        entries[row_index]['description'].config(text=description)
+        # Update the entries list and DataFrame
+        entries[index]['sensitivity']['text'] = str(sensitivity)
+        entries[index]['sensitivity_code']['text'] = sensitivity_code
+        entries[index]['sensitivity_description']['text'] = sensitivity_description
 
-        # Update DataFrame if necessary
-        df.at[row_index, 'susceptibility'] = susceptibility
-        df.at[row_index, 'importance'] = importance
-        df.at[row_index, 'sensitivity'] = sensitivity
-        df.at[row_index, 'code'] = code
-        df.at[row_index, 'description'] = description
+        df_assetgroup.at[index, 'susceptibility'] = susceptibility
+        df_assetgroup.at[index, 'importance'] = importance
+        df_assetgroup.at[index, 'sensitivity'] = sensitivity
+        df_assetgroup.at[index, 'sensitivity_code'] = sensitivity_code
+        df_assetgroup.at[index, 'sensitivity_description'] = sensitivity_description
 
     except ValueError:
-        entries[row_index]['sensitivity'].config(text="")
-        entries[row_index]['code'].config(text="")
-        entries[row_index]['description'].config(text="")
-
-    df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
-    df['importance'] = df['importance'].astype('int64', errors='ignore')
-    df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
+        messagebox.showerror("Input Error", "Enter valid integers for susceptibility and importance.")
 
 
-def load_data():
-    global df, entries
-    engine = create_engine(f'sqlite:///{gpkg_file}')
+def update_all_rows_immediately(entries, df_assetgroup):
+    for entry in entries:
+        try:
+            # Extract susceptibility and importance values from the UI and convert to integers
+            susceptibility = int(entry['susceptibility'].get())
+            importance = int(entry['importance'].get())
+            
+            # Calculate new sensitivity
+            sensitivity = susceptibility * importance
+            sensitivity_code, sensitivity_description = determine_category(sensitivity)
+            
+            # Update the DataFrame
+            index = entry['row_index']
+            df_assetgroup.at[index, 'susceptibility'] = susceptibility
+            df_assetgroup.at[index, 'importance'] = importance
+            df_assetgroup.at[index, 'sensitivity'] = sensitivity
+            df_assetgroup.at[index, 'sensitivity_code'] = sensitivity_code
+            df_assetgroup.at[index, 'sensitivity_description'] = sensitivity_description
+            
+            # Update geometry if it's included in the entry dictionary
+            if 'geom' in entry:
+                df_assetgroup.at[index, 'geom'] = entry['geom']
+
+            # Update UI elements with new values
+            entry['sensitivity']['text'] = str(sensitivity)
+            entry['sensitivity_code']['text'] = sensitivity_code
+            entry['sensitivity_description']['text'] = sensitivity_description
+
+            # Debug output to confirm data update
+            print(f"Updated row {index} with new values.")
+
+        except ValueError as e:
+            print(f"Input Error: {e}")
+            continue  # Skip this entry and continue with the next
+
+
+def load_data(gpkg_file):
     try:
-        df = pd.read_sql(f"SELECT * FROM {table_name}", con=engine)
+        # Specify the layer name if your GeoPackage contains multiple layers
+        layer_name = "tbl_asset_group"
         
-        df['susceptibility'] = df['susceptibility'].astype('int64', errors='ignore')
-        df['importance'] = df['importance'].astype('int64', errors='ignore')
-        df['sensitivity'] = df['sensitivity'].astype('int64', errors='ignore')
+        # Read the specified layer directly into a GeoDataFrame
+        df_assetgroup = gpd.read_file(gpkg_file, layer=layer_name)
+        
+        # Verify and set the geometry column if not automatically recognized
+        if 'geom' in df_assetgroup.columns and df_assetgroup.geometry.name != 'geom':
+            df_assetgroup.set_geometry('geom', inplace=True)
+        
+        # Initialize columns if they don't exist or if they are completely null
+        for col in ['susceptibility', 'importance', 'sensitivity']:
+            if col not in df_assetgroup.columns or df_assetgroup[col].isnull().all():
+                df_assetgroup[col] = 0
+        
+        # Check for any geometries that failed to load (if geometries are invalid or missing)
+        if df_assetgroup.geometry.isnull().any():
+            print("Some geometries failed to load or are invalid.")
+        
+        return df_assetgroup
 
-    except exc.SQLAlchemyError as e:
-        messagebox.showerror("Database Error", f"Failed to load data: {e}")
-        return
-
-    for widget in frame.winfo_children():
-        widget.destroy()
-
-    entries = []
-
-    # Add text labels as the first row in the frame
-    ttk.Label(frame, text="Dataset", anchor='w').grid(row=0, column=0, padx=5, sticky='ew')
-    ttk.Label(frame, text="Susceptibility", anchor='w').grid(row=0, column=1, padx=5, sticky='ew')
-    ttk.Label(frame, text="Importance", anchor='w').grid(row=0, column=2, padx=5, sticky='ew')
-    ttk.Label(frame, text="Sensitivity", anchor='w').grid(row=0, column=3, padx=5, sticky='ew')
-    ttk.Label(frame, text="Code", anchor='w').grid(row=0, column=4, padx=5, sticky='ew')
-    ttk.Label(frame, text="Description", anchor='w').grid(row=0, column=5, padx=5, sticky='ew')
-
-    for i, row in enumerate(df.itertuples(), start=1):  # Adjust to use itertuples() for efficiency
-        add_data_row(i, row)
-
-    frame.update_idletasks()
-    canvas.configure(scrollregion=canvas.bbox("all"))
+    except Exception as e:
+        print("Failed to load data:", e)
+        return None
 
 
-def add_data_row(i, row):
-    global entries
-    ttk.Label(frame, text=getattr(row, 'name_original', ''), anchor='e').grid(row=i, column=0, padx=5, sticky='ew')
 
-    susceptibility_entry = ttk.Entry(frame, width=column_widths[1], validate='key', validatecommand=vcmd)
-    susceptibility_entry.insert(0, getattr(row, 'susceptibility', ''))
-    susceptibility_entry.grid(row=i, column=1, padx=5)
-    susceptibility_entry.bind('<KeyRelease>', lambda event, index=i-1: calculate_sensitivity(index))  # Adjusted index for zero-based
+def add_data_row(index, row, frame, column_widths, entries, df_assetgroup):
+    entry_susceptibility = ttk.Entry(frame, width=column_widths[1])
+    entry_susceptibility.insert(0, str(getattr(row, 'susceptibility', '')))
+    entry_susceptibility.grid(row=index, column=1, padx=5)
 
-    importance_entry = ttk.Entry(frame, width=column_widths[2], validate='key', validatecommand=vcmd)
-    importance_entry.insert(0, getattr(row, 'importance', ''))
-    importance_entry.grid(row=i, column=2, padx=5)
-    importance_entry.bind('<KeyRelease>', lambda event, index=i-1: calculate_sensitivity(index))  # Adjusted index for zero-based
+    entry_importance = ttk.Entry(frame, width=column_widths[2])
+    entry_importance.insert(0, str(getattr(row, 'importance', '')))
+    entry_importance.grid(row=index, column=2, padx=5)
 
-    sensitivity_label = ttk.Label(frame, text=str(getattr(row, 'sensitivity', '')), width=column_widths[3])
-    sensitivity_label.grid(row=i, column=3, padx=5)
-    
-    code_label = ttk.Label(frame, width=5)
-    code_label.grid(row=i, column=4, padx=5)
-    
-    description_label = ttk.Label(frame, width=30)
-    description_label.grid(row=i, column=5, padx=5)
+    # Ensure all parameters are correctly included in the lambda function call
+    entry_susceptibility.bind('<KeyRelease>', lambda event, ent=entry_susceptibility, imp=entry_importance, idx=index-1: calculate_sensitivity(ent, imp, idx, entries, df_assetgroup))
+    entry_importance.bind('<KeyRelease>', lambda event, ent=entry_susceptibility, imp=entry_importance, idx=index-1: calculate_sensitivity(ent, imp, idx, entries, df_assetgroup))
+
+    geom = getattr(row, 'geom', None)
+
+    label_name = ttk.Label(frame, text=getattr(row, 'name_original', ''), anchor='w', width=column_widths[0])
+    label_name.grid(row=index, column=0, padx=5, sticky='ew')
+
+    label_sensitivity = ttk.Label(frame, text=str(getattr(row, 'sensitivity', '')), anchor='w', width=column_widths[3])
+    label_sensitivity.grid(row=index, column=3, padx=5, sticky='ew')
+
+    label_code = ttk.Label(frame, text=str(getattr(row, 'sensitivity_code', '')), anchor='w', width=column_widths[4])
+    label_code.grid(row=index, column=4, padx=5, sticky='ew')
+
+    label_description = ttk.Label(frame, text=str(getattr(row, 'sensitivity_description', '')), anchor='w', width=column_widths[5])
+    label_description.grid(row=index, column=5, padx=5, sticky='ew')
 
     entries.append({
-        'susceptibility': susceptibility_entry,
-        'importance': importance_entry,
-        'sensitivity': sensitivity_label,
-        'code': code_label,
-        'description': description_label
+        'row_index': index-1,
+        'name': label_name,
+        'susceptibility': entry_susceptibility,
+        'importance': entry_importance,
+        'sensitivity': label_sensitivity,
+        'sensitivity_code': label_code,
+        'sensitivity_description': label_description,
+        'geom': geom
     })
 
 
-def save_to_gpkg():
-    engine = create_engine(f'sqlite:///{gpkg_file}')
+def save_to_gpkg(df_assetgroup, gpkg_file):
     try:
-        df['date_import'] = pd.to_datetime(df['date_import'], errors='coerce')
-
-        data_types = {
-            'id': Integer,
-            'name_original': String,
-            'name_fromuser': String,
-            'date_import': DateTime,
-            'bounding_box_geom': String,
-            'total_asset_objects': Integer,
-            'susceptibility': Integer,
-            'importance': Integer,
-            'sensitivity': Integer,
-            'code': String,
-            'description':String
-        }
-
-        df.to_sql(table_name, con=engine, if_exists='replace', index=False, dtype=data_types)
-    except exc.SQLAlchemyError as e:
+        if not df_assetgroup.empty:
+            # Find all geometry columns in the DataFrame
+            geom_cols = df_assetgroup.columns[df_assetgroup.dtypes.apply(lambda dtype: dtype == 'geometry')].tolist()
+            print(f"Geometry columns found: {geom_cols}")
+            
+            # Set the main geometry column; use the first geometry column found
+            if geom_cols:
+                main_geom_col = geom_cols[0]  # Use the first geometry column as the main one
+            else:
+                raise ValueError("No geometry column found in the DataFrame.")
+            
+            # If there are multiple geometry columns, process them
+            if len(geom_cols) > 1:
+                print(f"Warning: Multiple geometry columns found. Converting all but '{main_geom_col}' to WKT.")
+                for col in geom_cols:
+                    if col != main_geom_col:
+                        df_assetgroup[col] = df_assetgroup[col].apply(lambda geom: geom.to_wkt() if geom else None)
+                        df_assetgroup.drop(columns=[col], inplace=True)
+            
+            # Ensure 'main_geom_col' is set as the geometry column
+            if df_assetgroup.geometry.name != main_geom_col:
+                df_assetgroup.set_geometry(main_geom_col, inplace=True)
+            
+            # Set CRS if not already set
+            if df_assetgroup.crs is None:
+                df_assetgroup.set_crs(epsg=4326, inplace=True)  # Adjust CRS as necessary
+            
+            # Save to GeoPackage
+            df_assetgroup.to_file(filename=gpkg_file, layer='tbl_asset_group', driver='GPKG')
+            print("Data saved successfully to GeoPackage.")
+        else:
+            print("GeoDataFrame is empty or missing a geometry column.")
+    except Exception as e:
+        print("Failed to save GeoDataFrame:", e)
         messagebox.showerror("Database Error", f"Failed to save data: {e}")
+
+
 
 
 # Application closes without saving. Not sure if this is the way or if I should add default save on exit.
 def close_application():
+    save_to_gpkg(df_assetgroup, gpkg_file)
     root.destroy()
+
+def setup_headers(frame, column_widths):
+    headers = ["Dataset", "Susceptibility", "Importance", "Sensitivity", "Code", "Description"]
+    for idx, header in enumerate(headers):
+        label = ttk.Label(frame, text=header, anchor='w', width=column_widths[idx])
+        label.grid(row=0, column=idx, padx=5, pady=5, sticky='ew')
+    return frame
+
+
+def update_df_assetgroup(entries):
+    for entry in entries:
+        index = entry['row_index']
+        # Ensure other data is updated
+        df_assetgroup.at[index, 'susceptibility'] = entry['susceptibility'].get()
+        df_assetgroup.at[index, 'importance'] = entry['importance'].get()
+        df_assetgroup.at[index, 'sensitivity'] = entry['sensitivity']['text']
+        df_assetgroup.at[index, 'sensitivity_code'] = entry['sensitivity_code']['text']
+        df_assetgroup.at[index, 'sensitivity_description'] = entry['sensitivity_description']['text']
+        # Update the geometry
+        df_assetgroup.at[index, 'geom'] = entry['geom']
 
 
 def create_scrollable_area(root):
@@ -195,17 +295,40 @@ def create_scrollable_area(root):
     canvas = tk.Canvas(scrollable_frame)
     scrollbar_y = ttk.Scrollbar(scrollable_frame, orient="vertical", command=canvas.yview)
 
+    # Configure the scrollbar with the canvas
     canvas.configure(yscrollcommand=scrollbar_y.set)
-    canvas.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-    # Pack canvas and scrollbar in the scrollable_frame
+    # Bind the configure event to adjust the scroll region
+    canvas.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+
+    # Pack the scrollbar and canvas in the frame
     canvas.pack(side=tk.LEFT, fill="both", expand=True)
     scrollbar_y.pack(side=tk.RIGHT, fill="y")
 
-    # Pack the scrollable_frame in the root
+    # Pack the scrollable_frame in the root window
     scrollable_frame.pack(side=tk.TOP, fill="both", expand=True)
 
-    return canvas
+    # Create a frame inside the canvas which will contain the actual widgets
+    frame = ttk.Frame(canvas)
+    canvas.create_window((0, 0), window=frame, anchor="nw")
+
+    return canvas, frame
+
+
+def setup_ui_elements(root, df_assetgroup, column_widths):
+    canvas, frame = create_scrollable_area(root)
+    entries = []  # Initialize here
+    setup_headers(frame, column_widths)
+
+    if df_assetgroup is not None and not df_assetgroup.empty:
+        for i, row in enumerate(df_assetgroup.itertuples(), start=1):
+            add_data_row(i, row, frame, column_widths, entries, df_assetgroup)  # Ensure entries are passed and used correctly
+        frame.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+    else:
+        print("No data to display.")
+
+    return canvas, frame, entries  # Return entries too
 
 
 def increment_stat_value(config_file, stat_name, increment_value):
@@ -245,10 +368,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
             file.writelines(lines)
 
 
-def update_all_rows_immediately():
-    for index, entry in enumerate(entries):
-        calculate_sensitivity(index)
-
 
 # Logging function to write to the GUI log
 def log_to_file(message):
@@ -265,7 +384,6 @@ def log_to_file(message):
 config_file             = 'config.ini'
 config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
-table_name              = 'tbl_asset_group'
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
@@ -273,33 +391,30 @@ classification = read_config_classification(config_file)
 
 increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 
-# Initialize the main window
-root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("Set up processing")
-root.geometry("900x800")
+if __name__ == "__main__":
+    root = ttk.Window(themename=ttk_bootstrap_theme)
+    root.title("Set up processing")
+    root.geometry("900x800")
 
-log_to_file("Started user interface for editing importance and susceptibility.")
+    df_assetgroup = load_data(gpkg_file)
 
-vcmd = (root.register(validate_input_value), '%P')
+    if df_assetgroup is None:
+        print("Failed to load the GeoDataFrame. Check the GeoPackage file and the data integrity.")
+        sys.exit(1)  # Exit if the data could not be loaded, adjust handling as needed
 
-# Create scrollable area below the header
-canvas = create_scrollable_area(root)
-frame = ttk.Frame(canvas)
-canvas.create_window((0, 0), window=frame, anchor="nw")
+    canvas, frame, entries = setup_ui_elements(root, df_assetgroup, column_widths)  # Ensure entries are received here
+    
+    update_all_rows_immediately(entries, df_assetgroup)  # Now pass entries to this function to update all rows
 
-load_data()
+    # Setup the rest of the UI components
+    info_text = "This is where you register values for susceptibility and importance. Ensure all values are correctly filled."
+    info_label = tk.Label(root, text=info_text, wraplength=600, justify="center")
+    info_label.pack(padx=10, pady=10)
 
-update_all_rows_immediately()
+    save_button = ttk.Button(root, text="Save", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=PRIMARY)
+    save_button.pack(side='left', padx=10, pady=10)
 
-# Text panel and buttons below the scrollable area
-info_text = "This is where you register values for susceptibility and importance. Tabulate through the table to make sure sensitivity is calulated properly."
-info_label = tk.Label(root, text=info_text, wraplength=600, justify="center")
-info_label.pack(padx=10, pady=10)
+    close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
+    close_button.pack(side='right', padx=10, pady=10)
 
-save_button = ttk.Button(root, text="Save", command=save_to_gpkg, bootstyle=PRIMARY)
-save_button.pack(side='left', padx=10, pady=10)
-
-close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
-close_button.pack(side='right', padx=10, pady=10)
-
-root.mainloop()
+    root.mainloop()
