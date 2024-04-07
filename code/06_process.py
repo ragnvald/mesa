@@ -26,13 +26,18 @@ def read_config(file_name):
 def read_config_classification(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
-    classification = {}
+    # Clear the existing global classification dictionary before populating it
+    classification.clear()
     for section in config.sections():
-        range_str = config[section]['range']
-        start, end = map(int, range_str.split('-'))
-        classification[section] = range(start, end + 1)
+        if section in ['A', 'B', 'C', 'D', 'E']:  # Make sure we're only dealing with your classification sections
+            range_str = config[section]['range']
+            description = config[section].get('description', '')  # Safely get the description if it exists
+            start, end = map(int, range_str.split('-'))
+            classification[section] = {
+                'range': range(start, end + 1),  # Adjust the end value to make the range inclusive
+                'description': description
+            }
     return classification
-
 
 # # # # # # # # # # # # # # 
 # Core functions
@@ -152,6 +157,7 @@ def aggregate_data(intersected_data):
 
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file):
+
     log_to_gui(log_widget, "Building analysis table (tbl_stacked).")
     update_progress(10)  # Indicate start
 
@@ -164,10 +170,12 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
     update_progress(25)  # Progress after reading asset group data
 
-    # Merge asset group data with asset data
-    asset_data = asset_data.merge(asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity']], 
-                                  left_on='ref_asset_group', right_on='id', how='left')
-   
+    # Merge asset group data with asset data   
+    asset_data = asset_data.merge(
+        asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']], 
+        left_on='ref_asset_group', right_on='id', how='left'
+    )
+
     update_progress(30)  # Progress after merging data
 
     point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
@@ -180,6 +188,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     update_progress(43)  # Progress after polygon intersections
 
     intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
+
     # To list the columns:
     columns_list = intersected_data.columns.tolist()
   
@@ -265,21 +274,29 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     gdf = gpd.read_file(gpkg_file, layer=process_layer)
 
     # Function to classify each row
-    def classify_row(row):
-        for label, value_range in classification.items():
-            if row[column_name] in value_range:
-                return label
-        return 0  # or any default value
+    def classify_row(value):
+        for label, info in classification.items():
+            if value in info['range']:
+                return label, info['description']
+        return 'Unknown', 'No description available'  # Default if no range matches
 
-    new_column_name = column_name + "_code"
-    # Apply classification
-    gdf[new_column_name] = gdf.apply(lambda row: classify_row(row), axis=1)
+    # Identify the base name and suffix (if any) for dynamic column naming
+    base_name, *suffix = column_name.rsplit('_', 1)
+    suffix = suffix[0] if suffix else ''
+    new_code_col = f"{base_name}_code_{suffix}" if suffix else f"{base_name}_code"
+    new_desc_col = f"{base_name}_description_{suffix}" if suffix else f"{base_name}_description"
 
-    log_to_gui(log_widget, f"Updated codes for: {process_layer} - {column_name} ")
-    update_progress(93)
+    # Apply classification to the specified column
+    # Using zip to unpack results directly into the new columns
+    gdf[new_code_col], gdf[new_desc_col] = zip(*gdf[column_name].apply(classify_row))
+
+    log_to_gui(log_widget, f"Updated classifications for {process_layer} based on {column_name}")
 
     # Save the modified geopackage
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
+
+    log_to_gui(log_widget, f"Data saved to {process_layer} with new fields {new_code_col} and {new_desc_col}")
+
 
 
 def process_all(log_widget, progress_var, gpkg_file, config_file):
@@ -289,7 +306,7 @@ def process_all(log_widget, progress_var, gpkg_file, config_file):
     # Process and create tbl_flat
     main_tbl_flat(log_widget, progress_var, gpkg_file) 
     update_progress(94)
-
+ 
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
     update_progress(95)
 
@@ -316,6 +333,9 @@ gpkg_file               = config['DEFAULT']['gpkg_file']
 mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
+
+# Global declaration
+classification = {}
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
