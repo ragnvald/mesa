@@ -5,8 +5,6 @@ import configparser
 import pandas as pd
 import geopandas as gpd
 import datetime
-from sqlalchemy import create_engine, exc
-from sqlalchemy.types import Integer, String, DateTime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import os
@@ -53,6 +51,7 @@ def read_config_classification(file_name):
                 'description': description
             }
     return classification
+
 
 # Updated validation function
 def validate_input_value(P):
@@ -144,9 +143,6 @@ def update_all_rows_immediately(entries, df_assetgroup):
             entry['sensitivity_code']['text'] = sensitivity_code
             entry['sensitivity_description']['text'] = sensitivity_description
 
-            # Debug output to confirm data update
-            print(f"Updated row {index} with new values.")
-
         except ValueError as e:
             print(f"Input Error: {e}")
             continue  # Skip this entry and continue with the next
@@ -178,7 +174,6 @@ def load_data(gpkg_file):
     except Exception as e:
         print("Failed to load data:", e)
         return None
-
 
 
 def add_data_row(index, row, frame, column_widths, entries, df_assetgroup):
@@ -225,7 +220,6 @@ def save_to_gpkg(df_assetgroup, gpkg_file):
         if not df_assetgroup.empty:
             # Find all geometry columns in the DataFrame
             geom_cols = df_assetgroup.columns[df_assetgroup.dtypes.apply(lambda dtype: dtype == 'geometry')].tolist()
-            print(f"Geometry columns found: {geom_cols}")
             
             # Set the main geometry column; use the first geometry column found
             if geom_cols:
@@ -235,7 +229,7 @@ def save_to_gpkg(df_assetgroup, gpkg_file):
             
             # If there are multiple geometry columns, process them
             if len(geom_cols) > 1:
-                print(f"Warning: Multiple geometry columns found. Converting all but '{main_geom_col}' to WKT.")
+                log_to_file(f"Warning: Multiple geometry columns found. Converting all but '{main_geom_col}' to WKT.")
                 for col in geom_cols:
                     if col != main_geom_col:
                         df_assetgroup[col] = df_assetgroup[col].apply(lambda geom: geom.to_wkt() if geom else None)
@@ -247,18 +241,15 @@ def save_to_gpkg(df_assetgroup, gpkg_file):
             
             # Set CRS if not already set
             if df_assetgroup.crs is None:
-                df_assetgroup.set_crs(epsg=4326, inplace=True)  # Adjust CRS as necessary
+                df_assetgroup.set_crs(epsg=workingprojection_epsg, inplace=True)  # Adjust CRS as necessary
             
             # Save to GeoPackage
             df_assetgroup.to_file(filename=gpkg_file, layer='tbl_asset_group', driver='GPKG')
-            print("Data saved successfully to GeoPackage.")
+            log_to_file("Data saved successfully to GeoPackage.")
         else:
-            print("GeoDataFrame is empty or missing a geometry column.")
+            log_to_file("GeoDataFrame is empty or missing a geometry column.")
     except Exception as e:
-        print("Failed to save GeoDataFrame:", e)
-        messagebox.showerror("Database Error", f"Failed to save data: {e}")
-
-
+        log_to_file("Failed to save GeoDataFrame:", e)
 
 
 # Application closes without saving. Not sure if this is the way or if I should add default save on exit.
@@ -326,7 +317,7 @@ def setup_ui_elements(root, df_assetgroup, column_widths):
         frame.update_idletasks()
         canvas.configure(scrollregion=canvas.bbox("all"))
     else:
-        print("No data to display.")
+        log_to_file("No data to display.")
 
     return canvas, frame, entries  # Return entries too
 
@@ -334,7 +325,7 @@ def setup_ui_elements(root, df_assetgroup, column_widths):
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
     if not os.path.isfile(config_file):
-        print(f"Configuration file {config_file} not found.")
+        log_to_file(f"Configuration file {config_file} not found.")
         return
     
     # Read the entire config file to preserve the layout and comments
@@ -366,7 +357,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
     if updated:
         with open(config_file, 'w') as file:
             file.writelines(lines)
-
 
 
 # Logging function to write to the GUI log
