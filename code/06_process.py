@@ -156,12 +156,17 @@ def aggregate_data(intersected_data):
 
 
 # Create tbl_stacked by intersecting all asset data with the geocoding data
-def main_tbl_stacked(log_widget, progress_var, gpkg_file):
+def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
     log_to_gui(log_widget, "Building analysis table (tbl_stacked).")
     update_progress(10)  # Indicate start
 
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+
+    if asset_data.crs is None:
+        log_to_gui(log_widget, "No CRS found, setting default CRS.")
+        asset_data.set_crs(workingprojection_epsg, inplace=True)
+
     update_progress(15)  # Progress after reading asset data
 
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
@@ -197,6 +202,17 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
     # Drop the unnecessary columns
     intersected_data.drop(columns=['fid', 'id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
 
+    # Area calculation (area_m2 here)
+    if intersected_data.crs.is_geographic:
+        # Project to a CRS suitable for area calculation
+        temp_data = intersected_data.copy()
+        temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
+        intersected_data['area_m2'] = temp_data.geometry.area.astype('int64')
+    else:
+        intersected_data['area_m2'] = intersected_data.geometry.area.astype('int64')
+        
+    update_progress(50)  # Progress after concatenating data
+    
     # Before saving, assign the CRS to the GeoDataFrame
     intersected_data.crs = workingprojection_epsg
 
@@ -206,9 +222,15 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file):
 
 
 # Create tbl_flat by reading out values from tbl_stacked
-def main_tbl_flat(log_widget, progress_var, gpkg_file):
+def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
+
+    # Ensure the CRS is set right after reading
+    if tbl_stacked.crs is None:
+        log_to_gui(log_widget, "CRS not found, setting default CRS for tbl_stacked.")
+        tbl_stacked.set_crs(workingprojection_epsg, inplace=True)
+
     update_progress(60)
 
     # Calculate overlap counts per 'code'
@@ -251,7 +273,21 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     tbl_flat.rename(columns=renamed_columns, inplace=True)
 
     # Convert to GeoDataFrame
-    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry')
+    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry', crs=workingprojection_epsg)
+
+    # Check and set CRS again, if needed
+    if tbl_flat.crs is None:
+        log_to_gui(log_widget, "CRS not found after aggregation, setting CRS for tbl_flat.")
+        tbl_flat.set_crs(workingprojection_epsg, inplace=True)
+
+    # Calculate area depending on the CRS
+    if tbl_flat.crs.is_geographic:
+        # Project to a CRS suitable for area calculation
+        temp_tbl_flat = tbl_flat.copy()
+        temp_tbl_flat.geometry = temp_tbl_flat.geometry.to_crs("EPSG:3395")
+        tbl_flat['area_m2'] = temp_tbl_flat.geometry.area.astype('int64')
+    else:
+        tbl_flat['area_m2'] = tbl_flat.geometry.area.astype('int64')
 
     # Reset index to make 'code' a column
     tbl_flat.reset_index(inplace=True)
@@ -259,11 +295,10 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file):
     # Merge tbl_flat with overlap_counts to add the overlap_count column
     tbl_flat = tbl_flat.merge(overlap_counts, on='code', how='left')
 
-    # Before saving tbl_flat
-    tbl_flat.crs = workingprojection_epsg
-
     # Save tbl_flat as a new layer in the GeoPackage
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
+    log_to_gui(log_widget, "tbl_flat processed and saved.")
+
 
 
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
@@ -299,12 +334,12 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
 
 
 
-def process_all(log_widget, progress_var, gpkg_file, config_file):
+def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg):
     # Process and create tbl_stacked
-    main_tbl_stacked(log_widget, progress_var, gpkg_file)
+    main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg)
 
     # Process and create tbl_flat
-    main_tbl_flat(log_widget, progress_var, gpkg_file) 
+    main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg) 
     update_progress(94)
  
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
@@ -375,7 +410,7 @@ button_frame.pack(pady=5)
 
 # Add 'Process All' button to the button frame
 process_all_btn = ttk.Button(button_frame, text="Process All", command=lambda: threading.Thread(
-    target=process_all, args=(log_widget, progress_var, gpkg_file, config_file), daemon=True).start())
+    target=process_all, args=(log_widget, progress_var, gpkg_file, config_file,workingprojection_epsg), daemon=True).start())
 process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
 # Add 'Close' button to the button frame
