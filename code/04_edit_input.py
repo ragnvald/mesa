@@ -54,7 +54,7 @@ def read_config_classification(file_name):
 
 # Updated validation function
 def validate_input_value(P):
-    if P.isdigit() and int(P) in valid_input_values or P == "":
+    if P.isdigit() and (int(P) in valid_input_values or P == ""):
         return True
     return False
 
@@ -64,6 +64,7 @@ def determine_category(sensitivity):
         if sensitivity in info['range']:
             return category, info['description']
     return '', ''  
+
 
 def determine_category(sensitivity):
     for category, info in classification.items():
@@ -373,8 +374,8 @@ config                  = read_config(config_file)
 gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
-
-classification = read_config_classification(config_file)
+valid_input_values      = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
+classification          = read_config_classification(config_file)
 
 increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 
