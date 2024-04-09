@@ -13,7 +13,6 @@
 #               kept in tbl_geocode_objects.
 
 import tkinter as tk
-import locale
 from tkinter import scrolledtext, ttk
 from fiona import open as fiona_open    
 import threading
@@ -72,16 +71,21 @@ def log_to_gui(log_widget, message):
 
 
 # Function to read and reproject spatial data
-def read_and_reproject(filepath, layer=None):
-    data = gpd.read_file(filepath, layer=layer)
-    # if no projection indicated, assume workingprojection_epsg
-    if data.crs is None:
-        log_to_gui(log_widget, f"Warning: No CRS found for {filepath}. Setting CRS to EPSG:{workingprojection_epsg}.")
-        data.set_crs(epsg=workingprojection_epsg, inplace=True)
-    # any other projection, reproject to workingprojection_epsg
-    elif data.crs.to_epsg() != workingprojection_epsg:
-        data = data.to_crs(epsg=workingprojection_epsg)
-    return data
+def read_and_reproject(filepath, layer=None, log_widget=None):
+    try:
+        data = gpd.read_file(filepath, layer=layer)
+        original_crs = data.crs
+        if data.crs is None:
+            log_to_gui(log_widget, f"No CRS found for {filepath}. Setting CRS to EPSG:{workingprojection_epsg}.")
+            data.set_crs(epsg=workingprojection_epsg, inplace=True)
+        elif data.crs.to_epsg() != workingprojection_epsg:
+            log_to_gui(log_widget, f"Reprojecting data from {original_crs} to EPSG:{workingprojection_epsg}.")
+            data = data.to_crs(epsg=workingprojection_epsg)
+        return data
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed to read or reproject {filepath}: {e}")
+        return gpd.GeoDataFrame()  # Return an empty GeoDataFrame on failure
+
 
 
 # Function to process a layer and add to asset objects
@@ -194,13 +198,13 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
         for i in range(ds.GetLayerCount()):
             layer       = ds.GetLayerByIndex(i)
             layer_name  = layer.GetName()
-            data        = read_and_reproject(filepath, layer=layer_name)
+            data        = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
             log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
             group_id_counter, object_id_counter = process_geocode_layer(
                 data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
-        data            = read_and_reproject(filepath)
+        data            = read_and_reproject(filepath, log_widget=log_widget)
         layer_name      = os.path.splitext(os.path.basename(filepath))[0]
         log_to_gui(log_widget, f"Importing shapefile layyer: {layer_name}")
         group_id_counter, object_id_counter = process_geocode_layer(
@@ -218,13 +222,13 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
         for i in range(ds.GetLayerCount()):
             layer       = ds.GetLayerByIndex(i)
             layer_name  = layer.GetName()
-            data        = read_and_reproject(filepath, layer=layer_name)
+            data        = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
             log_to_gui(log_widget, f"Importing geopackage layer {layer_name}.")
             line_id_counter = process_line_layer(
                 data, line_objects, line_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
-        data = read_and_reproject(filepath)
+        data = read_and_reproject(filepath, log_widget=log_widget)
         layer_name = os.path.splitext(os.path.basename(filepath))[0]
         log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
         line_id_counter = process_line_layer(
@@ -234,45 +238,71 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
     return line_id_counter
 
 
-# Import spatial data and export to geopackage
+def get_file_metadata(file_path):
+    """Extracts number of features from a geospatial file."""
+    try:
+        data = gpd.read_file(file_path)
+        num_features = len(data)
+        return (file_path, num_features)
+    except Exception as e:
+        log_to_gui(log_widget, f"Error reading {file_path}: {e}")
+        return (file_path, 0)
+
+
+def sort_files_by_feature_count(file_paths):
+    """Sorts file paths by the number of features, descending."""
+    files_with_metadata = [get_file_metadata(fp) for fp in file_paths]
+    sorted_files = sorted(files_with_metadata, key=lambda x: x[1], reverse=False)
+    return [fp[0] for fp in sorted_files]
+
+
 def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
-    geocode_groups      = []
-    geocode_objects     = []
-    group_id_counter    = 1
-    object_id_counter   = 1
-    file_patterns       = ['*.shp', '*.gpkg']
-    total_files         = sum([len(glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)) for pattern in file_patterns])
-    processed_files     = 0
+    geocode_groups = []
+    geocode_objects = []
+    group_id_counter = 1
+    object_id_counter = 1
+    file_patterns = ['*.shp', '*.gpkg']
+    
+    log_to_gui(log_widget, "Working with imports...")
+    update_progress(5)  # Initial progress after starting
+
+    # Gather all file paths
+    all_file_paths = [fp for pattern in file_patterns for fp in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)]
+    
+    log_to_gui(log_widget, "Sorting the geocode layers by increasing size")
+    update_progress(10)  # Initial progress after starting
+
+    # Sort files by the number of features
+    sorted_file_paths = sort_files_by_feature_count(all_file_paths)
+    total_files = len(sorted_file_paths)
+    processed_files = 0
 
     if total_files == 0:
         progress_increment = 70
     else:
         progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
 
-    log_to_gui(log_widget, "Working with imports...")
-    update_progress(10)  # Initial progress after starting
 
-    for pattern in file_patterns:
-        for filepath in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True):
-            try:
-                log_to_gui(log_widget, f"Processing the layer {os.path.splitext(os.path.basename(filepath))[0]}")
-                progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
+    for filepath in sorted_file_paths:
+        try:
+            layer_name = os.path.splitext(os.path.basename(filepath))[0]
+            log_to_gui(log_widget, f"Processing the layer {layer_name}")
+            progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
 
-                group_id_counter, object_id_counter = process_geocode_file(
-                    filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
+            group_id_counter, object_id_counter = process_geocode_file(
+                filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
 
-                processed_files += 1
-                progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
-                update_progress(10 + processed_files * progress_increment)
+            processed_files += 1
+            progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
+            update_progress(10 + processed_files * progress_increment)
 
-            except Exception as e:
-                log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
+        except Exception as e:
+            log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
 
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
     geocode_objects_gdf = gpd.GeoDataFrame(geocode_objects, geometry='geom' if geocode_objects else None)
     
     update_progress(90)
-
     log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}")
     return geocode_groups_gdf, geocode_objects_gdf
 
@@ -439,7 +469,7 @@ def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
 
 
 def process_geopackage_layer(filepath, layer_name, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
-    data = read_and_reproject(filepath, layer=layer_name)
+    data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
     if not data.empty:
         group_id_counter = append_to_asset_groups(layer_name, data, asset_groups, group_id_counter)
         object_id_counter = append_to_asset_objects(data, asset_objects, object_id_counter, group_id_counter - 1)
@@ -457,7 +487,7 @@ def process_geopackage_layers(filepath, asset_objects, asset_groups, object_id_c
     
     # Process each layer individually
     for layer_name in layer_names:
-        data = read_and_reproject(filepath, layer=layer_name)
+        data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
         if not data.empty:
             # Process layer data and update asset_objects and asset_groups
             bbox_polygon = box(*data.total_bounds)  # Create a Polygon geometry from the bounding box
@@ -514,7 +544,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                     
                     log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
                     
-                    data = read_and_reproject(filepath, layer=layer_name)
+                    data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
                     if not data.empty:
                         bbox_polygon = box(*data.total_bounds)
                         asset_groups.append({
@@ -551,7 +581,7 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
                 log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
                 
-                data = read_and_reproject(filepath)
+                data = read_and_reproject(filepath, log_widget=log_widget)
                 if not data.empty:
                     bbox_polygon = box(*data.total_bounds)
                     asset_groups.append({
