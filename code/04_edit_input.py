@@ -10,7 +10,6 @@ from ttkbootstrap.constants import *
 import os
 from shapely import wkb
 import binascii
-from fiona import listlayers
 import sys
 
 
@@ -64,14 +63,12 @@ def determine_category(sensitivity):
     for category, info in classification.items():
         if sensitivity in info['range']:
             return category, info['description']
-    print("No match found.")
     return '', ''  
 
 def determine_category(sensitivity):
     for category, info in classification.items():
         if sensitivity in info['range']:
             return category, info['description']
-    print("No match found.")
     return '', ''
 
 
