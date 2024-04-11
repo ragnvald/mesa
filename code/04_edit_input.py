@@ -66,13 +66,6 @@ def determine_category(sensitivity):
     return '', ''  
 
 
-def determine_category(sensitivity):
-    for category, info in classification.items():
-        if sensitivity in info['range']:
-            return category, info['description']
-    return '', ''
-
-
 # Function to safely load WKB or indicate error
 def load_wkb_or_flag(wkb_data):
     if wkb_data is None or wkb_data == '':
@@ -93,21 +86,21 @@ def load_wkb_or_flag(wkb_data):
 
 def calculate_sensitivity(entry_susceptibility, entry_importance, index, entries, df_assetgroup):
     try:
-        susceptibility = int(entry_susceptibility.get())
-        importance = int(entry_importance.get())
-        sensitivity = susceptibility * importance
+        susceptibility  = int(entry_susceptibility.get())
+        importance      = int(entry_importance.get())
+        sensitivity     = susceptibility * importance
         sensitivity_code, sensitivity_description = determine_category(sensitivity)
 
         # Update the entries list and DataFrame
-        entries[index]['sensitivity']['text'] = str(sensitivity)
-        entries[index]['sensitivity_code']['text'] = sensitivity_code
-        entries[index]['sensitivity_description']['text'] = sensitivity_description
+        entries[index]['sensitivity']['text']               = str(sensitivity)
+        entries[index]['sensitivity_code']['text']          = sensitivity_code
+        entries[index]['sensitivity_description']['text']   = sensitivity_description
 
-        df_assetgroup.at[index, 'susceptibility'] = susceptibility
-        df_assetgroup.at[index, 'importance'] = importance
-        df_assetgroup.at[index, 'sensitivity'] = sensitivity
-        df_assetgroup.at[index, 'sensitivity_code'] = sensitivity_code
-        df_assetgroup.at[index, 'sensitivity_description'] = sensitivity_description
+        df_assetgroup.at[index, 'susceptibility']           = susceptibility
+        df_assetgroup.at[index, 'importance']               = importance
+        df_assetgroup.at[index, 'sensitivity']              = sensitivity
+        df_assetgroup.at[index, 'sensitivity_code']         = sensitivity_code
+        df_assetgroup.at[index, 'sensitivity_description']  = sensitivity_description
 
     except ValueError:
         messagebox.showerror("Input Error", "Enter valid integers for susceptibility and importance.")
@@ -117,8 +110,8 @@ def update_all_rows_immediately(entries, df_assetgroup):
     for entry in entries:
         try:
             # Extract susceptibility and importance values from the UI and convert to integers
-            susceptibility = int(entry['susceptibility'].get())
-            importance = int(entry['importance'].get())
+            susceptibility  = int(entry['susceptibility'].get())
+            importance      = int(entry['importance'].get())
             
             # Calculate new sensitivity
             sensitivity = susceptibility * importance
@@ -126,20 +119,20 @@ def update_all_rows_immediately(entries, df_assetgroup):
             
             # Update the DataFrame
             index = entry['row_index']
-            df_assetgroup.at[index, 'susceptibility'] = susceptibility
-            df_assetgroup.at[index, 'importance'] = importance
-            df_assetgroup.at[index, 'sensitivity'] = sensitivity
-            df_assetgroup.at[index, 'sensitivity_code'] = sensitivity_code
-            df_assetgroup.at[index, 'sensitivity_description'] = sensitivity_description
+            df_assetgroup.at[index, 'susceptibility']           = susceptibility
+            df_assetgroup.at[index, 'importance']               = importance
+            df_assetgroup.at[index, 'sensitivity']              = sensitivity
+            df_assetgroup.at[index, 'sensitivity_code']         = sensitivity_code
+            df_assetgroup.at[index, 'sensitivity_description']  = sensitivity_description
             
             # Update geometry if it's included in the entry dictionary
             if 'geom' in entry:
                 df_assetgroup.at[index, 'geom'] = entry['geom']
 
             # Update UI elements with new values
-            entry['sensitivity']['text'] = str(sensitivity)
-            entry['sensitivity_code']['text'] = sensitivity_code
-            entry['sensitivity_description']['text'] = sensitivity_description
+            entry['sensitivity']['text']                = str(sensitivity)
+            entry['sensitivity_code']['text']           = sensitivity_code
+            entry['sensitivity_description']['text']    = sensitivity_description
 
         except ValueError as e:
             print(f"Input Error: {e}")
@@ -171,6 +164,8 @@ def load_data(gpkg_file):
 
     except Exception as e:
         print("Failed to load data:", e)
+        log_to_file("Database file is missing.")
+
         return None
 
 
@@ -267,11 +262,11 @@ def update_df_assetgroup(entries):
     for entry in entries:
         index = entry['row_index']
         # Ensure other data is updated
-        df_assetgroup.at[index, 'susceptibility'] = entry['susceptibility'].get()
-        df_assetgroup.at[index, 'importance'] = entry['importance'].get()
-        df_assetgroup.at[index, 'sensitivity'] = entry['sensitivity']['text']
-        df_assetgroup.at[index, 'sensitivity_code'] = entry['sensitivity_code']['text']
-        df_assetgroup.at[index, 'sensitivity_description'] = entry['sensitivity_description']['text']
+        df_assetgroup.at[index, 'susceptibility']           = entry['susceptibility'].get()
+        df_assetgroup.at[index, 'importance']               = entry['importance'].get()
+        df_assetgroup.at[index, 'sensitivity']              = entry['sensitivity']['text']
+        df_assetgroup.at[index, 'sensitivity_code']         = entry['sensitivity_code']['text']
+        df_assetgroup.at[index, 'sensitivity_description']  = entry['sensitivity_description']['text']
         # Update the geometry
         df_assetgroup.at[index, 'geom'] = entry['geom']
 
