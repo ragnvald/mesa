@@ -300,7 +300,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "tbl_flat processed and saved.")
 
 
-
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
     # Load classification configuration
     classification = read_config_classification(config_path)
@@ -331,7 +330,6 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
 
     log_to_gui(log_widget, f"Data saved to {process_layer} with new fields {new_code_col} and {new_desc_col}")
-
 
 
 def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg):
@@ -372,51 +370,53 @@ workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 # Global declaration
 classification = {}
 
-# Create the user interface
-root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("Process data")
 
-# Create a log widget
-log_widget = scrolledtext.ScrolledText(root, height=10)
-log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+if __name__ == "__main__":
+    # Create the user interface
+    root = ttk.Window(themename=ttk_bootstrap_theme)
+    root.title("Process data")
 
-# Create a frame to hold the progress bar and the label
-progress_frame = tk.Frame(root)
-progress_frame.pack(pady=5)
+    # Create a log widget
+    log_widget = scrolledtext.ScrolledText(root, height=10)
+    log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-# Create a progress bar
-progress_var = tk.DoubleVar()
-progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
-progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the frame
+    # Create a frame to hold the progress bar and the label
+    progress_frame = tk.Frame(root)
+    progress_frame.pack(pady=5)
 
-# Label for displaying the progress percentage
-progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
-progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
+    # Create a progress bar
+    progress_var = tk.DoubleVar()
+    progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
+    progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the frame
 
-# Information text field above the buttons
-info_label_text = ("This is where all assets and geocode objects (grids) are processed "
-                   "using the intersect function. For each such intersection a separate "
-                   "geocode object (grid cell) is established. At the same time we also "
-                   "calculate the sensitivity based on input asset importance and "
-                   "susceptibility. Our data model provides a rich set of attributes "
-                   "which we believe can be usefull in your further analysis of the "
-                   "area sensitivities.")
-info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
-info_label.pack(padx=10, pady=10)
+    # Label for displaying the progress percentage
+    progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+    progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
 
-# Create a frame for buttons
-button_frame = tk.Frame(root)
-button_frame.pack(pady=5)
+    # Information text field above the buttons
+    info_label_text = ("This is where all assets and geocode objects (grids) are processed "
+                    "using the intersect function. For each such intersection a separate "
+                    "geocode object (grid cell) is established. At the same time we also "
+                    "calculate the sensitivity based on input asset importance and "
+                    "susceptibility. Our data model provides a rich set of attributes "
+                    "which we believe can be usefull in your further analysis of the "
+                    "area sensitivities.")
+    info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+    info_label.pack(padx=10, pady=10)
 
-# Add 'Process All' button to the button frame
-process_all_btn = ttk.Button(button_frame, text="Process All", command=lambda: threading.Thread(
-    target=process_all, args=(log_widget, progress_var, gpkg_file, config_file,workingprojection_epsg), daemon=True).start())
-process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+    # Create a frame for buttons
+    button_frame = tk.Frame(root)
+    button_frame.pack(pady=5)
 
-# Add 'Close' button to the button frame
-close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root))
-close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+    # Add 'Process All' button to the button frame
+    process_all_btn = ttk.Button(button_frame, text="Process All", command=lambda: threading.Thread(
+        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file,workingprojection_epsg), daemon=True).start())
+    process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
-log_to_gui(log_widget, "Opened processing subprocess.")
+    # Add 'Close' button to the button frame
+    close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root))
+    close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
-root.mainloop()
+    log_to_gui(log_widget, "Opened processing subprocess.")
+
+    root.mainloop()

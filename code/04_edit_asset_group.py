@@ -1,5 +1,4 @@
 import tkinter as tk
-import locale
 from tkinter import ttk
 import configparser
 import pandas as pd
@@ -97,53 +96,55 @@ gpkg_file               = config['DEFAULT']['gpkg_file']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
-# Create the user interface
-root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
-root.title("Edit assets")
 
-# Configure column widths
-root.columnconfigure(0, minsize=200)  # Configure the size of the first column
-root.columnconfigure(1, weight=1)     # Make the second column expandable
+if __name__ == "__main__":
+    # Create the user interface
+    root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
+    root.title("Edit assets")
 
-df = load_data()
-current_index = 0
+    # Configure column widths
+    root.columnconfigure(0, minsize=200)  # Configure the size of the first column
+    root.columnconfigure(1, weight=1)     # Make the second column expandable
 
-# Variables for form fields
-name_original_var = tk.StringVar()
-name_gis_var = tk.StringVar()
-title_fromuser_var = tk.StringVar()
+    df = load_data()
+    current_index = 0
 
-# GIS name is internal to the system. Can not be edited.
-tk.Label(root, text="GIS name").grid(row=0, column=0, sticky='w')
-name_gis_label = tk.Label(root, textvariable=name_gis_var, width=50, relief="sunken", anchor="w")
-name_gis_label.grid(row=0, column=1, sticky='w')
+    # Variables for form fields
+    name_original_var = tk.StringVar()
+    name_gis_var = tk.StringVar()
+    title_fromuser_var = tk.StringVar()
 
-# Original Name Entry
-tk.Label(root, text="Original name").grid(row=1, column=0, sticky='w')
-name_original_entry = tk.Entry(root, textvariable=name_original_var, width=50)
-name_original_entry.grid(row=1, column=1, sticky='w')
+    # GIS name is internal to the system. Can not be edited.
+    tk.Label(root, text="GIS name").grid(row=0, column=0, sticky='w')
+    name_gis_label = tk.Label(root, textvariable=name_gis_var, width=50, relief="sunken", anchor="w")
+    name_gis_label.grid(row=0, column=1, sticky='w')
 
-# Title Entry
-tk.Label(root, text="Title").grid(row=2, column=0, sticky='w')
-title_fromuser_entry = tk.Entry(root, textvariable=title_fromuser_var, width=50)
-title_fromuser_entry.grid(row=2, column=1, sticky='w')
+    # Original Name Entry
+    tk.Label(root, text="Original name").grid(row=1, column=0, sticky='w')
+    name_original_entry = tk.Entry(root, textvariable=name_original_var, width=50)
+    name_original_entry.grid(row=1, column=1, sticky='w')
 
-# Information text field above the "Update and Save Record" button
-info_label_text = ("All assets that are imported are associated with a file "
-                   "or table name. This table name is the original name. If "
-                   "you want to use a different name in presenting the analysis "
-                   "we suggest that you add that name here.")
-info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
-info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
+    # Title Entry
+    tk.Label(root, text="Title").grid(row=2, column=0, sticky='w')
+    title_fromuser_entry = tk.Entry(root, textvariable=title_fromuser_var, width=50)
+    title_fromuser_entry.grid(row=2, column=1, sticky='w')
 
-# Navigation buttons
-ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=5, pady=5)
-ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
+    # Information text field above the "Update and Save Record" button
+    info_label_text = ("All assets that are imported are associated with a file "
+                    "or table name. This table name is the original name. If "
+                    "you want to use a different name in presenting the analysis "
+                    "we suggest that you add that name here.")
+    info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
+    info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
 
-# Exit button
-ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=2, columnspan=3, pady=5)
+    # Navigation buttons
+    ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=5, pady=5)
+    ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
 
-# Load the first record
-load_record()
+    # Exit button
+    ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=2, columnspan=3, pady=5)
 
-root.mainloop()
+    # Load the first record
+    load_record()
+
+    root.mainloop()
