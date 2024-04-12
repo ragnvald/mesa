@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import *
-import locale
 import os
 from tkinterweb import HtmlFrame 
 import subprocess
@@ -40,33 +39,44 @@ def log_to_logfile(message):
         log_file.write(formatted_message + "\n")
 
 
+def create_link_icon(parent, url, row, col, padx, pady):
+    # Create a canvas widget
+    icon_size = 20  # Size of the icon
+    canvas = tk.Canvas(parent, width=icon_size, height=icon_size, bd=0, highlightthickness=0)
+    canvas.grid(row=row, column=col, padx=padx, pady=pady, sticky="nsew")
+    
+    # Draw a circle with a white fill
+    canvas.create_oval(2, 2, icon_size-2, icon_size-2, fill='white', outline='blue')
+    
+    # Place the letter "i" inside the circle
+    canvas.create_text(icon_size/2, icon_size/2, text="i", font=('Calibri', 10, 'bold'), fill='blue')
+    
+    # Bind the canvas to open the URL on click
+    canvas.bind("<Button-1>", lambda e: webbrowser.open(url))
+
+
 # This function updates the stats in the labelframe. Clear labels first,
 # then write the updates.
-def update_stats():
-    # Clear the labels before updating
+def update_stats(documentation_link):
+    print(f"Update stats called with link: {documentation_link}")  # Debug output
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
     my_status = get_status(gpkg_file)
 
-    # Check if the DataFrame is not empty and has the expected columns
     if not my_status.empty and {'Status', 'Message'}.issubset(my_status.columns):
         for index, row in my_status.iterrows():
-            if row['Status'] == "+":
-                # Green is for success - data has been added.
-                status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success')
-                status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
-            elif row['Status'] == "/":
-                # Orange is an option where it is not necessary to have registered data.
-                status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='warning')
-                status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
-            else:
-                # Red is for data missing.
-                status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
-                status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
+            status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success' if row['Status'] == "+" else 'warning' if row['Status'] == "/" else 'danger')
+            status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
 
             message_label = ttk.Label(info_labelframe, text=row['Message'], justify='left')
             message_label.grid(row=index, column=1, sticky="nsew", padx=5, pady=5)
+
+            if documentation_link:
+                create_link_icon(info_labelframe, documentation_link, index, 2, 5, 5)
+
+        root.update_idletasks()
+
     else:
         print("No status information available.")
 
@@ -152,7 +162,7 @@ def get_status(gpkg_file):
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
-
+        
         return status_df
 
     except Exception as e:
@@ -172,48 +182,56 @@ def run_subprocess(command, fallback_command):
 
 def import_assets():
     run_subprocess(["python", "01_import.py"], ["01_import.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_assets"
+    update_stats(link)
 
 
 def edit_asset_group():
     run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version"
+    update_stats(link)
 
 
 def edit_geocode_group():
     run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Geocodes"
+    update_stats(link)
 
 
 def edit_processing_setup():
     run_subprocess(["python", "04_edit_input.py"], ["04_edit_input.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Processing"
+    update_stats(link)
 
 
 def process_data():
     run_subprocess(["python", "06_process.py"], ["06_process.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version"
+    update_stats(link)
 
 
 def make_atlas():
     run_subprocess(["python", "07_make_atlas.py"], ["07_make_atlas.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Atlas"
+    update_stats(link)
 
 
 def edit_atlas():
     run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
-    update_stats()
-
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Atlas"
+    update_stats(link)
 
 
 def admin_lines():
     run_subprocess(["python", "08_admin_lines.py"], ["08_admin_lines.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_lines"
+    update_stats(link)
 
 
 def edit_lines():
     run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
-    update_stats()
+    link = "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_lines"
+    update_stats(link)
 
 
 def exit_program():
@@ -282,15 +300,18 @@ def show_main_frame():
     registration_frame.pack_forget()
     main_frame.pack(fill='both', expand=True, pady=10)
 
+
 def show_about_frame():
     main_frame.pack_forget()
     registration_frame.pack_forget()
     about_frame.pack(fill='both', expand=True)
 
+
 def show_registration_frame():
     main_frame.pack_forget()
     about_frame.pack_forget()
     registration_frame.pack(fill='both', expand=True)
+
 
 def add_text_to_labelframe(labelframe, text):
     label = tk.Label(labelframe, text=text, justify='left')
@@ -548,10 +569,13 @@ right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 # Info label frame (add this above the exit button)
 info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
 info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
+info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
+info_labelframe.grid_columnconfigure(2, weight=2)  # For links
 
 log_to_logfile("User interface, statistics updated.")
 
-update_stats()
+update_stats(None)
 
 ###################################################
 # About frame set up
@@ -675,6 +699,7 @@ exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, b
 exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
 
 show_main_frame()
+root.update_idletasks()
 
 # Start the GUI event loop
 root.mainloop()
