@@ -58,13 +58,15 @@ def create_link_icon(parent, url, row, col, padx, pady):
 # This function updates the stats in the labelframe. Clear labels first,
 # then write the updates.
 def update_stats(documentation_link):
-    print(f"Update stats called with link: {documentation_link}")  # Debug output
+    
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
     my_status = get_status(gpkg_file)
 
-    if not my_status.empty and {'Status', 'Message'}.issubset(my_status.columns):
+    print("Status:", my_status)
+
+    if not my_status.empty and {'Status', 'Message' ,'Link'}.issubset(my_status.columns):
         for index, row in my_status.iterrows():
             status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success' if row['Status'] == "+" else 'warning' if row['Status'] == "/" else 'danger')
             status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
@@ -72,19 +74,24 @@ def update_stats(documentation_link):
             message_label = ttk.Label(info_labelframe, text=row['Message'], justify='left')
             message_label.grid(row=index, column=1, sticky="nsew", padx=5, pady=5)
 
-            if documentation_link:
-                create_link_icon(info_labelframe, documentation_link, index, 2, 5, 5)
+            create_link_icon(info_labelframe, row['Link'], index, 2, 5, 5)
 
         root.update_idletasks()
 
     else:
-        print("No status information available.")
 
+        status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
+        status_label.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+
+        initial_message = "To initiate the system please import \nassets.Start doing this by pressing the \nImport-button. Make sure you \nhave asset and geocode files\nstored in the respective \nfolders."
+
+        message_label = ttk.Label(info_labelframe, text=initial_message, justify='left')
+        message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+
+        create_link_icon(info_labelframe, "https://www.mesamethod.org/wiki/Current_tool_version", 1, 2, 5, 5)
 
 def get_status(gpkg_file):
-    if not os.path.exists(gpkg_file):
-        return pd.DataFrame({'Status': ['Error'], 'Message': ["To initiate the system please import assets.\nStart doing this by pressing the Import-button.\nMake sure you have asset and geocode files\nstored in the respective folders."]})
-
+   
     # Initialize an empty list to store each row of the DataFrame
     status_list = []
 
@@ -130,35 +137,49 @@ def get_status(gpkg_file):
 
 
         # Function to append status and message to the list
-        def append_status(symbol, message):
-            status_list.append({'Status': symbol, 'Message': message})
+        def append_status(symbol, message, link):
+            status_list.append({'Status': symbol, 
+                                'Message': message,
+                                'Link':link})
 
 
         # Check for tbl_asset_group
         asset_group_count = read_table_and_count('tbl_asset_group')
-        append_status("+" if asset_group_count is not None else "-", f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing.\nImport assets by pressing the Import button.")
+        append_status("+" if asset_group_count is not None else "-", 
+                      f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing.\nImport assets by pressing the Import button.",
+                      "https://www.mesamethod.org/wiki/Current_tool_version")
 
         # Check for tbl_geocode_group
         geocode_group_count = read_table_and_count('tbl_geocode_group')
-        append_status("+" if geocode_group_count is not None else "/", f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.")
+        append_status("+" if geocode_group_count is not None else "/", 
+                      f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.",
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Geocodes")
 
         # Check for tbl_asset_group sensitivity
         symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
         if symbol:
-            append_status(symbol, message)
+            append_status(symbol, 
+                          message,
+                          "https://www.mesamethod.org/wiki/Current_tool_version#Set_up")
 
         # Check for tbl_geocode_group
         stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
-        append_status("+" if stacked_cells_count is not None else "-", f"Processing completed ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.")
+        append_status("+" if stacked_cells_count is not None else "-", 
+                      f"Processing completed ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Processing")
         
         # Check for tbl_geocode_group
         atlas_count = read_table_and_count('tbl_atlas')
-        append_status("+" if atlas_count is not None else "/", f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please create atlas.")
+        append_status("+" if atlas_count is not None else "/", 
+                      f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please create atlas.",
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Atlas")
 
         # Check for tbl_geocode_group
         lines_original_count = read_table_and_count('tbl_lines_original')
-        append_status("+" if lines_original_count is not None else "/", f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.")
+        append_status("+" if lines_original_count is not None else "/", 
+                      f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.",
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_lines")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
@@ -188,50 +209,33 @@ def import_assets():
 
 def edit_asset_group():
     run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version"
-    update_stats(link)
 
 
 def edit_geocode_group():
     run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Geocodes"
-    update_stats(link)
 
 
 def edit_processing_setup():
     run_subprocess(["python", "04_edit_input.py"], ["04_edit_input.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Processing"
-    update_stats(link)
 
 
 def process_data():
     run_subprocess(["python", "06_process.py"], ["06_process.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version"
-    update_stats(link)
 
 
 def make_atlas():
     run_subprocess(["python", "07_make_atlas.py"], ["07_make_atlas.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Atlas"
-    update_stats(link)
 
 
 def edit_atlas():
     run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Atlas"
-    update_stats(link)
 
 
 def admin_lines():
     run_subprocess(["python", "08_admin_lines.py"], ["08_admin_lines.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_lines"
-    update_stats(link)
-
 
 def edit_lines():
     run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_lines"
-    update_stats(link)
 
 
 def exit_program():
@@ -505,7 +509,7 @@ check_and_create_folders()
 # Setup the main Tkinter window
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("MESA 4")
-root.geometry("800x540")
+root.geometry("850x540")
 
 button_width = 18
 button_padx  =  7
