@@ -181,8 +181,6 @@ def get_status(gpkg_file):
 
 def run_subprocess(command, fallback_command):
 
-    update_stats()
-
     """ Utility function to run a subprocess with a fallback option. """
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -200,33 +198,42 @@ def import_assets():
 
 def edit_asset_group():
     run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
+    update_stats()
 
 
 def edit_geocode_group():
     run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
+    update_stats()
 
 
 def edit_processing_setup():
     run_subprocess(["python", "04_edit_input.py"], ["04_edit_input.exe"])
+    update_stats()
 
 
 def process_data():
     run_subprocess(["python", "06_process.py"], ["06_process.exe"])
+    update_stats()
 
 
 def make_atlas():
     run_subprocess(["python", "07_make_atlas.py"], ["07_make_atlas.exe"])
+    update_stats()
 
 
 def edit_atlas():
     run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
+    update_stats()
 
 
 def admin_lines():
     run_subprocess(["python", "08_admin_lines.py"], ["08_admin_lines.exe"])
+    update_stats()
+
 
 def edit_lines():
     run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
+    update_stats()
 
 
 def exit_program():
@@ -568,8 +575,6 @@ info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
 info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
 info_labelframe.grid_columnconfigure(2, weight=2)  # For links
 
-
-update_stats()
 
 log_to_logfile("User interface, statistics updated.")
 
