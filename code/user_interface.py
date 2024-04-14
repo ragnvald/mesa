@@ -15,6 +15,8 @@ import datetime
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import threading
+
 
 
 # Read the configuration file
@@ -113,6 +115,9 @@ def get_status(gpkg_file):
             except sqlite3.Error as e:
                 log_to_logfile(f"Error counting records in {layer_name}: {e}")
                 return None
+            finally:
+                if conn:
+                    conn.close()  # Ensure the connection is closed
 
         def read_table_and_check_sensitivity(layer_name):
             try:
@@ -514,194 +519,202 @@ button_padx  =  7
 button_pady  =  7
 button_text  = 'About...'
 
-###################################################
-# Main frame set up
-#
-main_frame = tk.Frame(root)
-main_frame.pack(fill='both', expand=True, pady=10)
 
-# Configure the grid weights
-main_frame.grid_columnconfigure(0, weight=0)  # Left panel has no weight
-main_frame.grid_columnconfigure(1, weight=0)  # Separator has no weight
-main_frame.grid_columnconfigure(2, weight=1)  # Right panel has weight
+has_run_update_stats = False
 
-# Left panel
-left_panel = tk.Frame(main_frame)
-left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
+if __name__ == "__main__":
+    ###################################################
+    # Main frame set up
+    #
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill='both', expand=True, pady=10)
 
-main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
+    # Configure the grid weights
+    main_frame.grid_columnconfigure(0, weight=0)  # Left panel has no weight
+    main_frame.grid_columnconfigure(1, weight=0)  # Separator has no weight
+    main_frame.grid_columnconfigure(2, weight=1)  # Right panel has weight
 
-# Add buttons to left panel with spacing between buttons
-import_assets_btn = ttk.Button(left_panel, text="Import data", command=import_assets, width=button_width, bootstyle=PRIMARY)
-import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
+    # Left panel
+    left_panel = tk.Frame(main_frame)
+    left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
 
-edit_asset_group_btn = ttk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width, bootstyle=SECONDARY)
-edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
+    main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
-edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width, bootstyle=SECONDARY)
-edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
+    # Add buttons to left panel with spacing between buttons
+    import_assets_btn = ttk.Button(left_panel, text="Import data", command=import_assets, width=button_width, bootstyle=PRIMARY)
+    import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
-edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
-edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
+    edit_asset_group_btn = ttk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width, bootstyle=SECONDARY)
+    edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
 
-process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
-process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
+    edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width, bootstyle=SECONDARY)
+    edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
-process_stacked_data_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
-process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+    edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
+    edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
-edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
+    process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
+    process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
-admin_lines_btn = ttk.Button(left_panel, text="Lines", command=admin_lines, width=button_width)
-admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
+    process_stacked_data_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
+    process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
-# Separator
-separator = ttk.Separator(main_frame, orient='vertical')
-separator.grid(row=0, column=1, sticky='ns')
+    edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
+    edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
-# Right panel
-right_panel = ttk.Frame(main_frame)
-right_panel.grid(row=0, column=2, sticky="nsew", padx=5)
+    admin_lines_btn = ttk.Button(left_panel, text="Lines", command=admin_lines, width=button_width)
+    admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
-# Configure the rows and columns within the right panel where widgets will be placed
-right_panel.grid_rowconfigure(0, weight=1)  # Adjust row for info_labelframe to grow
-right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
+    # Separator
+    separator = ttk.Separator(main_frame, orient='vertical')
+    separator.grid(row=0, column=1, sticky='ns')
 
-# Info label frame (add this above the exit button)
-info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
-info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
-info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
-info_labelframe.grid_columnconfigure(2, weight=2)  # For links
+    # Right panel
+    right_panel = ttk.Frame(main_frame)
+    right_panel.grid(row=0, column=2, sticky="nsew", padx=5)
 
+    # Configure the rows and columns within the right panel where widgets will be placed
+    right_panel.grid_rowconfigure(0, weight=1)  # Adjust row for info_labelframe to grow
+    right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
 
-log_to_logfile("User interface, statistics updated.")
+    # Info label frame (add this above the exit button)
+    info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
+    info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+    info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
+    info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
+    info_labelframe.grid_columnconfigure(2, weight=2)  # For links
 
-
-###################################################
-# About frame set up
-#
-
-# Adjusted Content for About Page
-about_frame = ttk.Frame(root)  # This frame is for the alternate screen
-
-increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
-
-# Create a HtmlFrame widget
-html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
+    if has_run_update_stats == False:
+            timer = threading.Timer(2.0, update_stats)
+            timer.start()
+            has_run_update_stats = True
 
 
-# Define the path to your HTML content file
-file_path = "system_resources/userguide.html"
-
-# Read the HTML content from the file
-with open(file_path, "r", encoding="utf-8") as file:
-    html_content = file.read()
-
-html_frame.load_html(html_content)
-
-# Pack the HtmlFrame into the ttkbootstrap window
-html_frame.pack(fill=BOTH, expand=YES)
-
-###################################################
-# Registration frame set up
-#
-
-# Setup for the registration frame (assuming root is your Tk window)
-registration_frame = ttk.Frame(root)
-registration_frame.pack(fill='both', expand=True)
-
-id_uuid_ok               = tk.BooleanVar(value=id_uuid_ok_value)
-id_personalinfo_ok       = tk.BooleanVar(value=id_personalinfo_ok_value)
-
-# About label frame
-about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
-about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
-
-mesa_text = ("MESA 4.0 is open source software. It is available under the "
-             "GNU GPLv3 license. This means you can use the software for free."
-             "\n\n"
-             "In MESA, a unique random identifier (UUID) is automatically generated. "
-             "It can be used to count how many times the system has been used. It "
-             "is not associated with where you are or who you are. The UUID together "
-             "with usage information will be sent to one of our servers. You can opt "
-             "out of using this functionality by unticking the associated box below."
-             "\n\n"
-             "Additionally you can tick the box next to name and email registration "
-             "and add your name and email for our reference. This might be used "
-             "to send you questionaires and information about updates of the MESA "
-             "tool/method at a later stage."
-             "\n\n"
-             "Your email and name is also stored locally in the config.ini-file.")
-
-add_text_to_labelframe(about_labelframe, mesa_text)
-
-# Create a new frame for the grid layout within registration_frame
-grid_frame = ttk.Frame(registration_frame)
-grid_frame.pack(side='top', fill='both', expand=True, padx=5, pady=5)
-
-# Labels in the first column
- # Checkboxes in the first column
-uuid_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok)
-uuid_ok_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-
-personalinfo_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok)
-personalinfo_ok_checkbox.grid(row=1, column=0, padx=10, pady=5, sticky="w")
-
-# Labels for UUID, Name, Email in the second column
-ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
-ttk.Label(grid_frame, text="Name:").grid(row=1, column=1, padx=10, pady=5, sticky="w")
-ttk.Label(grid_frame, text="Email:").grid(row=2, column=1, padx=10, pady=5, sticky="w")
-
-# UUID value, Name and Email entries in the third column
-ttk.Label(grid_frame, text=id_uuid).grid(row=0, column=2, padx=10, pady=5, sticky="w")
-    
-name_entry = ttk.Entry(grid_frame)
-name_entry.grid(row=1, column=2, padx=10, pady=5, sticky="we")
-name_entry.insert(0, id_name)
-
-email_entry = ttk.Entry(grid_frame)
-email_entry.grid(row=2, column=2, padx=10, pady=5, sticky="we")
-email_entry.insert(0, id_email)
-
-# Submit button in the fourth column's bottom cell
-submit_btn = ttk.Button(grid_frame, text="Submit", command=submit_form)
-submit_btn.grid(row=2, column=3, padx=10, pady=5, sticky="e")
-
-# Optional: Configure the grid_frame column 2 (Entries) to take extra space
-grid_frame.columnconfigure(2, weight=1)
+    log_to_logfile("User interface, statistics updated.")
 
 
-###################################################
-# Bottom frame in Main Interface for toggling to About Page
-#
-bottom_frame_buttons = ttk.Frame(root)
-bottom_frame_buttons.pack(side='bottom', fill='x', padx=10, pady=5)
+    ###################################################
+    # About frame set up
+    #
 
-# Create buttons for each frame
-main_frame_btn = ttk.Button(bottom_frame_buttons, text="MESA desktop", command=show_main_frame, bootstyle="primary")
-main_frame_btn.pack(side='left', padx=(0, 10))
+    # Adjusted Content for About Page
+    about_frame = ttk.Frame(root)  # This frame is for the alternate screen
 
-about_frame_btn = ttk.Button(bottom_frame_buttons, text="About...", command=show_about_frame, bootstyle="primary")
-about_frame_btn.pack(side='left', padx=(0, 10))
+    increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
 
-registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register...", command=show_registration_frame, bootstyle="primary")
-registration_frame_btn.pack(side='left', padx=(0, 10))
+    # Create a HtmlFrame widget
+    html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
 
-# Center frame for version label
-center_frame = ttk.Frame(bottom_frame_buttons)
-center_frame.pack(side='left', expand=True, fill='x')
 
-version_label = ttk.Label(center_frame, text=mesa_version, font=("Calibri", 7))
-version_label.pack(side='left', padx=50, pady=5)  # Adjust side and padding as needed
+    # Define the path to your HTML content file
+    file_path = "system_resources/userguide.html"
 
-# Continue with the Exit button and version label as before
-exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, bootstyle="warning")
-exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
+    # Read the HTML content from the file
+    with open(file_path, "r", encoding="utf-8") as file:
+        html_content = file.read()
 
-show_main_frame()
-root.update_idletasks()
+    html_frame.load_html(html_content)
 
-# Start the GUI event loop
-root.mainloop()
+    # Pack the HtmlFrame into the ttkbootstrap window
+    html_frame.pack(fill=BOTH, expand=YES)
+
+    ###################################################
+    # Registration frame set up
+    #
+
+    # Setup for the registration frame (assuming root is your Tk window)
+    registration_frame = ttk.Frame(root)
+    registration_frame.pack(fill='both', expand=True)
+
+    id_uuid_ok               = tk.BooleanVar(value=id_uuid_ok_value)
+    id_personalinfo_ok       = tk.BooleanVar(value=id_personalinfo_ok_value)
+
+    # About label frame
+    about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
+    about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
+
+    mesa_text = ("MESA 4.0 is open source software. It is available under the "
+                "GNU GPLv3 license. This means you can use the software for free."
+                "\n\n"
+                "In MESA, a unique random identifier (UUID) is automatically generated. "
+                "It can be used to count how many times the system has been used. It "
+                "is not associated with where you are or who you are. The UUID together "
+                "with usage information will be sent to one of our servers. You can opt "
+                "out of using this functionality by unticking the associated box below."
+                "\n\n"
+                "Additionally you can tick the box next to name and email registration "
+                "and add your name and email for our reference. This might be used "
+                "to send you questionaires and information about updates of the MESA "
+                "tool/method at a later stage."
+                "\n\n"
+                "Your email and name is also stored locally in the config.ini-file.")
+
+    add_text_to_labelframe(about_labelframe, mesa_text)
+
+    # Create a new frame for the grid layout within registration_frame
+    grid_frame = ttk.Frame(registration_frame)
+    grid_frame.pack(side='top', fill='both', expand=True, padx=5, pady=5)
+
+    # Labels in the first column
+    # Checkboxes in the first column
+    uuid_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok)
+    uuid_ok_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+    personalinfo_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok)
+    personalinfo_ok_checkbox.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+
+    # Labels for UUID, Name, Email in the second column
+    ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
+    ttk.Label(grid_frame, text="Name:").grid(row=1, column=1, padx=10, pady=5, sticky="w")
+    ttk.Label(grid_frame, text="Email:").grid(row=2, column=1, padx=10, pady=5, sticky="w")
+
+    # UUID value, Name and Email entries in the third column
+    ttk.Label(grid_frame, text=id_uuid).grid(row=0, column=2, padx=10, pady=5, sticky="w")
+        
+    name_entry = ttk.Entry(grid_frame)
+    name_entry.grid(row=1, column=2, padx=10, pady=5, sticky="we")
+    name_entry.insert(0, id_name)
+
+    email_entry = ttk.Entry(grid_frame)
+    email_entry.grid(row=2, column=2, padx=10, pady=5, sticky="we")
+    email_entry.insert(0, id_email)
+
+    # Submit button in the fourth column's bottom cell
+    submit_btn = ttk.Button(grid_frame, text="Submit", command=submit_form)
+    submit_btn.grid(row=2, column=3, padx=10, pady=5, sticky="e")
+
+    # Optional: Configure the grid_frame column 2 (Entries) to take extra space
+    grid_frame.columnconfigure(2, weight=1)
+
+
+    ###################################################
+    # Bottom frame in Main Interface for toggling to About Page
+    #
+    bottom_frame_buttons = ttk.Frame(root)
+    bottom_frame_buttons.pack(side='bottom', fill='x', padx=10, pady=5)
+
+    # Create buttons for each frame
+    main_frame_btn = ttk.Button(bottom_frame_buttons, text="MESA desktop", command=show_main_frame, bootstyle="primary")
+    main_frame_btn.pack(side='left', padx=(0, 10))
+
+    about_frame_btn = ttk.Button(bottom_frame_buttons, text="About...", command=show_about_frame, bootstyle="primary")
+    about_frame_btn.pack(side='left', padx=(0, 10))
+
+    registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register...", command=show_registration_frame, bootstyle="primary")
+    registration_frame_btn.pack(side='left', padx=(0, 10))
+
+    # Center frame for version label
+    center_frame = ttk.Frame(bottom_frame_buttons)
+    center_frame.pack(side='left', expand=True, fill='x')
+
+    version_label = ttk.Label(center_frame, text=mesa_version, font=("Calibri", 7))
+    version_label.pack(side='left', padx=50, pady=5)  # Adjust side and padding as needed
+
+    # Continue with the Exit button and version label as before
+    exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, bootstyle="warning")
+    exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
+
+    show_main_frame()
+    root.update_idletasks()
+
+    root.mainloop()
