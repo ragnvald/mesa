@@ -57,14 +57,12 @@ def create_link_icon(parent, url, row, col, padx, pady):
 
 # This function updates the stats in the labelframe. Clear labels first,
 # then write the updates.
-def update_stats(documentation_link):
+def update_stats():
     
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
     my_status = get_status(gpkg_file)
-
-    print("Status:", my_status)
 
     if not my_status.empty and {'Status', 'Message' ,'Link'}.issubset(my_status.columns):
         for index, row in my_status.iterrows():
@@ -99,15 +97,6 @@ def get_status(gpkg_file):
         # Count using an SQL-query. loading big data frames for counting them only is not
         # very efficient.
         def read_table_and_count(layer_name):
-            """
-            Counts the records in the specified layer of a GeoPackage.
-            
-            Parameters:
-            - layer_name: The name of the layer to count records in.
-            
-            Returns:
-            - The count of records in the layer, or None if an error occurs or the layer does not exist.
-            """
             try:
                 # Use a context manager to ensure the connection is closed automatically
                 with sqlite3.connect(gpkg_file) as conn:
@@ -135,7 +124,6 @@ def get_status(gpkg_file):
             except Exception:
                 return None, None
 
-
         # Function to append status and message to the list
         def append_status(symbol, message, link):
             status_list.append({'Status': symbol, 
@@ -145,9 +133,10 @@ def get_status(gpkg_file):
 
         # Check for tbl_asset_group
         asset_group_count = read_table_and_count('tbl_asset_group')
+        
         append_status("+" if asset_group_count is not None else "-", 
                       f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing.\nImport assets by pressing the Import button.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version")
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Assets")
 
         # Check for tbl_geocode_group
         geocode_group_count = read_table_and_count('tbl_geocode_group')
@@ -179,7 +168,7 @@ def get_status(gpkg_file):
         lines_original_count = read_table_and_count('tbl_lines_original')
         append_status("+" if lines_original_count is not None else "/", 
                       f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_lines")
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
@@ -191,6 +180,9 @@ def get_status(gpkg_file):
 
 
 def run_subprocess(command, fallback_command):
+
+    update_stats()
+
     """ Utility function to run a subprocess with a fallback option. """
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -203,8 +195,7 @@ def run_subprocess(command, fallback_command):
 
 def import_assets():
     run_subprocess(["python", "01_import.py"], ["01_import.exe"])
-    link = "https://www.mesamethod.org/wiki/Current_tool_version#Working_with_assets"
-    update_stats(link)
+    update_stats()
 
 
 def edit_asset_group():
@@ -577,9 +568,11 @@ info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
 info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
 info_labelframe.grid_columnconfigure(2, weight=2)  # For links
 
+
+update_stats()
+
 log_to_logfile("User interface, statistics updated.")
 
-update_stats(None)
 
 ###################################################
 # About frame set up
