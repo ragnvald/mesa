@@ -59,7 +59,7 @@ def create_link_icon(parent, url, row, col, padx, pady):
 
 # This function updates the stats in the labelframe. Clear labels first,
 # then write the updates.
-def update_stats():
+def update_stats(gpkg_file):
     
     for widget in info_labelframe.winfo_children():
         widget.destroy()
@@ -90,6 +90,7 @@ def update_stats():
 
         create_link_icon(info_labelframe, "https://www.mesamethod.org/wiki/Current_tool_version", 1, 2, 5, 5)
 
+
 def get_status(gpkg_file):
    
     # Initialize an empty list to store each row of the DataFrame
@@ -110,14 +111,19 @@ def get_status(gpkg_file):
                         return None
                     # Execute a SQL query to count the records in the specified layer
                     cur.execute(f"SELECT COUNT(*) FROM {layer_name}")
-                    count = cur.fetchone()[0]  # Fetch the count result
-                    return count
+
+                    returnvalue = cur.fetchone()[0]
+                    
+                    cur.close() 
+
+                    return  returnvalue # Fetch the count result
+
             except sqlite3.Error as e:
                 log_to_logfile(f"Error counting records in {layer_name}: {e}")
+            
+                raise RuntimeError(f"Database operation failed: {str(e)}") from e
+            
                 return None
-            finally:
-                if conn:
-                    conn.close()  # Ensure the connection is closed
 
         def read_table_and_check_sensitivity(layer_name):
             try:
@@ -189,56 +195,49 @@ def run_subprocess(command, fallback_command):
     """ Utility function to run a subprocess with a fallback option. """
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        update_stats(gpkg_file)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            update_stats(gpkg_file)
         except subprocess.CalledProcessError:
             log_to_logfile(f"Failed to execute command: {command}")
 
 
 def import_assets():
     run_subprocess(["python", "01_import.py"], ["01_import.exe"])
-    update_stats()
 
 
 def edit_asset_group():
     run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
-    update_stats()
 
 
 def edit_geocode_group():
     run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
-    update_stats()
 
 
 def edit_processing_setup():
     run_subprocess(["python", "04_edit_input.py"], ["04_edit_input.exe"])
-    update_stats()
 
 
 def process_data():
     run_subprocess(["python", "06_process.py"], ["06_process.exe"])
-    update_stats()
 
 
 def make_atlas():
     run_subprocess(["python", "07_make_atlas.py"], ["07_make_atlas.exe"])
-    update_stats()
 
 
 def edit_atlas():
     run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
-    update_stats()
 
 
 def admin_lines():
     run_subprocess(["python", "08_admin_lines.py"], ["08_admin_lines.exe"])
-    update_stats()
 
 
 def edit_lines():
     run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
-    update_stats()
 
 
 def exit_program():
@@ -460,6 +459,7 @@ id_email                  = config['DEFAULT'].get('id_email', '').strip()
 id_uuid_ok_value          = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't')
 id_personalinfo_ok_value  = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
 
+has_run_update_stats      = False
     
 # Function to handle the submission of the form
 def submit_form():
@@ -509,20 +509,16 @@ if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value 
 # Check and create folders at the beginning
 check_and_create_folders()
 
-# Setup the main Tkinter window
-root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("MESA 4")
-root.geometry("850x540")
-
-button_width = 18
-button_padx  =  7
-button_pady  =  7
-button_text  = 'About...'
-
-
-has_run_update_stats = False
-
 if __name__ == "__main__":
+    # Setup the main Tkinter window
+    root = ttk.Window(themename=ttk_bootstrap_theme)
+    root.title("MESA 4")
+    root.geometry("850x540")
+
+    button_width = 18
+    button_padx  =  7
+    button_pady  =  7
+
     ###################################################
     # Main frame set up
     #
@@ -583,13 +579,10 @@ if __name__ == "__main__":
     info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
     info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
     info_labelframe.grid_columnconfigure(2, weight=2)  # For links
+    
+    update_stats(gpkg_file)
 
-    if has_run_update_stats == False:
-            timer = threading.Timer(2.0, update_stats)
-            timer.start()
-            has_run_update_stats = True
-
-
+   
     log_to_logfile("User interface, statistics updated.")
 
 
