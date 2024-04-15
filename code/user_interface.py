@@ -64,6 +64,21 @@ def update_stats(gpkg_file):
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
+    # This part checks if the file exists. If it does not exist just print info about next step
+    # and abort. Without this oune the geopackage file is "touched" and will exist as an invalid
+    # geopackage file. This will effectively block imports to the file.
+    if not os.path.exists(gpkg_file):
+        status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
+        status_label.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+
+        message_label = ttk.Label(info_labelframe, text="No data imported. Start with\nimporting data.", justify='left')
+        message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+        
+        create_link_icon(info_labelframe, "https://www.mesamethod.org/wiki/Current_tool_version", 1, 2, 5, 5)
+
+        return  # Exit the function if the file does not exist
+
+
     my_status = get_status(gpkg_file)
 
     if not my_status.empty and {'Status', 'Message' ,'Link'}.issubset(my_status.columns):
