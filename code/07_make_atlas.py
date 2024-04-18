@@ -7,9 +7,9 @@
 #   bounding box as the outer limits but rather a flexible polygon
 
 import tkinter as tk
-import locale
 from tkinter import scrolledtext, ttk
 import threading
+import subprocess
 import geopandas as gpd
 import configparser
 from shapely.geometry import box
@@ -263,6 +263,24 @@ def increment_stat_value(config_file, stat_name, increment_value):
             file.writelines(lines)
 
 
+def run_subprocess(command, fallback_command):
+
+    """ Utility function to run a subprocess with a fallback option. """
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        update_stats(gpkg_file)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            update_stats(gpkg_file)
+        except subprocess.CalledProcessError:
+            log_to_logfile(f"Failed to execute command: {command}")
+
+
+def edit_atlas():
+    run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
+
+
 #####################################################################################
 #  Main
 #
@@ -300,7 +318,7 @@ progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, ne
 info_label_text = ("This is where you can import, generate and update atlas geometries. "
                    "The size of an atlas frame is set in the config.ini-file. "
                    "Earlier atlas frames and their asociated information will be deleted.")
-info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
 # Create a frame for buttons
@@ -308,17 +326,21 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=5)
 
 # Add 'Import' button to the button frame
-run_btn = ttk.Button(button_frame, text="Import", command=lambda: threading.Thread(
+import_atlas_btn = ttk.Button(button_frame, text="Import", command=lambda: threading.Thread(
     target=run_import_atlas, args=(input_folder_atlas, gpkg_file, log_widget, progress_var, ), daemon=True).start())
-run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+import_atlas_btn.grid(row=1, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
 
 # Add 'Run' button to the button frame  
-run_btn = ttk.Button(button_frame, text="Create", command=lambda: threading.Thread(
+create_atlas_btn = ttk.Button(button_frame, text="Create", command=lambda: threading.Thread(
     target=run_create_atlas, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
-run_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+create_atlas_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew')
 
 # Add 'Close' button to the button frame
 close_btn = ttk.Button(button_frame, bootstyle=WARNING, text="Exit", command=lambda: close_application(root))
-close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+close_btn.grid(row=1, column=3, columnspan=1, padx=10, pady=5, sticky='ew')
+
+edit_atlas_btn = ttk.Button(button_frame, text="Edit assets", bootstyle=SECONDARY, command=lambda: threading.Thread(
+    target=edit_atlas, args=(), daemon=True).start())
+edit_atlas_btn.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
 
 root.mainloop()
