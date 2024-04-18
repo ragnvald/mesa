@@ -419,17 +419,6 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
         log_to_gui(log_widget, "No segments were created.")
 
 
-def edit_lines():
-    try:
-        subprocess.run(["python", "08_edit_lines.py"], check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        try:
-            # If import.py fails, try running import.exe
-            subprocess.run(["08_edit_lines.exe"], check=True)
-        except subprocess.CalledProcessError:
-            log_to_gui(log_widget, "Failed to execute edit lines script")
-
-
 # Function to perform intersection with geocode data
 def intersection_with_geocode_data(asset_df, segment_df, geom_type, log_widget):
 
@@ -720,14 +709,6 @@ initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 # Explanatory label next to the Initiate-button
 explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help to create sample lines.\nDo NOT use it if you have already imported lines.", bg="light grey",  justify='left')
 explanatory_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
-
-# Button for editing lines. This opens a sub-process to set up the line generation.
-edit_lines_button = ttk.Button(buttons_frame, text="Edit segments", command=edit_lines, width=button_width, bootstyle="secondary")
-edit_lines_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
-
-# Explanatory label next to the "Edit lines" button
-explanatory_label = tk.Label(buttons_frame, text="Edit names, segment width/length and more. Remember that\nyou can edit these lines by opening the database using QGIS.", bg="light grey",  justify='left')
-explanatory_label.grid(row=1, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Create the Process and buffer button
 process_button = ttk.Button(buttons_frame, text="Process segments", command=lambda: process_all(gpkg_file, log_widget), width=button_width)

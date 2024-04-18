@@ -19,6 +19,7 @@ import threading
 import geopandas as gpd
 from sqlalchemy import create_engine
 import configparser
+import subprocess
 import datetime
 import glob
 import os
@@ -31,6 +32,7 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from shapely.geometry import shape
 import fiona
+import threading
 
 
 # # # # # # # # # # # # # # 
@@ -825,6 +827,31 @@ def increment_stat_value(config_file, stat_name, increment_value):
             file.writelines(lines)
 
 
+def run_subprocess(command, fallback_command):
+
+    """ Utility function to run a subprocess with a fallback option. """
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        update_stats(gpkg_file)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            update_stats(gpkg_file)
+        except subprocess.CalledProcessError:
+            log_to_logfile(f"Failed to execute command: {command}")
+
+
+
+def edit_asset_group():
+    run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
+
+def edit_lines():
+    run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
+
+
+def edit_geocode_group():
+    run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
+
 
 # Function to close the application
 def close_application():
@@ -878,7 +905,7 @@ info_label_text = ("Assets are geopackage files with layers or shapefiles placed
                    "On this page you can import assets, geocodes (grids) and lines. The features will "
                    "be placed in our database and used in the analysis. All assets will be associated "
                    "with importance and susceptibility values. Please refer to the log.txt to review the full log.")
-info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
 # Create a frame for buttons
@@ -886,21 +913,33 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=5)
 
 # Add button importing assets
-import_btn = ttk.Button(button_frame, text="Import assets", bootstyle=PRIMARY, command=lambda: threading.Thread(
+import_asset_btn = ttk.Button(button_frame, text="Import assets", bootstyle=PRIMARY, command=lambda: threading.Thread(
     target=run_import_asset, args=(input_folder_asset, gpkg_file, log_widget, progress_var), daemon=True).start())
-import_btn.pack(side=tk.LEFT, padx=10)
+import_asset_btn.grid(row=0, column=0, padx=10, pady=5, sticky='ew')
+
 
 # Add button forimporting geocodes
-import_btn = ttk.Button(button_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: threading.Thread(
+import_geocode_btn = ttk.Button(button_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: threading.Thread(
     target=run_import_geocode, args=(input_folder_geocode, gpkg_file, log_widget, progress_var), daemon=True).start())
-import_btn.pack(side=tk.LEFT, padx=10)
+import_geocode_btn.grid(row=0, column=1, padx=10, pady=5, sticky='ew')
 
 # Add button for importing lines data
-import_btn = ttk.Button(button_frame, text="Import lines", bootstyle=PRIMARY, command=lambda: threading.Thread(
+import_lines_btn = ttk.Button(button_frame, text="Import lines", bootstyle=PRIMARY, command=lambda: threading.Thread(
     target=run_import_lines, args=(input_folder_lines, gpkg_file, log_widget, progress_var), daemon=True).start())
-import_btn.pack(side=tk.LEFT, padx=10)
+import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
 
-close_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
-close_btn.pack(side=tk.LEFT, padx=10)
+exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
+exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
+
+edit_asset_group_btn = ttk.Button(button_frame, text="Edit assets", bootstyle=SECONDARY, command=lambda: threading.Thread(
+    target=edit_asset_group, args=(), daemon=True).start())
+edit_asset_group_btn.grid(row=1, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
+
+
+edit_geocode_group_btn = ttk.Button(button_frame, text="Edit lines", bootstyle=SECONDARY, command=lambda: threading.Thread(
+    target=edit_lines, args=(), daemon=True).start())
+edit_geocode_group_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew')
+
+
 
 root.mainloop()

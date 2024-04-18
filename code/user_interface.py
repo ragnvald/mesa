@@ -71,7 +71,7 @@ def update_stats(gpkg_file):
         status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
         status_label.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
-        message_label = ttk.Label(info_labelframe, text="No data imported. Start with\nimporting data.", justify='left')
+        message_label = ttk.Label(info_labelframe, text="No data imported.\nStart with importing data.", justify='left')
         message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         
         create_link_icon(info_labelframe, "https://www.mesamethod.org/wiki/Current_tool_version", 1, 2, 5, 5)
@@ -221,14 +221,6 @@ def run_subprocess(command, fallback_command):
 
 def import_assets():
     run_subprocess(["python", "01_import.py"], ["01_import.exe"])
-
-
-def edit_asset_group():
-    run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
-
-
-def edit_geocode_group():
-    run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
 
 
 def edit_processing_setup():
@@ -554,12 +546,6 @@ if __name__ == "__main__":
     # Add buttons to left panel with spacing between buttons
     import_assets_btn = ttk.Button(left_panel, text="Import data", command=import_assets, width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
-
-    edit_asset_group_btn = ttk.Button(left_panel, text="Edit asset groups", command=edit_asset_group, width=button_width, bootstyle=SECONDARY)
-    edit_asset_group_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady)
-
-    edit_geocode_group_btn = ttk.Button(left_panel, text="Edit geocode groups", command=edit_geocode_group, width=button_width, bootstyle=SECONDARY)
-    edit_geocode_group_btn.grid(row=1, column=1, padx=button_padx, pady=button_pady)
 
     edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
     edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
