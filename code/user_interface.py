@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import threading
 
 
-
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -542,11 +541,11 @@ if __name__ == "__main__":
     edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
     edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-    process_stacked_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
-    process_stacked_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
+    process_process_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
+    process_process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
-    process_stacked_data_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
-    process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+    process_make_atlas_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
+    process_make_atlas_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
     admin_lines_btn = ttk.Button(left_panel, text="Lines", command=admin_lines, width=button_width)
     admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
