@@ -235,16 +235,8 @@ def make_atlas():
     run_subprocess(["python", "07_make_atlas.py"], ["07_make_atlas.exe"])
 
 
-def edit_atlas():
-    run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
-
-
 def admin_lines():
     run_subprocess(["python", "08_admin_lines.py"], ["08_admin_lines.exe"])
-
-
-def edit_lines():
-    run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
 
 
 def exit_program():
@@ -555,9 +547,6 @@ if __name__ == "__main__":
 
     process_stacked_data_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
     process_stacked_data_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
-
-    edit_asset_group_btn = ttk.Button(left_panel, text="Edit atlas", command=edit_atlas, width=button_width, bootstyle=SECONDARY)
-    edit_asset_group_btn.grid(row=4, column=1, padx=button_padx, pady=button_pady)
 
     admin_lines_btn = ttk.Button(left_panel, text="Lines", command=admin_lines, width=button_width)
     admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
