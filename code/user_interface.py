@@ -169,6 +169,13 @@ def get_status(gpkg_file):
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Geocodes")
 
+
+        # Check for original lines
+        lines_original_count = read_table_and_count('tbl_lines_original')
+        append_status("+" if lines_original_count is not None else "/", 
+                      f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
+                      "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
+
         # Check for tbl_asset_group sensitivity
         symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
         if symbol:
@@ -190,9 +197,9 @@ def get_status(gpkg_file):
                       "https://www.mesamethod.org/wiki/Current_tool_version#Atlas")
 
         # Check for tbl_geocode_group
-        lines_original_count = read_table_and_count('tbl_lines_original')
-        append_status("+" if lines_original_count is not None else "/", 
-                      f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing are missing.\nImport lines if you want to use the line feature.",
+        segments_flat_count = read_table_and_count('tbl_segments_flat')
+        append_status("+" if segments_flat_count is not None else "/", 
+                      f"Segments in the system: {segments_flat_count}" if segments_flat_count is not None else "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
 
         # Convert the list of statuses to a DataFrame
@@ -508,6 +515,7 @@ if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value 
 check_and_create_folders()
 
 if __name__ == "__main__":
+
     # Setup the main Tkinter window
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("MESA 4")
@@ -538,16 +546,16 @@ if __name__ == "__main__":
     import_assets_btn = ttk.Button(left_panel, text="Import data", command=import_assets, width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
-    edit_processing_setup_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
-    edit_processing_setup_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
+    setup_processing_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
+    setup_processing_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-    process_process_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
-    process_process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
+    process_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
+    process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
-    process_make_atlas_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
-    process_make_atlas_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
+    admin_atlas_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
+    admin_atlas_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
-    admin_lines_btn = ttk.Button(left_panel, text="Lines", command=admin_lines, width=button_width)
+    admin_lines_btn = ttk.Button(left_panel, text="Segments", command=admin_lines, width=button_width)
     admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
     # Separator
@@ -571,14 +579,12 @@ if __name__ == "__main__":
     
     update_stats(gpkg_file)
 
-   
     log_to_logfile("User interface, statistics updated.")
 
 
     ###################################################
     # About frame set up
     #
-
     # Adjusted Content for About Page
     about_frame = ttk.Frame(root)  # This frame is for the alternate screen
 
@@ -586,7 +592,6 @@ if __name__ == "__main__":
 
     # Create a HtmlFrame widget
     html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
-
 
     # Define the path to your HTML content file
     file_path = "system_resources/userguide.html"
@@ -600,10 +605,10 @@ if __name__ == "__main__":
     # Pack the HtmlFrame into the ttkbootstrap window
     html_frame.pack(fill=BOTH, expand=YES)
 
+
     ###################################################
     # Registration frame set up
     #
-
     # Setup for the registration frame (assuming root is your Tk window)
     registration_frame = ttk.Frame(root)
     registration_frame.pack(fill='both', expand=True)
@@ -697,6 +702,7 @@ if __name__ == "__main__":
     exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
 
     show_main_frame()
+
     root.update_idletasks()
 
     root.mainloop()
