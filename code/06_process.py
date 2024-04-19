@@ -372,6 +372,7 @@ classification = {}
 
 
 if __name__ == "__main__":
+    
     # Create the user interface
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Process data")
@@ -401,7 +402,7 @@ if __name__ == "__main__":
                     "susceptibility. Our data model provides a rich set of attributes "
                     "which we believe can be usefull in your further analysis of the "
                     "area sensitivities.")
-    info_label = tk.Label(root, text=info_label_text, wraplength=500, justify="left")
+    info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
     info_label.pack(padx=10, pady=10)
 
     # Create a frame for buttons
