@@ -707,16 +707,16 @@ initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: cre
 initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Initiate-button
-explanatory_label = tk.Label(buttons_frame, text="Press this button in case you need help to create sample lines.\nDo NOT use it if you have already imported lines.", bg="light grey",  justify='left')
-explanatory_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
+initiate_label = tk.Label(buttons_frame, text="Press this button in case you need help to create sample lines.\nDo NOT use it if you have already imported lines.", bg="light grey",  justify='left')
+initiate_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Create the Process and buffer button
 process_button = ttk.Button(buttons_frame, text="Process segments", command=lambda: process_all(gpkg_file, log_widget), width=button_width)
 process_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Process-button
-explanatory_label = tk.Label(buttons_frame, text="Create sensitivity values for the segments.", bg="light grey",  justify='left')
-explanatory_label.grid(row=2, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
+process_label = tk.Label(buttons_frame, text="Create sensitivity values for the segments.", bg="light grey",  justify='left')
+process_label.grid(row=2, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
