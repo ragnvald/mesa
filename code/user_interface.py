@@ -155,7 +155,6 @@ def get_status(gpkg_file):
                                 'Message': message,
                                 'Link':link})
 
-
         # Check for tbl_asset_group
         asset_group_count = read_table_and_count('tbl_asset_group')
         
@@ -183,20 +182,20 @@ def get_status(gpkg_file):
                           message,
                           "https://www.mesamethod.org/wiki/Current_tool_version#Set_up")
 
-        # Check for tbl_geocode_group
+        # Present status for calculations on geocode objects
         stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if stacked_cells_count is not None else "-", 
                       f"Processing completed ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Processing")
         
-        # Check for tbl_geocode_group
+        # Present status for atlas objects
         atlas_count = read_table_and_count('tbl_atlas')
         append_status("+" if atlas_count is not None else "/", 
                       f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please create atlas.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Atlas")
 
-        # Check for tbl_geocode_group
+        # Present status for calculations on segments
         segments_flat_count = read_table_and_count('tbl_segments_flat')
         append_status("+" if segments_flat_count is not None else "/", 
                       f"Segments in the system: {segments_flat_count}" if segments_flat_count is not None else "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
