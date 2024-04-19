@@ -89,7 +89,6 @@ def read_and_reproject(filepath, layer=None, log_widget=None):
         return gpd.GeoDataFrame()  # Return an empty GeoDataFrame on failure
 
 
-
 # Function to process a layer and add to asset objects
 # Asset objects are all objects form all asset files/geopackages. In this process we will have
 # to harvest all attribute data and place them in one specific attribute. The attributes are all
@@ -832,18 +831,16 @@ def run_subprocess(command, fallback_command):
     """ Utility function to run a subprocess with a fallback option. """
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        update_stats(gpkg_file)
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            update_stats(gpkg_file)
         except subprocess.CalledProcessError:
             log_to_logfile(f"Failed to execute command: {command}")
 
 
-
 def edit_asset_group():
     run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
+
 
 def edit_lines():
     run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
@@ -917,8 +914,7 @@ import_asset_btn = ttk.Button(button_frame, text="Import assets", bootstyle=PRIM
     target=run_import_asset, args=(input_folder_asset, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_asset_btn.grid(row=0, column=0, padx=10, pady=5, sticky='ew')
 
-
-# Add button forimporting geocodes
+# Add button for importing geocodes
 import_geocode_btn = ttk.Button(button_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: threading.Thread(
     target=run_import_geocode, args=(input_folder_geocode, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_geocode_btn.grid(row=0, column=1, padx=10, pady=5, sticky='ew')
@@ -928,18 +924,23 @@ import_lines_btn = ttk.Button(button_frame, text="Import lines", bootstyle=PRIMA
     target=run_import_lines, args=(input_folder_lines, gpkg_file, log_widget, progress_var), daemon=True).start())
 import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
 
+# Exit button for this sub-program
 exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
 exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
 
+# Edit assets
 edit_asset_group_btn = ttk.Button(button_frame, text="Edit assets", bootstyle=SECONDARY, command=lambda: threading.Thread(
     target=edit_asset_group, args=(), daemon=True).start())
 edit_asset_group_btn.grid(row=1, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
 
+# Edit assets
+edit_ageocodes_btn = ttk.Button(button_frame, text="Edit geocodes", bootstyle=SECONDARY, command=lambda: threading.Thread(
+    target=edit_geocode_group, args=(), daemon=True).start())
+edit_ageocodes_btn.grid(row=1, column=1, columnspan=1, padx=10, pady=5, sticky='ew')
 
-edit_geocode_group_btn = ttk.Button(button_frame, text="Edit lines", bootstyle=SECONDARY, command=lambda: threading.Thread(
+# Edit lines
+edit_lines_btn = ttk.Button(button_frame, text="Edit lines", bootstyle=SECONDARY, command=lambda: threading.Thread(
     target=edit_lines, args=(), daemon=True).start())
-edit_geocode_group_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew')
-
-
+edit_lines_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew')
 
 root.mainloop()
