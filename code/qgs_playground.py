@@ -54,6 +54,8 @@ def add_layer_to_qgs(qgs_file, layer_name, gpkg_path, filter_query=None):
             'minScale': '0'
         })
 
+        new_snapping_setting.tail = "\n"  # Add a newline for layout   
+        
         tree.write(qgs_file)
         return layer_id
     else:
@@ -77,7 +79,7 @@ def add_layer_to_qgs(qgs_file, layer_name, gpkg_path, filter_query=None):
 
 # Example usage
 qgs_file_path = 'qgis/mesa/mesa.qgs'
-layer_name = 'tbl_stackennn'
+layer_name = 'tbl_stackeiii'
 gpkg_file_path = 'output/mesa.gpkg'
 filter_query = "ref_geocodegroup = 1"
 layer_id = add_layer_to_qgs(qgs_file_path, layer_name, gpkg_file_path, filter_query)

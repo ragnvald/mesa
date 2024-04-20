@@ -41,6 +41,7 @@ def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     return pd.read_sql_table('tbl_lines', engine)
 
+
 # Function to save data to the database
 def save_data(df):
     try:
@@ -50,6 +51,7 @@ def save_data(df):
     except Exception as e:
         write_to_log(f"Error saving data: {e}")
         print(f"Error saving data: {e}")
+
 
 # Function to update record in the DataFrame and save to the database
 def update_record(save_message=True):
@@ -64,6 +66,7 @@ def update_record(save_message=True):
             write_to_log("Record updated and saved")
     except Exception as e:
         write_to_log(f"Error updating and saving record: {e}")
+
 
 # Navigate through records
 def navigate(direction):
@@ -106,7 +109,7 @@ workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
-root.title("Edit assets")
+root.title("Edit lines")
 
 # Configure column widths
 root.columnconfigure(0, minsize=200)  # Configure the size of the first column
@@ -154,7 +157,7 @@ info_label_text = ("Registred lines will be used to create segmente polygons "
                    "are saved when you click on the buttons Previous or "
                    "next.")
 
-info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
+info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
 
 # Navigation and Update buttons

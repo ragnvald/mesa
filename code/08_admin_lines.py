@@ -666,7 +666,7 @@ workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
-root.title("Line processing")
+root.title("Admin segments")
 root.geometry("750x550")
 
 # Define button sizes and width
