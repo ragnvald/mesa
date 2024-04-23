@@ -172,7 +172,7 @@ def get_status(gpkg_file):
         # Check for original lines
         lines_original_count = read_table_and_count('tbl_lines_original')
         append_status("+" if lines_original_count is not None else "/", 
-                      f"Lines in the system: {lines_original_count}" if lines_original_count is not None else "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
+                      f"Lines: {lines_original_count}" if lines_original_count is not None else "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
 
         # Check for tbl_asset_group sensitivity
@@ -196,9 +196,11 @@ def get_status(gpkg_file):
                       "https://www.mesamethod.org/wiki/Current_tool_version#Atlas")
 
         # Present status for calculations on segments
-        segments_flat_count = read_table_and_count('tbl_segments_flat')
+        segments_flat_count = read_table_and_count('tbl_segment_flat')
+        lines_count = read_table_and_count('tbl_lines')
+        print(segments_flat_count)
         append_status("+" if segments_flat_count is not None else "/", 
-                      f"Segments in the system: {segments_flat_count}" if segments_flat_count is not None else "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
+                      f"Segments are in place with {segments_flat_count} segments along {lines_count} lines." if segments_flat_count is not None else "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
 
         # Convert the list of statuses to a DataFrame
@@ -499,7 +501,7 @@ now = datetime.now()
 log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:%S")
 
 # Log if the number of hours exceeds hour limit (hours =xx).
-if ((now - log_date_lastupdate_dt) > timedelta(hours=24)) and (id_uuid_ok_value == True):
+if ((now - log_date_lastupdate_dt) > timedelta(hours=1)) and (id_uuid_ok_value == True):
     # Parameters for store_logs_online function should be provided accordingly
     storing_usage_message = store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_version, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
     log_to_logfile(storing_usage_message)
