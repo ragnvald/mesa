@@ -105,13 +105,28 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
 # Function to perform intersection with geocode data
 def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
+
     log_to_gui(log_widget, f"Processing {geom_type} intersections")
     asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
 
+    geocode_df.sindex
+    asset_filtered.sindex
+
     if asset_filtered.empty:
+        log_to_gui(log_widget, "No asset data of the specified geom type.")
         return gpd.GeoDataFrame()
 
-    return gpd.sjoin(geocode_df, asset_filtered, how='inner', predicate='intersects')
+    if asset_filtered.crs != geocode_df.crs:
+        asset_filtered = asset_filtered.to_crs(geocode_df.crs)
+
+    intersection_result = gpd.sjoin(geocode_df, asset_filtered, how='inner', predicate='intersects')
+    if intersection_result.empty:
+        log_to_gui(log_widget, "No intersections found.")
+    else:
+        log_to_gui(log_widget, f"Found {len(intersection_result)} intersections.")
+
+    return intersection_result
+
 
 
 # Function to aggregate data by code
@@ -175,32 +190,53 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
     update_progress(25)  # Progress after reading asset group data
 
+    log_to_gui(log_widget, f"Asset data count before merge: {len(asset_data)}")
+
     # Merge asset group data with asset data   
     asset_data = asset_data.merge(
         asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']], 
         left_on='ref_asset_group', right_on='id', how='left'
     )
 
+    log_to_gui(log_widget, f"Asset data count after merge: {len(asset_data)}")
+
     update_progress(30)  # Progress after merging data
 
     point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
-    update_progress(35)  # Progress after point intersections
+    update_progress(33)  # Progress after point intersections
+
+    multipoint_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'MultiPoint', log_widget)
+    update_progress(36)  # Progress after point intersections
 
     line_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'LineString', log_widget)
-    update_progress(40)  # Progress after line intersections
+    update_progress(49)  # Progress after line intersections
+
+    multiline_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'MultiLineString', log_widget)
+    update_progress(42)  # Progress after line intersections
 
     polygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Polygon', log_widget)
-    update_progress(43)  # Progress after polygon intersections
+    update_progress(45)  # Progress after polygon intersections
 
-    intersected_data = pd.concat([point_intersections, line_intersections, polygon_intersections])
+    multipolygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'MultiPolygon', log_widget)
+    update_progress(47)  # Progress after polygon intersections
 
+    log_to_gui(log_widget, f"Point intersections count: {len(point_intersections)}")
+    log_to_gui(log_widget, f"Line intersections count: {len(line_intersections)}")
+    log_to_gui(log_widget, f"Polygon intersections count: {len(polygon_intersections)}")
+
+    intersected_data = pd.concat([point_intersections, multipoint_intersections, line_intersections, multiline_intersections, polygon_intersections, multipolygon_intersections], ignore_index=True)
+
+    log_to_gui(log_widget, f"Total intersected data count: {len(intersected_data)}")
+    
     # To list the columns:
     columns_list = intersected_data.columns.tolist()
   
-    update_progress(45)  # Progress after concatenating data
+    update_progress(49)  # Progress after concatenating data
     
     # Drop the unnecessary columns
-    intersected_data.drop(columns=['fid', 'id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
+    intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
+    
+    log_to_gui(log_widget, f"Total intersected data after drop function: {len(intersected_data)}")
 
     # Area calculation (area_m2 here)
     if intersected_data.crs.is_geographic:
@@ -211,10 +247,14 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     else:
         intersected_data['area_m2'] = intersected_data.geometry.area.astype('int64')
         
+    log_to_gui(log_widget, f"Total intersected data after area calculations: {len(intersected_data)}")
+
     update_progress(50)  # Progress after concatenating data
     
     # Before saving, assign the CRS to the GeoDataFrame
     intersected_data.crs = workingprojection_epsg
+
+    log_to_gui(log_widget, f"Total intersected data after projection to working projection: {len(intersected_data)}")
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Done processing the analysis layer.")
