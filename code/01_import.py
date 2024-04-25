@@ -751,8 +751,17 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
         # Update the 'ref_name_gis_assetgroup' in df_asset_object with the joined data
         df_asset_object['ref_name_gis_assetgroup'] = df_joined['name_gis_assetgroup']
 
+        # Make sure fid is treated as index if not already
+        if 'fid' in df_asset_object.columns:
+            df_asset_object.set_index('fid', inplace=True)
+
+        # Remove fid from columns if it's there accidentally
+        df_asset_object.reset_index(inplace=True)
+        df_asset_object.drop(columns=['fid'], errors='ignore', inplace=True)
+        df_asset_object.set_index('index', inplace=True)
+
         # Write updated dataframe back to SQLite database
-        #df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
+        df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
 
         conn.execute("COMMIT;")  # Commit transaction
         log_to_gui(log_widget, "tbl_asset_object updated with name_gis_assetgroup from tbl_asset_group.")
