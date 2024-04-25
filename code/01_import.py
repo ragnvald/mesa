@@ -568,14 +568,16 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
                             asset_objects.append({
                                 'id': object_id_counter,
-                                'ref_asset_group': group_id_counter,
                                 'asset_group_name': layer_name,
                                 'attributes': attributes,
                                 'process': True,
+                                'ref_asset_group': group_id_counter,
                                 'geom': row.geometry  # Original geometry in workingprojection_epsg
                             })
+                            
                             object_id_counter += 1
                         group_id_counter += 1
+
             elif filepath.endswith('.shp'):
                 
                 layer_name = filename
@@ -606,18 +608,22 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
                         asset_objects.append({
                             'id': object_id_counter,
-                            'ref_asset_group': group_id_counter,
                             'asset_group_name': layer_name,
                             'attributes': attributes,
                             'process': True,
+                            'ref_asset_group': group_id_counter,
                             'geom': row.geometry  # Original geometry in workingprojection_epsg
                         })
+
                         object_id_counter += 1
                     group_id_counter += 1
             else:
                 log_to_gui(log_widget, f"Unsupported file format for {filepath}")
+
             processed_files += 1
+
             progress_var.set(10 + processed_files * progress_increment)
+
             update_progress(10 + processed_files * progress_increment)
 
     asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
@@ -733,27 +739,26 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
     try:
         # Connect to SQLite database
         conn = sqlite3.connect(db_file)
+        conn.execute("BEGIN;")  # Start a transaction
 
         # Load data into dataframes
-        df_asset_group  = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
+        df_asset_group = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
         df_asset_object = pd.read_sql_query("SELECT * FROM tbl_asset_object", conn)
 
-        # Check if 'fid' is part of the dataframe
-        if 'fid' in df_asset_object.columns:
-            df_asset_object.set_index('fid', inplace=True)
-
-        # Join dataframes to get name_gis_assetgroup
+        # Perform the join using 'ref_asset_group' in df_asset_object and 'id' in df_asset_group
         df_joined = df_asset_object.merge(df_asset_group, left_on='ref_asset_group', right_on='id', how='left')
 
-        # Update tbl_asset_object dataframe with name_gis_assetgroup
+        # Update the 'ref_name_gis_assetgroup' in df_asset_object with the joined data
         df_asset_object['ref_name_gis_assetgroup'] = df_joined['name_gis_assetgroup']
 
         # Write updated dataframe back to SQLite database
-        df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
+        #df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
 
+        conn.execute("COMMIT;")  # Commit transaction
         log_to_gui(log_widget, "tbl_asset_object updated with name_gis_assetgroup from tbl_asset_group.")
 
     except Exception as e:
+        conn.execute("ROLLBACK;")  # Rollback transaction on error
         log_to_gui(log_widget, f"Error updating tbl_asset_object: {e}")
     finally:
         conn.close()
@@ -898,10 +903,11 @@ progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, ne
 
 
 # Information text field below the progress bar
-info_label_text = ("Assets are geopackage files with layers or shapefiles placed in the input/assets-folder. "
-                   "On this page you can import assets, geocodes (grids) and lines. The features will "
-                   "be placed in our database and used in the analysis. All assets will be associated "
-                   "with importance and susceptibility values. Please refer to the log.txt to review the full log.")
+info_label_text = ("On this page you can import assets, geocodes (grids) and lines. The features will "
+                   "be placed in our database and used in the analysis. Assets are geopackage files with "
+                   "layers or shapefiles placed in the input/assets-folder. All assets will later be associated "
+                   "with importance and susceptibility values. Geocodes are usually grid cells. Lines are being used "
+                   "to create segments which will have a similar calulation to the geocode areas. ")
 info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
