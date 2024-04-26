@@ -481,35 +481,51 @@ def build_stacked_data(gpkg_file, log_widget):
     segments_related = segments_related.set_crs(workingprojection_epsg, allow_override=True)
 
     update_progress(40)
-
+   
     point_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Point', log_widget)
+    update_progress(33)  # Progress after point intersections
 
-    update_progress(45)  # Progress after point intersections
+    multipoint_intersections = intersection_with_geocode_data(asset_data, segments_related, 'MultiPoint', log_widget)
+    update_progress(36)  # Progress after point intersections
 
     line_intersections = intersection_with_geocode_data(asset_data, segments_related, 'LineString', log_widget)
-
     update_progress(49)  # Progress after line intersections
 
+    multiline_intersections = intersection_with_geocode_data(asset_data, segments_related, 'MultiLineString', log_widget)
+    update_progress(42)  # Progress after line intersections
+
     polygon_intersections = intersection_with_geocode_data(asset_data, segments_related, 'Polygon', log_widget)
+    update_progress(45)  # Progress after polygon intersections
 
-    update_progress(50)  # Progress after polygon intersections
+    multipolygon_intersections = intersection_with_geocode_data(asset_data, segments_related, 'MultiPolygon', log_widget)
+    update_progress(47)  # Progress after polygon intersections
+    
+    log_to_gui(log_widget, f"Point intersections count: {len(point_intersections)}")
+    log_to_gui(log_widget, f"Line intersections count: {len(line_intersections)}")
+    log_to_gui(log_widget, f"Polygon intersections count: {len(polygon_intersections)}")
 
-    segment_intersections = pd.concat([point_intersections, line_intersections, polygon_intersections])
+    intersected_data = pd.concat([point_intersections, multipoint_intersections, line_intersections, multiline_intersections, polygon_intersections, multipolygon_intersections], ignore_index=True)
 
+    log_to_gui(log_widget, f"Total intersected data count: {len(intersected_data)}")
     update_progress(60)
     
-    # Drop the unnecessary columns, adjust according to your final table requirements
-    segment_intersections.drop(columns=['id_x', 'id_y', 'lines_name_gis'], inplace=True)
+    # List of columns to drop if they exist
+    columns_to_drop = ['id_x', 'id_y', 'lines_name_gis']
+
+    # Drop the unnecessary columns if they exist
+    for col in columns_to_drop:
+        if col in intersected_data.columns:
+            intersected_data.drop(columns=[col], inplace=True)
     
     # Assuming 'segment_intersections' is the GeoDataFrame you're trying to write
-    segment_intersections.reset_index(drop=True, inplace=True)  # Resets the index
-    segment_intersections['fid'] = segment_intersections.index  # Uses the new index as 'fid'
+    intersected_data.reset_index(drop=True, inplace=True)  # Resets the index
+    intersected_data['fid'] = intersected_data.index  # Uses the new index as 'fid'
 
     # Before saving tbl_flat
-    segment_intersections.crs = workingprojection_epsg
+    intersected_data.crs = workingprojection_epsg
 
     # Write the intersected data to a new layer in the GeoPackage
-    segment_intersections.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG', if_exists='replace')
+    intersected_data.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG', if_exists='replace')
 
     log_to_gui(log_widget, "Data processing completed.")
     
