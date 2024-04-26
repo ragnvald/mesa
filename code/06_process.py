@@ -233,8 +233,14 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
   
     update_progress(49)  # Progress after concatenating data
     
-    # Drop the unnecessary columns
-    intersected_data.drop(columns=['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right'], inplace=True)
+    # List of columns to drop if they exist
+    columns_to_drop = ['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right']
+
+    # Drop the unnecessary columns if they exist
+    for col in columns_to_drop:
+        if col in intersected_data.columns:
+            intersected_data.drop(columns=[col], inplace=True)
+
     
     log_to_gui(log_widget, f"Total intersected data after drop function: {len(intersected_data)}")
 
