@@ -734,43 +734,61 @@ def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
         log_to_gui(log_widget, "Error: 'geom' column not found in asset_groups_df.")
 
 
+def enable_spatialite(db_file, log_widget):
+    try:
+        conn = sqlite3.connect(db_file)
+        conn.enable_load_extension(True)  # Allows loading of SQLite extensions
+        conn.execute('SELECT load_extension("mod_spatialite");')  # Adjust the path to mod_spatialite if necessary
+
+        log_to_gui(log_widget, "SpatiaLite extension loaded successfully.")
+        return conn  # Return the connection if you want to use it further
+
+    except sqlite3.Error as e:
+        log_to_gui(log_widget, f"Failed to load SpatiaLite extension: {e}")
+
+
 # Name gis should be part of the asset objects table
 def update_asset_objects_with_name_gis(db_file, log_widget):
     try:
-        # Connect to SQLite database
-        conn = sqlite3.connect(db_file)
-        conn.execute("BEGIN;")  # Start a transaction
+        # Load spatial data directly into GeoDataFrames
+        gdf_assets = gpd.read_file(db_file, layer='tbl_asset_object')
+        gdf_asset_groups = gpd.read_file(db_file, layer='tbl_asset_group')
+        
+        # Perform an attribute-based join
+        gdf_assets = gdf_assets.merge(
+            gdf_asset_groups[['id', 'name_gis_assetgroup']], 
+            left_on='ref_asset_group', 
+            right_on='id', 
+            how="left"
+        )
 
-        # Load data into dataframes
-        df_asset_group = pd.read_sql_query("SELECT id, name_gis_assetgroup FROM tbl_asset_group", conn)
-        df_asset_object = pd.read_sql_query("SELECT * FROM tbl_asset_object", conn)
+        # After merging, 'name_gis_assetgroup' contains the information we want to add to 'tbl_asset_object' as 'ref_name_gis_assetgroup'
+        gdf_assets['ref_name_gis_assetgroup'] = gdf_assets['name_gis_assetgroup']
+        
+        # Drop the 'id' column from the merge operation if it exists
+        if 'id' in gdf_assets.columns:
+            gdf_assets.drop(columns=['id'], inplace=True)
+            
+        # Drop the 'id_y' column from the merge operation if it exists
+        if 'id_y' in gdf_assets.columns:
+            gdf_assets.drop(columns=['id_y'], inplace=True)
 
-        # Perform the join using 'ref_asset_group' in df_asset_object and 'id' in df_asset_group
-        df_joined = df_asset_object.merge(df_asset_group, left_on='ref_asset_group', right_on='id', how='left')
+        # Drop the 'id_x' column from the merge operation if it exists
+        if 'id_x' in gdf_assets.columns:
+            gdf_assets.drop(columns=['id_x'], inplace=True)
+            
+        # Drop the 'name_gis_assetgroup' column from the merge operation if it exists
+        if 'name_gis_assetgroup' in gdf_assets.columns:
+            gdf_assets.drop(columns=['name_gis_assetgroup'], inplace=True)
 
-        # Update the 'ref_name_gis_assetgroup' in df_asset_object with the joined data
-        df_asset_object['ref_name_gis_assetgroup'] = df_joined['name_gis_assetgroup']
-
-        # Make sure fid is treated as index if not already
-        if 'fid' in df_asset_object.columns:
-            df_asset_object.set_index('fid', inplace=True)
-
-        # Remove fid from columns if it's there accidentally
-        df_asset_object.reset_index(inplace=True)
-        df_asset_object.drop(columns=['fid'], errors='ignore', inplace=True)
-        df_asset_object.set_index('index', inplace=True)
-
-        # Write updated dataframe back to SQLite database
-        df_asset_object.to_sql('tbl_asset_object', conn, if_exists='replace', index=True, index_label='fid')
-
-        conn.execute("COMMIT;")  # Commit transaction
-        log_to_gui(log_widget, "tbl_asset_object updated with name_gis_assetgroup from tbl_asset_group.")
+        # Save the updated GeoDataFrame back to a GeoPackage
+        gdf_assets.to_file(db_file, layer='tbl_asset_object', driver="GPKG")
+        
+        log_to_gui(log_widget, "Successfully updated 'ref_name_gis_assetgroup' in tbl_asset_object.")
 
     except Exception as e:
-        conn.execute("ROLLBACK;")  # Rollback transaction on error
-        log_to_gui(log_widget, f"Error updating tbl_asset_object: {e}")
-    finally:
-        conn.close()
+        log_to_gui(log_widget, f"Failed to update 'ref_name_gis_assetgroup': {e}")
+
 
 
 # Thread function to run import without freezing GUI
