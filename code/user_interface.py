@@ -198,7 +198,6 @@ def get_status(gpkg_file):
         # Present status for calculations on segments
         segments_flat_count = read_table_and_count('tbl_segment_flat')
         lines_count = read_table_and_count('tbl_lines')
-        print(segments_flat_count)
         append_status("+" if segments_flat_count is not None else "/", 
                       f"Segments are in place with {segments_flat_count} segments along {lines_count} lines." if segments_flat_count is not None else "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
