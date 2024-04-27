@@ -677,7 +677,7 @@ def run_subprocess(command, fallback_command):
 
 
 def edit_asset_group():
-    run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
+    run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
 
 
 def exit_program():
@@ -735,7 +735,7 @@ buttons_frame = tk.Frame(main_frame)
 buttons_frame.pack(side='left', fill='both', padx=20, pady=5)  # Corrected this line
 
 # Edit assets
-edit_asset_group_btn = ttk.Button(buttons_frame, text="Edit assets", bootstyle='secondary', command=lambda: threading.Thread(
+edit_asset_group_btn = ttk.Button(buttons_frame, text="Edit lines", bootstyle='secondary', command=lambda: threading.Thread(
     target=edit_asset_group, args=(), daemon=True).start())
 edit_asset_group_btn.grid(row=0, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
 
