@@ -12,7 +12,7 @@ import pandas as pd
 import configparser
 import subprocess
 import datetime
-import locale
+import threading
 import math
 from shapely.geometry import box, LineString, Point, Polygon, MultiLineString, MultiPolygon
 from shapely.ops import unary_union, split, polygonize, linemerge
@@ -664,6 +664,22 @@ def process_all(gpkg_file, log_widget):
     increment_stat_value(config_file, 'mesa_stat_process_lines', increment_value=1)
 
 
+def run_subprocess(command, fallback_command):
+
+    """ Utility function to run a subprocess with a fallback option. """
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            log_to_logfile(f"Failed to execute command: {command}")
+
+
+def edit_asset_group():
+    run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
+
+
 def exit_program():
     root.destroy()
 
@@ -716,26 +732,27 @@ progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
 progress_label.pack(side=tk.LEFT, padx=5)
 
 buttons_frame = tk.Frame(main_frame)
-buttons_frame.pack(side='left', fill='y', padx=20, pady=5)  # Corrected this line
+buttons_frame.pack(side='left', fill='both', padx=20, pady=5)  # Corrected this line
 
-# Create the Initiate button
-initiate_button = ttk.Button(buttons_frame, text="Initiate", command=lambda: create_lines_table_and_lines(gpkg_file, log_widget), width=button_width)
-initiate_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
+# Edit assets
+edit_asset_group_btn = ttk.Button(buttons_frame, text="Edit assets", bootstyle='secondary', command=lambda: threading.Thread(
+    target=edit_asset_group, args=(), daemon=True).start())
+edit_asset_group_btn.grid(row=0, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
 
 # Explanatory label next to the Initiate-button
-initiate_label = tk.Label(buttons_frame, text="Press this button in case you need help to create sample lines.\nDo NOT use it if you have already imported lines.", bg="light grey",  justify='left')
+initiate_label = tk.Label(buttons_frame, text="Lines are processed to segments with the parameterd length and width. Default values are set when the lines are imported. This is where you can adjust the parameters as well as their names.", bg="light grey",  wraplength=400, justify="left")
 initiate_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Create the Process and buffer button
 process_button = ttk.Button(buttons_frame, text="Process segments", command=lambda: process_all(gpkg_file, log_widget), width=button_width)
-process_button.grid(row=2, column=0, padx=button_padx, pady=button_pady)
+process_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Process-button
 process_label = tk.Label(buttons_frame, text="Create sensitivity values for the segments.", bg="light grey",  justify='left')
-process_label.grid(row=2, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
+process_label.grid(row=1, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
-exit_btn.grid(row=3, column=1, pady=button_pady, sticky='e')  # Align to the right side
+exit_btn.grid(row=2, column=1, pady=button_pady, sticky='e')  # Align to the right side
 
 root.mainloop()
