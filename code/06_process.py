@@ -456,7 +456,7 @@ if __name__ == "__main__":
     button_frame.pack(pady=5)
 
     # Add 'Process All' button to the button frame
-    process_all_btn = ttk.Button(button_frame, text="Process All", command=lambda: threading.Thread(
+    process_all_btn = ttk.Button(button_frame, text="Process", command=lambda: threading.Thread(
         target=process_all, args=(log_widget, progress_var, gpkg_file, config_file,workingprojection_epsg), daemon=True).start())
     process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
