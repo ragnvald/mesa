@@ -268,13 +268,13 @@ def run_subprocess(command, fallback_command):
     """ Utility function to run a subprocess with a fallback option. """
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        update_stats(gpkg_file)
+                
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
             subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            update_stats(gpkg_file)
+            
         except subprocess.CalledProcessError:
-            log_to_logfile(f"Failed to execute command: {command}")
+            log_to_gui(f"Failed to execute command: {command}")
 
 
 def edit_atlas():
