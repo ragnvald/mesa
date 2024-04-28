@@ -543,13 +543,13 @@ if __name__ == "__main__":
     main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
     # Add buttons to left panel with spacing between buttons
-    import_assets_btn = ttk.Button(left_panel, text="Import data", command=import_assets, width=button_width, bootstyle=PRIMARY)
+    import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
     setup_processing_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
     setup_processing_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-    process_data_btn = ttk.Button(left_panel, text="Process data", command=process_data, width=button_width)
+    process_data_btn = ttk.Button(left_panel, text="Process", command=process_data, width=button_width)
     process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
     admin_atlas_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
