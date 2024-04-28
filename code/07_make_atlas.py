@@ -339,7 +339,7 @@ create_atlas_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew
 close_btn = ttk.Button(button_frame, bootstyle=WARNING, text="Exit", command=lambda: close_application(root))
 close_btn.grid(row=1, column=3, columnspan=1, padx=10, pady=5, sticky='ew')
 
-edit_atlas_btn = ttk.Button(button_frame, text="Edit assets", bootstyle=SECONDARY, command=lambda: threading.Thread(
+edit_atlas_btn = ttk.Button(button_frame, text="Edit atlas objects", bootstyle=SECONDARY, command=lambda: threading.Thread(
     target=edit_atlas, args=(), daemon=True).start())
 edit_atlas_btn.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
 
