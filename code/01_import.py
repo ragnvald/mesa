@@ -867,7 +867,7 @@ def run_subprocess(command, fallback_command):
         try:
             subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
-            log_to_logfile(f"Failed to execute command: {command}")
+            log_to_gui(f"Failed to execute command: {command}")
 
 
 def edit_asset_group():
