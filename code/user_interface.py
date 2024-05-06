@@ -85,7 +85,7 @@ def update_stats(gpkg_file):
             status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success' if row['Status'] == "+" else 'warning' if row['Status'] == "/" else 'danger')
             status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
 
-            message_label = ttk.Label(info_labelframe, text=row['Message'], justify='left')
+            message_label = ttk.Label(info_labelframe, text=row['Message'], justify='left', wraplength=380)
             message_label.grid(row=index, column=1, sticky="nsew", padx=5, pady=5)
 
             create_link_icon(info_labelframe, row['Link'], index, 2, 5, 5)
@@ -186,7 +186,7 @@ def get_status(gpkg_file):
         stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if stacked_cells_count is not None else "-", 
-                      f"Processing completed ({flat_original_count} / {stacked_cells_count})" if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
+                      f"Processing completed. You may open the QGIS-project file in the output-folder." if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
                       "https://www.mesamethod.org/wiki/Current_tool_version#Processing")
         
         # Present status for atlas objects
