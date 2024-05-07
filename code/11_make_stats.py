@@ -1,6 +1,7 @@
 import geopandas as gpd
 import pandas as pd
 import os
+import matplotlib.pyplot as plt
 
 # Define the paths
 geopackage_file = 'output/mesa.gpkg'
@@ -8,6 +9,7 @@ output_folder = 'output'
 os.makedirs(output_folder, exist_ok=True)
 excel_assets_stats = os.path.join(output_folder, 'assets_stats_per_sensitivity.xlsx')
 excel_overall_stats = os.path.join(output_folder, 'overall_stats_per_sensitivity.xlsx')
+bar_chart_output = os.path.join(output_folder, 'sensitivity_overall_stats_bar_chart.png')
 
 # Load both tables from the GeoPackage file
 gdf_assets = gpd.read_file(geopackage_file, layer='tbl_asset_object')
@@ -62,7 +64,7 @@ def asset_table_per_sensitivity(gdf):
     return assets_stats
 
 # Create a column combining sensitivity code and description
-gdf_assets['sensitivity_text'] = gdf_assets['sensitivity_code'] + ' - ' + gdf_assets['sensitivity_description']
+gdf_assets['sensitivity_text'] = gdf_assets['sensitivity_code'] + ' | ' + gdf_assets['sensitivity_description']
 
 # Table 2: Total areas for all objects within each sensitivity category by descriptive text
 def overall_table_per_sensitivity(gdf):
@@ -80,3 +82,31 @@ overall_stats_table.to_excel(excel_overall_stats, index=False)
 # Display tables for quick verification
 print(assets_stats_table)
 print(overall_stats_table)
+
+# Create a bar chart for Table 2
+def create_bar_chart(df, column, output_path):
+    # Extract data for plotting
+    labels = df['sensitivity_text']
+    values = df[column].str.replace(' m²', '').str.replace(' km²', '').astype(float)
+
+    # Check if the values are in square meters or square kilometers
+    is_km = 'km²' in df[column].iloc[0]
+
+    # Adjust the units based on the format
+    if is_km:
+        ylabel = 'Total Area (km²)'
+    else:
+        ylabel = 'Total Area (m²)'
+
+    # Plot
+    plt.figure(figsize=(8, 6))
+    plt.barh(labels, values, color='teal')
+    plt.xlabel(ylabel)
+    plt.ylabel('Sensitivity Category')
+    plt.title('Total Areas per Sensitivity Category')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.show()
+
+# Create the bar chart for Table 2
+create_bar_chart(overall_stats_table, 'total_area', bar_chart_output)
