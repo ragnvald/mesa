@@ -349,9 +349,18 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
 # Thread function to run import of geocodes
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
-    geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
 
     log_to_gui(log_widget, f"Preparing import of geocode groups and objects.")
+
+    log_to_gui(log_widget, "Cleaning up. Deleting old geocodes, if they exist.")
+
+    delete_table_from_geopackage(gpkg_file, 'tbl_geocode_group', log_widget=None)
+    delete_table_from_geopackage(gpkg_file, 'tbl_geocode_object', log_widget=None)
+
+
+    log_to_gui(log_widget, f"Looking trough input folder.")
+    geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
+
 
     if not geocode_groups_gdf.empty:
         export_to_geopackage(geocode_groups_gdf, gpkg_file, 'tbl_geocode_group', log_widget)
@@ -418,9 +427,15 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
 
 # Thread function to run import lines
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
-    line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
     log_to_gui(log_widget, f"Preparing import of lines.")
+    
+    log_to_gui(log_widget, "Cleaning up. Deleting old lines, if they exist.")
+
+    delete_table_from_geopackage(gpkg_file, 'tbl_lines', log_widget=None)
+    
+    log_to_gui(log_widget, f"Looking trough input folder.")
+    line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
     if not line_objects_gdf.empty:
         export_line_to_geopackage(line_objects_gdf, gpkg_file, 'tbl_lines_original', log_widget)
@@ -796,6 +811,12 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     
     log_to_gui(log_widget, "Starting asset import process...")
 
+    log_to_gui(log_widget, "Cleaning up. Deleting old assets, if they exist.")
+
+    delete_table_from_geopackage(gpkg_file, 'tbl_asset_object', log_widget=None)
+
+    delete_table_from_geopackage(gpkg_file, 'tbl_asset_group', log_widget=None)
+
     asset_objects_gdf, asset_groups_gdf, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
 
     # Check if the GeoDataFrame is not empty before exporting
@@ -819,6 +840,43 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     update_progress(100)
 
     increment_stat_value(config_file, 'mesa_stat_import_assets', increment_value=1)
+
+
+# Function to delete a table from a GeoPackage file
+def delete_table_from_geopackage(gpkg_file, table_name, log_widget=None):
+    try:
+        # Open the GeoPackage in update mode
+        ds = ogr.Open(gpkg_file, update=True)
+        if ds is not None:
+            # Check if the specified table exists
+            layer = ds.GetLayerByName(table_name)
+            if layer is not None:
+                ds.DeleteLayer(table_name)
+                message = f"Table {table_name} deleted from {gpkg_file}."
+                if log_widget:
+                    log_to_gui(log_widget, message)
+                else:
+                    print(message)
+            else:
+                message = f"Table {table_name} does not exist in {gpkg_file}."
+                if log_widget:
+                    log_to_gui(log_widget, message)
+                else:
+                    print(message)
+            ds = None  # Ensure the data source is closed
+        else:
+            message = f"Failed to open {gpkg_file}."
+            if log_widget:
+                log_to_gui(log_widget, message)
+            else:
+                print(message)
+    except Exception as e:
+        message = f"An error occurred while attempting to delete table {table_name} from {gpkg_file}: {e}"
+        if log_widget:
+            log_to_gui(log_widget, message)
+        else:
+            print(message)
+
 
 
 def increment_stat_value(config_file, stat_name, increment_value):
