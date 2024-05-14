@@ -23,6 +23,7 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
+
 def read_config_classification(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
@@ -126,7 +127,6 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
         log_to_gui(log_widget, f"Found {len(intersection_result)} intersections.")
 
     return intersection_result
-
 
 
 # Function to aggregate data by code
