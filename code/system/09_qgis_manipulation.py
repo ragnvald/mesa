@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 import uuid
 import geopandas as gpd
 import pandas as pd
-import fiona
+import os
 import pandas 
 from sqlalchemy import create_engine
 import configparser

@@ -13,6 +13,7 @@ import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import sqlite3
+import os
 
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -133,13 +134,15 @@ def export_to_excel(data_frame, file_path):
 #  Main
 #
         
-config_file             = 'config.ini'
+config_file             = os.path.join('..', 'config.ini')
 config                  = read_config(config_file)
-gpkg_file               = config['DEFAULT']['gpkg_file']
-output_png              = config['DEFAULT']['output_png']
-asset_output_png        = 'output/asset.png'
-flat_output_png         = 'output/flat.png'
-geocode_output_png      = 'output/geocode.png'
+
+gpkg_file               = os.path.join('..', config['DEFAULT']['gpkg_file'])
+output_png              = os.path.join('..', config['DEFAULT']['output_png'])
+asset_output_png        = os.path.join('..', 'output/asset.png')
+flat_output_png         = os.path.join('..', 'output/flat.png')
+geocode_output_png      = os.path.join('..', 'output/geocode.png')
+                                       
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)

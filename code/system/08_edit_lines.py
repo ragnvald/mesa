@@ -6,7 +6,7 @@
 #
 
 import tkinter as tk
-import locale
+import os
 from tkinter import ttk
 import configparser
 import pandas as pd
@@ -99,11 +99,13 @@ def exit_application():
 #
 
 # Load configuration settings
-config_file             = 'config.ini'
+config_file             = os.path.join('..', 'config.ini')
 config                  = read_config(config_file)
-input_folder_asset      = config['DEFAULT']['input_folder_asset']
-input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
-gpkg_file               = config['DEFAULT']['gpkg_file']
+
+input_folder_asset      = os.path.join('..', config['DEFAULT']['input_folder_asset'])
+input_folder_geocode    = os.path.join('..', config['DEFAULT']['input_folder_geocode'])
+gpkg_file               = os.path.join('..', config['DEFAULT']['gpkg_file'])
+
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 

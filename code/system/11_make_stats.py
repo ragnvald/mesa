@@ -4,8 +4,8 @@ import os
 import matplotlib.pyplot as plt
 
 # Define paths
-geopackage_file = 'output/mesa.gpkg'
-output_folder = 'output'
+geopackage_file = '../output/mesa.gpkg'
+output_folder = '../output'
 os.makedirs(output_folder, exist_ok=True)
 excel_assets_stats = os.path.join(output_folder, 'assets_stats_per_sensitivity.xlsx')
 excel_overall_stats = os.path.join(output_folder, 'overall_stats_per_sensitivity.xlsx')
