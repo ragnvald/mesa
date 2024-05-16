@@ -406,12 +406,14 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
 #
 
 # Load configuration settings
-config_file             = os.path.join('..', 'config.ini')
+config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)
 
-gpkg_file               = os.path.join('..', config['DEFAULT']['gpkg_file'])
-mesa_stat_process       = os.path.join('..', config['DEFAULT']['mesa_stat_process'])
+gpkg_file               = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', config['DEFAULT']['gpkg_file'])
                                        
+print (gpkg_file)
+
+mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 

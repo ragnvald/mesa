@@ -135,10 +135,10 @@ def increment_stat_value(config_file, stat_name, increment_value):
 #
 
 # Load configuration settings
-config_file             = os.path.join('..', 'config.ini')
+config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)
 
-gpkg_file               = os.path.join('..', config['DEFAULT']['gpkg_file'])
+gpkg_file               = config['DEFAULT']['gpkg_file']
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']

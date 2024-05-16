@@ -41,7 +41,8 @@ import threading
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
-    config.read(file_name)
+    if not config.read(file_name):
+        raise FileNotFoundError(f"Unable to read the config file at {file_name}")
     return config
 
 
@@ -928,16 +929,29 @@ def run_subprocess(command, fallback_command):
             log_to_gui(f"Failed to execute command: {command}")
 
 
+print (os.path.abspath(__file__))
+
 def edit_asset_group():
-    run_subprocess(["python", "04_edit_asset_group.py"], ["04_edit_asset_group.exe"])
+    edit_asset_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_asset_group.py')
+    edit_asset_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_asset_group.exe')
+
+    run_subprocess(["python", edit_asset_py], [edit_asset_exe])
 
 
 def edit_lines():
-    run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
+
+    edit_lines_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '08_edit_lines.py')
+    edit_lines_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '08_edit_lines.exe')
+
+    run_subprocess(["python", edit_lines_py], [edit_lines_exe])
 
 
 def edit_geocode_group():
-    run_subprocess(["python", "04_edit_geocode_group.py"], ["04_edit_geocode_group.exe"])
+    
+    edit_geocode_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_geocode_group.py')
+    edit_geocode_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_geocode_group.exe')
+
+    run_subprocess(["python", edit_geocode_py], [edit_geocode_exe])
 
 
 # Function to close the application
@@ -950,13 +964,13 @@ def close_application():
 #
 
 # Load configuration settings
-config_file             = os.path.join('..', 'config.ini')
+config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)
 
-input_folder_asset      = os.path.join('..', config['DEFAULT']['input_folder_asset'])
-input_folder_geocode    = os.path.join('..', config['DEFAULT']['input_folder_geocode'])
-input_folder_lines      = os.path.join('..', config['DEFAULT']['input_folder_lines'])
-gpkg_file               = os.path.join('..', config['DEFAULT']['gpkg_file'])
+input_folder_asset      = config['DEFAULT']['input_folder_asset']
+input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
+input_folder_lines      = config['DEFAULT']['input_folder_lines']
+gpkg_file               = config['DEFAULT']['gpkg_file']
 
 segment_width           = config['DEFAULT']['segment_width']
 segment_length          = config['DEFAULT']['segment_length']
