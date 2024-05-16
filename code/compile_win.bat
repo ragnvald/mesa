@@ -19,101 +19,121 @@ set "SCRIPT_PATH=%SCRIPT_PATH:~0,-1%"
 for %%i in ("%SCRIPT_PATH%") do set "PARENT_DIR=%%~dpi"
 
 :: Path of the work folder relative to the script
-set "BUILD_FOLDER_ROOT      = %PARENT_DIR%build"
-set "BUILD_FOLDER_SYSTEM    = %PARENT_DIR%build/system"
+set "BUILD_FOLDER_ROOT=%PARENT_DIR%build"
+set "BUILD_FOLDER_SYSTEM=%PARENT_DIR%build\system"
 
 :: Define the dist folder path
-set "DIST_FOLDER_ROOT       = %PARENT_DIR%dist"
-set "DIST_FOLDER_SYSTEM     = %PARENT_DIR%dist/system"
+set "DIST_FOLDER_ROOT=%PARENT_DIR%dist"
+set "DIST_FOLDER_SYSTEM=%PARENT_DIR%dist\system"
 
 :: Define the system folder
-set "INPUT_FOLDER_ROOT    = %PARENT_DIR%"
-set "INPUT_FOLDER_SYSTEM    = %PARENT_DIR%system"
+set "INPUT_FOLDER_ROOT=%PARENT_DIR%"
+set "INPUT_FOLDER_SYSTEM=%PARENT_DIR%system"
+
+:: Ensure the target directory exists
+if not exist "%DIST_FOLDER_SYSTEM%" (
+    mkdir "%DIST_FOLDER_SYSTEM%"
+)
 
 echo
 echo Fetching config.ini...
-xcopy "%SCRIPT_PATH%\config.ini" "%DIST_FOLDER%" /Y >nul 2>&1
+xcopy "%SCRIPT_PATH%\system\config.ini" "%DIST_FOLDER_SYSTEM%" /Y
+if errorlevel 1 echo Error copying config.ini
 
 echo
 echo Copying folders...
 echo -system_resources...
-xcopy "%SCRIPT_PATH%\system_resources" "%DIST_FOLDER%\system_resources" /E /I /Y >nul 2>&1
+xcopy "%SCRIPT_PATH%\system_resources" "%DIST_FOLDER_ROOT%\system_resources" /E /I /Y >nul 2>&1
+if errorlevel 1 echo Error copying system_resources
 
 echo -input...
-xcopy "%SCRIPT_PATH%\input" "%DIST_FOLDER%\input" /E /I /Y >nul 2>&1
+xcopy "%SCRIPT_PATH%\input" "%DIST_FOLDER_ROOT%\input" /E /I /Y >nul 2>&1
+if errorlevel 1 echo Error copying input
 
 echo -output...
-xcopy "%SCRIPT_PATH%\output" "%DIST_FOLDER%\output" /E /I /Y >nul 2>&1
+xcopy "%SCRIPT_PATH%\output" "%DIST_FOLDER_ROOT%\output" /E /I /Y >nul 2>&1
+if errorlevel 1 echo Error copying output
 
 echo -qgis...
-xcopy "%SCRIPT_PATH%\qgis" "%DIST_FOLDER%\qgis" /E /I /Y >nul 2>&1
+xcopy "%SCRIPT_PATH%\qgis" "%DIST_FOLDER_ROOT%\qgis" /E /I /Y >nul 2>&1
+if errorlevel 1 echo Error copying qgis
 
 echo -docs...
-xcopy "%SCRIPT_PATH%\docs" "%DIST_FOLDER%\docs" /E /I /Y >nul 2>&1
+xcopy "%SCRIPT_PATH%\docs" "%DIST_FOLDER_ROOT%\docs" /E /I /Y >nul 2>&1
+if errorlevel 1 echo Error copying docs
 
 echo
-echo Working in this folder: %BUILD_FOLDER%
+echo Working in this folder: %BUILD_FOLDER_ROOT%
 
-echo Distribution folder will be: %DIST_FOLDER%
+echo Distribution folder will be: %DIST_FOLDER_ROOT%
 
 :: Start the compilation
+set "PYINSTALLER_CMD=pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_ROOT% --workpath=%BUILD_FOLDER_ROOT%"
 
 echo Working on mesa.py
-pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_ROOT%" --workpath="%BUILD_FOLDER_ROOT%" user_interface.py >nul 2>&1
+%PYINSTALLER_CMD% mesa.py >nul 2>&1
+if errorlevel 1 echo Error compiling mesa.py
 
 echo Working on 01_import.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 01_import.py >nul 2>&1
+%PYINSTALLER_CMD% 01_import.py >nul 2>&1
+if errorlevel 1 echo Error compiling 01_import.py
 
 echo Working on 02_present_files.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 02_present_files.py >nul 2>&1
+%PYINSTALLER_CMD% 02_present_files.py >nul 2>&1
+if errorlevel 1 echo Error compiling 02_present_files.py
 
 echo Working on 04_edit_asset_group.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 04_edit_asset_group.py >nul 2>&1
+%PYINSTALLER_CMD% 04_edit_asset_group.py >nul 2>&1
+if errorlevel 1 echo Error compiling 04_edit_asset_group.py
 
 echo Working on 04_edit_geocode_group.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 04_edit_geocode_group.py >nul 2>&1
+%PYINSTALLER_CMD% 04_edit_geocode_group.py >nul 2>&1
+if errorlevel 1 echo Error compiling 04_edit_geocode_group.py
 
 echo Working on 04_edit_input.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 04_edit_input.py >nul 2>&1
+%PYINSTALLER_CMD% 04_edit_input.py >nul 2>&1
+if errorlevel 1 echo Error compiling 04_edit_input.py
 
 echo Working on 06_process.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 06_process.py >nul 2>&1
+%PYINSTALLER_CMD% 06_process.py >nul 2>&1
+if errorlevel 1 echo Error compiling 06_process.py
 
 echo Working on 07_edit_atlas.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 07_edit_atlas.py >nul 2>&1
+%PYINSTALLER_CMD% 07_edit_atlas.py >nul 2>&1
+if errorlevel 1 echo Error compiling 07_edit_atlas.py
 
 echo Working on 07_make_atlas.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER%" --workpath="%BUILD_FOLDER_SYSTEM%" 07_make_atlas.py >nul 2>&1
+%PYINSTALLER_CMD% 07_make_atlas.py >nul 2>&1
+if errorlevel 1 echo Error compiling 07_make_atlas.py
 
 echo Working on 08_admin_lines.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 08_admin_lines.py >nul 2>&1
+%PYINSTALLER_CMD% 08_admin_lines.py >nul 2>&1
+if errorlevel 1 echo Error compiling 08_admin_lines.py
 
 echo Working on 08_edit_lines.py
-pyinstaller --onefile --collect-all ttkbootstrap --hidden-import=ttkbootstrap --distpath="%DIST_FOLDER_SYSTEM%" --workpath="%BUILD_FOLDER_SYSTEM%" 08_edit_lines.py >nul 2>&1
+%PYINSTALLER_CMD% 08_edit_lines.py >nul 2>&1
+if errorlevel 1 echo Error compiling 08_edit_lines.py
 
-echo Compilation complete. You will finde the compiled code here: %DIST_FOLDER_ROOT%
-
+echo Compilation complete. You will find the compiled code here: %DIST_FOLDER_ROOT%
 
 echo
 
 :: Clean up build folders and .spec files
 
 :: Check if the folder exists
-if exist "%BUILD_FOLDER%" (
-    echo Deleting the work folder: %BUILD_FOLDER%
-    rmdir /s /q "%BUILD_FOLDER%"
+if exist "%BUILD_FOLDER_ROOT%" (
+    echo Deleting the work folder: %BUILD_FOLDER_ROOT%
+    rmdir /s /q "%BUILD_FOLDER_ROOT%"
     echo Folder deleted successfully.
 ) else (
-    echo Work folder does not exist: %BUILD_FOLDER%
+    echo Work folder does not exist: %BUILD_FOLDER_ROOT%
 )
 
- echo Build folders deleted
+echo Build folders deleted
 
 echo
 
 :: Just delete the -spec-files
- del "*.spec" /q
+del "*.spec" /q
 
 echo All .spec-files deleted
-
-pause
