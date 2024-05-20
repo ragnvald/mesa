@@ -2,6 +2,7 @@ import geopandas as gpd
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
+import fiona
 
 # Define paths
 geopackage_file = '../output/mesa.gpkg'
@@ -11,16 +12,57 @@ excel_assets_stats = os.path.join(output_folder, 'assets_stats_per_sensitivity.x
 excel_overall_stats = os.path.join(output_folder, 'overall_stats_per_sensitivity.xlsx')
 bar_chart_output = os.path.join(output_folder, 'sensitivity_overall_stats_bar_chart.png')
 
-# Load data
-gdf_assets = gpd.read_file(geopackage_file, layer='tbl_asset_object')
+# List all layers in the GeoPackage file using fiona
+layers = fiona.listlayers(geopackage_file)
+print("Available layers in GeoPackage:", layers)
+
+# Load data from all geometry types
+gdf_assets_list = []
+for layer in layers:
+    if 'tbl_asset_object' in layer:
+        gdf = gpd.read_file(geopackage_file, layer=layer)
+        gdf_assets_list.append(gdf)
+
+# Combine all geometry types into a single GeoDataFrame
+gdf_assets = pd.concat(gdf_assets_list, ignore_index=True)
+print("Combined gdf_assets data:\n", gdf_assets.head())
+
 tbl_asset_group = gpd.read_file(geopackage_file, layer='tbl_asset_group')
+print("Initial tbl_asset_group data:\n", tbl_asset_group.head())
+
+# Drop geometry column from asset group table and merge with assets
 tbl_asset_group = tbl_asset_group.drop(columns=['geometry'])
-gdf_assets = gdf_assets.merge(tbl_asset_group, left_on='ref_asset_group', right_on='id')
+
+# Verify unique IDs in tbl_asset_group
+print("Unique IDs in tbl_asset_group:", tbl_asset_group['id'].unique())
+
+# Verify unique ref_asset_group in gdf_assets
+print("Unique ref_asset_group in gdf_assets:", gdf_assets['ref_asset_group'].unique())
+
+# Merge operation
+gdf_assets = gdf_assets.merge(tbl_asset_group, left_on='ref_asset_group', right_on='id', how='left')
+
+# Check merged data
+print("Merged gdf_assets data:\n", gdf_assets.all())
+
+# Create GeoDataFrame and filter polygons
 gdf_assets = gpd.GeoDataFrame(gdf_assets, geometry='geometry')
 gdf_assets = gdf_assets[gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+
+# Reproject and calculate area
 gdf_assets = gdf_assets.to_crs('ESRI:54009')  # Mollweide projection
 gdf_assets['area'] = gdf_assets['geometry'].area
+
+# Combine sensitivity code and description
 gdf_assets['sensitivity_text'] = gdf_assets['sensitivity_code'] + ' | ' + gdf_assets['sensitivity_description']
+
+# Verify unique sensitivity categories after processing
+unique_sensitivity_categories = gdf_assets['sensitivity_text'].unique()
+print("Unique Sensitivity Categories after processing:", unique_sensitivity_categories)
+
+# Check if 'A' category is missing
+if not any('A' in category for category in unique_sensitivity_categories):
+    print("Warning: Category 'A' is missing from the data!")
 
 def format_area(row):
     if row['total_area'] < 1_000_000:
@@ -67,4 +109,3 @@ def create_bar_chart(df, output_path):
     plt.show()
 
 create_bar_chart(overall_stats_table, bar_chart_output)
-
