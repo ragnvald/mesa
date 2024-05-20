@@ -70,7 +70,7 @@ def update_progress(new_value):
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
     if not os.path.isfile(config_file):
-        print(f"Configuration file {config_file} not found.")
+        log_to_gui(log_widget, f"Configuration file {config_file} not found.")
         return
 
     # Read the entire config file to preserve the layout and comments
@@ -95,7 +95,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
                     break
                 except ValueError:
                     # Handle the case where the conversion fails
-                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    log_to_gui(log_widget, f"Error: Current value of {stat_name} is not an integer.")
                     return
 
     # Write the updated content back to the file if the variable was found and updated
@@ -676,8 +676,12 @@ def run_subprocess(command, fallback_command):
             log_to_gui(f"Failed to execute command: {command}")
 
 
-def edit_asset_group():
-    run_subprocess(["python", "08_edit_lines.py"], ["08_edit_lines.exe"])
+def edit_asset_group(): 
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    edit_lines_py = os.path.join(current_dir, '08_edit_lines.py')
+
+    edit_lines_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '08_edit_lines.exe')
+    run_subprocess(["python", edit_lines_py], [edit_lines_exe])
 
 
 def exit_program():

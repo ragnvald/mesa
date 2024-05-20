@@ -229,7 +229,7 @@ def run_import_atlas(input_folder_atlas, gpkg_file, log_widget, progress_var):
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
     if not os.path.isfile(config_file):
-        print(f"Configuration file {config_file} not found.")
+        log_to_gui(log_widget, f"Configuration file {config_file} not found.")
         return
 
     # Read the entire config file to preserve the layout and comments
@@ -254,7 +254,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
                     break
                 except ValueError:
                     # Handle the case where the conversion fails
-                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    log_to_gui(log_widget, f"Error: Current value of {stat_name} is not an integer.")
                     return
 
     # Write the updated content back to the file if the variable was found and updated
@@ -278,7 +278,10 @@ def run_subprocess(command, fallback_command):
 
 
 def edit_atlas():
-    run_subprocess(["python", "07_edit_atlas.py"], ["07_edit_atlas.exe"])
+    edit_atlas_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '07_edit_atlas.py')
+    edit_atlas_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '07_edit_atlas.exe')
+
+    run_subprocess(["python", edit_atlas_py], [edit_atlas_exe])
 
 
 #####################################################################################
