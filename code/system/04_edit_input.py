@@ -69,7 +69,7 @@ def determine_category(sensitivity):
 # Function to safely load WKB or indicate error
 def load_wkb_or_flag(wkb_data):
     if wkb_data is None or wkb_data == '':
-        print("No WKB data found.")
+        log_to_file("No WKB data found.")
         return None
     try:
         # Assuming the WKB data might be in hexadecimal string format
@@ -77,10 +77,10 @@ def load_wkb_or_flag(wkb_data):
             wkb_data = binascii.unhexlify(wkb_data)
         return wkb.loads(wkb_data)
     except binascii.Error as e:
-        print(f"Failed to convert hex: {e}")
+        log_to_file(f"Failed to convert hex: {e}")
         return None
     except Exception as e:
-        print(f"Failed to load WKB: {e}")
+        log_to_file(f"Failed to load WKB: {e}")
         return None
 
 
@@ -135,7 +135,7 @@ def update_all_rows_immediately(entries, df_assetgroup):
             entry['sensitivity_description']['text']    = sensitivity_description
 
         except ValueError as e:
-            print(f"Input Error: {e}")
+            log_to_file(f"Input Error: {e}")
             continue  # Skip this entry and continue with the next
 
 
@@ -158,12 +158,12 @@ def load_data(gpkg_file):
         
         # Check for any geometries that failed to load (if geometries are invalid or missing)
         if df_assetgroup.geometry.isnull().any():
-            print("Some geometries failed to load or are invalid.")
+            log_to_file("Some geometries failed to load or are invalid.")
         
         return df_assetgroup
 
     except Exception as e:
-        print("Failed to load data:", e)
+        log_to_file("Failed to load data:", e)
         log_to_file("Database file is missing.")
 
         return None
@@ -343,7 +343,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
                     break
                 except ValueError:
                     # Handle the case where the conversion fails
-                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    log_to_file(f"Error: Current value of {stat_name} is not an integer.")
                     return
     
     # Write the updated content back to the file if the variable was found and updated
@@ -384,7 +384,7 @@ if __name__ == "__main__":
     df_assetgroup = load_data(gpkg_file)
 
     if df_assetgroup is None:
-        print("Failed to load the GeoDataFrame. Check the GeoPackage file and the data integrity.")
+        log_to_file("Failed to load the GeoDataFrame. Check the GeoPackage file and the data integrity.")
         sys.exit(1)  # Exit if the data could not be loaded, adjust handling as needed
 
     canvas, frame, entries = setup_ui_elements(root, df_assetgroup, column_widths)  # Ensure entries are received here
