@@ -1,11 +1,3 @@
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-# 
-# Work in progress
-#
-# The intention of this file is to provide a draft overview of assets, geocodes and coded assets
-# Could be used to create the basis for a PDF report showing the database processing.
-# As for now - just a proof of concept.
-
 import geopandas as gpd
 import pandas as pd
 import configparser
@@ -14,46 +6,46 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sqlite3
 import os
+import contextily as ctx
 
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
 
-
 # Logging function to write to the GUI log
-def write_to_log( message):
+def write_to_log(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
-
-def plot_geopackage_layer(gpkg_file, layer_name, output_png):
+def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
     try:
         layer = gpd.read_file(gpkg_file, layer=layer_name)
 
-        if layer.empty or layer.is_empty.any() or not 'geometry' in layer.columns:
+        if layer.empty or layer.is_empty.any() or 'geometry' not in layer.columns:
             print(f"Layer {layer_name} is empty, contains invalid geometries, or has no geometry column.")
             return
 
         fig, ax = plt.subplots(figsize=(40, 40), dpi=200)
-        common_crs = workingprojection_epsg
+        
+        if layer.crs.to_string() != crs:
+            layer = layer.to_crs(crs)
 
-        if layer.crs and layer.crs.to_string() != common_crs:
-            layer = layer.to_crs(common_crs)
-
-        polygons  = layer[layer.geom_type.isin(['Polygon', 'MultiPolygon'])]
-        lines     = layer[layer.geom_type.isin(['LineString', 'MultiLineString'])]
-        points    = layer[layer.geom_type.isin(['Point', 'MultiPoint'])]
-
+        polygons = layer[layer.geom_type.isin(['Polygon', 'MultiPolygon'])]
+        lines = layer[layer.geom_type.isin(['LineString', 'MultiLineString'])]
+        points = layer[layer.geom_type.isin(['Point', 'MultiPoint'])]
 
         if not points.empty:
-            points.plot(ax=ax, alpha=0.5, color='#628C96')
+            points.plot(ax=ax, alpha=0.7, color='#99EE77')
         if not lines.empty:
-            lines.plot(ax=ax, alpha=0.5, color='#628C96')
+            lines.plot(ax=ax, alpha=0.7, color='#99EE77')
         if not polygons.empty:
-            polygons.plot(ax=ax, alpha=0.5, facecolor='#99D9EA', edgecolor='#8CC7D6')
+            polygons.plot(ax=ax, alpha=0.7, facecolor='#99EE77', edgecolor='#8CC7D6')
+
+        # Add basemap
+        ctx.add_basemap(ax, crs=crs, source=ctx.providers.OpenStreetMap.Mapnik)
 
         # Default plot limits in case of invalid bounds
         default_limits = (-180, 180, -90, 90)
@@ -72,13 +64,12 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png):
             ax.set_ylim(default_limits[2], default_limits[3])
 
         plt.savefig(output_png, bbox_inches='tight')
+        plt.close(fig)  # Close the figure to ensure the file is written
         print(f"Plot saved to {output_png}")
 
     except Exception as e:
         print(f"Error processing layer {layer_name}: {e}")
 
-
-# Define a Python function to execute the query and return a DataFrame
 def fetch_asset_group_statistics(db_path):
     """
     Fetches the asset group statistics from the database.
@@ -86,38 +77,26 @@ def fetch_asset_group_statistics(db_path):
     :param db_path: Path to the SQLite database file
     :return: A pandas DataFrame containing the asset group statistics
     """
-    # Connect to the SQLite database
     conn = sqlite3.connect(db_path)
-    
-    # Create a cursor object
     cur = conn.cursor()
     
-    # SQL query to select all attributes from tbl_asset_group and count the number of associated objects in tbl_asset
     sql_query = """
     SELECT a.*, COUNT(b.ref_asset_group) AS asset_objects_nr
     FROM tbl_asset_group AS a
     LEFT JOIN tbl_asset_object AS b ON a.id = b.ref_asset_group
-    GROUP BY a.id;
+    GROUP BY a.sensitivity_code
+    ORDER BY a.sensitivity_code;
     """
     
-    # Execute the query
     cur.execute(sql_query)
-    
-    # Fetch all results
     results = cur.fetchall()
-    
-    # Fetch the column names
     column_names = [description[0] for description in cur.description]
-    
-    # Close the connection
     conn.close()
     
-    # Convert the query results into a pandas DataFrame
     df_results = pd.DataFrame(results, columns=column_names)
     
     return df_results
 
-# Define a Python function to export a DataFrame to an Excel file
 def export_to_excel(data_frame, file_path):
     """
     Exports a pandas DataFrame to an Excel file.
@@ -125,25 +104,25 @@ def export_to_excel(data_frame, file_path):
     :param data_frame: The pandas DataFrame to export
     :param file_path: The file path to save the Excel file
     """
-    # Use the .to_excel() method to export to Excel format
+    if not file_path.endswith('.xlsx'):
+        file_path += '.xlsx'
+    
     data_frame.to_excel(file_path, index=False)
-
-
 
 #####################################################################################
 #  Main
 #
-        
-config_file             = os.path.join('..', 'config.ini')
-config                  = read_config(config_file)
+config_file = 'config.ini'
+config = read_config(config_file)
 
-gpkg_file               = os.path.join('..', config['DEFAULT']['gpkg_file'])
-output_png              = os.path.join('..', config['DEFAULT']['output_png'])
-asset_output_png        = os.path.join('..', 'output/asset.png')
-flat_output_png         = os.path.join('..', 'output/flat.png')
-geocode_output_png      = os.path.join('..', 'output/geocode.png')
-                                       
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+gpkg_file = os.path.join('..', config['DEFAULT']['gpkg_file'])
+output_png = os.path.join('..', config['DEFAULT']['output_png'])
+asset_output_png = '../output/asset.png'
+flat_output_png = '../output/flat.png'
+geocode_output_png = '../output/geocode.png'
+excel_output = '../output/asset_group_statistics.xlsx'
+
+workingprojection_epsg = config['DEFAULT']['workingprojection_epsg']
 
 plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
 write_to_log("Overview of assets exported")
@@ -151,5 +130,5 @@ plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
 write_to_log("Overview of flat tables exported")
 
 df_asset_group_statistics = fetch_asset_group_statistics(gpkg_file)
-print (df_asset_group_statistics.head())
-export_to_excel(df_asset_group_statistics, gpkg_file)
+export_to_excel(df_asset_group_statistics, excel_output)
+write_to_log("Excel table exported")
