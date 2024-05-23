@@ -119,8 +119,8 @@ def calculate_group_statistics(gpkg_file, layer_name):
     gdf_assets = gdf_assets.to_crs('ESRI:54009')
 
     # Separate polygons and non-polygons
-    polygons = gdf_assets[gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])]
-    non_polygons = gdf_assets[~gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+    polygons = gdf_assets[gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
+    non_polygons = gdf_assets[~gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
 
     # Calculate area for polygons
     polygons.loc[:, 'area'] = polygons['geometry'].area
@@ -166,15 +166,23 @@ def line_up_to_pdf(order_list):
         item_type, item_value = item
 
         if item_type == 'text':
-            with open(item_value, 'r') as file:
-                text = file.read()
-                text = text.replace("\n", "<br/>")  # Replace newlines with <br/> for HTML-style line breaks
-                elements.append(Paragraph(text, styles['Normal']))
-                elements.append(Spacer(1, 12))
+            # Check if item_value is a file path or direct text
+            if os.path.isfile(item_value):
+                with open(item_value, 'r') as file:
+                    text = file.read()
+            else:
+                text = item_value
+            text = text.replace("\n", "<br/>")  # Replace newlines with <br/> for HTML-style line breaks
+            elements.append(Paragraph(text, styles['Normal']))
+            elements.append(Spacer(1, 12))
         
         elif item_type == 'image':
             elements.append(Image(item_value, width=500, height=500))
             elements.append(Spacer(1, 12))
+
+        elif item_type == 'spacer':
+            lines = item_value if item_value else 1  # Default to 1 line if no value is provided
+            elements.append(Spacer(1, lines * 12))
         
         elif item_type == 'table':
             df = pd.read_excel(item_value)
@@ -201,7 +209,19 @@ def line_up_to_pdf(order_list):
 
 def compile_pdf(output_pdf, elements):
     doc = SimpleDocTemplate(output_pdf, pagesize=A4)  # Use A4 page size
-    doc.build(elements)
+    
+    # Create a function to add a header on every page starting from the second page
+    def add_header(canvas, doc):
+        canvas.saveState()
+        header_text = "MESA - report on data provided"
+        canvas.setFont('Helvetica-Bold', 10)
+        canvas.setFillColor(colors.gray)
+        width, height = A4
+        if doc.page > 1:
+            canvas.drawString(72, height - 40, header_text)
+        canvas.restoreState()
+    
+    doc.build(elements, onFirstPage=add_header, onLaterPages=add_header)
 
 #####################################################################################
 #  Main
@@ -235,29 +255,35 @@ group_statistics = calculate_group_statistics(gpkg_file, 'tbl_asset_object')
 export_to_excel(group_statistics, object_stats_output)
 write_to_log("Asset object statistics table exported")
 
+# Get the current date and time
+timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+time_info = f"Timestamp for this report is: {timestamp}"
+
 # Define the order of objects for the PDF
 order_list = [
     ('heading(1)', "MESA report"),
-    ('heading(1)', "MESA report"),
+    ('spacer', 5),
+    ('text', time_info),  # Direct text
     ('new_page', None),
     ('heading(2)', "Introduction"),
-    ('text', '../output/tmp/introduction.txt'), 
+    ('text', '../output/tmp/introduction.txt'),  # Text from file
     ('heading(2)', "Geographical Coordinates"),
-    ('text', '../output/tmp/geographical_coordinates.txt'), 
+    ('text', '../output/tmp/geographical_coordinates.txt'),  # Text from file
     ('new_page', None),
     ('heading(2)', "Asset Data Table"),
-    ('text', '../output/tmp/asset_overview.txt'),
+    ('text', '../output/tmp/asset_overview.txt'),  # Text from file
+    ('spacer', 2),
     ('table', excel_output),
     ('new_page', None),
     ('heading(2)', "Detailed Asset Description"),
-    ('text', '../output/tmp/asset_desc.txt'),
+    ('text', '../output/tmp/asset_desc.txt'),  # Text from file
     ('image', flat_output_png),
     ('new_page', None),
-    ('heading(2)', "Asset Data Overview"),
     ('heading(2)', "Map Representation"),
     ('image', asset_output_png),
     ('new_page', None),
     ('heading(2)', "Asset Object Statistics"),
+    ('spacer', 2),
     ('table', object_stats_output)
 ]
 
