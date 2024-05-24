@@ -86,7 +86,7 @@ def fetch_asset_group_statistics(db_path):
     
     cur.execute(sql_query)
     results = cur.fetchall()
-    column_names = [description[0] for description in cur.description]
+    column_names = ['Sensitivity Code', 'Sensitivity Description', 'Number of Asset Objects']  # Set column names here
     conn.close()
     
     df_results = pd.DataFrame(results, columns=column_names)
@@ -142,6 +142,9 @@ def calculate_group_statistics(gpkg_file, layer_name):
 
     # Sort by sensitivity_code
     group_stats = group_stats.sort_values(by='sensitivity_code')
+
+    # Set column names
+    group_stats.columns = ['Title', 'Code', 'Description', 'Type', 'Total area', '# objects']
     
     return group_stats
 
@@ -159,7 +162,7 @@ def line_up_to_pdf(order_list):
     heading_styles = {
         1: ParagraphStyle(name='Heading1', fontSize=18, leading=22, spaceAfter=12, alignment=TA_CENTER),
         2: ParagraphStyle(name='Heading2', fontSize=16, leading=8, spaceAfter=4),
-        3: ParagraphStyle(name='Heading3', fontSize=14, leading=8, spaceAfter=4)
+        3: ParagraphStyle(name='Heading3', fontSize=12, leading=8, spaceAfter=4)
     }
 
     for item in order_list:
@@ -186,6 +189,8 @@ def line_up_to_pdf(order_list):
         
         elif item_type == 'table':
             df = pd.read_excel(item_value)
+            if len(df.columns) == 3:  # Ensure we only rename if the column count matches
+                df.columns = ['Code', 'Description', '# asset objects']
             table_data = [df.columns.tolist()] + df.values.tolist()
             table = Table(table_data)
             table.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.grey),
@@ -210,7 +215,7 @@ def line_up_to_pdf(order_list):
 def compile_pdf(output_pdf, elements):
     doc = SimpleDocTemplate(output_pdf, pagesize=A4)  # Use A4 page size
     
-    # Create a function to add a header on every page starting from the second page
+    # Create a function to add a centered header on every page starting from the second page
     def add_header(canvas, doc):
         canvas.saveState()
         header_text = "MESA - report on data provided"
@@ -218,7 +223,7 @@ def compile_pdf(output_pdf, elements):
         canvas.setFillColor(colors.gray)
         width, height = A4
         if doc.page > 1:
-            canvas.drawString(72, height - 40, header_text)
+            canvas.drawCentredString(width / 2.0, height - 40, header_text)
         canvas.restoreState()
     
     doc.build(elements, onFirstPage=add_header, onLaterPages=add_header)
@@ -267,29 +272,31 @@ order_list = [
     ('new_page', None),
     ('heading(2)', "Introduction"),
     ('text', '../output/tmp/introduction.txt'),  # Text from file
-    ('heading(2)', "Geographical Coordinates"),
+    ('spacer', 2),
+    ('heading(2)', "Asset object statistics"),
+    ('table', object_stats_output),
+    ('new_page', None),
+    ('heading(2)', "Map representation of all assets"),
+    ('text', '../output/tmp/asset_desc.txt'),  # Text from file
+    ('image', asset_output_png),
+    ('heading(3)', "Geographical Coordinates"),
     ('text', '../output/tmp/geographical_coordinates.txt'),  # Text from file
     ('new_page', None),
-    ('heading(2)', "Asset Data Table"),
+    ('heading(2)', "Asset data table"),
     ('text', '../output/tmp/asset_overview.txt'),  # Text from file
     ('spacer', 2),
     ('table', excel_output),
     ('new_page', None),
-    ('heading(2)', "Detailed Asset Description"),
-    ('text', '../output/tmp/asset_desc.txt'),  # Text from file
+    ('heading(2)', "Detailed asset description"),
     ('image', flat_output_png),
-    ('new_page', None),
-    ('heading(2)', "Map Representation"),
-    ('image', asset_output_png),
-    ('new_page', None),
-    ('heading(2)', "Asset Object Statistics"),
-    ('spacer', 2),
-    ('table', object_stats_output)
+    ('new_page', None)
 ]
 
 elements = line_up_to_pdf(order_list)
 
+timestamp_pdf = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+
 # Create PDF
-output_pdf = '../output/report.pdf'
+output_pdf = f'../output/{timestamp_pdf}_MESA-report.pdf'
 compile_pdf(output_pdf, elements)
 write_to_log("PDF report created")
