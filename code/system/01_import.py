@@ -23,6 +23,7 @@ import subprocess
 import datetime
 import glob
 import os
+import sys
 from osgeo import ogr
 import pandas as pd
 from sqlalchemy import exc
@@ -54,6 +55,12 @@ def get_bounding_box(data):
     bbox = data.total_bounds
     bbox_geom = box(*bbox)
     return bbox_geom
+
+
+def get_base_path():
+    if hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 # Update progress label
@@ -929,29 +936,14 @@ def run_subprocess(command, fallback_command):
             log_to_gui(f"Failed to execute command: {command}")
 
 
-print (os.path.abspath(__file__))
-
-def edit_asset_group():
-    edit_asset_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_asset_group.py')
-    edit_asset_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_asset_group.exe')
-
-    run_subprocess(["python", edit_asset_py], [edit_asset_exe])
-
-
-def edit_lines():
-
-    edit_lines_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '08_edit_lines.py')
-    edit_lines_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '08_edit_lines.exe')
-
-    run_subprocess(["python", edit_lines_py], [edit_lines_exe])
-
-
-def edit_geocode_group():
+def get_current_directory_and_file():
+    # Get the current working directory
+    current_directory = os.getcwd()
     
-    edit_geocode_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_geocode_group.py')
-    edit_geocode_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '04_edit_geocode_group.exe')
-
-    run_subprocess(["python", edit_geocode_py], [edit_geocode_exe])
+    # Get the name of the current file
+    current_file = os.path.basename(sys.argv[0])
+    
+    return current_directory, current_file
 
 
 # Function to close the application
@@ -982,7 +974,7 @@ root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
 root.title("Import assets")
 
 # Create a LabelFrame for the log output
-log_frame = ttk.LabelFrame(root, text="Log Output", bootstyle="info") 
+log_frame = ttk.LabelFrame(root, text="Log output", bootstyle="info") 
 log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
 # Create a log widget inside the LabelFrame
@@ -1035,19 +1027,5 @@ import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
 exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
 exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
 
-# Edit assets
-edit_asset_group_btn = ttk.Button(button_frame, text="Edit assets", bootstyle=SECONDARY, command=lambda: threading.Thread(
-    target=edit_asset_group, args=(), daemon=True).start())
-edit_asset_group_btn.grid(row=1, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
-
-# Edit assets
-edit_ageocodes_btn = ttk.Button(button_frame, text="Edit geocodes", bootstyle=SECONDARY, command=lambda: threading.Thread(
-    target=edit_geocode_group, args=(), daemon=True).start())
-edit_ageocodes_btn.grid(row=1, column=1, columnspan=1, padx=10, pady=5, sticky='ew')
-
-# Edit lines
-edit_lines_btn = ttk.Button(button_frame, text="Edit lines", bootstyle=SECONDARY, command=lambda: threading.Thread(
-    target=edit_lines, args=(), daemon=True).start())
-edit_lines_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew')
 
 root.mainloop()
