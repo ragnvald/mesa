@@ -168,8 +168,12 @@ ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyl
 
 ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=6, column=1, padx=5, pady=5)
 
+
+# Save button
+ttk.Button(root, text="Save", command=update_record(save_message=False), bootstyle=SUCCESS).grid(row=6, column=4, columnspan=1, padx=5, pady=5)
+
 # Exit button
-ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=2, columnspan=3, pady=5)
+ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=5, columnspan=1, padx=5, pady=5)
 
 # Load the first record
 load_record()
