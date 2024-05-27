@@ -263,27 +263,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
             file.writelines(lines)
 
 
-def run_subprocess(command, fallback_command):
-
-    """ Utility function to run a subprocess with a fallback option. """
-    try:
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        try:
-            subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-        except subprocess.CalledProcessError:
-            log_to_gui(f"Failed to execute command: {command}")
-
-
-def edit_atlas():
-    edit_atlas_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '07_edit_atlas.py')
-    edit_atlas_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '07_edit_atlas.exe')
-
-    run_subprocess(["python", edit_atlas_py], [edit_atlas_exe])
-
-
 #####################################################################################
 #  Main
 #
@@ -293,8 +272,8 @@ config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)
 config                  = read_config(config_file)
 
 gpkg_file               = config['DEFAULT']['gpkg_file']
-input_folder_atlas      = config['DEFAULT']['input_folder_atlas']
-                                       
+
+input_folder_atlas      = config['DEFAULT']['input_folder_atlas']                      
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
@@ -343,9 +322,5 @@ create_atlas_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew
 # Add 'Close' button to the button frame
 close_btn = ttk.Button(button_frame, bootstyle=WARNING, text="Exit", command=lambda: close_application(root))
 close_btn.grid(row=1, column=3, columnspan=1, padx=10, pady=5, sticky='ew')
-
-edit_atlas_btn = ttk.Button(button_frame, text="Edit atlas objects", bootstyle=SECONDARY, command=lambda: threading.Thread(
-    target=edit_atlas, args=(), daemon=True).start())
-edit_atlas_btn.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky='ew')
 
 root.mainloop()

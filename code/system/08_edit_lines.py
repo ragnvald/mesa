@@ -98,6 +98,7 @@ def exit_application():
 #  Main
 #
 
+
 # Load configuration settings
 config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)

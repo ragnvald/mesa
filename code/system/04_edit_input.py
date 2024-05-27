@@ -368,6 +368,7 @@ config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)
 config                  = read_config(config_file)
 
 gpkg_file               = config['DEFAULT']['gpkg_file']
+
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
                                        

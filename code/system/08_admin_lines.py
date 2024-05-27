@@ -705,7 +705,7 @@ workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Admin segments")
-root.geometry("750x550")
+root.geometry("750x350")
 
 # Define button sizes and width
 button_width = 18   
@@ -717,11 +717,11 @@ main_frame = tk.Frame(root)
 main_frame.pack(fill='both', expand=True, pady=10)
 
 # Create a LabelFrame for the log output
-log_frame = ttk.LabelFrame(main_frame, text="Log Output", bootstyle="info") 
+log_frame = ttk.LabelFrame(main_frame, text="Log output", bootstyle="info") 
 log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
 # Create a log widget inside the LabelFrame
-log_widget = scrolledtext.ScrolledText(log_frame, height=10)
+log_widget = scrolledtext.ScrolledText(log_frame, height=6)
 log_widget.pack(fill=tk.BOTH, expand=True)
 
 # Create a frame to hold the progress bar and the label
@@ -740,25 +740,21 @@ progress_label.pack(side=tk.LEFT, padx=5)
 buttons_frame = tk.Frame(main_frame)
 buttons_frame.pack(side='left', fill='both', padx=20, pady=5)  # Corrected this line
 
-# Edit assets
-edit_asset_group_btn = ttk.Button(buttons_frame, text="Edit lines", bootstyle='secondary', command=lambda: threading.Thread(
-    target=edit_asset_group, args=(), daemon=True).start())
-edit_asset_group_btn.grid(row=0, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
-
-# Explanatory label next to the Initiate-button
-initiate_label = tk.Label(buttons_frame, text="Lines are processed to segments with the parameterd length and width. Default values are set when the lines are imported. This is where you can adjust the parameters as well as their names.", bg="light grey",  wraplength=400, justify="left")
-initiate_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
+# Information text field above the buttons
+info_label_text = ("Create sensitivity values for the segments.")
+info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
+info_label.pack(padx=10, pady=10)
 
 # Create the Process and buffer button
 process_button = ttk.Button(buttons_frame, text="Process segments", command=lambda: process_all(gpkg_file, log_widget), width=button_width)
-process_button.grid(row=1, column=0, padx=button_padx, pady=button_pady)
+process_button.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
 # Explanatory label next to the Process-button
 process_label = tk.Label(buttons_frame, text="Create sensitivity values for the segments.", bg="light grey",  justify='left')
-process_label.grid(row=1, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
+process_label.grid(row=0, column=1, padx=button_padx, sticky='w')  # Align to the west (left)
 
 # Adjust the exit button to align it to the right
 exit_btn = ttk.Button(buttons_frame, text="Exit", command=exit_program, width=button_width, bootstyle="warning")
-exit_btn.grid(row=2, column=1, pady=button_pady, sticky='e')  # Align to the right side
+exit_btn.grid(row=1, column=1, pady=button_pady, sticky='e')  # Align to the right side
 
 root.mainloop()

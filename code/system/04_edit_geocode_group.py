@@ -77,7 +77,7 @@ def exit_application():
 #####################################################################################
 #  Main
 #
-    
+
 # Load configuration settings
 config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)
@@ -85,8 +85,6 @@ config                  = read_config(config_file)
 input_folder_asset      = config['DEFAULT']['input_folder_asset']
 input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
 gpkg_file               = config['DEFAULT']['gpkg_file']
-
-print (gpkg_file)       
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']

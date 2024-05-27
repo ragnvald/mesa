@@ -5,6 +5,7 @@ import pandas as pd
 import datetime
 from sqlalchemy import create_engine
 import os
+import sys
 
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
@@ -21,7 +22,7 @@ def read_config(file_name):
 
 
 # Logging function to write to the GUI log
-def write_to_log( message):
+def write_to_log(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
     with open("log.txt", "a") as log_file:
@@ -84,25 +85,40 @@ def exit_application():
     write_to_log("Closing edit assets")
     root.destroy()
 
+def get_current_directory_and_file():
+    # Get the current working directory
+    current_directory = os.getcwd()
+    
+    # Get the name of the current file
+    current_file = os.path.basename(sys.argv[0])
+    
+    return current_directory, current_file
+
+
 #####################################################################################
 #  Main
 #
 
+
 # Load configuration settings
-config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
-config                  = read_config(config_file)
+config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
+config      = read_config(config_file)
 
 input_folder_asset      = config['DEFAULT']['input_folder_asset']
 input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
 gpkg_file               = config['DEFAULT']['gpkg_file']
 
-print (gpkg_file)       
-
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
-
 if __name__ == "__main__":
+
+    directory, file_name = get_current_directory_and_file()
+    print(f"Current Directory: {directory}")
+    write_to_log(f"Current dir {directory}")
+    print(f"File Name: {file_name}")
+    write_to_log(f"Current file {file_name}")
+
     # Create the user interface
     root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
     root.title("Edit assets")
@@ -136,9 +152,9 @@ if __name__ == "__main__":
 
     # Information text field above the "Update and Save Record" button
     info_label_text = ("All assets that are imported are associated with a file "
-                    "or table name. This table name is the original name. If "
-                    "you want to use a different name in presenting the analysis "
-                    "we suggest that you add that name here.")
+                       "or table name. This table name is the original name. If "
+                       "you want to use a different name in presenting the analysis "
+                       "we suggest that you add that name here.")
     info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
     info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
 
@@ -146,8 +162,11 @@ if __name__ == "__main__":
     ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=5, pady=5)
     ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
 
+    # Save button
+    ttk.Button(root, text="Save", command=update_record, bootstyle=SUCCESS).grid(row=5, column=1, pady=5)
+
     # Exit button
-    ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=2, columnspan=3, pady=5)
+    ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=5, column=2, pady=5)
 
     # Load the first record
     load_record()

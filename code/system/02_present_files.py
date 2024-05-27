@@ -234,17 +234,17 @@ def compile_pdf(output_pdf, elements):
 config_file = 'config.ini'
 config = read_config(config_file)
 
-gpkg_file = os.path.join('..', config['DEFAULT']['gpkg_file'])
-output_png = os.path.join('..', config['DEFAULT']['output_png'])
-tmp_dir = os.path.join('..', 'output/tmp')
+gpkg_file               = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../output/mesa.gpkg')
+output_png              = os.path.join('..', config['DEFAULT']['output_png'])
+tmp_dir                 = os.path.join('..', 'output/tmp')
 os.makedirs(tmp_dir, exist_ok=True)
 
 asset_output_png = os.path.join(tmp_dir, 'asset.png')
-flat_output_png = os.path.join(tmp_dir, 'flat.png')
-excel_output = os.path.join(tmp_dir, 'asset_group_statistics.xlsx')
-object_stats_output = os.path.join(tmp_dir, 'asset_object_statistics.xlsx')
+flat_output_png         = os.path.join(tmp_dir, 'flat.png')
+asset_group_statistics  = os.path.join(tmp_dir, 'asset_group_statistics.xlsx')
+object_stats_output     = os.path.join(tmp_dir, 'asset_object_statistics.xlsx')
 
-workingprojection_epsg = config['DEFAULT']['workingprojection_epsg']
+workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
 write_to_log("Overview of assets exported")
@@ -252,7 +252,7 @@ plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
 write_to_log("Overview of flat tables exported")
 
 df_asset_group_statistics = fetch_asset_group_statistics(gpkg_file)
-export_to_excel(df_asset_group_statistics, excel_output)
+export_to_excel(df_asset_group_statistics, asset_group_statistics)
 write_to_log("Excel table exported")
 
 # Calculate group statistics
@@ -285,7 +285,7 @@ order_list = [
     ('heading(2)', "Asset data table"),
     ('text', '../output/tmp/asset_overview.txt'),  # Text from file
     ('spacer', 2),
-    ('table', excel_output),
+    ('table', asset_group_statistics),
     ('new_page', None),
     ('heading(2)', "Detailed asset description"),
     ('image', flat_output_png),
