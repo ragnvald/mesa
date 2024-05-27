@@ -150,7 +150,7 @@ if __name__ == "__main__":
     button_frame.pack(pady=10)
 
     # Save button
-    save_button = ttk.Button(button_frame, text="Save Data", command=save_changes, bootstyle=PRIMARY)
+    save_button = ttk.Button(button_frame, text="Save", command=save_changes, bootstyle=SUCCESS)
     save_button.pack(side=tk.LEFT, padx=10)
 
     # Exit button
