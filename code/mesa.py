@@ -16,12 +16,17 @@ from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import concurrent.futures
+import sys
 
 
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
-    config.read(file_name)
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    config.read(os.path.join(base_path, file_name))
     return config
 
 
@@ -214,37 +219,33 @@ def get_status(gpkg_file):
 def run_subprocess(command, fallback_command, gpkg_file):
     """ Utility function to run a subprocess with a fallback option. """
     try:
-        print(f"Attempting to run command: {command}")
+        log_to_logfile(f"Attempting to run command: {command}")
         result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        print("Primary command executed successfully")
-        print("Output:", result.stdout)
+        log_to_logfile("Primary command executed successfully")
         update_stats(gpkg_file)
     except subprocess.CalledProcessError as e:
-        print(f"Primary command failed with error: {e}")
-        print("Output:", e.stdout)
-        print("Error:", e.stderr)
+        log_to_logfile(f"Primary command failed with error: {e}")
         log_to_logfile(f"Failed to execute command: {command}, error: {e.stderr}")
         try:
-            print(f"Attempting to run fallback command: {fallback_command}")
+            log_to_logfile(f"Attempting to run fallback command: {fallback_command}")
             result = subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            print("Fallback command executed successfully")
-            print("Output:", result.stdout)
+            log_to_logfile("Fallback command executed successfully")
             update_stats(gpkg_file)
         except subprocess.CalledProcessError as e:
-            print(f"Fallback command failed with error: {e}")
-            print("Output:", e.stdout)
-            print("Error:", e.stderr)
             log_to_logfile(f"Failed to execute fallback command: {fallback_command}, error: {e.stderr}")
         except FileNotFoundError as e:
-            print(f"Fallback command file not found: {fallback_command}, error: {e}")
             log_to_logfile(f"File not found for fallback command: {fallback_command}, error: {e}")
     except FileNotFoundError as e:
-        print(f"Primary command file not found: {command}, error: {e}")
         log_to_logfile(f"File not found for command: {command}, error: {e}")
 
 
 def get_script_paths(script_name):
-    system_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system')
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    system_folder = os.path.join(base_path, 'system')
     python_script = os.path.join(system_folder, f"{script_name}.py")
     exe_file = os.path.join(system_folder, f"{script_name}.exe")
     return python_script, exe_file
@@ -275,6 +276,26 @@ def admin_lines():
     run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
 
+def edit_assets():
+    python_script, exe_file = get_script_paths("04_edit_asset_group")
+    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
+
+def edit_geocodes():
+    python_script, exe_file = get_script_paths("04_edit_geocode_group")
+    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+
+
+def edit_lines():
+    python_script, exe_file = get_script_paths("08_edit_lines")
+    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+
+
+def edit_atlas():
+    python_script, exe_file = get_script_paths("07_edit_atlas")
+    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+
+
 def exit_program():
     root.destroy()
 
@@ -301,7 +322,7 @@ def update_config_with_values(config_file, **kwargs):
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
     if not os.path.isfile(config_file):
-        print(f"Configuration file {config_file} not found.")
+        log_to_logfile(f"Configuration file {config_file} not found.")
         return
     
     # Read the entire config file to preserve the layout and comments
@@ -326,7 +347,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
                     break
                 except ValueError:
                     # Handle the case where the conversion fails
-                    print(f"Error: Current value of {stat_name} is not an integer.")
+                    log_to_logfile(f"Error: Current value of {stat_name} is not an integer.")
                     return
     
     # Write the updated content back to the file if the variable was found and updated
@@ -339,19 +360,28 @@ def increment_stat_value(config_file, stat_name, increment_value):
 def show_main_frame():
     about_frame.pack_forget()
     registration_frame.pack_forget()
+    settings_frame.pack_forget()
     main_frame.pack(fill='both', expand=True, pady=10)
 
 
 def show_about_frame():
     main_frame.pack_forget()
     registration_frame.pack_forget()
+    settings_frame.pack_forget()
     about_frame.pack(fill='both', expand=True)
 
 
 def show_registration_frame():
     main_frame.pack_forget()
     about_frame.pack_forget()
+    settings_frame.pack_forget()
     registration_frame.pack(fill='both', expand=True)
+    
+def show_settings_frame():
+    main_frame.pack_forget()
+    about_frame.pack_forget()
+    registration_frame.pack_forget()
+    settings_frame.pack(fill='both', expand=True)
 
 
 def add_text_to_labelframe(labelframe, text):
@@ -462,39 +492,39 @@ def store_userinfo_online(
 #
 
 # Load configuration settings
-config_file               = 'system/config.ini'
-config                    = read_config(config_file)
+config_file                 = 'system/config.ini'
+config                      = read_config(config_file)
 
-gpkg_file                 = config['DEFAULT']['gpkg_file']
-ttk_bootstrap_theme       = config['DEFAULT']['ttk_bootstrap_theme']
-mesa_version              = config['DEFAULT']['mesa_version']
-workingprojection_epsg    = config['DEFAULT']['workingprojection_epsg']
+gpkg_file                   = 'output/mesa.gpkg'
+ttk_bootstrap_theme         = config['DEFAULT']['ttk_bootstrap_theme']
+mesa_version                = config['DEFAULT']['mesa_version']
+workingprojection_epsg      = config['DEFAULT']['workingprojection_epsg']
 
-log_date_initiated        = config['DEFAULT']['log_date_initiated']
-log_date_lastupdate       = config['DEFAULT']['log_date_lastupdate']
-log_org                   = config['DEFAULT']['log_org']
-log_bucket                = config['DEFAULT']['log_bucket']
-log_host                  = config['DEFAULT']['log_host']
-log_token                 = config['DEFAULT']['log_token']
+log_date_initiated          = config['DEFAULT']['log_date_initiated']
+log_date_lastupdate         = config['DEFAULT']['log_date_lastupdate']
+log_org                     = config['DEFAULT']['log_org']
+log_bucket                  = config['DEFAULT']['log_bucket']
+log_host                    = config['DEFAULT']['log_host']
+log_token                   = config['DEFAULT']['log_token']
 
-mesa_stat_startup         = config['DEFAULT']['mesa_stat_startup']
-mesa_stat_process         = config['DEFAULT']['mesa_stat_process']
-mesa_stat_import_assets   = config['DEFAULT']['mesa_stat_import_assets']
-mesa_stat_import_geocodes = config['DEFAULT']['mesa_stat_import_geocodes']
-mesa_stat_import_atlas    = config['DEFAULT']['mesa_stat_import_atlas']
-mesa_stat_import_lines    = config['DEFAULT']['mesa_stat_import_lines']
-mesa_stat_setup           = config['DEFAULT']['mesa_stat_setup']
-mesa_stat_edit_atlas      = config['DEFAULT']['mesa_stat_edit_atlas']
-mesa_stat_create_atlas    = config['DEFAULT']['mesa_stat_create_atlas']
-mesa_stat_process_lines   = config['DEFAULT']['mesa_stat_process_lines']
+mesa_stat_startup           = config['DEFAULT']['mesa_stat_startup']
+mesa_stat_process           = config['DEFAULT']['mesa_stat_process']
+mesa_stat_import_assets     = config['DEFAULT']['mesa_stat_import_assets']
+mesa_stat_import_geocodes   = config['DEFAULT']['mesa_stat_import_geocodes']
+mesa_stat_import_atlas      = config['DEFAULT']['mesa_stat_import_atlas']
+mesa_stat_import_lines      = config['DEFAULT']['mesa_stat_import_lines']
+mesa_stat_setup             = config['DEFAULT']['mesa_stat_setup']
+mesa_stat_edit_atlas        = config['DEFAULT']['mesa_stat_edit_atlas']
+mesa_stat_create_atlas      = config['DEFAULT']['mesa_stat_create_atlas']
+mesa_stat_process_lines     = config['DEFAULT']['mesa_stat_process_lines']
 
-id_uuid                   = config['DEFAULT'].get('id_uuid', '').strip()
-id_name                   = config['DEFAULT'].get('id_name', '').strip()
-id_email                  = config['DEFAULT'].get('id_email', '').strip()
-id_uuid_ok_value          = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't')
-id_personalinfo_ok_value  = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
+id_uuid = config['DEFAULT'].get('id_uuid', '').strip()
+id_name = config['DEFAULT'].get('id_name', '').strip()
+id_email = config['DEFAULT'].get('id_email', '').strip()
+id_uuid_ok_value = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't')
+id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
 
-has_run_update_stats      = False
+has_run_update_stats = False
     
 # Function to handle the submission of the form
 def submit_form():
@@ -624,7 +654,12 @@ if __name__ == "__main__":
     html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
 
     # Define the path to your HTML content file
-    file_path = "system_resources/userguide.html"
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    file_path = os.path.join(base_path, "system_resources/userguide.html")
 
     # Read the HTML content from the file
     with open(file_path, "r", encoding="utf-8") as file:
@@ -639,12 +674,13 @@ if __name__ == "__main__":
     ###################################################
     # Registration frame set up
     #
+
     # Setup for the registration frame (assuming root is your Tk window)
     registration_frame = ttk.Frame(root)
     registration_frame.pack(fill='both', expand=True)
 
-    id_uuid_ok               = tk.BooleanVar(value=id_uuid_ok_value)
-    id_personalinfo_ok       = tk.BooleanVar(value=id_personalinfo_ok_value)
+    id_uuid_ok = tk.BooleanVar(value=id_uuid_ok_value)
+    id_personalinfo_ok = tk.BooleanVar(value=id_personalinfo_ok_value)
 
     # About label frame
     about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
@@ -703,6 +739,55 @@ if __name__ == "__main__":
     # Optional: Configure the grid_frame column 2 (Entries) to take extra space
     grid_frame.columnconfigure(2, weight=1)
 
+# Setup for the registration frame (assuming root is your Tk window)
+    settings_frame = ttk.Frame(root)
+    settings_frame.pack(fill='both', expand=True)
+
+    # About label frame
+    about_labelframe = ttk.LabelFrame(settings_frame, text="Settings", bootstyle='secondary')
+    about_labelframe.pack(side='top', fill='both', expand=True, padx=20, pady=20)
+
+    mesa_text = ("Filling in information here is optional.")
+
+    add_text_to_labelframe(about_labelframe, mesa_text)
+
+    # Create the bottom frame with grid layout
+    grid_frame = ttk.Frame(settings_frame)
+    grid_frame.pack(side='top', fill='both', expand=True, padx=20, pady=20)
+
+    # Create buttons and labels manually
+
+    # Edit Polygons button and label
+    edit_polygons_btn = ttk.Button(grid_frame, text="Edit assets", command=edit_assets, bootstyle="primary")
+    edit_polygons_btn.grid(row=1, column=0, padx=5, pady=5, sticky='ew')
+    edit_polygons_lbl = ttk.Label(grid_frame, text="This is where you can add titles to the different layers you have imported. You may also add a short descriptive text.", wraplength=550)
+    edit_polygons_lbl.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+
+    # Edit Points button and label
+    edit_points_btn = ttk.Button(grid_frame, text="Edit geocodes", command=edit_geocodes, bootstyle="primary")
+    edit_points_btn.grid(row=2, column=0, padx=5, pady=5, sticky='ew')
+    edit_points_lbl = ttk.Label(grid_frame, text="Geocodes can be grid cells, hexagons or other types of polygons. You may add titles to them here for easier reference later.", wraplength=550)
+    edit_points_lbl.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+
+    # Edit Lines button and label
+    edit_lines_btn = ttk.Button(grid_frame, text="Edit Lines", command=edit_lines, bootstyle="primary")
+    edit_lines_btn.grid(row=3, column=0, padx=5, pady=5, sticky='ew')
+    edit_lines_lbl = ttk.Label(grid_frame, text="Lines are processed to segments with the parameters length and width. Default values are set when the lines are imported. If you want to do the processing with other segment sizes you may do so here on a per line basis. This is where you can adjust the parameters as well as their names.", wraplength=550)
+    edit_lines_lbl.grid(row=3, column=1, padx=5, pady=5, sticky='w')
+
+    # Edit Raster button and label
+    edit_raster_btn = ttk.Button(grid_frame, text="Edit atlas", command=edit_atlas, bootstyle="primary")
+    edit_raster_btn.grid(row=4, column=0, padx=5, pady=5, sticky='ew')
+    edit_raster_lbl = ttk.Label(grid_frame, text="Atlases are polygons which will be highlighted in the QGIS project file.", wraplength=550)
+    edit_raster_lbl.grid(row=4, column=1, padx=5, pady=5, sticky='w')
+
+
+    # Optional: Configure the grid_frame column 1 (Labels) to take extra space
+    grid_frame.columnconfigure(1, weight=1)
+
+    # Optional: Configure the grid_frame column 2 (Entries) to take extra space
+    grid_frame.columnconfigure(2, weight=1)
+
 
     ###################################################
     # Bottom frame in Main Interface for toggling to About Page
@@ -713,6 +798,9 @@ if __name__ == "__main__":
     # Create buttons for each frame
     main_frame_btn = ttk.Button(bottom_frame_buttons, text="MESA desktop", command=show_main_frame, bootstyle="primary")
     main_frame_btn.pack(side='left', padx=(0, 10))
+
+    settings_frame_btn = ttk.Button(bottom_frame_buttons, text="Settings", command=show_settings_frame, bootstyle="primary")
+    settings_frame_btn.pack(side='left', padx=(0, 10))
 
     about_frame_btn = ttk.Button(bottom_frame_buttons, text="About...", command=show_about_frame, bootstyle="primary")
     about_frame_btn.pack(side='left', padx=(0, 10))
