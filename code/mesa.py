@@ -686,7 +686,7 @@ if __name__ == "__main__":
     about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
     about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-    mesa_text = ("MESA 4.0 is open source software. It is available under the "
+    mesa_text = ("MESA 4.1 is open source software. It is available under the "
                 "GNU GPLv3 license. This means you can use the software for free."
                 "\n\n"
                 "In MESA, a unique random identifier (UUID) is automatically generated. "
@@ -733,7 +733,7 @@ if __name__ == "__main__":
     email_entry.insert(0, id_email)
 
     # Submit button in the fourth column's bottom cell
-    submit_btn = ttk.Button(grid_frame, text="Submit", command=submit_form)
+    submit_btn = ttk.Button(grid_frame, text="Save", command=submit_form, bootstyle=SUCCESS)
     submit_btn.grid(row=2, column=3, padx=10, pady=5, sticky="e")
 
     # Optional: Configure the grid_frame column 2 (Entries) to take extra space
@@ -744,10 +744,10 @@ if __name__ == "__main__":
     settings_frame.pack(fill='both', expand=True)
 
     # About label frame
-    about_labelframe = ttk.LabelFrame(settings_frame, text="Settings", bootstyle='secondary')
-    about_labelframe.pack(side='top', fill='both', expand=True, padx=20, pady=20)
+    about_labelframe = ttk.LabelFrame(settings_frame, text="Settings", bootstyle='info')
+    about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-    mesa_text = ("Filling in information here is optional.")
+    mesa_text = ("Some of the objects you already have imported or created might need some further adjustments.\nYou may do this by reading up on the below suggestions.")
 
     add_text_to_labelframe(about_labelframe, mesa_text)
 
@@ -757,29 +757,29 @@ if __name__ == "__main__":
 
     # Create buttons and labels manually
 
-    # Edit Polygons button and label
+    # Edit assets button and label
     edit_polygons_btn = ttk.Button(grid_frame, text="Edit assets", command=edit_assets, bootstyle="primary")
     edit_polygons_btn.grid(row=1, column=0, padx=5, pady=5, sticky='ew')
     edit_polygons_lbl = ttk.Label(grid_frame, text="This is where you can add titles to the different layers you have imported. You may also add a short descriptive text.", wraplength=550)
     edit_polygons_lbl.grid(row=1, column=1, padx=5, pady=5, sticky='w')
 
-    # Edit Points button and label
-    edit_points_btn = ttk.Button(grid_frame, text="Edit geocodes", command=edit_geocodes, bootstyle="primary")
-    edit_points_btn.grid(row=2, column=0, padx=5, pady=5, sticky='ew')
-    edit_points_lbl = ttk.Label(grid_frame, text="Geocodes can be grid cells, hexagons or other types of polygons. You may add titles to them here for easier reference later.", wraplength=550)
-    edit_points_lbl.grid(row=2, column=1, padx=5, pady=5, sticky='w')
+    # Edit geocodes button and label
+    edit_geocode_btn = ttk.Button(grid_frame, text="Edit geocodes", command=edit_geocodes, bootstyle="primary")
+    edit_geocode_btn.grid(row=2, column=0, padx=5, pady=5, sticky='ew')
+    edit_geocode_lbl = ttk.Label(grid_frame, text="Geocodes can be grid cells, hexagons or other types of polygons. You may add titles to them here for easier reference later.", wraplength=550)
+    edit_geocode_lbl.grid(row=2, column=1, padx=5, pady=5, sticky='w')
 
     # Edit Lines button and label
-    edit_lines_btn = ttk.Button(grid_frame, text="Edit Lines", command=edit_lines, bootstyle="primary")
+    edit_lines_btn = ttk.Button(grid_frame, text="Edit lines", command=edit_lines, bootstyle="primary")
     edit_lines_btn.grid(row=3, column=0, padx=5, pady=5, sticky='ew')
-    edit_lines_lbl = ttk.Label(grid_frame, text="Lines are processed to segments with the parameters length and width. Default values are set when the lines are imported. If you want to do the processing with other segment sizes you may do so here on a per line basis. This is where you can adjust the parameters as well as their names.", wraplength=550)
+    edit_lines_lbl = ttk.Label(grid_frame, text="Remember to import lines before attempting to edit them. Lines are processed to segments with the parameters length and width. Default values are set when the lines are imported. If you want to do the processing with other segment sizes you may do so here on a per line basis. This is where you can adjust the parameters as well as their names.", wraplength=550)
     edit_lines_lbl.grid(row=3, column=1, padx=5, pady=5, sticky='w')
 
-    # Edit Raster button and label
-    edit_raster_btn = ttk.Button(grid_frame, text="Edit atlas", command=edit_atlas, bootstyle="primary")
-    edit_raster_btn.grid(row=4, column=0, padx=5, pady=5, sticky='ew')
-    edit_raster_lbl = ttk.Label(grid_frame, text="Atlases are polygons which will be highlighted in the QGIS project file.", wraplength=550)
-    edit_raster_lbl.grid(row=4, column=1, padx=5, pady=5, sticky='w')
+    # Edit atlas button and label
+    edit_atlas_btn = ttk.Button(grid_frame, text="Edit atlas", command=edit_atlas, bootstyle="primary")
+    edit_atlas_btn.grid(row=4, column=0, padx=5, pady=5, sticky='ew')
+    edit_atlas_lbl = ttk.Label(grid_frame, text="Remember to import or create atlases before attempting to edit them. Atlases are polygons which will be highlighted in the QGIS project file.", wraplength=550)
+    edit_atlas_lbl.grid(row=4, column=1, padx=5, pady=5, sticky='w')
 
 
     # Optional: Configure the grid_frame column 1 (Labels) to take extra space
