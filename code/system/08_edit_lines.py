@@ -1,20 +1,11 @@
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-# This code allows the user to edit tbl_lines using a simple user interface
-# allowing the user to move between the different line objects. 
-# It does not allow for editing name_gis which will be used for filtering
-# in QGIS.
-#
-
 import tkinter as tk
-import os
 from tkinter import ttk
 import configparser
-import pandas as pd
+import geopandas as gpd
 import datetime
-from sqlalchemy import create_engine
+import os
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
-
 
 # # # # # # # # # # # # # # 
 # Shared/general functions
@@ -25,9 +16,8 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
-
 # Logging function to write to the GUI log
-def write_to_log( message):
+def write_to_log(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
     with open("log.txt", "a") as log_file:
@@ -36,37 +26,34 @@ def write_to_log( message):
 # # # # # # # # # # # # # # 
 # Core functions
 
-# Function to load data from the database
+# Function to load data from the geopackage
 def load_data():
-    engine = create_engine(f'sqlite:///{gpkg_file}')
-    return pd.read_sql_table('tbl_lines', engine)
+    if not os.path.exists(gpkg_file):
+        raise FileNotFoundError(f"GeoPackage file not found: {gpkg_file}")
+    return gpd.read_file(gpkg_file, layer='tbl_lines')
 
-
-# Function to save data to the database
+# Function to save data to the geopackage
 def save_data(df):
     try:
-        engine = create_engine(f'sqlite:///{gpkg_file}')
-        df.to_sql('tbl_lines', con=engine, if_exists='replace', index=False)
+        df.to_file(gpkg_file, layer='tbl_lines', driver='GPKG', if_exists='replace')
         write_to_log("Line data saved")
     except Exception as e:
         write_to_log(f"Error saving data: {e}")
         print(f"Error saving data: {e}")
 
-
-# Function to update record in the DataFrame and save to the database
+# Function to update record in the DataFrame and save to the geopackage
 def update_record(save_message=True):
     try:
-        df.at[current_index, 'name_gis']        = name_gis_var.get()
-        df.at[current_index, 'name_user']       = name_user_var.get()
-        df.at[current_index, 'segment_length']  = segment_length_var.get()
-        df.at[current_index, 'segment_width']   = segment_width_var.get()
-        df.at[current_index, 'description']     = description_var.get()
+        df.at[current_index, 'name_gis'] = name_gis_var.get()
+        df.at[current_index, 'name_user'] = name_user_var.get()
+        df.at[current_index, 'segment_length'] = segment_length_var.get()
+        df.at[current_index, 'segment_width'] = segment_width_var.get()
+        df.at[current_index, 'description'] = description_var.get()
         save_data(df)  # Save changes to the database
         if save_message:
             write_to_log("Record updated and saved")
     except Exception as e:
         write_to_log(f"Error updating and saving record: {e}")
-
 
 # Navigate through records
 def navigate(direction):
@@ -78,7 +65,6 @@ def navigate(direction):
         current_index -= 1
     load_record()
 
-
 # Load a record into the form
 def load_record():
     record = df.iloc[current_index]
@@ -88,7 +74,6 @@ def load_record():
     segment_width_var.set(record['segment_width'])
     description_var.set(record['description'])
 
-
 # Function to close the application
 def exit_application():
     write_to_log("Closing edit assets")
@@ -97,7 +82,6 @@ def exit_application():
 #####################################################################################
 #  Main
 #
-
 
 # Load configuration settings
 config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
@@ -118,7 +102,14 @@ root.title("Edit lines")
 root.columnconfigure(0, minsize=200)  # Configure the size of the first column
 root.columnconfigure(1, weight=1)     # Make the second column expandable
 
-df = load_data()
+try:
+    df = load_data()
+except FileNotFoundError as e:
+    print(e)
+    write_to_log(str(e))
+    root.destroy()
+    exit()
+
 current_index = 0
 
 # Variables for form fields
@@ -154,7 +145,7 @@ description_entry = tk.Entry(root, textvariable=description_var, width=50)
 description_entry.grid(row=4, column=1, sticky='w')
 
 # Information text field above the "Update and Save Record" button
-info_label_text = ("Registred lines will be used to create segmente polygons "
+info_label_text = ("Registered lines will be used to create segment polygons "
                    "along the designated line. You may edit the attributes "
                    "here, or both attributes and line data in QGIS. Edits "
                    "are saved when you click on the buttons Previous or "
@@ -164,16 +155,14 @@ info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left"
 info_label.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
 
 # Navigation and Update buttons
-ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=6, column=0, padx=5, pady=5)
-
-ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=6, column=1, padx=5, pady=5)
-
+ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=6, column=0, padx=10, pady=10)
+ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=6, column=4, padx=10, pady=10)
 
 # Save button
-ttk.Button(root, text="Save", command=update_record(save_message=False), bootstyle=SUCCESS).grid(row=6, column=4, columnspan=1, padx=5, pady=5)
+ttk.Button(root, text="Save", command=lambda: update_record(save_message=False), bootstyle=SUCCESS).grid(row=7, column=4, columnspan=1, padx=10, pady=10)
 
 # Exit button
-ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=6, column=5, columnspan=1, padx=5, pady=5)
+ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=7, column=5, columnspan=1, padx=10, pady=10)
 
 # Load the first record
 load_record()
