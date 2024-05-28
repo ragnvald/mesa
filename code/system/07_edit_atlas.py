@@ -220,7 +220,10 @@ if __name__ == "__main__":
     ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=7, column=2, padx=10, pady=10, sticky='e')
 
     # Exit button
-    ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=9, column=2, sticky='e', padx=10, pady=10)
+    ttk.Button(main_frame, text="Save", command=update_record(save_message=False), bootstyle=SUCCESS).grid(row=8, column=2, sticky='e', padx=10, pady=10)
+
+    # Exit button
+    ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=8, column=3, sticky='e', padx=10, pady=10)
 
     # Load the first record
     load_record()
