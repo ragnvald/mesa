@@ -148,11 +148,12 @@ def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widg
         attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
 
         line_objects.append({
-            'name_gis': int(index),
+            'name_gis': int(line_id_counter),
             'name_user': layer_name,
             'attributes': attributes,
             'geom': row.geometry  # Original geometry in workingprojection_epsg
         })
+
         line_id_counter += 1
 
     return line_id_counter
@@ -438,7 +439,7 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
 
     log_to_gui(log_widget, f"Preparing import of lines.")
     
-    log_to_gui(log_widget, "Cleaning up. Deleting old lines, if they exist.")
+    log_to_gui(log_widget, "First deleting old lines, if they exist.")
 
     delete_table_from_geopackage(gpkg_file, 'tbl_lines', log_widget=None)
     
