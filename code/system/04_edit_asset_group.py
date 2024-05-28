@@ -159,14 +159,14 @@ if __name__ == "__main__":
     info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
 
     # Navigation buttons
-    ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=5, pady=5)
-    ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=5, pady=5)
+    ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=10, pady=10)
+    ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=10, pady=10)
 
     # Save button
-    ttk.Button(root, text="Save", command=update_record, bootstyle=SUCCESS).grid(row=5, column=1, pady=5)
+    ttk.Button(root, text="Save", command=update_record, bootstyle=SUCCESS).grid(row=5, column=2, padx=10, pady=10)
 
     # Exit button
-    ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=5, column=2, pady=5)
+    ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=5, column=3, padx=10, pady=10)
 
     # Load the first record
     load_record()
