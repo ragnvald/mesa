@@ -397,10 +397,10 @@ if __name__ == "__main__":
     info_label = tk.Label(root, text=info_text, wraplength=600, justify="center")
     info_label.pack(padx=10, pady=10)
 
-    save_button = ttk.Button(root, text="Save", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=PRIMARY)
-    save_button.pack(side='left', padx=10, pady=10)
-
     close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
     close_button.pack(side='right', padx=10, pady=10)
+
+    save_button = ttk.Button(root, text="Save", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=SUCCESS)
+    save_button.pack(side='right', padx=10, pady=10)
 
     root.mainloop()
