@@ -367,7 +367,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
     delete_table_from_geopackage(gpkg_file, 'tbl_geocode_object', log_widget=None)
 
 
-    log_to_gui(log_widget, f"Looking trough input folder.")
+    log_to_gui(log_widget, f"Looking through the input folder.")
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
 
 
@@ -443,7 +443,8 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
 
     delete_table_from_geopackage(gpkg_file, 'tbl_lines', log_widget=None)
     
-    log_to_gui(log_widget, f"Looking trough input folder.")
+    log_to_gui(log_widget, "Looking trough input folder.")
+    
     line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
     if not line_objects_gdf.empty:
@@ -666,17 +667,16 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
 # Attempts to delete a layer from a geopacakge file. Necessary to avoid invalid
 # spatial indexes when new data is added to an existing layer.
-def delete_layer(gpkg_file, layer_name):
+def delete_layer(gpkg_file, layer_name, log_widget):
     try:
         ds = ogr.Open(gpkg_file, update=True)  # Open in update mode
         if ds is not None:
             layer = ds.GetLayerByName(layer_name)
             if layer is not None:
                 ds.DeleteLayer(layer_name)
-                log_to_gui(f"Layer {layer_name} deleted from {gpkg_file}.")
+                log_to_gui(log_widget, f"Layer {layer_name} deleted from {gpkg_file}.")
             else:
-                #log_to_gui(log_widget, f"Layer {layer_name} does not exist in {gpkg_file}.")
-                log_to_gui(log_widget, "Cleaning up...")
+                log_to_gui(log_widget, f"Layer {layer_name} does not exist in {gpkg_file}.")
             ds = None  # Ensure the data source is closed
         else:
             log_to_gui(log_widget, f"Failed to open {gpkg_file}.")
@@ -728,7 +728,8 @@ def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
 
         if not gdf.empty:
 
-            delete_layer(gpkg_file, layer_name)
+            delete_layer(gpkg_file, 'tbl_lines_original', log_widget)
+            delete_layer(gpkg_file, 'tbl_lines', log_widget)
 
             gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
             log_to_gui(log_widget, f"Data for layer {layer_name} saved in GeoPackage.")
