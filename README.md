@@ -16,7 +16,7 @@ The code can be compiled to a series of executable files (.exe) which run nicely
 ## Getting started
 This is what you do to start using MESA:
 * Download the compiled package.
-* Run user_interface.exe
+* Run mesa.exe
 * Follow the instructions on the screen.
 
 ## Script Descriptions
@@ -48,7 +48,7 @@ Admin lines processing.
 **08_edit_lines.py**
 Edit lines using this code.
 
-**user_interface.py**
+**mesa.py**
 Functions related to checking and creating folders, and user interface aspects.
 
 
