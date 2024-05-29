@@ -25,7 +25,7 @@ def read_config(file_name):
 def write_to_log(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    with open("log.txt", "a") as log_file:
+    with open("../log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
 # # # # # # # # # # # # # # 

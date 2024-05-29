@@ -41,7 +41,7 @@ def log_to_gui(log_widget, message):
     formatted_message = f"{timestamp} - {message}"
     log_widget.insert(tk.END, formatted_message + "\n")
     log_widget.see(tk.END)
-    with open("log.txt", "a") as log_file:
+    with open("../log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
 

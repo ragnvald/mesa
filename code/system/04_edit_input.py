@@ -356,7 +356,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
 def log_to_file(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    with open("log.txt", "a") as log_file:
+    with open("../log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
 
 #####################################################################################
