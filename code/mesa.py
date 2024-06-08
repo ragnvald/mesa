@@ -10,6 +10,7 @@ import pandas as pd
 import geopandas as gpd
 import configparser
 import sqlite3
+import argparse
 import uuid
 import datetime
 from datetime import datetime, timedelta
@@ -217,10 +218,10 @@ def get_status(gpkg_file):
 
 
 def run_subprocess(command, fallback_command, gpkg_file):
-    """ Utility function to run a subprocess with a fallback option. """
+    """Utility function to run a subprocess with a fallback option."""
     try:
         log_to_logfile(f"Attempting to run command: {command}")
-        result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         log_to_logfile("Primary command executed successfully")
         update_stats(gpkg_file)
     except subprocess.CalledProcessError as e:
@@ -228,7 +229,7 @@ def run_subprocess(command, fallback_command, gpkg_file):
         log_to_logfile(f"Failed to execute command: {command}, error: {e.stderr}")
         try:
             log_to_logfile(f"Attempting to run fallback command: {fallback_command}")
-            result = subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             log_to_logfile("Fallback command executed successfully")
             update_stats(gpkg_file)
         except subprocess.CalledProcessError as e:
@@ -239,61 +240,176 @@ def run_subprocess(command, fallback_command, gpkg_file):
         log_to_logfile(f"File not found for command: {command}, error: {e}")
 
 
-def get_script_paths(script_name):
+def get_script_paths(file_name,original_working_directory):
+    """Determine the paths for the Python script and the executable file."""
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
+        log_to_logfile(f"Using _MEIPASS: {base_path}")
     else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
+        base_path = original_working_directory
+        log_to_logfile(f"Using __file__: {base_path}")
 
-    system_folder = os.path.join(base_path, 'system')
-    python_script = os.path.join(system_folder, f"{script_name}.py")
-    exe_file = os.path.join(system_folder, f"{script_name}.exe")
+    python_script = os.path.join(base_path,"system", f"{file_name}.py")
+    exe_file = os.path.join(base_path,"system", f"{file_name}.exe")
+    
+    log_to_logfile(f"Python script path: {python_script}")
+    log_to_logfile(f"Executable file path: {exe_file}")
+    
     return python_script, exe_file
 
 
-def import_assets():
-    python_script, exe_file = get_script_paths("01_import")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+def import_assets(gpkg_file):
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("01_import", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "01_import.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
 
 def edit_processing_setup():
-    python_script, exe_file = get_script_paths("04_edit_input")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("04_edit_input", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "04_edit_input.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
 
 def process_data():
-    python_script, exe_file = get_script_paths("06_process")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("06_process", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "06_process.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
 
 def make_atlas():
-    python_script, exe_file = get_script_paths("07_make_atlas")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("07_make_atlas", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "07_make_atlas.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
 
 def admin_lines():
-    python_script, exe_file = get_script_paths("08_admin_lines")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("08_admin_lines", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "08_admin_lines.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
 
 def edit_assets():
-    python_script, exe_file = get_script_paths("04_edit_asset_group")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+        
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("04_edit_asset_group", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "04_edit_asset_group.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
     
 
 def edit_geocodes():
-    python_script, exe_file = get_script_paths("04_edit_geocode_group")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+        
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("04_edit_geocode_group", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "04_edit_geocode_group.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
 
 
 def edit_lines():
-    python_script, exe_file = get_script_paths("08_edit_lines")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("08_edit_lines", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "08_edit_lines.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
 
 
 def edit_atlas():
-    python_script, exe_file = get_script_paths("07_edit_atlas")
-    run_subprocess(["python", python_script], [exe_file], gpkg_file)
+    
+    """Main function to import assets by running the appropriate script or executable."""
+    python_script, exe_file,  = get_script_paths("07_edit_atlas", original_working_directory)
+
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # Check if running from a bundled executable
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path,"system", "07_edit_atlas.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path,arguments], [], gpkg_file)
+    else:
+        run_subprocess(["python", python_script], [exe_file], gpkg_file)
 
 
 def exit_program():
@@ -491,11 +607,27 @@ def store_userinfo_online(
 #  Main
 #
 
-# Load configuration settings
-config_file                 = 'system/config.ini'
-config                      = read_config(config_file)
 
-gpkg_file                   = 'output/mesa.gpkg'
+
+# Load directory
+#
+# Establish working directory. This is the folder for the original script.
+# When compiled the executable file will run within a temporary folder. This
+# is not problematic until til script invoces another. Solution space is to either 
+# embed the other executable file into this one, or run it separately effectively
+# ending up with another file being run within a temporary folder.
+# All other files will remain within the original working directory. It is therefore
+# important to maintain the adress of the original files throughout. Similarly,
+# there is no need to move these files into the distributable .exe-file
+
+original_working_directory  = os.getcwd()
+
+# Load configuration settings
+config_file                 = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
+
+# Setting variables
+config                      = read_config(config_file)
 ttk_bootstrap_theme         = config['DEFAULT']['ttk_bootstrap_theme']
 mesa_version                = config['DEFAULT']['mesa_version']
 workingprojection_epsg      = config['DEFAULT']['workingprojection_epsg']
@@ -505,7 +637,7 @@ log_date_lastupdate         = config['DEFAULT']['log_date_lastupdate']
 log_org                     = config['DEFAULT']['log_org']
 log_bucket                  = config['DEFAULT']['log_bucket']
 log_host                    = config['DEFAULT']['log_host']
-log_token                   = config['DEFAULT']['log_token']
+log_token                   = "the api-secret"
 
 mesa_stat_startup           = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process           = config['DEFAULT']['mesa_stat_process']
@@ -525,7 +657,7 @@ id_uuid_ok_value = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('tru
 id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't')
 
 has_run_update_stats = False
-    
+
 # Function to handle the submission of the form
 def submit_form():
     global id_name, id_email  # If they're used globally; adjust according to your application's structure
@@ -603,13 +735,13 @@ if __name__ == "__main__":
     main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
     # Add buttons to left panel with spacing between buttons
-    import_assets_btn = ttk.Button(left_panel, text="Import", command=import_assets, width=button_width, bootstyle=PRIMARY)
+    import_assets_btn = ttk.Button(left_panel, text="Import", command=lambda: import_assets(gpkg_file), width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
     setup_processing_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
     setup_processing_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-    process_data_btn = ttk.Button(left_panel, text="Process", command=process_data, width=button_width)
+    process_data_btn = ttk.Button(left_panel, text="Process", command=lambda: process_data(), width=button_width)
     process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
     admin_atlas_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
@@ -739,7 +871,7 @@ if __name__ == "__main__":
     # Optional: Configure the grid_frame column 2 (Entries) to take extra space
     grid_frame.columnconfigure(2, weight=1)
 
-# Setup for the registration frame (assuming root is your Tk window)
+    # Setup for the registration frame (assuming root is your Tk window)
     settings_frame = ttk.Frame(root)
     settings_frame.pack(fill='both', expand=True)
 
@@ -824,3 +956,4 @@ if __name__ == "__main__":
     root.update_idletasks()
 
     root.mainloop()
+
