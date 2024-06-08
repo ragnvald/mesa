@@ -82,15 +82,11 @@ echo
 echo Working in this folder: %BUILD_FOLDER_ROOT%
 
 echo Distribution folder will be: %DIST_FOLDER_ROOT%
+echo
 
 :: Start the compilation
 set "PYINSTALLER_CMD_ROOT=pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_ROOT% --workpath=%BUILD_FOLDER_ROOT% --add-data %SCRIPT_FOLDER_SYSTEM%;system --add-data %SCRIPT_PATH%\system_resources;system_resources"
 set "PYINSTALLER_CMD_SYSTEM=pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_SYSTEM% --workpath=%BUILD_FOLDER_SYSTEM% --add-data %SCRIPT_FOLDER_SYSTEM%;system --add-data %SCRIPT_PATH%\system_resources;system_resources"
-
-echo Working on mesa.py in %SCRIPT_FOLDER_ROOT%
-echo %PYINSTALLER_CMD_ROOT% "%SCRIPT_FOLDER_ROOT%\mesa.py"
-%PYINSTALLER_CMD_ROOT% "%SCRIPT_FOLDER_ROOT%\mesa.py" >nul 2>&1
-if errorlevel 1 echo Error compiling mesa.py
 
 echo Working on 01_import.py in %SCRIPT_FOLDER_SYSTEM%
 if exist "%SCRIPT_FOLDER_SYSTEM%\01_import.py" (
@@ -101,16 +97,7 @@ if exist "%SCRIPT_FOLDER_SYSTEM%\01_import.py" (
     echo File 01_import.py does not exist in %SCRIPT_FOLDER_SYSTEM%
 )
 
-echo Working on 02_present_files.py
-if exist "%SCRIPT_FOLDER_SYSTEM%\02_present_files.py" (
-    echo %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\02_present_files.py"
-    %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\02_present_files.py" >nul 2>&1
-    if errorlevel 1 echo Error compiling 02_present_files.py
-) else (
-    echo File 02_present_files.py does not exist in %SCRIPT_FOLDER_SYSTEM%
-)
-
-echo Working on 04_edit_asset_group.py
+echo Working on 04_edit_asset_group.py in %SCRIPT_FOLDER_SYSTEM%
 if exist "%SCRIPT_FOLDER_SYSTEM%\04_edit_asset_group.py" (
     echo %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\04_edit_asset_group.py"
     %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\04_edit_asset_group.py" >nul 2>&1
@@ -119,7 +106,7 @@ if exist "%SCRIPT_FOLDER_SYSTEM%\04_edit_asset_group.py" (
     echo File 04_edit_asset_group.py does not exist in %SCRIPT_FOLDER_SYSTEM%
 )
 
-echo Working on 04_edit_geocode_group.py
+echo Working on 04_edit_geocode_group.py in %SCRIPT_FOLDER_SYSTEM%
 if exist "%SCRIPT_FOLDER_SYSTEM%\04_edit_geocode_group.py" (
     echo %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\04_edit_geocode_group.py"
     %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\04_edit_geocode_group.py" >nul 2>&1
@@ -128,7 +115,7 @@ if exist "%SCRIPT_FOLDER_SYSTEM%\04_edit_geocode_group.py" (
     echo File 04_edit_geocode_group.py does not exist in %SCRIPT_FOLDER_SYSTEM%
 )
 
-echo Working on 04_edit_input.py
+echo Working on 04_edit_input.py in %SCRIPT_FOLDER_SYSTEM%
 if exist "%SCRIPT_FOLDER_SYSTEM%\04_edit_input.py" (
     echo %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\04_edit_input.py"
     %PYINSTALLER_CMD_SYSTEM% "%SCRIPT_FOLDER_SYSTEM%\04_edit_input.py" >nul 2>&1
@@ -181,6 +168,56 @@ if exist "%SCRIPT_FOLDER_SYSTEM%\08_edit_lines.py" (
 ) else (
     echo File 08_edit_lines.py does not exist in %SCRIPT_FOLDER_SYSTEM%
 )
+
+echo -01_import.exe back in system source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\01_import.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 01_import
+echo
+
+echo -04_edit_asset_group.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\04_edit_asset_group.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 04_edit_asset_group
+echo
+
+echo -04_edit_geocode_group.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\04_edit_geocode_group.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 04_edit_geocode_group
+echo
+
+echo -04_edit_input.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\04_edit_input.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 04_edit_input
+echo
+
+echo -06_process.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\06_process.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 06_process
+echo
+
+echo -07_edit_atlas.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\07_edit_atlas.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 07_edit_atlas
+echo
+
+echo -07_make_atlas.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\07_make_atlas.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 07_make_atlas
+echo
+
+echo -08_admin_lines.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\08_admin_lines.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 08_admin_lines
+echo
+
+echo -08_edit_lines.exe back in system at source for inclusion in mesa.exe.
+move  "%DIST_FOLDER_ROOT%\system\08_edit_lines.exe" "%SCRIPT_PATH%\system"
+if errorlevel 1 echo Error copying 08_edit_lines
+echo
+
+echo Working on mesa.py in %SCRIPT_FOLDER_ROOT%
+echo %PYINSTALLER_CMD_ROOT% "%SCRIPT_FOLDER_ROOT%\mesa.py"
+%PYINSTALLER_CMD_ROOT% "%SCRIPT_FOLDER_ROOT%\mesa.py" >nul 2>&1
+if errorlevel 1 echo Error compiling mesa.py
 
 echo Compilation complete. You will find the compiled code here: %DIST_FOLDER_ROOT%
 
