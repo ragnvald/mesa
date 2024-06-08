@@ -140,30 +140,35 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
 
 
 # Process the spatial file. Make sure it is a single polygon, not a multipolygon or any other geometry.
-def process_spatial_file(filepath, atlas_objects, atlas_id_counter):
-    # Load spatial data from file
-    gdf = gpd.read_file(filepath)
-    
-    # Filter for polygon geometries
-    polygons = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
-    
-    # Iterate over each polygon feature
-    for _, row in polygons.iterrows():
-        atlas_object = {
-            'id': atlas_id_counter, 
-            'name_gis': f'atlas{atlas_id_counter:03}',
-            'title_user': f'Map title for {atlas_id_counter:03}', 
-            'geom': row.geometry,
-            'description': '',   # Default empty value
-            'image_name_1': '',  # Default empty value
-            'image_desc_1': '',  # Default empty value
-            'image_name_2': '',  # Default empty value
-            'image_desc_2': ''   # Default empty value
-        }
-        atlas_objects.append(atlas_object)
-        atlas_id_counter += 1
-    
+def process_spatial_file(filepath, atlas_objects, atlas_id_counter, log_widget):
+    try:
+        # Load spatial data from file
+        gdf = gpd.read_file(filepath)
+
+        # Filter for polygon geometries
+        polygons = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+
+        # Iterate over each polygon feature
+        for _, row in polygons.iterrows():
+            atlas_object = {
+                'id': atlas_id_counter, 
+                'name_gis': f'atlas{atlas_id_counter:03}',
+                'title_user': f'Map title for {atlas_id_counter:03}', 
+                'geom': row.geometry,
+                'description': '',   # Default empty value
+                'image_name_1': '',  # Default empty value
+                'image_desc_1': '',  # Default empty value
+                'image_name_2': '',  # Default empty value
+                'image_desc_2': ''   # Default empty value
+            }
+            atlas_objects.append(atlas_object)
+            atlas_id_counter += 1
+        log_to_gui(log_widget, f"Processed file: {filepath}")
+    except Exception as e:
+        log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
+
     return atlas_id_counter
+
 
 
 # Import atlas objects from the atlas folder.
@@ -185,11 +190,10 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
     for pattern in file_patterns:
         for filepath in glob.glob(os.path.join(input_folder_atlas, '**', pattern), recursive=True):
             try:
-                log_to_gui(log_widget, f"Processing layer: {os.path.splitext(os.path.basename(filepath))[0]}")
+                log_to_gui(log_widget, f"Processing file: {filepath}")
+                atlas_id_counter = process_spatial_file(filepath, atlas_objects, atlas_id_counter, log_widget)
                 processed_files += 1
-                update_progress(10 + processed_files * progress_increment)  # Update progress before processing each file
-
-                atlas_id_counter = process_spatial_file(filepath, atlas_objects, atlas_id_counter)
+                update_progress(10 + processed_files * progress_increment)  # Update progress after processing each file
 
             except Exception as e:
                 log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
@@ -204,7 +208,6 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
 
     log_to_gui(log_widget, f"Total atlas polygons added: {atlas_id_counter - 1}")
 
-    
     increment_stat_value(config_file, 'mesa_stat_import_atlas', increment_value=1)
 
     return atlas_objects_gdf
@@ -212,18 +215,17 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
 
 # Thread function to run import without freezing GUI
 def run_import_atlas(input_folder_atlas, gpkg_file, log_widget, progress_var):
-
     log_to_gui(log_widget, "Starting atlas import process...")
 
     atlas_objects_gdf = import_atlas_objects(input_folder_atlas, log_widget, progress_var)
 
     # Check if the GeoDataFrame is not empty before exporting
     if not atlas_objects_gdf.empty:  # Corrected atlas
-        log_to_gui(log_widget, "Importing:")
+        log_to_gui(log_widget, "Importing atlas objects to GeoPackage")
         atlas_objects_gdf.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG', if_exists='replace')
     else:
         log_to_gui(log_widget, "No atlas objects to export.")
-    
+
     log_to_gui(log_widget, "COMPLETED: Atlas polygons imported. Old ones deleted.")
     progress_var.set(100)
 
