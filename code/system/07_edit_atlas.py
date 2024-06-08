@@ -1,8 +1,4 @@
 import tkinter as tk
-import locale
-
-locale.setlocale(locale.LC_ALL, 'C') 
-
 from tkinter import messagebox, ttk, filedialog
 import configparser
 import pandas as pd
@@ -29,7 +25,6 @@ def load_data():
     engine = create_engine(f'sqlite:///{gpkg_file}')
     return pd.read_sql_table('tbl_atlas', engine)
 
-
 # Function to save data to the database
 def save_data(df):
     try:
@@ -38,9 +33,8 @@ def save_data(df):
     except Exception as e:
         messagebox.showerror("Error", f"Error saving data: {e}")
 
-
 # Function to update record in the DataFrame and save to the database
-def update_record(save_message=True):
+def update_record(save_message=False):
     try:
         df.at[current_index, 'name_gis'] = name_gis_var.get()
         df.at[current_index, 'title_user'] = title_user_var.get()
@@ -55,17 +49,15 @@ def update_record(save_message=True):
     except Exception as e:
         messagebox.showerror("Error", f"Error updating and saving record: {e}")
 
-
 # Navigate through records
 def navigate(direction):
+    update_record()
     global current_index
-    update_record(save_message=False)  # Save current edits without showing a message
     if direction == 'next' and current_index < len(df) - 1:
         current_index += 1
     elif direction == 'previous' and current_index > 0:
         current_index -= 1
     load_record()
-
 
 # Load a record into the form
 def load_record():
@@ -78,7 +70,6 @@ def load_record():
     image_name_2_var.set(record['image_name_2'])
     image_desc_2_var.set(record['image_desc_2'])
 
-
 # Function to browse for image file for image_name_1
 def browse_image_1():
     initial_dir = os.path.join(os.getcwd(), "input", "images")
@@ -86,14 +77,12 @@ def browse_image_1():
     if file_path:
         image_name_1_var.set(file_path)
 
-
 # Function to browse for image file for image_name_2
 def browse_image_2():
     initial_dir = os.path.join(os.getcwd(), "input", "images")
     file_path = filedialog.askopenfilename(initialdir=initial_dir, title="Select file", filetypes=(("JPEG files", "*.jpg"), ("PNG files", "*.png"), ("All files", "*.*")))
     if file_path:
         image_name_2_var.set(file_path)
-
 
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
@@ -162,9 +151,7 @@ config                  = read_config(config_file)
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
-
 increment_stat_value(config_file, 'mesa_stat_edit_atlas', increment_value=1)
-
 
 if __name__ == "__main__":
     
@@ -181,7 +168,6 @@ if __name__ == "__main__":
 
     main_frame = ttk.Frame(root, padding="10")
     main_frame.grid(row=0, column=0, sticky="nsew")
-
 
     df = load_data()
     current_index = 0
@@ -241,7 +227,7 @@ if __name__ == "__main__":
     ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=7, column=2, padx=10, pady=10, sticky='e')
 
     # Update button
-    ttk.Button(main_frame, text="Save", command=update_record(save_message=False), bootstyle=SUCCESS).grid(row=8, column=2, sticky='e', padx=10, pady=10)
+    ttk.Button(main_frame, text="Save", command=update_record, bootstyle=SUCCESS).grid(row=8, column=2, sticky='e', padx=10, pady=10)
 
     # Exit button
     ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=8, column=3, sticky='e', padx=10, pady=10)
