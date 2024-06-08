@@ -8,6 +8,7 @@ import configparser
 import pandas as pd
 from sqlalchemy import create_engine
 import os
+import argparse
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 
@@ -133,12 +134,30 @@ def increment_stat_value(config_file, stat_name, increment_value):
 #####################################################################################
 #  Main
 #
+# original folder for the system is sent from the master executable. If the script is
+# invked this way we are fetching the adress here.
+parser = argparse.ArgumentParser(description='Slave script')
+parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+args = parser.parse_args()
+original_working_directory = args.original_working_directory
+
+# However - if this is not the case we will have to establish the root folder in 
+# one of two different ways.
+if original_working_directory is None or original_working_directory == '':
+    
+    #if it is running as a python subprocess we need to get the originating folder.
+    original_working_directory  = os.getcwd()
+
+    # When running directly separate script we need to find out and go up one level.
+    if str("system") in str(original_working_directory):
+        original_working_directory = os.path.join(os.getcwd(),'../')
+
+# Load configuration settings and data
+config_file             = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file               = os.path.join(original_working_directory, "output/mesa.gpkg")
 
 # Load configuration settings
-config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)
-
-gpkg_file               = config['DEFAULT']['gpkg_file']
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
@@ -152,15 +171,17 @@ if __name__ == "__main__":
     # Initialize the main window
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Edit atlas")
+    
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
-
-    main_frame = ttk.Frame(root, padding="10")
-    main_frame.grid(row=0, column=0, sticky="nsew")
 
     # Configure column widths
     root.columnconfigure(0, minsize=200)
     root.columnconfigure(1, weight=1)
+
+    main_frame = ttk.Frame(root, padding="10")
+    main_frame.grid(row=0, column=0, sticky="nsew")
+
 
     df = load_data()
     current_index = 0
@@ -219,7 +240,7 @@ if __name__ == "__main__":
     ttk.Button(main_frame, text="Previous", command=lambda: navigate('previous')).grid(row=7, column=0, sticky='w')
     ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=7, column=2, padx=10, pady=10, sticky='e')
 
-    # Exit button
+    # Update button
     ttk.Button(main_frame, text="Save", command=update_record(save_message=False), bootstyle=SUCCESS).grid(row=8, column=2, sticky='e', padx=10, pady=10)
 
     # Exit button

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 import configparser
+import argparse
 import datetime
 import geopandas as gpd
 from sqlalchemy import create_engine
@@ -22,7 +23,8 @@ def read_config(file_name):
 def write_to_log( message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    with open("../log.txt", "a") as log_file:
+    log_destination_file = os.path.join(original_working_directory, "log.txt")
+    with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
 
 # # # # # # # # # # # # # # 
@@ -78,13 +80,33 @@ def exit_application():
 #  Main
 #
 
+# original folder for the system is sent from the master executable. If the script is
+# invked this way we are fetching the adress here.
+parser = argparse.ArgumentParser(description='Slave script')
+parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+args = parser.parse_args()
+original_working_directory = args.original_working_directory
+
+# However - if this is not the case we will have to establish the root folder in 
+# one of two different ways.
+if original_working_directory is None or original_working_directory == '':
+    
+    #if it is running as a python subprocess we need to get the originating folder.
+    original_working_directory  = os.getcwd()
+
+    # When running directly separate script we need to find out and go up one level.
+    if str("system") in str(original_working_directory):
+        original_working_directory = os.path.join(os.getcwd(),'../')
+
 # Load configuration settings
-config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
+config_file             = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file               = os.path.join(original_working_directory, "output/mesa.gpkg")
+
+# Load configuration settings
 config                  = read_config(config_file)
 
-input_folder_asset      = config['DEFAULT']['input_folder_asset']
-input_folder_geocode    = config['DEFAULT']['input_folder_geocode']
-gpkg_file               = config['DEFAULT']['gpkg_file']
+input_folder_asset      = os.path.join(original_working_directory, config['DEFAULT']['input_folder_asset'])
+input_folder_geocode    = os.path.join(original_working_directory, config['DEFAULT']['input_folder_geocode'])
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']

@@ -5,6 +5,7 @@ import configparser
 import pandas as pd
 import geopandas as gpd
 import datetime
+import argparse
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import os
@@ -356,24 +357,44 @@ def increment_stat_value(config_file, stat_name, increment_value):
 def log_to_file(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    with open("../log.txt", "a") as log_file:
+    log_destination_file = os.path.join(original_working_directory, "log.txt")
+    with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
 
 #####################################################################################
 #  Main
 #
 
+
+# original folder for the system is sent from the master executable. If the script is
+# invked this way we are fetching the adress here.
+parser = argparse.ArgumentParser(description='Slave script')
+parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+args = parser.parse_args()
+original_working_directory = args.original_working_directory
+
+# However - if this is not the case we will have to establish the root folder in 
+# one of two different ways.
+if original_working_directory is None or original_working_directory == '':
+    
+    #if it is running as a python subprocess we need to get the originating folder.
+    original_working_directory  = os.getcwd()
+
+    # When running directly separate script we need to find out and go up one level.
+    if str("system") in str(original_working_directory):
+        original_working_directory = os.path.join(os.getcwd(),'../')
+
 # Load configuration settings and data
-config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
-config                  = read_config(config_file)
+config_file                 = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
 
-gpkg_file               = config['DEFAULT']['gpkg_file']
+config                      = read_config(config_file)
 
-ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+ttk_bootstrap_theme         = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg      = config['DEFAULT']['workingprojection_epsg']
                                        
-valid_input_values      = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
-classification          = read_config_classification(config_file)
+valid_input_values          = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
+classification              = read_config_classification(config_file)
 
 increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 

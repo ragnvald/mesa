@@ -4,6 +4,7 @@ import configparser
 import datetime
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
 import sqlite3
 import os
 import contextily as ctx
@@ -231,12 +232,34 @@ def compile_pdf(output_pdf, elements):
 #####################################################################################
 #  Main
 #
-config_file = 'config.ini'
+
+# original folder for the system is sent from the master executable. If the script is
+# invked this way we are fetching the adress here.
+parser = argparse.ArgumentParser(description='Slave script')
+parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+args = parser.parse_args()
+original_working_directory = args.original_working_directory
+
+# However - if this is not the case we will have to establish the root folder in 
+# one of two different ways.
+if original_working_directory is None or original_working_directory == '':
+    
+    #if it is running as a python subprocess we need to get the originating folder.
+    original_working_directory  = os.getcwd()
+
+    # When running directly separate script we need to find out and go up one level.
+    if str("system") in str(original_working_directory):
+        original_working_directory = os.path.join(os.getcwd(),'../')
+
+# Load configuration settings
+config_file                 = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
+
 config = read_config(config_file)
 
-gpkg_file               = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../output/mesa.gpkg')
-output_png              = os.path.join('..', config['DEFAULT']['output_png'])
-tmp_dir                 = os.path.join('..', 'output/tmp')
+output_png              = os.path.join(original_working_directory, config['DEFAULT']['output_png'])
+tmp_dir                 = os.path.join(original_working_directory, 'output/tmp')
+
 os.makedirs(tmp_dir, exist_ok=True)
 
 asset_output_png = os.path.join(tmp_dir, 'asset.png')

@@ -10,6 +10,7 @@ import os
 import geopandas as gpd
 import pandas as pd
 import configparser
+import argparse
 import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
@@ -60,7 +61,8 @@ def log_to_gui(log_widget, message):
     formatted_message = f"{timestamp} - {message}"
     log_widget.insert(tk.END, formatted_message + "\n")
     log_widget.see(tk.END)
-    with open("../log.txt", "a") as log_file:
+    log_destination_file = os.path.join(original_working_directory, "log.txt")
+    with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
 
 
@@ -405,10 +407,30 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
 #  Main
 #
 
+# original folder for the system is sent from the master executable. If the script is
+# invked this way we are fetching the adress here.
+parser = argparse.ArgumentParser(description='Slave script')
+parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+args = parser.parse_args()
+original_working_directory = args.original_working_directory
+
+# However - if this is not the case we will have to establish the root folder in 
+# one of two different ways.
+if original_working_directory is None or original_working_directory == '':
+    
+    #if it is running as a python subprocess we need to get the originating folder.
+    original_working_directory  = os.getcwd()
+
+    # When running directly separate script we need to find out and go up one level.
+    if str("system") in str(original_working_directory):
+        original_working_directory = os.path.join(os.getcwd(),'../')
+
+# Load configuration settings and data
+config_file             = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file               = os.path.join(original_working_directory, "output/mesa.gpkg")
+
 # Load configuration settings
-config_file             = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini')
 config                  = read_config(config_file)
-gpkg_file               = config['DEFAULT']['gpkg_file']
         
 mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
@@ -462,7 +484,7 @@ if __name__ == "__main__":
     process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
     # Add 'Close' button to the button frame
-    close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root))
+    close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
     close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
     log_to_gui(log_widget, "Opened processing subprocess.")
