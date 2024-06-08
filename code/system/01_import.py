@@ -161,18 +161,19 @@ def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widg
 # placed within one attribute (attributes) in the tbl_geocode_object table. At the time
 # of writing this I am not sure if the attribute name is kept here. If not it should be
 # placed separately in tbl_geocode_group.
+# Function to process a geocode layer and place it in context.
 def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
         return group_id_counter, object_id_counter
 
     feature_count = len(data)
-    log_to_gui(log_widget, f"Imported {layer_name} with {feature_count}.")
+    log_to_gui(log_widget, f"Imported {layer_name} with {feature_count} features.")
 
     # Calculate bounding box and add to geocode groups
-    bounding_box            = data.total_bounds
-    bbox_geom               = box(*bounding_box)
-    name_gis_geocodegroup   = f"geocode_{group_id_counter:03d}"
+    bounding_box = data.total_bounds
+    bbox_geom = box(*bounding_box)
+    name_gis_geocodegroup = f"geocode_{group_id_counter:03d}"
 
     geocode_groups.append({
         'id': group_id_counter,  # Group ID
@@ -197,23 +198,22 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
 
     return group_id_counter + 1, object_id_counter
 
-
 # Function to process each geocode file
 def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget):
     if filepath.endswith('.gpkg'):
         ds = ogr.Open(filepath)
         for i in range(ds.GetLayerCount()):
-            layer       = ds.GetLayerByIndex(i)
-            layer_name  = layer.GetName()
-            data        = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
+            layer = ds.GetLayerByIndex(i)
+            layer_name = layer.GetName()
+            data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
             log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
             group_id_counter, object_id_counter = process_geocode_layer(
                 data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
         ds = None
     elif filepath.endswith('.shp'):
-        data            = read_and_reproject(filepath, log_widget=log_widget)
-        layer_name      = os.path.splitext(os.path.basename(filepath))[0]
-        log_to_gui(log_widget, f"Importing shapefile layyer: {layer_name}")
+        data = read_and_reproject(filepath, log_widget=log_widget)
+        layer_name = os.path.splitext(os.path.basename(filepath))[0]
+        log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
         group_id_counter, object_id_counter = process_geocode_layer(
             data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
     else:
@@ -289,11 +289,10 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     else:
         progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
 
-
     for filepath in sorted_file_paths:
         try:
             layer_name = os.path.splitext(os.path.basename(filepath))[0]
-            log_to_gui(log_widget, f"Processing the layer {layer_name}")
+            log_to_gui(log_widget, f"Processing file: {filepath}")
             progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
 
             group_id_counter, object_id_counter = process_geocode_file(
