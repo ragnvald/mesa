@@ -303,6 +303,7 @@ workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Create atlas tiles")
+root.iconbitmap("system_resources/mesa.ico")
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)

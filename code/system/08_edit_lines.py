@@ -119,7 +119,8 @@ workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
-root.title("Edit lines")
+root.title("Edit segments")
+root.iconbitmap("system_resources/mesa.ico")
 
 # Configure column widths
 root.columnconfigure(0, minsize=200)  # Configure the size of the first column

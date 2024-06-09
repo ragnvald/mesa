@@ -990,6 +990,7 @@ workingprojection_epsg      = config['DEFAULT']['workingprojection_epsg']
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
 root.title("Import assets")
+root.iconbitmap("system_resources/mesa.ico")
 
 # Create a LabelFrame for the log output
 log_frame = ttk.LabelFrame(root, text="Log output", bootstyle="info") 

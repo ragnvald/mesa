@@ -445,6 +445,7 @@ if __name__ == "__main__":
     # Create the user interface
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Process data")
+    root.iconbitmap("system_resources/mesa.ico")
 
     # Create a log widget
     log_widget = scrolledtext.ScrolledText(root, height=10)

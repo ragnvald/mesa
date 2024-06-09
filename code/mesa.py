@@ -10,7 +10,7 @@ import pandas as pd
 import geopandas as gpd
 import configparser
 import sqlite3
-import argparse
+import socket
 import uuid
 import datetime
 from datetime import datetime, timedelta
@@ -29,6 +29,20 @@ def read_config(file_name):
         base_path = os.path.dirname(os.path.abspath(__file__))
     config.read(os.path.join(base_path, file_name))
     return config
+
+def is_connected(hostname="8.8.8.8", port=53, timeout=3):
+    """
+    Hostname: 8.8.8.8 (Google DNS)
+    OpenPort: 53/tcp
+    Service: domain (DNS/TCP)
+    """
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((hostname, port))
+        return True
+    except socket.error as ex:
+        print(ex)
+        return False
 
 
 # Function to check and create folders
@@ -530,6 +544,9 @@ def store_logs_online(
         mesa_stat_create_atlas, 
         mesa_stat_process_lines
         ):
+    if not is_connected():
+        return "No network access, logs not updated"
+    
     try:
         # Function to execute the writing process
         def write_point():
@@ -576,6 +593,9 @@ def store_userinfo_online(
         id_name, 
         id_email
         ):
+    if not is_connected():
+        return "No network access, logs not updated"
+    
     try:
         # Function to execute the writing process
         def write_point():
@@ -637,7 +657,7 @@ log_date_lastupdate         = config['DEFAULT']['log_date_lastupdate']
 log_org                     = config['DEFAULT']['log_org']
 log_bucket                  = config['DEFAULT']['log_bucket']
 log_host                    = config['DEFAULT']['log_host']
-log_token                   = "the api-secret"
+log_token                   = "Xp_sTOcg-46FFiQuplxz-Fqi-jEe5YGfOZarPR7gwZ4CMTMYseUPUjdKtp2xKV9w85TlBlh5X_lnaNzKULAhog=="
 
 mesa_stat_startup           = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process           = config['DEFAULT']['mesa_stat_process']
@@ -711,6 +731,7 @@ if __name__ == "__main__":
     # Setup the main Tkinter window
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("MESA 4")
+    root.iconbitmap("system_resources/mesa.ico")
     root.geometry("850x540")
 
     button_width = 18
@@ -956,4 +977,3 @@ if __name__ == "__main__":
     root.update_idletasks()
 
     root.mainloop()
-
