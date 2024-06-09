@@ -85,8 +85,8 @@ echo Distribution folder will be: %DIST_FOLDER_ROOT%
 echo
 
 :: Start the compilation
-set "PYINSTALLER_CMD_ROOT=pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_ROOT% --workpath=%BUILD_FOLDER_ROOT% --add-data %SCRIPT_FOLDER_SYSTEM%;system --add-data %SCRIPT_PATH%\system_resources;system_resources"
-set "PYINSTALLER_CMD_SYSTEM=pyinstaller --onefile --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_SYSTEM% --workpath=%BUILD_FOLDER_SYSTEM% --add-data %SCRIPT_FOLDER_SYSTEM%;system --add-data %SCRIPT_PATH%\system_resources;system_resources"
+set "PYINSTALLER_CMD_ROOT=pyinstaller --onefile --windowed --icon=system_resources\mesa.ico --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_ROOT% --workpath=%BUILD_FOLDER_ROOT% --add-data %SCRIPT_FOLDER_SYSTEM%;system --add-data %SCRIPT_PATH%\system_resources;system_resources"
+set "PYINSTALLER_CMD_SYSTEM=pyinstaller --onefile --windowed --collect-all ttkbootstrap --collect-all tkinterweb --hidden-import=ttkbootstrap --distpath=%DIST_FOLDER_SYSTEM% --workpath=%BUILD_FOLDER_SYSTEM% --add-data %SCRIPT_FOLDER_SYSTEM%;system --add-data %SCRIPT_PATH%\system_resources;system_resources"
 
 echo Working on 01_import.py in %SCRIPT_FOLDER_SYSTEM%
 if exist "%SCRIPT_FOLDER_SYSTEM%\01_import.py" (
@@ -237,6 +237,15 @@ if exist "%BUILD_FOLDER_ROOT%" (
 echo Build folders deleted
 
 echo
+
+
+:: Delete all .exe files in the original code folder
+echo Deleting all .exe files in the original code folder: %SCRIPT_FOLDER_ROOT%
+del "%SCRIPT_FOLDER_ROOT%\system\*.exe" /q
+if errorlevel 1 echo Error deleting .exe files
+echo All .exe files deleted
+echo
+
 
 :: Just delete the -spec-files
 del "*.spec" /q
