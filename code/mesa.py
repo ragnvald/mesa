@@ -657,7 +657,7 @@ log_date_lastupdate         = config['DEFAULT']['log_date_lastupdate']
 log_org                     = config['DEFAULT']['log_org']
 log_bucket                  = config['DEFAULT']['log_bucket']
 log_host                    = config['DEFAULT']['log_host']
-log_token                   = "Xp_sTOcg-46FFiQuplxz-Fqi-jEe5YGfOZarPR7gwZ4CMTMYseUPUjdKtp2xKV9w85TlBlh5X_lnaNzKULAhog=="
+log_token                   = "here"
 
 mesa_stat_startup           = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process           = config['DEFAULT']['mesa_stat_process']
