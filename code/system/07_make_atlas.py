@@ -113,12 +113,6 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
     log_to_gui(log_widget, "Starting processing...")
     progress_var.set(10)  # Indicate start
 
-    # Read configuration
-    config                  = read_config('config.ini')
-    atlas_lon_size_km       = float(config['DEFAULT']['atlas_lon_size_km'])
-    atlas_lat_size_km       = float(config['DEFAULT']['atlas_lat_size_km'])
-    atlas_overlap_percent   = float(config['DEFAULT']['atlas_overlap_percent'])
-
     # Load tbl_flat from GeoPackage
     tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')
     update_progress(30)
@@ -300,10 +294,16 @@ input_folder_atlas      = os.path.join(original_working_directory, config['DEFAU
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
+atlas_lon_size_km       = float(config['DEFAULT']['atlas_lon_size_km'])
+atlas_lat_size_km       = float(config['DEFAULT']['atlas_lat_size_km'])
+atlas_overlap_percent   = float(config['DEFAULT']['atlas_overlap_percent'])
+
+icon_file               = os.path.join(original_working_directory, "system_resources/mesa.ico")
+
 # Create the user interface
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Create atlas tiles")
-root.iconbitmap("system_resources/mesa.ico")
+root.iconbitmap(icon_file)
 
 # Create a log widget
 log_widget = scrolledtext.ScrolledText(root, height=10)
