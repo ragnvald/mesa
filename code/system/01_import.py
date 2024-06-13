@@ -44,12 +44,6 @@ import threading
 # # # # # # # # # # # # # # 
 # Core functions
 
-# Get bounding box
-def get_bounding_box(data):
-    bbox = data.total_bounds
-    bbox_geom = box(*bbox)
-    return bbox_geom
-
 
 # Read the configuration file
 def read_config(file_name):
@@ -92,47 +86,6 @@ def read_and_reproject(filepath, layer=None, log_widget=None):
     except Exception as e:
         log_to_gui(log_widget, f"Failed to read or reproject {filepath}: {e}")
         return gpd.GeoDataFrame()  # Return an empty GeoDataFrame on failure
-
-
-# Function to process a layer and add to asset objects
-# Asset objects are all objects form all asset files/geopackages. In this process we will have
-# to harvest all attribute data and place them in one specific attribute. The attributes are all
-# placed within one attribute (attributes). At the time of writing this I am not sure if the 
-# attribute name is kept here. If not it should be placed separately in tbl_asset_group.
-#
-def process_asset_layer(data, asset_objects, object_id_counter, group_id, layer_name, log_widget):
-    if data.empty:
-        log_to_gui(log_widget, f"No data found in layer {layer_name}")
-        return object_id_counter
-
-    # Create a temporary GeoSeries for area calculation if the CRS is geographic
-    if data.crs.is_geographic:
-        
-        temp_data = data.copy()
-        temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
-
-        # Calculate area in the temporary projected system
-        area_m2_series = temp_data.geometry.area
-    else:
-        # Calculate area in the original system
-        area_m2_series = data.geometry.area
-
-    for index, row in data.iterrows():
-        attributes  = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
-        area_m2     = area_m2_series.iloc[index] if row.geometry.geom_type == 'Polygon' else 0
-
-        asset_objects.append({
-            'id': int(object_id_counter),
-            'ref_asset_group': int(group_id),
-            'asset_group_name': layer_name,
-            'attributes': attributes,
-            'process': True,
-            'area_m2': int(area_m2),
-            'geom': row.geometry  # Original geometry in workingprojection_epsg
-        })
-        object_id_counter += 1
-
-    return object_id_counter
 
 
 # Process the lines in a layer. Add appropriate attributes.
@@ -498,43 +451,6 @@ def process_geopackage_layer(filepath, layer_name, asset_objects, asset_groups, 
     return group_id_counter, object_id_counter
 
 
-def process_geopackage_layers(filepath, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
-    """
-    Process each layer in a GeoPackage file, adding each layer's data to the asset_objects list,
-    and creating a new entry in asset_groups for each layer.
-    """
-    # Open the GeoPackage file
-    with fiona.open(filepath) as src:
-        layer_names = src.layer_names()
-    
-    # Process each layer individually
-    for layer_name in layer_names:
-        data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
-        if not data.empty:
-            # Process layer data and update asset_objects and asset_groups
-            bbox_polygon = box(*data.total_bounds)  # Create a Polygon geometry from the bounding box
-            asset_groups.append({
-                'id': group_id_counter,
-                'name_original': layer_name,
-                'geom': bbox_polygon,  # Using the Polygon geometry here
-                # Add other necessary attributes here
-            })
-            for _, row in data.iterrows():
-                asset_objects.append({
-                    'id': object_id_counter,
-                    'ref_asset_group': group_id_counter,
-                    'geom': row.geometry,  # Directly use geometry
-                    # Add other necessary attributes here
-                })
-                object_id_counter += 1
-            group_id_counter += 1
-            log_to_gui(log_widget, f"Processed layer {layer_name} from GeoPackage {os.path.basename(filepath)}")
-        else:
-            log_to_gui(log_widget, f"Layer {layer_name} in GeoPackage {os.path.basename(filepath)} is empty")
-
-    return asset_objects, asset_groups, object_id_counter, group_id_counter
-
-
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     asset_objects       = []
     asset_groups        = []
@@ -733,28 +649,6 @@ def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
             log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
 
 
-# Function to update asset groups in geopackage
-def update_asset_groups(asset_groups_df, gpkg_file, log_widget):
-    engine = create_engine(f'sqlite:///{gpkg_file}')
-
-    # Check if 'geom' column exists in the DataFrame
-    if 'geom' in asset_groups_df.columns:
-        # Define the data types for the ID columns
-        id_col = asset_groups_df.columns[asset_groups_df.dtypes == 'int64']
-        
-        asset_groups_gdf = gpd.GeoDataFrame(asset_groups_df, geometry='geom')
-
-        asset_groups_gdf[id_col] = asset_groups_gdf[id_col].astype(int)
-
-        try:
-            asset_groups_gdf.to_file(gpkg_file, layer='tbl_asset_group', driver="GPKG", if_exists='append')
-            log_to_gui(log_widget, "Asset groups updated in GeoPackage.")
-        except exc.SQLAlchemyError as e:
-            log_to_gui(log_widget, f"Failed to update asset groups: {e}")
-    else:
-        log_to_gui(log_widget, "Error: 'geom' column not found in asset_groups_df.")
-
-
 def enable_spatialite(db_file, log_widget):
     try:
         conn = sqlite3.connect(db_file)
@@ -884,7 +778,6 @@ def delete_table_from_geopackage(gpkg_file, table_name, log_widget=None):
             print(message)
 
 
-
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
     if not os.path.isfile(config_file):
@@ -932,16 +825,6 @@ def run_subprocess(command, fallback_command):
             subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             log_to_gui(f"Failed to execute command: {command}")
-
-
-def get_current_directory_and_file():
-    # Get the current working directory
-    current_directory = os.getcwd()
-    
-    # Get the name of the current file
-    current_file = os.path.basename(sys.argv[0])
-    
-    return current_directory, current_file
 
 
 # Function to close the application

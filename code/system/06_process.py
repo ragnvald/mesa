@@ -131,47 +131,6 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
     return intersection_result
 
 
-# Function to aggregate data by code
-def aggregate_data(intersected_data):
-    # Group by code and calculate aggregates
-    aggregation_functions = {
-        'importance': ['min', 'max'],
-        'sensitivity': ['min', 'max'],
-        'susceptibility': ['min', 'max'],
-        'ref_geocodegroup': 'first',                # Include the first reference to geocode group id
-        'name_gis_geocodegroup': 'first',           # Include the first reference to geocode group id
-        'name': 'first',                            # Include the first name for each group
-        'geometry': 'first',                        # Keeping the first geometry for each group
-        'asset_group_name': lambda x: '; '.join(x)  # Concatenating asset_group_name
-    }
-
-    # Check if asset_group_name column exists
-    if 'asset_group_name' in intersected_data.columns:
-        grouped = intersected_data.groupby('code').agg(aggregation_functions)
-    else:
-        # Remove asset_group_name aggregation if the column does not exist
-        aggregation_functions.pop('asset_group_name')
-        grouped = intersected_data.groupby('code').agg(aggregation_functions)
-
-    # Flatten MultiIndex columns
-    grouped.columns = ['_'.join(col).strip() for col in grouped.columns.values]
-
-    # Rename columns after flattening
-    renamed_columns = {
-        'name_first': 'geocode_name_user',
-        'ref_geocodegroup_first': 'ref_geocodegroup',
-        'name_gis_first': 'name_gis_geocodegroup', 
-        'asset_group_name_<lambda>': 'asset_group_names'  
-    }
-
-    grouped.rename(columns=renamed_columns, inplace=True)
-
-    # Count the total assets in each cell (code is the unique identifier)
-    grouped['assets_total'] = intersected_data.groupby('code').size()
-
-    return grouped
-
-
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
