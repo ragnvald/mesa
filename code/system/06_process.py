@@ -382,7 +382,7 @@ if original_working_directory is None or original_working_directory == '':
 
     # When running directly separate script we need to find out and go up one level.
     if str("system") in str(original_working_directory):
-        original_working_directory = os.path.join(os.getcwd(),'../')
+        original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
 
 # Load configuration settings and data
 config_file             = os.path.join(original_working_directory, "system/config.ini")
@@ -404,7 +404,7 @@ if __name__ == "__main__":
     # Create the user interface
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Process data")
-    root.iconbitmap("system_resources/mesa.ico")
+    root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
 
     # Create a log widget
     log_widget = scrolledtext.ScrolledText(root, height=10)

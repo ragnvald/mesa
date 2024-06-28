@@ -158,7 +158,7 @@ if __name__ == "__main__":
     # Initialize the main window
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Edit atlas")
-    root.iconbitmap("system_resources/mesa.ico")
+    root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
     
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)

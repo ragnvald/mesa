@@ -9,7 +9,6 @@
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 import threading
-import subprocess
 import geopandas as gpd
 import configparser
 from shapely.geometry import box
@@ -289,7 +288,7 @@ gpkg_file               = os.path.join(original_working_directory, "output/mesa.
 # Load configuration settings
 config                  = read_config(config_file)
 
-input_folder_atlas      = os.path.join(original_working_directory, config['DEFAULT']['input_folder_atlas'])
+input_folder_atlas      = os.path.join(original_working_directory, "input/atlas")
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']

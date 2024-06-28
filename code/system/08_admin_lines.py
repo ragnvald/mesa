@@ -726,7 +726,7 @@ workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
 root.title("Admin segments")
-root.iconbitmap("system_resources/mesa.ico")
+root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
 root.geometry("750x350")
 
 # Define button sizes and width

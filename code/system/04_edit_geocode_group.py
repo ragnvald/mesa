@@ -115,7 +115,7 @@ if __name__ == "__main__":
     # Create the user interface
     root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
     root.title("Edit geocodes")
-    root.iconbitmap("system_resources/mesa.ico")
+    root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
 
     # Load data
     df = load_spatial_data(gpkg_file)

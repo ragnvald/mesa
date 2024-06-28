@@ -401,7 +401,7 @@ increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 if __name__ == "__main__":
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Set up processing")
-    root.iconbitmap("system_resources/mesa.ico")
+    root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
     root.geometry("900x800")
 
     df_assetgroup = load_data(gpkg_file)
