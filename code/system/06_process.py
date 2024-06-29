@@ -1,5 +1,5 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-# This is where evertthing comes together for the gridded assets.
+# This is where evertything comes together for the gridded assets.
 #
 
 import tkinter as tk
@@ -15,7 +15,12 @@ import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 
-# # # # # # # # # # # # # # 
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# This script processes geospatial data by reading assets and geocode objects,
+# performing spatial intersections, and aggregating results into final tables.
+# It provides a GUI for monitoring progress and logs the processing steps.
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
 # Shared functions
 
 # Read the configuration file
@@ -24,14 +29,13 @@ def read_config(file_name):
     config.read(file_name)
     return config
 
-
+# Read the classification configuration file and populate the global dictionary
 def read_config_classification(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
-    # Clear the existing global classification dictionary before populating it
     classification.clear()
     for section in config.sections():
-        if section in ['A', 'B', 'C', 'D', 'E']:  # Make sure we're only dealing with your classification sections
+        if section in ['A', 'B', 'C', 'D', 'E']:  # Only handle specific sections
             range_str = config[section]['range']
             description = config[section].get('description', '')  # Safely get the description if it exists
             start, end = map(int, range_str.split('-'))
@@ -41,21 +45,18 @@ def read_config_classification(file_name):
             }
     return classification
 
-# # # # # # # # # # # # # # 
 # Core functions
 
-
+# Update progress bar and label
 def update_progress(new_value):
     progress_var.set(new_value)
     progress_label.config(text=f"{int(new_value)}%")
 
-
-# Function to close the application
+# Close the application
 def close_application(root):
     root.destroy()
 
-
-# Logging function to write to the GUI log
+# Log messages to the GUI log widget and a log file
 def log_to_gui(log_widget, message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
@@ -65,55 +66,40 @@ def log_to_gui(log_widget, message):
     with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
 
-
+# Increment a statistical value in the configuration file
 def increment_stat_value(config_file, stat_name, increment_value):
-    # Check if the config file exists
     if not os.path.isfile(config_file):
         log_to_gui(log_widget,f"Configuration file {config_file} not found.")
         return
 
-    # Read the entire config file to preserve the layout and comments
     with open(config_file, 'r') as file:
         lines = file.readlines()
 
-    # Initialize a flag to check if the variable was found and updated
     updated = False
-
-    # Update the specified variable's value if it exists
     for i, line in enumerate(lines):
         if line.strip().startswith(f'{stat_name} ='):
-            # Extract the current value, increment it, and update the line
             parts = line.split('=')
             if len(parts) == 2:
                 current_value = parts[1].strip()
                 try:
-                    # Attempt to convert the current value to an integer and increment it
                     new_value = int(current_value) + increment_value
                     lines[i] = f"{stat_name} = {new_value}\n"
                     updated = True
                     break
                 except ValueError:
-                    # Handle the case where the conversion fails
                     log_to_gui(log_widget,f"Error: Current value of {stat_name} is not an integer.")
                     return
 
-    # Write the updated content back to the file if the variable was found and updated
     if updated:
         with open(config_file, 'w') as file:
             file.writelines(lines)
 
-# # # # # # # # # # # # # # 
 # Spatial functions
 
-
-# Function to perform intersection with geocode data
+# Perform intersection with geocode data
 def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
-
     log_to_gui(log_widget, f"Processing {geom_type} intersections")
     asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
-
-    geocode_df.sindex
-    asset_filtered.sindex
 
     if asset_filtered.empty:
         log_to_gui(log_widget, "No asset data of the specified geom type.")
@@ -127,13 +113,10 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
         log_to_gui(log_widget, "No intersections found.")
     else:
         log_to_gui(log_widget, f"Found {len(intersection_result)} intersections.")
-
     return intersection_result
-
 
 # Create tbl_stacked by intersecting all asset data with the geocoding data
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
-
     log_to_gui(log_widget, "Building analysis table (tbl_stacked).")
     update_progress(10)  # Indicate start
 
@@ -142,7 +125,6 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     if asset_data.crs is None:
         log_to_gui(log_widget, "No CRS found, setting default CRS.")
         asset_data.set_crs(workingprojection_epsg, inplace=True)
-
     update_progress(15)  # Progress after reading asset data
 
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
@@ -158,86 +140,57 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
         asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']], 
         left_on='ref_asset_group', right_on='id', how='left'
     )
-
     log_to_gui(log_widget, f"Asset data count after merge: {len(asset_data)}")
-
     update_progress(30)  # Progress after merging data
 
-    point_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Point', log_widget)
-    update_progress(33)  # Progress after point intersections
+    # For  now these are the types. Later - consider if GeometryCollection should also be included.
+    geom_types = ['Point', 'MultiPoint', 'LineString', 'MultiLineString', 'Polygon', 'MultiPolygon']
+    intersections = []
 
-    multipoint_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'MultiPoint', log_widget)
-    update_progress(36)  # Progress after point intersections
+    # Process intersections for each geometry type
+    for geom_type in geom_types:
+        try:
+            intersected = intersection_with_geocode_data(asset_data, geocode_data, geom_type, log_widget)
+            intersections.append(intersected)
+            update_progress(progress_var.get() + 3)
+        except Exception as e:
+            log_to_gui(log_widget, f"Error processing intersections for {geom_type}: {e}")
 
-    line_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'LineString', log_widget)
-    update_progress(49)  # Progress after line intersections
-
-    multiline_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'MultiLineString', log_widget)
-    update_progress(42)  # Progress after line intersections
-
-    polygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'Polygon', log_widget)
-    update_progress(45)  # Progress after polygon intersections
-
-    multipolygon_intersections = intersection_with_geocode_data(asset_data, geocode_data, 'MultiPolygon', log_widget)
-    update_progress(47)  # Progress after polygon intersections
-
-    log_to_gui(log_widget, f"Point intersections count: {len(point_intersections)}")
-    log_to_gui(log_widget, f"Line intersections count: {len(line_intersections)}")
-    log_to_gui(log_widget, f"Polygon intersections count: {len(polygon_intersections)}")
-
-    intersected_data = pd.concat([point_intersections, multipoint_intersections, line_intersections, multiline_intersections, polygon_intersections, multipolygon_intersections], ignore_index=True)
-
+    intersected_data = pd.concat(intersections, ignore_index=True)
     log_to_gui(log_widget, f"Total intersected data count: {len(intersected_data)}")
-    
-    # To list the columns:
-    columns_list = intersected_data.columns.tolist()
-  
     update_progress(49)  # Progress after concatenating data
-    
-    # List of columns to drop if they exist
+
+    # Drop unnecessary columns if they exist
     columns_to_drop = ['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right']
-
-    # Drop the unnecessary columns if they exist
-    for col in columns_to_drop:
-        if col in intersected_data.columns:
-            intersected_data.drop(columns=[col], inplace=True)
-
-    
+    intersected_data.drop(columns=[col for col in columns_to_drop if col in intersected_data.columns], inplace=True)
     log_to_gui(log_widget, f"Total intersected data after drop function: {len(intersected_data)}")
 
-    # Area calculation (area_m2 here)
+    # Area calculation
     if intersected_data.crs.is_geographic:
-        # Project to a CRS suitable for area calculation
         temp_data = intersected_data.copy()
         temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
         intersected_data['area_m2'] = temp_data.geometry.area.astype('int64')
     else:
         intersected_data['area_m2'] = intersected_data.geometry.area.astype('int64')
-        
     log_to_gui(log_widget, f"Total intersected data after area calculations: {len(intersected_data)}")
+    update_progress(50)  # Progress after area calculation
 
-    update_progress(50)  # Progress after concatenating data
-    
-    # Before saving, assign the CRS to the GeoDataFrame
+    # Assign the CRS to the GeoDataFrame
     intersected_data.crs = workingprojection_epsg
-
     log_to_gui(log_widget, f"Total intersected data after projection to working projection: {len(intersected_data)}")
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Done processing the analysis layer.")
     update_progress(50)  # Final progress
 
-
-# Create tbl_flat by reading out values from tbl_stacked
+# Create tbl_flat by aggregating values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
-    # Ensure the CRS is set right after reading
     if tbl_stacked.crs is None:
         log_to_gui(log_widget, "CRS not found, setting default CRS for tbl_stacked.")
         tbl_stacked.set_crs(workingprojection_epsg, inplace=True)
-
     update_progress(60)
 
     # Calculate overlap counts per 'code'
@@ -258,8 +211,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
     # Group by 'code' and aggregate
     tbl_flat = tbl_stacked.groupby('code').agg(aggregation_functions)
-
-    # Flatten the MultiIndex columns
     tbl_flat.columns = ['_'.join(col).strip() for col in tbl_flat.columns.values]
 
     # Rename columns after flattening
@@ -276,77 +227,57 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
         'ref_asset_group_nunique': 'asset_groups_total',
         'geometry_first': 'geometry'
     }
-
     tbl_flat.rename(columns=renamed_columns, inplace=True)
 
-    # Convert to GeoDataFrame
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry', crs=workingprojection_epsg)
 
-    # Check and set CRS again, if needed
     if tbl_flat.crs is None:
         log_to_gui(log_widget, "CRS not found after aggregation, setting CRS for tbl_flat.")
         tbl_flat.set_crs(workingprojection_epsg, inplace=True)
 
-    # Calculate area depending on the CRS
     if tbl_flat.crs.is_geographic:
-        # Project to a CRS suitable for area calculation
         temp_tbl_flat = tbl_flat.copy()
         temp_tbl_flat.geometry = temp_tbl_flat.geometry.to_crs("EPSG:3395")
         tbl_flat['area_m2'] = temp_tbl_flat.geometry.area.astype('int64')
     else:
         tbl_flat['area_m2'] = tbl_flat.geometry.area.astype('int64')
 
-    # Reset index to make 'code' a column
     tbl_flat.reset_index(inplace=True)
-
-    # Merge tbl_flat with overlap_counts to add the overlap_count column
     tbl_flat = tbl_flat.merge(overlap_counts, on='code', how='left')
 
-    # Save tbl_flat as a new layer in the GeoPackage
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
 
-
+# Classify data based on configuration
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
-    # Load classification configuration
     classification = read_config_classification(config_path)
-
-    # Load geopackage data
     gdf = gpd.read_file(gpkg_file, layer=process_layer)
 
-    # Function to classify each row
     def classify_row(value):
         for label, info in classification.items():
             if value in info['range']:
                 return label, info['description']
-        return 'Unknown', 'No description available'  # Default if no range matches
+        return 'Unknown', 'No description available'
 
-    # Identify the base name and suffix (if any) for dynamic column naming
     base_name, *suffix = column_name.rsplit('_', 1)
     suffix = suffix[0] if suffix else ''
     new_code_col = f"{base_name}_code_{suffix}" if suffix else f"{base_name}_code"
     new_desc_col = f"{base_name}_description_{suffix}" if suffix else f"{base_name}_description"
 
-    # Apply classification to the specified column
-    # Using zip to unpack results directly into the new columns
     gdf[new_code_col], gdf[new_desc_col] = zip(*gdf[column_name].apply(classify_row))
 
     log_to_gui(log_widget, f"Updated classifications for {process_layer} based on {column_name}")
 
-    # Save the modified geopackage
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
 
     log_to_gui(log_widget, f"Data saved to {process_layer} with new fields {new_code_col} and {new_desc_col}")
 
-
+# Process all steps and create final tables
 def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg):
-    # Process and create tbl_stacked
     main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg)
-
-    # Process and create tbl_flat
     main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg) 
     update_progress(94)
- 
+
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
     update_progress(95)
 
@@ -361,13 +292,12 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
     log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
     update_progress(100)
 
-
 #####################################################################################
 #  Main
 #
 
 # original folder for the system is sent from the master executable. If the script is
-# invked this way we are fetching the adress here.
+# invoked this way we are fetching the address here.
 parser = argparse.ArgumentParser(description='Slave script')
 parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
 args = parser.parse_args()
@@ -376,11 +306,7 @@ original_working_directory = args.original_working_directory
 # However - if this is not the case we will have to establish the root folder in 
 # one of two different ways.
 if original_working_directory is None or original_working_directory == '':
-    
-    #if it is running as a python subprocess we need to get the originating folder.
     original_working_directory  = os.getcwd()
-
-    # When running directly separate script we need to find out and go up one level.
     if str("system") in str(original_working_directory):
         original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
 
@@ -398,52 +324,41 @@ workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 # Global declaration
 classification = {}
 
-
 if __name__ == "__main__":
-    
-    # Create the user interface
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("Process data")
     root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
 
-    # Create a log widget
     log_widget = scrolledtext.ScrolledText(root, height=10)
     log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-    # Create a frame to hold the progress bar and the label
     progress_frame = tk.Frame(root)
     progress_frame.pack(pady=5)
 
-    # Create a progress bar
     progress_var = tk.DoubleVar()
     progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
-    progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the frame
+    progress_bar.pack(side=tk.LEFT)
 
-    # Label for displaying the progress percentage
     progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
-    progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
+    progress_label.pack(side=tk.LEFT, padx=5)
 
-    # Information text field above the buttons
     info_label_text = ("This is where all assets and geocode objects (grids) are processed "
                     "using the intersect function. For each such intersection a separate "
                     "geocode object (grid cell) is established. At the same time we also "
                     "calculate the sensitivity based on input asset importance and "
                     "susceptibility. Our data model provides a rich set of attributes "
-                    "which we believe can be usefull in your further analysis of the "
+                    "which we believe can be useful in your further analysis of the "
                     "area sensitivities.")
     info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
     info_label.pack(padx=10, pady=10)
 
-    # Create a frame for buttons
     button_frame = tk.Frame(root)
     button_frame.pack(pady=5)
 
-    # Add 'Process All' button to the button frame
     process_all_btn = ttk.Button(button_frame, text="Process", command=lambda: threading.Thread(
-        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file,workingprojection_epsg), daemon=True).start())
+        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg), daemon=True).start())
     process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
-    # Add 'Close' button to the button frame
     close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
     close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
