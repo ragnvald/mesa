@@ -155,11 +155,88 @@ def export_to_excel(data_frame, file_path):
     
     data_frame.to_excel(file_path, index=False)
 
+def fetch_lines_and_segments(db_path):
+    conn = sqlite3.connect(db_path)
+    lines_query = "SELECT * FROM tbl_lines"
+    segments_query = "SELECT * FROM tbl_segment_flat"  # Changed to tbl_segment_flat
+    
+    lines_df = pd.read_sql_query(lines_query, conn)
+    segments_df = pd.read_sql_query(segments_query, conn)
+    
+    conn.close()
+    return lines_df, segments_df
+
+def get_color_from_code(code, config):
+    code = code.strip()  # Ensure code is a string
+    for section in config.sections():
+        if 'range' in config[section]:
+            range_min, range_max = map(int, config[section]['range'].split('-'))
+            try:
+                code_value = int(code)
+                if range_min <= code_value <= range_max:
+                    return config[section]['category_colour']
+            except ValueError:
+                pass  # Ignore non-integer codes
+    return "#FFFFFF"  # Default to white if no match found
+
+def create_line_statistic_image(line, segments, config, output_path):
+    line_segments = segments[segments['name_gis'] == line['name_gis']].sort_values(by='segment_id')
+    sensitivity_max = line_segments['sensitivity_code_max']
+    sensitivity_min = line_segments['sensitivity_code_min']
+    
+    segment_count = len(line_segments)
+    fig, ax = plt.subplots(figsize=(10, 1), dpi=100)
+    for i, (max_code, min_code) in enumerate(zip(sensitivity_max, sensitivity_min)):
+        max_color = get_color_from_code(max_code, config)
+        min_color = get_color_from_code(min_code, config)
+        ax.add_patch(plt.Rectangle((i/segment_count, 0.5), 1/segment_count, 0.5, color=max_color))
+        ax.add_patch(plt.Rectangle((i/segment_count, 0), 1/segment_count, 0.5, color=min_color))
+    
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis('off')
+    plt.savefig(output_path, bbox_inches='tight')
+    plt.close(fig)
+
+def generate_line_statistics_pages(lines_df, segments_df, config, tmp_dir):
+    pages = []
+    log_data = []
+    
+    for _, line in lines_df.iterrows():
+        line_name = line['name_gis']
+        length_m = line['length_m']
+        line_segments = segments_df[segments_df['name_gis'] == line_name].sort_values(by='segment_id')
+        
+        # Append segment data to log_data
+        for _, segment in line_segments.iterrows():
+            log_data.append({
+                'line_name': line_name,
+                'segment_id': segment['segment_id'],
+                'sensitivity_code_max': segment['sensitivity_code_max'],
+                'sensitivity_code_min': segment['sensitivity_code_min']
+            })
+        
+        line_image_path = os.path.join(tmp_dir, f"{line_name}_stats.png")
+        create_line_statistic_image(line, line_segments, config, line_image_path)
+        
+        pages.append(('new_page', None))
+        pages.append(('heading(2)', f"Line: {line_name}"))
+        pages.append(('text', f"Length: {length_m} meters"))
+        pages.append(('text', f"Number of segments: {len(line_segments)}"))
+        pages.append(('image', line_image_path))
+    
+    # Export log data to Excel
+    log_df = pd.DataFrame(log_data)
+    log_file_path = os.path.join(tmp_dir, 'line_segment_log.xlsx')
+    export_to_excel(log_df, log_file_path)
+    write_to_log(f"Segment log exported to {log_file_path}")
+    
+    return pages, log_file_path
+
 def line_up_to_pdf(order_list):
     elements = []
     styles = getSampleStyleSheet()
 
-    # Define custom heading styles
     heading_styles = {
         1: ParagraphStyle(name='Heading1', fontSize=18, leading=22, spaceAfter=12, alignment=TA_CENTER),
         2: ParagraphStyle(name='Heading2', fontSize=16, leading=8, spaceAfter=4),
@@ -170,27 +247,26 @@ def line_up_to_pdf(order_list):
         item_type, item_value = item
 
         if item_type == 'text':
-            # Check if item_value is a file path or direct text
             if os.path.isfile(item_value):
                 with open(item_value, 'r') as file:
                     text = file.read()
             else:
                 text = item_value
-            text = text.replace("\n", "<br/>")  # Replace newlines with <br/> for HTML-style line breaks
+            text = text.replace("\n", "<br/>")
             elements.append(Paragraph(text, styles['Normal']))
             elements.append(Spacer(1, 12))
         
         elif item_type == 'image':
-            elements.append(Image(item_value, width=500, height=500))
+            elements.append(Image(item_value, width=500, height=100))
             elements.append(Spacer(1, 12))
 
         elif item_type == 'spacer':
-            lines = item_value if item_value else 1  # Default to 1 line if no value is provided
+            lines = item_value if item_value else 1
             elements.append(Spacer(1, lines * 12))
         
         elif item_type == 'table':
             df = pd.read_excel(item_value)
-            if len(df.columns) == 3:  # Ensure we only rename if the column count matches
+            if len(df.columns) == 3:
                 df.columns = ['Code', 'Description', '# asset objects']
             table_data = [df.columns.tolist()] + df.values.tolist()
             table = Table(table_data)
@@ -204,7 +280,7 @@ def line_up_to_pdf(order_list):
             elements.append(table)
         
         elif item_type.startswith('heading'):
-            level = int(item_type[-2])  # Extract heading level
+            level = int(item_type[-2])
             elements.append(Paragraph(item_value, heading_styles[level]))
             elements.append(Spacer(1, 12))
         
@@ -214,9 +290,8 @@ def line_up_to_pdf(order_list):
     return elements
 
 def compile_pdf(output_pdf, elements):
-    doc = SimpleDocTemplate(output_pdf, pagesize=A4)  # Use A4 page size
+    doc = SimpleDocTemplate(output_pdf, pagesize=A4)
     
-    # Create a function to add a centered header on every page starting from the second page
     def add_header(canvas, doc):
         canvas.saveState()
         header_text = "MESA - report on data provided"
@@ -233,25 +308,16 @@ def compile_pdf(output_pdf, elements):
 #  Main
 #
 
-# original folder for the system is sent from the master executable. If the script is
-# invked this way we are fetching the adress here.
 parser = argparse.ArgumentParser(description='Slave script')
 parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
 args = parser.parse_args()
 original_working_directory = args.original_working_directory
 
-# However - if this is not the case we will have to establish the root folder in 
-# one of two different ways.
 if original_working_directory is None or original_working_directory == '':
-    
-    #if it is running as a python subprocess we need to get the originating folder.
     original_working_directory  = os.getcwd()
-
-    # When running directly separate script we need to find out and go up one level.
     if str("system") in str(original_working_directory):
         original_working_directory = os.path.join(os.getcwd(),'../')
 
-# Load configuration settings
 config_file                 = os.path.join(original_working_directory, "system/config.ini")
 gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
 
@@ -278,35 +344,38 @@ df_asset_group_statistics = fetch_asset_group_statistics(gpkg_file)
 export_to_excel(df_asset_group_statistics, asset_group_statistics)
 write_to_log("Excel table exported")
 
-# Calculate group statistics
 group_statistics = calculate_group_statistics(gpkg_file, 'tbl_asset_object')
 export_to_excel(group_statistics, object_stats_output)
 write_to_log("Asset object statistics table exported")
 
-# Get the current date and time
+lines_df, segments_df = fetch_lines_and_segments(gpkg_file)
+line_statistics_pages, log_file_path = generate_line_statistics_pages(lines_df, segments_df, config, tmp_dir)
+write_to_log("Line statistics images created")
+
 timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 time_info = f"Timestamp for this report is: {timestamp}"
+spatialstatistics_info = "*) Points and lines does not represent areas. So their areas are zero."
 
-# Define the order of objects for the PDF
 order_list = [
     ('heading(1)', "MESA report"),
     ('spacer', 5),
-    ('text', time_info),  # Direct text
+    ('text', time_info),
     ('new_page', None),
     ('heading(2)', "Introduction"),
-    ('text', '../output/tmp/introduction.txt'),  # Text from file
+    ('text', '../output/tmp/introduction.txt'),
     ('spacer', 2),
     ('heading(2)', "Asset object statistics"),
     ('table', object_stats_output),
+    ('text', spatialstatistics_info),
     ('new_page', None),
     ('heading(2)', "Map representation of all assets"),
-    ('text', '../output/tmp/asset_desc.txt'),  # Text from file
+    ('text', '../output/tmp/asset_desc.txt'),
     ('image', asset_output_png),
     ('heading(3)', "Geographical Coordinates"),
-    ('text', '../output/tmp/geographical_coordinates.txt'),  # Text from file
+    ('text', '../output/tmp/geographical_coordinates.txt'),
     ('new_page', None),
     ('heading(2)', "Asset data table"),
-    ('text', '../output/tmp/asset_overview.txt'),  # Text from file
+    ('text', '../output/tmp/asset_overview.txt'),
     ('spacer', 2),
     ('table', asset_group_statistics),
     ('new_page', None),
@@ -315,11 +384,11 @@ order_list = [
     ('new_page', None)
 ]
 
+order_list.extend(line_statistics_pages)  # Add line statistics pages at the end
 elements = line_up_to_pdf(order_list)
 
 timestamp_pdf = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-
-# Create PDF
 output_pdf = f'../output/{timestamp_pdf}_MESA-report.pdf'
 compile_pdf(output_pdf, elements)
 write_to_log("PDF report created")
+
