@@ -183,11 +183,15 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     log_to_gui(log_widget, "Done processing the analysis layer.")
     update_progress(50)  # Final progress
 
+
 # Create tbl_flat by aggregating values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
+    # Log the initial state of tbl_stacked
+    log_to_gui(log_widget, f"Initial tbl_stacked size: {len(tbl_stacked)}")
+    
     if tbl_stacked.crs is None:
         log_to_gui(log_widget, "CRS not found, setting default CRS for tbl_stacked.")
         tbl_stacked.set_crs(workingprojection_epsg, inplace=True)
@@ -196,7 +200,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     # Calculate overlap counts per 'code'
     overlap_counts = tbl_stacked['code'].value_counts().reset_index()
     overlap_counts.columns = ['code', 'assets_overlap_total']
-
+    
     # Aggregation functions
     aggregation_functions = {
         'importance': ['min', 'max'],
@@ -248,10 +252,16 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
 
+
+
 # Classify data based on configuration
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
     classification = read_config_classification(config_path)
     gdf = gpd.read_file(gpkg_file, layer=process_layer)
+
+    # Log the initial state of the GeoDataFrame and the classification configuration
+    log_to_gui(log_widget, f"Initial size of {process_layer}: {len(gdf)}")
+    log_to_gui(log_widget, f"Classification configuration: {classification}")
 
     def classify_row(value):
         for label, info in classification.items():
@@ -264,12 +274,21 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     new_code_col = f"{base_name}_code_{suffix}" if suffix else f"{base_name}_code"
     new_desc_col = f"{base_name}_description_{suffix}" if suffix else f"{base_name}_description"
 
+    # Ensure the column exists
+    if column_name not in gdf.columns:
+        log_to_gui(log_widget, f"Column {column_name} not found in {process_layer}. Classification skipped.")
+        return
+
+    # Apply classification
     gdf[new_code_col], gdf[new_desc_col] = zip(*gdf[column_name].apply(classify_row))
+
 
     log_to_gui(log_widget, f"Updated classifications for {process_layer} based on {column_name}")
 
+    # Save the classified data back to the file
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
 
+    # Log after saving
     log_to_gui(log_widget, f"Data saved to {process_layer} with new fields {new_code_col} and {new_desc_col}")
 
 # Process all steps and create final tables
