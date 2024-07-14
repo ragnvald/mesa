@@ -36,21 +36,11 @@ from ttkbootstrap.constants import *
 from shapely.geometry import shape
 import fiona
 
-
-# # # # # # # # # # # # # # 
-# Shared/general functions
-
-
-# # # # # # # # # # # # # # 
-# Core functions
-
-
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
-
 
 # Update progress label
 def update_progress(new_value):
@@ -58,7 +48,6 @@ def update_progress(new_value):
         progress_var.set(new_value)
         progress_label.config(text=f"{int(new_value)}%")
     root.after(0, task)
-
 
 # Logging function to write to the GUI log
 def log_to_gui(log_widget, message):
@@ -69,7 +58,6 @@ def log_to_gui(log_widget, message):
     log_destination_file = os.path.join(original_working_directory, "log.txt")
     with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
-
 
 # Function to read and reproject spatial data
 def read_and_reproject(filepath, layer=None, log_widget=None):
@@ -87,27 +75,31 @@ def read_and_reproject(filepath, layer=None, log_widget=None):
         log_to_gui(log_widget, f"Failed to read or reproject {filepath}: {e}")
         return gpd.GeoDataFrame()  # Return an empty GeoDataFrame on failure
 
-
 # Process the lines in a layer. Add appropriate attributes.
 def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
         return line_id_counter
 
+    # Temporarily reproject geometries to EPSG:3395 for length calculation
+    temp_data = data.copy()
+    temp_data = temp_data.to_crs(epsg=3395)
+
     for index, row in data.iterrows():
+        length_m = int(temp_data.loc[index].geometry.length)  # Calculate length in meters and convert to integer
         attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
 
         line_objects.append({
             'name_gis': int(line_id_counter),
             'name_user': layer_name,
             'attributes': attributes,
+            'length_m': length_m,  # Add the length attribute
             'geom': row.geometry  # Original geometry in workingprojection_epsg
         })
 
         line_id_counter += 1
 
     return line_id_counter
-
 
 # Function to process a geocode layer and place it in context.
 def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget):
@@ -205,7 +197,6 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
         log_to_gui(log_widget, f"Unsupported file format for {filepath}")
     return line_id_counter
 
-
 def get_file_metadata(file_path):
     """Extracts number of features from a geospatial file."""
     try:
@@ -216,13 +207,11 @@ def get_file_metadata(file_path):
         log_to_gui(log_widget, f"Error reading {file_path}: {e}")
         return (file_path, 0)
 
-
 def sort_files_by_feature_count(file_paths):
     """Sorts file paths by the number of features, descending."""
     files_with_metadata = [get_file_metadata(fp) for fp in file_paths]
     sorted_files = sorted(files_with_metadata, key=lambda x: x[1], reverse=False)
     return [fp[0] for fp in sorted_files]
-
 
 def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     geocode_groups = []
@@ -275,7 +264,6 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}")
     return geocode_groups_gdf, geocode_objects_gdf
 
-
 # Import line data and export to geopackage
 def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
     line_objects    = []
@@ -314,7 +302,6 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
     return line_objects_gdf
 
-
 # Thread function to run import of geocodes
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
 
@@ -342,7 +329,6 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
     
     increment_stat_value(config_file, 'mesa_stat_import_geocodes', increment_value=1)
 
-
 # Emtpy the destination table. Not sure if this one works 100%, but we will
 # stick with it for now.
 def initialize_empty_table(gpkg_file, dest_table, schema):
@@ -353,7 +339,6 @@ def initialize_empty_table(gpkg_file, dest_table, schema):
     
     # Save the empty GeoDataFrame to the destination table, replacing any existing content
     empty_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
-
 
 # Original lines are copied to tbl_lines where the user can make
 # edits to segment width and length. Furthermore name (title) and description
@@ -370,6 +355,7 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
         'segment_length': 'int',
         'segment_width': 'int',
         'description': 'str',
+        'length_m': 'int',  # Add the length_m field to the schema
         'geometry': 'geometry'
     }
 
@@ -386,12 +372,16 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
     dest_gdf['segment_width']   = segment_width
     dest_gdf['description']     = dest_gdf.apply(lambda row: f"{row['name_user']} + {row['attributes']}", axis=1)
     
+    # Calculate the length in meters for each line
+    dest_gdf = dest_gdf.to_crs(epsg=3395)
+    dest_gdf['length_m'] = dest_gdf.geometry.length.astype(int)
+    dest_gdf = dest_gdf.to_crs(epsg=workingprojection_epsg)  # Reproject back to the original CRS
+    
     # Adjust to ensure only the necessary columns are included
-    dest_gdf = dest_gdf[['name_gis', 'name_user', 'segment_length', 'segment_width', 'description', 'geometry']]
+    dest_gdf = dest_gdf[['name_gis', 'name_user', 'segment_length', 'segment_width', 'description', 'length_m', 'geometry']]
     
     # Save the transformed GeoDataFrame to the now-empty destination table
     dest_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
-
 
 # Thread function to run import lines
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
@@ -417,7 +407,6 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     
     increment_stat_value(config_file, 'mesa_stat_import_lines', increment_value=1)
 
-
 def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
     # Assuming data.total_bounds gives you [minx, miny, maxx, maxy]
     bbox = data.total_bounds
@@ -439,7 +428,6 @@ def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
     })
     return group_id_counter + 1
 
-
 def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
     # Example logic to append to asset_objects based on processed data
     for _, row in data.iterrows():
@@ -452,14 +440,12 @@ def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
         object_id_counter += 1
     return object_id_counter
 
-
 def process_geopackage_layer(filepath, layer_name, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
     data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
     if not data.empty:
         group_id_counter = append_to_asset_groups(layer_name, data, asset_groups, group_id_counter)
         object_id_counter = append_to_asset_objects(data, asset_objects, object_id_counter, group_id_counter - 1)
     return group_id_counter, object_id_counter
-
 
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     asset_objects       = []
@@ -586,7 +572,6 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
 
     return asset_objects_gdf, asset_groups_gdf, total_bbox_geom
 
-
 # Attempts to delete a layer from a geopacakge file. Necessary to avoid invalid
 # spatial indexes when new data is added to an existing layer.
 def delete_layer(gpkg_file, layer_name, log_widget):
@@ -604,7 +589,6 @@ def delete_layer(gpkg_file, layer_name, log_widget):
             log_to_gui(log_widget, f"Failed to open {gpkg_file}.")
     except Exception as e:
         log_to_gui(log_widget, f"An error occurred while attempting to delete layer {layer_name} from {gpkg_file}: {e}")
-
 
 # Function exports data to geopackage and secures replacing relevant data.  
 def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
@@ -638,7 +622,6 @@ def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
     except Exception as e:
         log_to_gui(log_widget, f"Failed to export data to GeoPackage: {str(e)}")
 
-
 # Function exports data to geopackage and secures replacing relevant data.  
 def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
     # Check if the GeoPackage file exists
@@ -658,7 +641,6 @@ def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
         else:
             log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
 
-
 def enable_spatialite(db_file, log_widget):
     try:
         conn = sqlite3.connect(db_file)
@@ -670,7 +652,6 @@ def enable_spatialite(db_file, log_widget):
 
     except sqlite3.Error as e:
         log_to_gui(log_widget, f"Failed to load SpatiaLite extension: {e}")
-
 
 # Name gis should be part of the asset objects table
 def update_asset_objects_with_name_gis(db_file, log_widget):
@@ -714,8 +695,6 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
     except Exception as e:
         log_to_gui(log_widget, f"Failed to update 'ref_name_gis_assetgroup': {e}")
 
-
-
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     
@@ -751,7 +730,6 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
 
     increment_stat_value(config_file, 'mesa_stat_import_assets', increment_value=1)
 
-
 # Function to delete a table from a GeoPackage file
 def delete_table_from_geopackage(gpkg_file, table_name, log_widget=None):
     try:
@@ -786,7 +764,6 @@ def delete_table_from_geopackage(gpkg_file, table_name, log_widget=None):
             log_to_gui(log_widget, message)
         else:
             print(message)
-
 
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
@@ -824,7 +801,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
         with open(config_file, 'w') as file:
             file.writelines(lines)
 
-
 def run_subprocess(command, fallback_command):
 
     """ Utility function to run a subprocess with a fallback option. """
@@ -836,11 +812,9 @@ def run_subprocess(command, fallback_command):
         except subprocess.CalledProcessError:
             log_to_gui(f"Failed to execute command: {command}")
 
-
 # Function to close the application
 def close_application():
     root.destroy()
-
 
 #####################################################################################
 #  Main
@@ -906,7 +880,6 @@ progress_bar.pack(side=tk.LEFT)  # Pack the progress bar on the left side of the
 progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
 progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
 
-
 # Information text field below the progress bar
 info_label_text = ("On this page you can import assets, geocodes (grids) and lines. The features will "
                    "be placed in our database and used in the analysis. Assets are geopackage files with "
@@ -938,6 +911,5 @@ import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
 # Exit button for this sub-program
 exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
 exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
-
 
 root.mainloop()
