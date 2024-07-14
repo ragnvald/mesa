@@ -20,10 +20,11 @@ import geopandas as gpd
 from sqlalchemy import create_engine
 import configparser
 import subprocess
+from collections import defaultdict
 import datetime
 import glob
 import os
-import sys
+import uuid
 import argparse
 from osgeo import ogr
 import pandas as pd
@@ -34,7 +35,6 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from shapely.geometry import shape
 import fiona
-import threading
 
 
 # # # # # # # # # # # # # # 
@@ -110,11 +110,6 @@ def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widg
 
 
 # Function to process a geocode layer and place it in context.
-# Geocode objects are all objects form all asset files/geopackages. The attributes are all
-# placed within one attribute (attributes) in the tbl_geocode_object table. At the time
-# of writing this I am not sure if the attribute name is kept here. If not it should be
-# placed separately in tbl_geocode_group.
-# Function to process a geocode layer and place it in context.
 def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget):
     if data.empty:
         log_to_gui(log_widget, f"No data found in layer {layer_name}")
@@ -140,7 +135,8 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
     # Add geocode objects with unique IDs and name_gis_geocodegroup from the group
     for index, row in data.iterrows():
         geom = row.geometry if 'geometry' in data.columns else None
-        code = row['qdgc'] if 'qdgc' in data.columns else object_id_counter
+        code = row['qdgc'] if 'qdgc' in data.columns else str(object_id_counter)
+        
         geocode_objects.append({
             'code': code,
             'ref_geocodegroup': group_id_counter,
@@ -173,9 +169,21 @@ def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_cou
         log_to_gui(log_widget, f"Unsupported file format for {filepath}")
     return group_id_counter, object_id_counter
 
+# Function to ensure unique 'code' attributes in geocode_objects
+def ensure_unique_codes(geocode_objects, log_widget):
+    code_counts = defaultdict(int)
+    for obj in geocode_objects:
+        code_counts[obj['code']] += 1
 
-# Function to process each file while readint through the filepath.
-# Supposedly being done recursively.
+    for obj in geocode_objects:
+        if code_counts[obj['code']] > 1:
+            base_code = obj['code']
+            new_code = f"{base_code}_{uuid.uuid4()}"
+            obj['code'] = new_code
+            code_counts[new_code] += 1
+            log_to_gui(log_widget, f"Duplicate found and renamed to {new_code}")
+
+# Function to process each file while reading through the filepath.
 def process_line_file(filepath, line_objects, line_id_counter, log_widget):
     if filepath.endswith('.gpkg'):
         ds = ogr.Open(filepath)
@@ -257,6 +265,8 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
 
         except Exception as e:
             log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
+
+    ensure_unique_codes(geocode_objects, log_widget)  # Ensure unique codes after all files are processed
 
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
     geocode_objects_gdf = gpd.GeoDataFrame(geocode_objects, geometry='geom' if geocode_objects else None)
