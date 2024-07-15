@@ -183,18 +183,31 @@ def sort_segments_numerically(segments):
     sorted_segments = segments.sort_values(by='sort_key').drop(columns=['sort_key'])
     return sorted_segments
 
-def create_line_statistic_image(line_name, sensitivity_series, color_codes, output_path):
+def create_line_statistic_image(line_name, sensitivity_series, color_codes, length_m, output_path):
     segment_count = len(sensitivity_series)
-    fig, ax = plt.subplots(figsize=(10, 1), dpi=100)
+    fig, ax = plt.subplots(figsize=(10, 0.25), dpi=100)
+    length_km = length_m / 1000  # Convert length to kilometers
+
     for i, code in enumerate(sensitivity_series):
         color = get_color_from_code(code, color_codes)
         ax.add_patch(plt.Rectangle((i/segment_count, 0), 1/segment_count, 1, color=color))
-    
+
+    # Adding x-axis with min, halfway, and max values
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    ax.axis('off')
+    ax.set_xticks([0, 0.5, 1])
+    ax.set_xticklabels([f"0 km", f"{length_km/2:.1f} km", f"{length_km:.1f} km"])
+    
+    ax.xaxis.set_tick_params(width=1)
+    ax.yaxis.set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
     plt.savefig(output_path, bbox_inches='tight')
     plt.close(fig)
+
 
 def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
     pages = []
@@ -216,8 +229,8 @@ def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
         max_image_path = os.path.join(tmp_dir, f"{line_name}_max_stats.png")
         min_image_path = os.path.join(tmp_dir, f"{line_name}_min_stats.png")
         
-        create_line_statistic_image(line_name, line_segments['sensitivity_code_max'], color_codes, max_image_path)
-        create_line_statistic_image(line_name, line_segments['sensitivity_code_min'], color_codes, min_image_path)
+        create_line_statistic_image(line_name, line_segments['sensitivity_code_max'], color_codes, length_m, max_image_path)
+        create_line_statistic_image(line_name, line_segments['sensitivity_code_min'], color_codes, length_m, min_image_path)
         
         pages.append(('new_page', None))
         pages.append(('heading(2)', f"Line: {line_name}"))
@@ -234,6 +247,7 @@ def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
     write_to_log(f"Segment log exported to {log_file_path}")
     
     return pages, log_file_path
+
 
 def line_up_to_pdf(order_list):
     elements = []
@@ -447,13 +461,16 @@ order_list = [
     ('new_page', None),
     ('heading(2)', "Detailed asset description"),
     ('image', flat_output_png),
-    ('new_page', None)
+    ('new_page', None),
+    ('heading(2)', "Information about lines and segments"),
+    ('text', '../output/tmp/introduction_line_data.txt')
+    
 ]
 
 order_list.extend(line_statistics_pages)  # Add line statistics pages at the end
 elements = line_up_to_pdf(order_list)
 
-timestamp_pdf = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-output_pdf = f'../output/{timestamp_pdf}_MESA-report.pdf'
+timestamp_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+output_pdf = f'../output/MESA-report_{timestamp_pdf}.pdf'
 compile_pdf(output_pdf, elements)
 write_to_log("PDF report created")
