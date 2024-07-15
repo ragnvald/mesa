@@ -13,11 +13,23 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Image, Spacer, Tabl
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.units import cm
+import re
 
 def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
+
+def read_color_codes(file_name):
+    config = configparser.ConfigParser()
+    config.read(file_name)
+    color_codes = {}
+    for section in config.sections():
+        if section in ['A', 'B', 'C', 'D', 'E']:
+            color = config[section]['category_colour']
+            color_codes[section] = color
+    return color_codes
 
 def write_to_log(message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
@@ -49,7 +61,10 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
         if not polygons.empty:
             polygons.plot(ax=ax, alpha=0.7, facecolor='#99EE77', edgecolor='#8CC7D6')
 
-        ctx.add_basemap(ax, crs=crs, source=ctx.providers.OpenStreetMap.Mapnik)
+        try:
+            ctx.add_basemap(ax, crs=crs, source=ctx.providers.OpenStreetMap.Mapnik)
+        except Exception as e:
+            print(f"Error adding basemap: {e}")
 
         default_limits = (-180, 180, -90, 90)
 
@@ -66,6 +81,7 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
             ax.set_xlim(default_limits[0], default_limits[1])
             ax.set_ylim(default_limits[2], default_limits[3])
 
+        ax.set_title(layer_name, fontsize=15, fontweight='bold')
         plt.savefig(output_png, bbox_inches='tight')
         plt.close(fig)
         print(f"Plot saved to {output_png}")
@@ -87,7 +103,7 @@ def fetch_asset_group_statistics(db_path):
     
     cur.execute(sql_query)
     results = cur.fetchall()
-    column_names = ['Sensitivity Code', 'Sensitivity Description', 'Number of Asset Objects']  # Set column names here
+    column_names = ['Sensitivity Code', 'Sensitivity Description', 'Number of Asset Objects']
     conn.close()
     
     df_results = pd.DataFrame(results, columns=column_names)
@@ -107,44 +123,32 @@ def calculate_group_statistics(gpkg_file, layer_name):
     gdf_assets = gpd.read_file(gpkg_file, layer=layer_name)
     tbl_asset_group = gpd.read_file(gpkg_file, layer='tbl_asset_group')
 
-    # Drop geometry column from asset group to merge with asset object table
     tbl_asset_group = tbl_asset_group.drop(columns=['geometry'])
 
-    # Merge asset object table with asset group table
     gdf_assets = gdf_assets.merge(tbl_asset_group, left_on='ref_asset_group', right_on='id')
 
-    # Add geometry type column
     gdf_assets['geometry_type'] = gdf_assets.geometry.type
 
-    # Transform all geometries to Mollweide projection for consistency
     gdf_assets = gdf_assets.to_crs('ESRI:54009')
 
-    # Separate polygons and non-polygons
     polygons = gdf_assets[gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
     non_polygons = gdf_assets[~gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
 
-    # Calculate area for polygons
     polygons.loc[:, 'area'] = polygons['geometry'].area
 
-    # For non-polygons, set area to NaN
     non_polygons.loc[:, 'area'] = np.nan
 
-    # Concatenate back together
     gdf_assets = pd.concat([polygons, non_polygons], ignore_index=True)
 
-    # Group statistics calculation
     group_stats = gdf_assets.groupby(['title_fromuser', 'sensitivity_code', 'sensitivity_description', 'geometry_type']).agg(
         total_area=('area', 'sum'),
         object_count=('geometry', 'size')
     ).reset_index()
 
-    # Format the area
     group_stats['total_area'] = group_stats.apply(format_area, axis=1)
 
-    # Sort by sensitivity_code
     group_stats = group_stats.sort_values(by='sensitivity_code')
 
-    # Set column names
     group_stats.columns = ['Title', 'Code', 'Description', 'Type', 'Total area', '# objects']
     
     return group_stats
@@ -158,7 +162,7 @@ def export_to_excel(data_frame, file_path):
 def fetch_lines_and_segments(db_path):
     conn = sqlite3.connect(db_path)
     lines_query = "SELECT * FROM tbl_lines"
-    segments_query = "SELECT * FROM tbl_segment_flat"  # Changed to tbl_segment_flat
+    segments_query = "SELECT * FROM tbl_segment_flat"
     
     lines_df = pd.read_sql_query(lines_query, conn)
     segments_df = pd.read_sql_query(segments_query, conn)
@@ -166,31 +170,25 @@ def fetch_lines_and_segments(db_path):
     conn.close()
     return lines_df, segments_df
 
-def get_color_from_code(code, config):
-    code = code.strip()  # Ensure code is a string
-    for section in config.sections():
-        if 'range' in config[section]:
-            range_min, range_max = map(int, config[section]['range'].split('-'))
-            try:
-                code_value = int(code)
-                if range_min <= code_value <= range_max:
-                    return config[section]['category_colour']
-            except ValueError:
-                pass  # Ignore non-integer codes
-    return "#FFFFFF"  # Default to white if no match found
+def get_color_from_code(code, color_codes):
+    return color_codes.get(code, "#FFFFFF")
 
-def create_line_statistic_image(line, segments, config, output_path):
-    line_segments = segments[segments['name_gis'] == line['name_gis']].sort_values(by='segment_id')
-    sensitivity_max = line_segments['sensitivity_code_max']
-    sensitivity_min = line_segments['sensitivity_code_min']
+def sort_segments_numerically(segments):
+    def extract_number(segment_id):
+        match = re.search(r'_(\d+)$', segment_id)
+        return int(match.group(1)) if match else float('inf')
     
-    segment_count = len(line_segments)
+    segments = segments.copy()
+    segments['sort_key'] = segments['segment_id'].apply(extract_number)
+    sorted_segments = segments.sort_values(by='sort_key').drop(columns=['sort_key'])
+    return sorted_segments
+
+def create_line_statistic_image(line_name, sensitivity_series, color_codes, output_path):
+    segment_count = len(sensitivity_series)
     fig, ax = plt.subplots(figsize=(10, 1), dpi=100)
-    for i, (max_code, min_code) in enumerate(zip(sensitivity_max, sensitivity_min)):
-        max_color = get_color_from_code(max_code, config)
-        min_color = get_color_from_code(min_code, config)
-        ax.add_patch(plt.Rectangle((i/segment_count, 0.5), 1/segment_count, 0.5, color=max_color))
-        ax.add_patch(plt.Rectangle((i/segment_count, 0), 1/segment_count, 0.5, color=min_color))
+    for i, code in enumerate(sensitivity_series):
+        color = get_color_from_code(code, color_codes)
+        ax.add_patch(plt.Rectangle((i/segment_count, 0), 1/segment_count, 1, color=color))
     
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -198,16 +196,15 @@ def create_line_statistic_image(line, segments, config, output_path):
     plt.savefig(output_path, bbox_inches='tight')
     plt.close(fig)
 
-def generate_line_statistics_pages(lines_df, segments_df, config, tmp_dir):
+def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
     pages = []
     log_data = []
     
     for _, line in lines_df.iterrows():
         line_name = line['name_gis']
         length_m = line['length_m']
-        line_segments = segments_df[segments_df['name_gis'] == line_name].sort_values(by='segment_id')
+        line_segments = sort_segments_numerically(segments_df[segments_df['name_gis'] == line_name])
         
-        # Append segment data to log_data
         for _, segment in line_segments.iterrows():
             log_data.append({
                 'line_name': line_name,
@@ -216,16 +213,21 @@ def generate_line_statistics_pages(lines_df, segments_df, config, tmp_dir):
                 'sensitivity_code_min': segment['sensitivity_code_min']
             })
         
-        line_image_path = os.path.join(tmp_dir, f"{line_name}_stats.png")
-        create_line_statistic_image(line, line_segments, config, line_image_path)
+        max_image_path = os.path.join(tmp_dir, f"{line_name}_max_stats.png")
+        min_image_path = os.path.join(tmp_dir, f"{line_name}_min_stats.png")
+        
+        create_line_statistic_image(line_name, line_segments['sensitivity_code_max'], color_codes, max_image_path)
+        create_line_statistic_image(line_name, line_segments['sensitivity_code_min'], color_codes, min_image_path)
         
         pages.append(('new_page', None))
         pages.append(('heading(2)', f"Line: {line_name}"))
-        pages.append(('text', f"Length: {length_m} meters"))
+        pages.append(('text', f"Total length: {length_m/1000} km"))
         pages.append(('text', f"Number of segments: {len(line_segments)}"))
-        pages.append(('image', line_image_path))
+        pages.append(('text', "Sensitivity Code Max:"))
+        pages.append(('image', max_image_path))
+        pages.append(('text', "Sensitivity Code Min:"))
+        pages.append(('image', min_image_path))
     
-    # Export log data to Excel
     log_df = pd.DataFrame(log_data)
     log_file_path = os.path.join(tmp_dir, 'line_segment_log.xlsx')
     export_to_excel(log_df, log_file_path)
@@ -304,6 +306,69 @@ def compile_pdf(output_pdf, elements):
     
     doc.build(elements, onFirstPage=add_header, onLaterPages=add_header)
 
+def line_up_to_pdf(order_list):
+    elements = []
+    styles = getSampleStyleSheet()
+
+    heading_styles = {
+        1: ParagraphStyle(name='Heading1', fontSize=18, leading=22, spaceAfter=12, alignment=TA_CENTER),
+        2: ParagraphStyle(name='Heading2', fontSize=16, leading=8, spaceAfter=4),
+        3: ParagraphStyle(name='Heading3', fontSize=12, leading=8, spaceAfter=4)
+    }
+
+    for item in order_list:
+        item_type, item_value = item
+
+        if item_type == 'text':
+            if os.path.isfile(item_value):
+                with open(item_value, 'r') as file:
+                    text = file.read()
+            else:
+                text = item_value
+            text = text.replace("\n", "<br/>")
+            elements.append(Paragraph(text, styles['Normal']))
+            elements.append(Spacer(1, 12))
+        
+        elif item_type == 'image':
+            image_path = item_value
+            img = Image(image_path)
+            img_width = 16 * cm  # Set the width to 18 cm
+            img_height = img_width * img.imageHeight / img.imageWidth  # Maintain aspect ratio
+            img.drawWidth = img_width
+            img.drawHeight = img_height
+            elements.append(img)
+            elements.append(Spacer(1, 12))
+
+        elif item_type == 'spacer':
+            lines = item_value if item_value else 1
+            elements.append(Spacer(1, lines * 12))
+        
+        elif item_type == 'table':
+            df = pd.read_excel(item_value)
+            if len(df.columns) == 3:
+                df.columns = ['Code', 'Description', '# asset objects']
+            table_data = [df.columns.tolist()] + df.values.tolist()
+            table = Table(table_data)
+            table.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                                       ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                                       ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                                       ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                                       ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                                       ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                                       ('GRID', (0, 0), (-1, -1), 1, colors.black)]))
+            elements.append(table)
+        
+        elif item_type.startswith('heading'):
+            level = int(item_type[-2])
+            elements.append(Paragraph(item_value, heading_styles[level]))
+            elements.append(Spacer(1, 12))
+        
+        elif item_type == 'new_page':
+            elements.append(PageBreak())
+    
+    return elements
+
+# Main script execution
 #####################################################################################
 #  Main
 #
@@ -322,6 +387,7 @@ config_file                 = os.path.join(original_working_directory, "system/c
 gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
 
 config = read_config(config_file)
+color_codes = read_color_codes(config_file)
 
 output_png              = os.path.join(original_working_directory, config['DEFAULT']['output_png'])
 tmp_dir                 = os.path.join(original_working_directory, 'output/tmp')
@@ -349,7 +415,7 @@ export_to_excel(group_statistics, object_stats_output)
 write_to_log("Asset object statistics table exported")
 
 lines_df, segments_df = fetch_lines_and_segments(gpkg_file)
-line_statistics_pages, log_file_path = generate_line_statistics_pages(lines_df, segments_df, config, tmp_dir)
+line_statistics_pages, log_file_path = generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir)
 write_to_log("Line statistics images created")
 
 timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
@@ -391,4 +457,3 @@ timestamp_pdf = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 output_pdf = f'../output/{timestamp_pdf}_MESA-report.pdf'
 compile_pdf(output_pdf, elements)
 write_to_log("PDF report created")
-
