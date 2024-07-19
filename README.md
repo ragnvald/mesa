@@ -5,7 +5,7 @@ The MESA (Methods for Environmental Sensitivity Assessment) tool is a Python-bas
 
 The python implementation of the MESA tool is rather complex to get up and running. Installing and running Python on a computer could be demanding. On top of that comes the need to install several python libraries. 
 
-The code can be compiled to a series of executable files (.exe) which run nicely on a Windows computer. The compiled files are big and in total they are at the last compilation 1.4 GB. This means distributing the files using Github is not possible.
+The code has be compiled to an executable file (mesa.exe) which rund nicely on a Windows computer. The compiled files are big and in total they are at the last compilation 1.4 GB. This means distributing the files using Github is not possibe.
 
 * Environmental Sensitivity Assessment: Systematic evaluation of various environmental assets' vulnerability to pollution.
 * Mapping Capability: Visual representation of sensitivity assessments for easier interpretation and decision-making.
