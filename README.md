@@ -7,6 +7,7 @@ The python implementation of the MESA tool is rather complex to get up and runni
 
 The code has be compiled to an executable file (mesa.exe) which rund nicely on a Windows computer. The compiled files are big and in total they are at the last compilation 1.4 GB. This means distributing the files using Github is not possibe.
 
+## Highlights
 * Environmental Sensitivity Assessment: Systematic evaluation of various environmental assets' vulnerability to pollution.
 * Mapping Capability: Visual representation of sensitivity assessments for easier interpretation and decision-making.
 * User-Friendly GUI: Developed using Tkinter for easy navigation and usability.
@@ -15,7 +16,7 @@ The code has be compiled to an executable file (mesa.exe) which rund nicely on a
 
 ## Getting started
 This is what you do to start using MESA:
-* Download the compiled package.
+* Download the compiled package from Zenodo: https://zenodo.org/communities/mesatool/
 * Run mesa.exe
 * Follow the instructions on the screen.
 
