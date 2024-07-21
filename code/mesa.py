@@ -93,7 +93,7 @@ def update_stats(gpkg_file):
         message_label = ttk.Label(info_labelframe, text="No data imported.\nStart with importing data.", justify='left')
         message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         
-        create_link_icon(info_labelframe, "https://www.mesamethod.org/wiki/Current_tool_version", 1, 2, 5, 5)
+        create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
 
         return  # Exit the function if the file does not exist
 
@@ -122,7 +122,7 @@ def update_stats(gpkg_file):
         message_label = ttk.Label(info_labelframe, text=initial_message, justify='left')
         message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
 
-        create_link_icon(info_labelframe, "https://www.mesamethod.org/wiki/Current_tool_version", 1, 2, 5, 5)
+        create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
 
 
 def get_status(gpkg_file):
@@ -180,47 +180,47 @@ def get_status(gpkg_file):
         
         append_status("+" if asset_group_count is not None else "-", 
                       f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing.\nImport assets by pressing the Import button.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Assets")
+                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#assets")
 
         # Check for tbl_geocode_group
         geocode_group_count = read_table_and_count('tbl_geocode_group')
         append_status("+" if geocode_group_count is not None else "/", 
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Geocodes")
+                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#geocodes")
 
 
         # Check for original lines
         lines_original_count = read_table_and_count('tbl_lines_original')
         append_status("+" if lines_original_count is not None else "/", 
                       f"Lines: {lines_original_count}" if lines_original_count is not None else "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
+                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines")
 
         # Check for tbl_asset_group sensitivity
         symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
         if symbol:
             append_status(symbol, 
                           message,
-                          "https://www.mesamethod.org/wiki/Current_tool_version#Set_up")
+                          "hhttps://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
 
         # Present status for calculations on geocode objects
         stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if stacked_cells_count is not None else "-", 
                       f"Processing completed. You may open the QGIS-project file in the output-folder." if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Processing")
+                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#processing")
         
         # Present status for atlas objects
         atlas_count = read_table_and_count('tbl_atlas')
         append_status("+" if atlas_count is not None else "/", 
                       f"Atlas pages: {atlas_count}" if atlas_count is not None else "Please create atlas.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Atlas")
+                      "https://github.com/ragnvald/mesa/wiki/5-Definitions#atlas")
 
         # Present status for calculations on segments
         segments_flat_count = read_table_and_count('tbl_segment_flat')
         lines_count = read_table_and_count('tbl_lines')
         append_status("+" if segments_flat_count is not None else "/", 
                       f"Segments are in place with {segments_flat_count} segments along {lines_count} lines." if segments_flat_count is not None else "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
-                      "https://www.mesamethod.org/wiki/Current_tool_version#Lines_and_segments")
+                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines-and-segments")
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
