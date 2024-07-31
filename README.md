@@ -1,7 +1,7 @@
 # README for MESA Tool
 
 ## Overview
-The MESA (Methods for Environmental Sensitivity Assessment) tool is an application designed to assess and map environmental sensitivity, particularly in relation to potential marine pollution incidents in the petroleum industry. It provides a systematic framework for evaluating the vulnerability and sensitivity of environmental assets such as coastal areas, ecosystems, and wildlife to pollution impacts. It is also well suited gor aggregate analysis as part of land use management plsnning processes.
+The MESA (Methods for Environmental Sensitivity Assessment) tool is an application designed to assess and map environmental sensitivity, particularly in relation to potential marine pollution incidents in the petroleum industry. It provides a systematic framework for evaluating the vulnerability and sensitivity of environmental assets such as coastal areas, ecosystems, and wildlife to pollution impacts. It is also well suited for aggregate analysis as part of land use management plsnning processes.
 
 The code has been compiled to an executable file (mesa.exe) which runs nicely on a Windows computer. The compiled files are big and in total they are at the last compilation 1.7 GB for Windows 11 and 0,7 Gb for Windows 10.
 
