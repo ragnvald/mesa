@@ -6,6 +6,8 @@
 # - Trying to cover the asset data as best as it can not using a 
 #   bounding box as the outer limits but rather a flexible polygon
 
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 import threading

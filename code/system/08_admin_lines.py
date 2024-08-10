@@ -7,6 +7,8 @@
 # Processing the lines to segments is simplified for the user. So the
 # user will not learn about the stacked and flat segments.
 
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import geopandas as gpd
 import pandas as pd
 import configparser
