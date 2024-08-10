@@ -12,6 +12,8 @@
 #               The geocodes are grouped into tbl_geocode_groups. Objects are
 #               kept in tbl_geocode_objects.
 
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 from fiona import open as fiona_open    
