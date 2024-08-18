@@ -5,6 +5,8 @@
 # assets.
 #
 
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import geopandas as gpd
 from shapely.geometry import Polygon, box
 import numpy as np

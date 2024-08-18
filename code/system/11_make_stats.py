@@ -1,3 +1,5 @@
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import geopandas as gpd
 import pandas as pd
 import argparse
