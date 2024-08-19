@@ -15,6 +15,9 @@ import argparse
 import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
+import concurrent.futures
+import multiprocessing
+import time
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # This script processes geospatial data by reading assets and geocode objects,
@@ -97,92 +100,150 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
 # Spatial functions
 
-# Perform intersection with geocode data
-def intersection_with_geocode_data(asset_df, geocode_df, geom_type, log_widget):
-    log_to_gui(log_widget, f"Processing {geom_type} intersections")
+def intersection_with_geocode_data(asset_df, geocode_df, geom_type):
     asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
 
     if asset_filtered.empty:
-        log_to_gui(log_widget, "No asset data of the specified geom type.")
         return gpd.GeoDataFrame()
 
     if asset_filtered.crs != geocode_df.crs:
         asset_filtered = asset_filtered.to_crs(geocode_df.crs)
 
     intersection_result = gpd.sjoin(geocode_df, asset_filtered, how='inner', predicate='intersects')
-    if intersection_result.empty:
-        log_to_gui(log_widget, "No intersections found.")
-    else:
-        log_to_gui(log_widget, f"Found {len(intersection_result)} intersections.")
     return intersection_result
 
-# Create tbl_stacked by intersecting all asset data with the geocoding data
+# Perform intersection with geocode data
+def test_function_for_choice(asset_data, geocode_data, geom_type):
+    """A small task to test performance with threading vs multiprocessing."""
+    asset_filtered = asset_data[asset_data.geometry.geom_type == geom_type]
+    if asset_filtered.empty:
+        return gpd.GeoDataFrame()
+
+    if asset_filtered.crs != geocode_data.crs:
+        asset_filtered = asset_filtered.to_crs(geocode_data.crs)
+
+    intersection_result = gpd.sjoin(geocode_data, asset_filtered, how='inner', predicate='intersects')
+    return intersection_result
+
+def measure_execution_time(method, asset_data, geocode_data, geom_type):
+    """Measure the execution time for threading or multiprocessing."""
+    start_time = time.time()
+    
+    if method == 'threading':
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(test_function_for_choice, asset_data, geocode_data, geom_type)
+            future.result()
+
+    elif method == 'multiprocessing':
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            future = executor.submit(test_function_for_choice, asset_data, geocode_data, geom_type)
+            future.result()
+
+    return time.time() - start_time
+
+def choose_best_method(asset_data, geocode_data, geom_types, log_widget):
+    """Choose the best method between threading and multiprocessing by testing multiple geom types."""
+    threading_total_time = 0
+    multiprocessing_total_time = 0
+
+    for geom_type in ['Polygon', 'MultiPolygon']:  # Focus on the more complex geometries
+        if geom_type in geom_types:
+            log_to_gui(log_widget, f"Testing parallel method selection based on {geom_type} geometry.")
+            threading_total_time += measure_execution_time('threading', asset_data, geocode_data, geom_type)
+            multiprocessing_total_time += measure_execution_time('multiprocessing', asset_data, geocode_data, geom_type)
+
+    if threading_total_time < multiprocessing_total_time:
+        log_to_gui(log_widget, "Threading chosen based on overall performance.")
+        return 'threading'
+    else:
+        log_to_gui(log_widget, "Multiprocessing chosen based on overall performance.")
+        return 'multiprocessing'
+
+
+def parallel_intersection(asset_data, geocode_data, geom_types, log_widget, progress_var, method):
+    intersections = []
+    
+    if method == 'threading':
+        Executor = concurrent.futures.ThreadPoolExecutor
+    elif method == 'multiprocessing':
+        Executor = concurrent.futures.ProcessPoolExecutor
+
+    with Executor() as executor:
+        future_to_geom_type = {
+            executor.submit(intersection_with_geocode_data, asset_data, geocode_data, geom_type): geom_type
+            for geom_type in geom_types
+        }
+        
+        for future in concurrent.futures.as_completed(future_to_geom_type):
+            geom_type = future_to_geom_type[future]
+            try:
+                result = future.result()
+                log_to_gui(log_widget, f"Processed {geom_type} with {len(result)} intersections.")
+                intersections.append(result)
+                update_progress(progress_var.get() + 3)
+            except Exception as e:
+                log_to_gui(log_widget, f"Error processing intersections for {geom_type}: {e}")
+
+    return pd.concat(intersections, ignore_index=True)
+
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
-    log_to_gui(log_widget, "Building analysis table (tbl_stacked).")
-    update_progress(10)  # Indicate start
+    log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
+    update_progress(10)
 
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+    log_to_gui(log_widget, "tbl_asset_object read from database to memory.")
 
     if asset_data.crs is None:
         log_to_gui(log_widget, "No CRS found, setting default CRS.")
         asset_data.set_crs(workingprojection_epsg, inplace=True)
-    update_progress(15)  # Progress after reading asset data
+    update_progress(15)
 
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    update_progress(20)  # Progress after reading geocode data
+    log_to_gui(log_widget, "Geocodes read")
+    update_progress(20)
 
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    update_progress(25)  # Progress after reading asset group data
+    log_to_gui(log_widget, "Assets read")
+    update_progress(25)
 
     log_to_gui(log_widget, f"Asset data count before merge: {len(asset_data)}")
 
-    # Merge asset group data with asset data   
     asset_data = asset_data.merge(
         asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']], 
         left_on='ref_asset_group', right_on='id', how='left'
     )
     log_to_gui(log_widget, f"Asset data count after merge: {len(asset_data)}")
-    update_progress(30)  # Progress after merging data
+    update_progress(30)
 
-    # For  now these are the types. Later - consider if GeometryCollection should also be included.
     geom_types = ['Point', 'MultiPoint', 'LineString', 'MultiLineString', 'Polygon', 'MultiPolygon']
-    intersections = []
+    
+    # Choose the best method for parallel processing
+    best_method = choose_best_method(asset_data, geocode_data, geom_types[0])
+    log_to_gui(log_widget, f"Chosen method for parallel processing: {best_method}")
+    
+    # Use the chosen method for parallel_intersection
+    intersected_data = parallel_intersection(asset_data, geocode_data, geom_types, log_widget, progress_var, best_method)
 
-    # Process intersections for each geometry type
-    for geom_type in geom_types:
-        try:
-            intersected = intersection_with_geocode_data(asset_data, geocode_data, geom_type, log_widget)
-            intersections.append(intersected)
-            update_progress(progress_var.get() + 3)
-        except Exception as e:
-            log_to_gui(log_widget, f"Error processing intersections for {geom_type}: {e}")
+    log_to_gui(log_widget, f"Total intersected objects count: {len(intersected_data)}")
+    update_progress(49)
 
-    intersected_data = pd.concat(intersections, ignore_index=True)
-    log_to_gui(log_widget, f"Total intersected data count: {len(intersected_data)}")
-    update_progress(49)  # Progress after concatenating data
-
-    # Drop unnecessary columns if they exist
     columns_to_drop = ['id_x', 'id_y', 'total_asset_objects', 'process', 'index_right']
     intersected_data.drop(columns=[col for col in columns_to_drop if col in intersected_data.columns], inplace=True)
     log_to_gui(log_widget, f"Total intersected data after drop function: {len(intersected_data)}")
 
-    # Area calculation
     if intersected_data.crs.is_geographic:
         temp_data = intersected_data.copy()
         temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
         intersected_data['area_m2'] = temp_data.geometry.area.astype('int64')
     else:
         intersected_data['area_m2'] = intersected_data.geometry.area.astype('int64')
-    log_to_gui(log_widget, f"Total intersected data after area calculations: {len(intersected_data)}")
-    update_progress(50)  # Progress after area calculation
 
-    # Assign the CRS to the GeoDataFrame
     intersected_data.crs = workingprojection_epsg
     log_to_gui(log_widget, f"Total intersected data after projection to working projection: {len(intersected_data)}")
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Done processing the analysis layer.")
-    update_progress(50)  # Final progress
+    update_progress(50)
 
 
 # Create tbl_flat by aggregating values from tbl_stacked
