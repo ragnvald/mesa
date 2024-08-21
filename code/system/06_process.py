@@ -18,6 +18,7 @@ from ttkbootstrap.constants import *
 import concurrent.futures
 import multiprocessing
 import time
+import dask_geopandas as dgpd
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # This script processes geospatial data by reading assets and geocode objects,
@@ -56,9 +57,11 @@ def update_progress(new_value):
     progress_var.set(new_value)
     progress_label.config(text=f"{int(new_value)}%")
 
+
 # Close the application
 def close_application(root):
     root.destroy()
+
 
 # Log messages to the GUI log widget and a log file
 def log_to_gui(log_widget, message):
@@ -69,6 +72,7 @@ def log_to_gui(log_widget, message):
     log_destination_file = os.path.join(original_working_directory, "log.txt")
     with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
+
 
 # Increment a statistical value in the configuration file
 def increment_stat_value(config_file, stat_name, increment_value):
@@ -141,73 +145,98 @@ def measure_execution_time(method, asset_data, geocode_data, geom_type):
 
     return time.time() - start_time
 
-def choose_best_method(asset_data, geocode_data, geom_types, log_widget):
-    """Choose the best method between threading and multiprocessing by testing multiple geom types."""
-    threading_total_time = 0
-    multiprocessing_total_time = 0
-
-    for geom_type in ['Polygon', 'MultiPolygon']:  # Focus on the more complex geometries
-        if geom_type in geom_types:
-            log_to_gui(log_widget, f"Testing parallel method selection based on {geom_type} geometry.")
-            threading_total_time += measure_execution_time('threading', asset_data, geocode_data, geom_type)
-            multiprocessing_total_time += measure_execution_time('multiprocessing', asset_data, geocode_data, geom_type)
-
-    if threading_total_time < multiprocessing_total_time:
-        log_to_gui(log_widget, "Threading chosen based on overall performance.")
-        return 'threading'
-    else:
-        log_to_gui(log_widget, "Multiprocessing chosen based on overall performance.")
-        return 'multiprocessing'
-
 
 def parallel_intersection(asset_data, geocode_data, geom_types, log_widget, progress_var, method):
     intersections = []
     
     if method == 'threading':
         Executor = concurrent.futures.ThreadPoolExecutor
-    elif method == 'multiprocessing':
-        Executor = concurrent.futures.ProcessPoolExecutor
+    elif method == 'dask':
+        Executor = None  # Dask handles parallelism internally
 
-    with Executor() as executor:
-        future_to_geom_type = {
-            executor.submit(intersection_with_geocode_data, asset_data, geocode_data, geom_type): geom_type
-            for geom_type in geom_types
-        }
+    for geom_type in geom_types:
+        asset_filtered = asset_data[asset_data.geometry.geom_type == geom_type]
+
+        if asset_filtered.empty:
+            log_to_gui(log_widget, f"No data for geometry type {geom_type}. Skipping...")
+            continue
+
+        total_objects = len(asset_filtered)
+        chunk_size = max(1, total_objects // 50)  # Ensure at least one object per chunk
+        asset_data_chunks = [asset_filtered.iloc[i:i + chunk_size] for i in range(0, total_objects, chunk_size)]
         
-        for future in concurrent.futures.as_completed(future_to_geom_type):
-            geom_type = future_to_geom_type[future]
-            try:
-                result = future.result()
-                log_to_gui(log_widget, f"Processed {geom_type} with {len(result)} intersections.")
-                intersections.append(result)
-                update_progress(progress_var.get() + 3)
-            except Exception as e:
-                log_to_gui(log_widget, f"Error processing intersections for {geom_type}: {e}")
+        total_chunks = len(asset_data_chunks)
+        
+        if method == 'threading':
+            with Executor() as executor:
+                for idx, chunk in enumerate(asset_data_chunks, start=1):
+                    log_to_gui(log_widget, f"Starting with chunk {idx} of {total_chunks} for geometry type {geom_type}.")
+                    
+                    future_to_geom_type = {
+                        executor.submit(intersection_with_geocode_data, chunk, geocode_data, geom_type): geom_type
+                    }
+                    
+                    for future in concurrent.futures.as_completed(future_to_geom_type):
+                        geom_type = future_to_geom_type[future]
+                        try:
+                            result = future.result()
+                            log_to_gui(log_widget, f"Processed chunk {idx} of {total_chunks} for {geom_type} with {len(result)} intersections.")
+                            intersections.append(result)
+                            update_progress(progress_var.get() + (3 / total_chunks))
+                        except Exception as e:
+                            log_to_gui(log_widget, f"Error processing chunk {idx} of {total_chunks} for {geom_type}: {e}")
+
+        elif method == 'dask':
+            log_to_gui(log_widget, f"Processing {geom_type} using Dask-GeoPandas...")
+            dask_asset_data = dgpd.from_geopandas(asset_filtered, npartitions=total_chunks)
+            dask_geocode_data = dgpd.from_geopandas(geocode_data, npartitions=total_chunks)
+            
+            dask_intersections = dask_asset_data.map_partitions(
+                intersection_with_geocode_data, 
+                geocode_df=dask_geocode_data, 
+                geom_type=geom_type
+            )
+            result = dask_intersections.compute()  # Trigger computation
+            
+            log_to_gui(log_widget, f"Processed {geom_type} using Dask-GeoPandas with {len(result)} intersections.")
+            intersections.append(result)
+            update_progress(progress_var.get() + 3)
 
     return pd.concat(intersections, ignore_index=True)
+
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
     update_progress(10)
 
+    log_to_gui(log_widget, "Reading assets to memory.")
+
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-    log_to_gui(log_widget, "tbl_asset_object read from database to memory.")
+    log_to_gui(log_widget, "Indexing the asset data.")
+    asset_data.sindex
+    log_to_gui(log_widget, "Assets read to memory.")
 
     if asset_data.crs is None:
         log_to_gui(log_widget, "No CRS found, setting default CRS.")
         asset_data.set_crs(workingprojection_epsg, inplace=True)
     update_progress(15)
 
+    log_to_gui(log_widget, "Reading geocodes to memory.")
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    log_to_gui(log_widget, "Geocodes read")
+    log_to_gui(log_widget, "Indexing the geocode data.")
+    geocode_data.sindex
+    log_to_gui(log_widget, "Geocodes read to memory.")
     update_progress(20)
 
+    log_to_gui(log_widget, "Reading asset groups to memory.")
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    log_to_gui(log_widget, "Assets read")
+    asset_group_data.sindex
+    log_to_gui(log_widget, "Asset groups read")
     update_progress(25)
 
     log_to_gui(log_widget, f"Asset data count before merge: {len(asset_data)}")
 
+    log_to_gui(log_widget, "Merging asset data per asset group (asset dataset).")
     asset_data = asset_data.merge(
         asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']], 
         left_on='ref_asset_group', right_on='id', how='left'
@@ -218,7 +247,11 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     geom_types = ['Point', 'MultiPoint', 'LineString', 'MultiLineString', 'Polygon', 'MultiPolygon']
     
     # Choose the best method for parallel processing
-    best_method = choose_best_method(asset_data, geocode_data, geom_types[0])
+    log_to_gui(log_widget, "Looking at method for processing.")
+    
+    #best_method = 'dask'
+    best_method = 'threading'
+
     log_to_gui(log_widget, f"Chosen method for parallel processing: {best_method}")
     
     # Use the chosen method for parallel_intersection
@@ -231,6 +264,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     intersected_data.drop(columns=[col for col in columns_to_drop if col in intersected_data.columns], inplace=True)
     log_to_gui(log_widget, f"Total intersected data after drop function: {len(intersected_data)}")
 
+    log_to_gui(log_widget, "Calculating grid cell areas.")
     if intersected_data.crs.is_geographic:
         temp_data = intersected_data.copy()
         temp_data.geometry = temp_data.geometry.to_crs("EPSG:3395")
@@ -239,6 +273,8 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
         intersected_data['area_m2'] = intersected_data.geometry.area.astype('int64')
 
     intersected_data.crs = workingprojection_epsg
+    
+    log_to_gui(log_widget, "Done area calculations.")
     log_to_gui(log_widget, f"Total intersected data after projection to working projection: {len(intersected_data)}")
 
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
@@ -293,6 +329,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
         'ref_asset_group_nunique': 'asset_groups_total',
         'geometry_first': 'geometry'
     }
+
     tbl_flat.rename(columns=renamed_columns, inplace=True)
 
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry', crs=workingprojection_epsg)
@@ -313,7 +350,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
-
 
 
 # Classify data based on configuration
@@ -353,6 +389,7 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     # Log after saving
     log_to_gui(log_widget, f"Data saved to {process_layer} with new fields {new_code_col} and {new_desc_col}")
 
+
 # Process all steps and create final tables
 def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg):
     main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg)
@@ -372,6 +409,7 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
 
     log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
     update_progress(100)
+
 
 #####################################################################################
 #  Main
