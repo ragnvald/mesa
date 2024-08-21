@@ -74,6 +74,32 @@ def fetch_data(query):
 # Display data for tbl_usage
 df_usage = fetch_data(query_tbl_usage)
 
+# Define the query for tbl_user
+query_tbl_user = f"""
+from(bucket: "{log_bucket}")
+  |> range(start: -180d)
+  |> filter(fn: (r) => r._measurement == "tbl_user")
+  |> filter(fn: (r) => r._field == "id_email" or r._field == "id_name")
+"""
+
+# Fetch data for tbl_user and convert to pandas DataFrame
+def fetch_user_data(query):
+    result = query_api.query(org=log_org, query=query)
+    records = []
+    for table in result:
+        for record in table.records:
+            record_dict = {
+                "UUID": record.values.get("uuid"),
+                record.get_field(): record.get_value()
+            }
+            records.append(record_dict)
+    df = pd.DataFrame(records)
+
+    return df
+
+# Display data for tbl_user
+df_user = fetch_user_data(query_tbl_user)
+
 # Ensure output folder exists
 output_dir = "../output"
 if not os.path.exists(output_dir):
@@ -81,7 +107,9 @@ if not os.path.exists(output_dir):
 
 # Save to Excel
 output_path = os.path.join(output_dir, "usagestats.xlsx")
-df_usage.to_excel(output_path, sheet_name='tbl_usage', index=False)
+with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
+    df_usage.to_excel(writer, sheet_name='tbl_usage', index=False)
+    df_user.to_excel(writer, sheet_name='tbl_user', index=False)
 
 # Close the client
 client.close()
