@@ -57,19 +57,19 @@ def determine_category(sensitivity):
             return category, info['description']
     return '', ''  
 
-def calculate_sensitivity(entry_susceptibility, entry_importance, index, entries, df_assetgroup):
+def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries, df_assetgroup):
     try:
-        susceptibility  = int(entry_susceptibility.get())
         importance      = int(entry_importance.get())
-        sensitivity     = susceptibility * importance
+        susceptibility  = int(entry_susceptibility.get())
+        sensitivity     = importance * susceptibility
         sensitivity_code, sensitivity_description = determine_category(sensitivity)
 
         entries[index]['sensitivity']['text']               = str(sensitivity)
         entries[index]['sensitivity_code']['text']          = sensitivity_code
         entries[index]['sensitivity_description']['text']   = sensitivity_description
 
-        df_assetgroup.at[index, 'susceptibility']           = susceptibility
         df_assetgroup.at[index, 'importance']               = importance
+        df_assetgroup.at[index, 'susceptibility']           = susceptibility
         df_assetgroup.at[index, 'sensitivity']              = sensitivity
         df_assetgroup.at[index, 'sensitivity_code']         = sensitivity_code
         df_assetgroup.at[index, 'sensitivity_description']  = sensitivity_description
@@ -80,15 +80,15 @@ def calculate_sensitivity(entry_susceptibility, entry_importance, index, entries
 def update_all_rows_immediately(entries, df_assetgroup):
     for entry in entries:
         try:
-            susceptibility  = int(entry['susceptibility'].get())
             importance      = int(entry['importance'].get())
+            susceptibility  = int(entry['susceptibility'].get())
             
-            sensitivity = susceptibility * importance
+            sensitivity = importance * susceptibility
             sensitivity_code, sensitivity_description = determine_category(sensitivity)
             
             index = entry['row_index']
-            df_assetgroup.at[index, 'susceptibility']           = susceptibility
             df_assetgroup.at[index, 'importance']               = importance
+            df_assetgroup.at[index, 'susceptibility']           = susceptibility
             df_assetgroup.at[index, 'sensitivity']              = sensitivity
             df_assetgroup.at[index, 'sensitivity_code']         = sensitivity_code
             df_assetgroup.at[index, 'sensitivity_description']  = sensitivity_description
@@ -112,7 +112,7 @@ def load_data(gpkg_file):
         if 'geom' in df_assetgroup.columns and df_assetgroup.geometry.name != 'geom':
             df_assetgroup.set_geometry('geom', inplace=True)
         
-        for col in ['susceptibility', 'importance', 'sensitivity']:
+        for col in ['importance', 'susceptibility', 'sensitivity']:
             if col not in df_assetgroup.columns or df_assetgroup[col].isnull().all():
                 df_assetgroup[col] = 0
         
@@ -126,16 +126,16 @@ def load_data(gpkg_file):
         return None
 
 def add_data_row(index, row, frame, column_widths, entries, df_assetgroup):
-    entry_susceptibility = ttk.Entry(frame, width=column_widths[1])
-    entry_susceptibility.insert(0, str(getattr(row, 'susceptibility', '')))
-    entry_susceptibility.grid(row=index, column=1, padx=5)
-
-    entry_importance = ttk.Entry(frame, width=column_widths[2])
+    entry_importance = ttk.Entry(frame, width=column_widths[1])
     entry_importance.insert(0, str(getattr(row, 'importance', '')))
-    entry_importance.grid(row=index, column=2, padx=5)
+    entry_importance.grid(row=index, column=1, padx=5)
 
-    entry_susceptibility.bind('<KeyRelease>', lambda event, ent=entry_susceptibility, imp=entry_importance, idx=index-1: calculate_sensitivity(ent, imp, idx, entries, df_assetgroup))
-    entry_importance.bind('<KeyRelease>', lambda event, ent=entry_susceptibility, imp=entry_importance, idx=index-1: calculate_sensitivity(ent, imp, idx, entries, df_assetgroup))
+    entry_susceptibility = ttk.Entry(frame, width=column_widths[2])
+    entry_susceptibility.insert(0, str(getattr(row, 'susceptibility', '')))
+    entry_susceptibility.grid(row=index, column=2, padx=5)
+
+    entry_importance.bind('<KeyRelease>', lambda event, imp=entry_importance, sus=entry_susceptibility, idx=index-1: calculate_sensitivity(imp, sus, idx, entries, df_assetgroup))
+    entry_susceptibility.bind('<KeyRelease>', lambda event, imp=entry_importance, sus=entry_susceptibility, idx=index-1: calculate_sensitivity(imp, sus, idx, entries, df_assetgroup))
 
     geom = getattr(row, 'geom', None)
 
@@ -154,8 +154,8 @@ def add_data_row(index, row, frame, column_widths, entries, df_assetgroup):
     entries.append({
         'row_index': index-1,
         'name': label_name,
-        'susceptibility': entry_susceptibility,
         'importance': entry_importance,
+        'susceptibility': entry_susceptibility,
         'sensitivity': label_sensitivity,
         'sensitivity_code': label_code,
         'sensitivity_description': label_description,
@@ -194,7 +194,7 @@ def save_to_gpkg(df_assetgroup, gpkg_file):
 
 def save_to_excel(df_assetgroup, excel_file):
     try:
-        columns_to_save = ['name_original', 'importance', 'susceptibility']
+        columns_to_save = ['name_original', 'susceptibility', 'importance']
         df_to_save = df_assetgroup[columns_to_save]
         df_to_save.to_excel(excel_file, index=False)
         log_to_file("Selected data saved successfully to Excel.")
@@ -215,19 +215,14 @@ def load_from_excel(excel_file, df_assetgroup):
                 idx = df_assetgroup[df_assetgroup['name_original'] == name_original].index[0]
                 
                 # Update the fields correctly using .loc[] for scalar assignment
-                df_assetgroup.loc[idx, 'importance'] = row['importance']
                 df_assetgroup.loc[idx, 'susceptibility'] = row['susceptibility']
+                df_assetgroup.loc[idx, 'importance'] = row['importance']
             else:
                 log_to_file(f"Warning: {name_original} not found in the database. Skipping this row.")
         
-        df_assetgroup.fillna({'importance': 0, 'susceptibility': 0}, inplace=True)
+        df_assetgroup.fillna({'susceptibility': 0, 'importance': 0}, inplace=True)
         
         return df_assetgroup
-
-    except Exception as e:
-        log_to_file(f"Failed to load data from Excel: {e}")
-        return df_assetgroup
-
 
     except Exception as e:
         log_to_file(f"Failed to load data from Excel: {e}")
@@ -238,7 +233,7 @@ def close_application():
     root.destroy()
 
 def setup_headers(frame, column_widths):
-    headers = ["Dataset", "Susceptibility", "Importance", "Sensitivity", "Code", "Description"]
+    headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]
     for idx, header in enumerate(headers):
         label = ttk.Label(frame, text=header, anchor='w', width=column_widths[idx])
         label.grid(row=0, column=idx, padx=5, pady=5, sticky='ew')
@@ -247,8 +242,8 @@ def setup_headers(frame, column_widths):
 def update_df_assetgroup(entries):
     for entry in entries:
         index = entry['row_index']
-        df_assetgroup.at[index, 'susceptibility']           = entry['susceptibility'].get()
         df_assetgroup.at[index, 'importance']               = entry['importance'].get()
+        df_assetgroup.at[index, 'susceptibility']           = entry['susceptibility'].get()
         df_assetgroup.at[index, 'sensitivity']              = entry['sensitivity']['text']
         df_assetgroup.at[index, 'sensitivity_code']         = entry['sensitivity_code']['text']
         df_assetgroup.at[index, 'sensitivity_description']  = entry['sensitivity_description']['text']
@@ -327,16 +322,16 @@ def handle_load_from_excel():
                 index = df_assetgroup[df_assetgroup['name_original'] == name_original].index[0]
                 
                 # Update susceptibility and importance from the updated df_assetgroup
-                entry['susceptibility'].delete(0, tk.END)
-                entry['susceptibility'].insert(0, str(df_assetgroup.at[index, 'susceptibility']))
-                
                 entry['importance'].delete(0, tk.END)
                 entry['importance'].insert(0, str(df_assetgroup.at[index, 'importance']))
+                
+                entry['susceptibility'].delete(0, tk.END)
+                entry['susceptibility'].insert(0, str(df_assetgroup.at[index, 'susceptibility']))
 
                 # Calculate sensitivity and update the labels
-                susceptibility = int(df_assetgroup.at[index, 'susceptibility'])
                 importance = int(df_assetgroup.at[index, 'importance'])
-                sensitivity = susceptibility * importance
+                susceptibility = int(df_assetgroup.at[index, 'susceptibility'])
+                sensitivity = importance * susceptibility
                 sensitivity_code, sensitivity_description = determine_category(sensitivity)
                 
                 entry['sensitivity']['text'] = str(sensitivity)
@@ -396,7 +391,7 @@ if __name__ == "__main__":
     canvas, frame, entries = setup_ui_elements(root, df_assetgroup, column_widths)
     update_all_rows_immediately(entries, df_assetgroup)
 
-    info_text = "This is where you register values for susceptibility and importance. Ensure all values are correctly filled."
+    info_text = "This is where you register values for importance and susceptibility. Ensure all values are correctly filled."
     info_label = tk.Label(root, text=info_text, wraplength=600, justify="center")
     info_label.pack(padx=10, pady=10)
 
