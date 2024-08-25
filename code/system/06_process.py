@@ -160,64 +160,51 @@ import geopandas as gpd
 import pandas as pd
 from shapely import wkb
 
-def parallel_intersection(asset_data, geocode_data, geom_types, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=100000):
+def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=15000):
     
     if method == 'duckdb':
         log_to_gui(log_widget, "Starting intersection processing using DuckDB...")
 
-        # Ensure parquet_folder is set correctly
         if not parquet_folder:
             parquet_folder = os.path.join(original_working_directory, "output/")
         
-        # Ensure the folder exists
         if not os.path.exists(parquet_folder):
             os.makedirs(parquet_folder)
 
-        # Initialize DuckDB connection
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
 
         try:
             chunk_files = []
-            # Convert all geometry columns to WKB before registering
             log_to_gui(log_widget, "Converting the geometry columns to Well Known Binary-format (WKB)")
             asset_data['geometry_wkb'] = asset_data['geometry'].apply(lambda geom: shapely.wkb.dumps(geom) if geom else None)
             geocode_data['geometry_wkb'] = geocode_data['geometry'].apply(lambda geom: shapely.wkb.dumps(geom) if geom else None)
             log_to_gui(log_widget, "Completed")
 
-            # Drop the original geometry columns
             asset_data = asset_data.drop(columns=['geometry'])
             geocode_data = geocode_data.drop(columns=['geometry'])
 
-            # Splitting asset_data into smaller chunks
             log_to_gui(log_widget, f"Splitting the data to be processed into chunks of {chunk_size} objects.")
             for start in range(0, len(asset_data), chunk_size):
                 chunk = asset_data.iloc[start:start + chunk_size]
 
-                # Ensure the chunk is not empty
                 if chunk.empty:
                     log_to_gui(log_widget, f"Chunk {start // chunk_size + 1} is empty, skipping.")
                     continue
 
-                # Register this chunk as a table
                 con.register('asset_chunk', chunk)
                 con.register('geocode_table', geocode_data)
 
-                # Define the intersection query for this chunk
+                # Adjust this query to include all columns from both datasets
                 chunk_parquet_path = os.path.join(parquet_folder, f"intersections_chunk_{start // chunk_size + 1}.parquet")
                 intersection_query = f"""
                     COPY (
                         SELECT 
-                        g.code,
-                        g.ref_geocodegroup,
-                        g.name_gis_geocodegroup,
-                        g.geometry_wkb AS geometry_wkb,  
-                        a.importance AS importance,
-                        a.sensitivity AS sensitivity,
-                        a.susceptibility AS susceptibility,
-                        a.name_gis_assetgroup AS asset_group_name,
-                        a.ref_asset_group AS ref_asset_group  
+                        g.*,
+                        a.*,
+                        g.geometry_wkb AS g_geometry_wkb,  
+                        a.geometry_wkb AS a_geometry_wkb
                         FROM geocode_table g
                         INNER JOIN asset_chunk a
                         ON ST_Intersects(ST_GeomFromWKB(g.geometry_wkb), ST_GeomFromWKB(a.geometry_wkb))
@@ -240,16 +227,16 @@ def parallel_intersection(asset_data, geocode_data, geom_types, log_widget, prog
             if not chunk_files:
                 log_to_gui(log_widget, "No valid chunks processed. No data to combine.")
                 return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
-
+            log_to_gui(log_widget, "Combining chunks.")
             combined_dfs = []
             for chunk_file in chunk_files:
                 df = pd.read_parquet(chunk_file)
-                df['geometry'] = df['geometry_wkb'].apply(wkb.loads)
+                df['geometry'] = df['g_geometry_wkb'].apply(wkb.loads)
                 combined_dfs.append(df)
 
             result_df = pd.concat(combined_dfs, ignore_index=True)
             result_gdf = gpd.GeoDataFrame(result_df, geometry='geometry', crs=workingprojection_epsg)
-            result_gdf.drop(columns=['geometry_wkb'], inplace=True)
+            result_gdf.drop(columns=['g_geometry_wkb', 'a_geometry_wkb'], inplace=True)
 
             log_to_gui(log_widget, f"Final GeoDataFrame prepared with {len(result_gdf)} rows.")
             return result_gdf
@@ -268,8 +255,8 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
     update_progress(10)
 
+    # Reading assets to memory
     log_to_gui(log_widget, "Reading assets to memory.")
-
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
     log_to_gui(log_widget, "Indexing the asset data.")
     asset_data.sindex
@@ -280,14 +267,15 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
         asset_data.set_crs(workingprojection_epsg, inplace=True)
     update_progress(15)
 
+    # Reading geocodes to memory
     log_to_gui(log_widget, "Reading geocodes to memory.")
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
-    log_to_gui(log_widget, "Indexing the geocode data.")
     geocode_data.sindex
     log_to_gui(log_widget, "Geocodes read to memory.")
     update_progress(20)
     log_to_gui(log_widget, f"Geocode objects count before intersection: {len(geocode_data)}")
 
+    # Reading asset groups to memory
     log_to_gui(log_widget, "Reading asset groups to memory.")
     asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
     asset_group_data.sindex
@@ -296,26 +284,31 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
 
     log_to_gui(log_widget, f"Asset objects count before intersection: {len(asset_data)}")
 
-    log_to_gui(log_widget, "Merging asset data per asset group (asset dataset).")
+    # Merging asset data per asset group
+    log_to_gui(log_widget, "Merging asset data per asset group.")
     asset_data = asset_data.merge(
         asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']], 
         left_on='ref_asset_group', right_on='id', how='left'
     )
+    log_to_gui(log_widget, "Asset data merged.")
+    update_progress(30)
 
-    # Perform the intersection using the updated parallel_intersection function
-    intersected_data = parallel_intersection(asset_data, geocode_data, [], log_widget, progress_var, 'duckdb', None, workingprojection_epsg)
-    if not intersected_data.empty:
-        print("First 5 rows of intersected data:")
-        print(intersected_data.head())
-    else:
-        print("No intersected data returned.")
+    log_to_gui(log_widget, asset_data.head())  # Inspect asset_data after merging
+
+    # Perform the intersection using the updated intersect_asset_and_geocode function
+    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, [], log_widget, progress_var, 'duckdb', None, workingprojection_epsg)
+    
+    if intersected_data.empty:
+        log_to_gui(log_widget, "No intersected data returned.")
+        return
 
     log_to_gui(log_widget, f"Total intersected objects count: {len(intersected_data)}")
     update_progress(49)
 
-    # Check for and handle None or invalid geometries
+    # Ensure geometries are valid and calculate areas
+    log_to_gui(log_widget, "Calculating grid cell areas.")
     intersected_data = intersected_data[intersected_data.geometry.notna()]
-
+    
     if intersected_data.empty:
         log_to_gui(log_widget, "No valid intersected data found.")
         return
@@ -329,13 +322,15 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     else:
         intersected_data['area_m2'] = intersected_data.geometry.area.astype('float64')
 
-    # Handle any remaining NaN values before converting to int
-    intersected_data['area_m2'].fillna(0, inplace=True)
-    intersected_data['area_m2'] = intersected_data['area_m2'].astype('int64')
-
+    intersected_data['area_m2'] = intersected_data['area_m2'].fillna(0).astype('int64')
     log_to_gui(log_widget, "Done area calculations.")
+
     log_to_gui(log_widget, f"Total intersected data after projection to working projection: {len(intersected_data)}")
 
+    # Drop unnecessary columns before saving
+    intersected_data = intersected_data.drop(columns=['geometry_wkb', 'geometry_wkb_1', 'process'], errors='ignore')
+
+    # Write the intersected data to the geopackage
     intersected_data.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "Done processing the analysis layer.")
     update_progress(50)
@@ -398,10 +393,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry', crs=workingprojection_epsg)
 
-    if tbl_flat.crs is None:
-        log_to_gui(log_widget, "CRS not found after aggregation, setting CRS for tbl_flat.")
-        tbl_flat.set_crs(workingprojection_epsg, inplace=True)
-
     if tbl_flat.crs.is_geographic:
         temp_tbl_flat = tbl_flat.copy()
         temp_tbl_flat.geometry = temp_tbl_flat.geometry.to_crs("EPSG:3395")
@@ -414,6 +405,7 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
+
 
 
 # Classify data based on configuration
