@@ -211,22 +211,32 @@ def load_from_excel(excel_file, df_assetgroup):
         for _, row in df_excel.iterrows():
             name_original = row['name_original']
             if name_original in df_assetgroup['name_original'].values:
-                # Ensure scalar index by using .iloc[0] after getting the index
                 idx = df_assetgroup[df_assetgroup['name_original'] == name_original].index[0]
                 
-                # Update the fields correctly using .loc[] for scalar assignment
+                # Update susceptibility and importance from Excel data
                 df_assetgroup.loc[idx, 'susceptibility'] = row['susceptibility']
                 df_assetgroup.loc[idx, 'importance'] = row['importance']
+                
+                # Recalculate sensitivity, sensitivity_code, and sensitivity_description
+                importance = int(df_assetgroup.at[idx, 'importance'])
+                susceptibility = int(df_assetgroup.at[idx, 'susceptibility'])
+                sensitivity = importance * susceptibility
+                sensitivity_code, sensitivity_description = determine_category(sensitivity)
+                
+                df_assetgroup.at[idx, 'sensitivity'] = sensitivity
+                df_assetgroup.at[idx, 'sensitivity_code'] = sensitivity_code
+                df_assetgroup.at[idx, 'sensitivity_description'] = sensitivity_description
             else:
                 log_to_file(f"Warning: {name_original} not found in the database. Skipping this row.")
         
-        df_assetgroup.fillna({'susceptibility': 0, 'importance': 0}, inplace=True)
+        df_assetgroup.fillna({'susceptibility': 0, 'importance': 0, 'sensitivity': 0}, inplace=True)
         
         return df_assetgroup
 
     except Exception as e:
         log_to_file(f"Failed to load data from Excel: {e}")
         return df_assetgroup
+
 
 def close_application():
     save_to_gpkg(df_assetgroup, gpkg_file)
