@@ -1,3 +1,5 @@
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
 from tkinter import *
 import os
@@ -18,6 +20,9 @@ from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import concurrent.futures
 import sys
+import duckdb
+import shapely.wkb
+from shapely import wkb
 
 
 # Read the configuration file
@@ -200,7 +205,7 @@ def get_status(gpkg_file):
         if symbol:
             append_status(symbol, 
                           message,
-                          "hhttps://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
+                          "https://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
 
         # Present status for calculations on geocode objects
         stacked_cells_count = read_table_and_count('tbl_stacked')
@@ -235,16 +240,18 @@ def run_subprocess(command, fallback_command, gpkg_file):
     """Utility function to run a subprocess with a fallback option."""
     try:
         log_to_logfile(f"Attempting to run command: {command}")
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         log_to_logfile("Primary command executed successfully")
+        log_to_logfile(f"stdout: {result.stdout}")
         update_stats(gpkg_file)
     except subprocess.CalledProcessError as e:
         log_to_logfile(f"Primary command failed with error: {e}")
         log_to_logfile(f"Failed to execute command: {command}, error: {e.stderr}")
         try:
             log_to_logfile(f"Attempting to run fallback command: {fallback_command}")
-            subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            result = subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             log_to_logfile("Fallback command executed successfully")
+            log_to_logfile(f"stdout: {result.stdout}")
             update_stats(gpkg_file)
         except subprocess.CalledProcessError as e:
             log_to_logfile(f"Failed to execute fallback command: {fallback_command}, error: {e.stderr}")
@@ -252,6 +259,7 @@ def run_subprocess(command, fallback_command, gpkg_file):
             log_to_logfile(f"File not found for fallback command: {fallback_command}, error: {e}")
     except FileNotFoundError as e:
         log_to_logfile(f"File not found for command: {command}, error: {e}")
+
 
 
 def get_script_paths(file_name,original_working_directory):
@@ -657,7 +665,7 @@ log_date_lastupdate         = config['DEFAULT']['log_date_lastupdate']
 log_org                     = config['DEFAULT']['log_org']
 log_bucket                  = config['DEFAULT']['log_bucket']
 log_host                    = config['DEFAULT']['log_host']
-log_token                   = "here"
+log_token                   = "Xp_sTOcg-46FFiQuplxz-Fqi-jEe5YGfOZarPR7gwZ4CMTMYseUPUjdKtp2xKV9w85TlBlh5X_lnaNzKULAhog=="
 
 mesa_stat_startup           = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process           = config['DEFAULT']['mesa_stat_process']
