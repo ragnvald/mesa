@@ -205,6 +205,7 @@ echo All .exe files deleted
 
 :: Delete all .spec files
 del "%SCRIPT_FOLDER_SYSTEM%\*.spec" /q
+del "%SCRIPT_PATH%\*.spec" /q
 if errorlevel 1 echo Error deleting .spec files
 echo All .spec files deleted
 
