@@ -154,13 +154,8 @@ def ensure_utf8_encoding(df):
         df[col] = df[col].apply(lambda x: x.encode('utf-8', errors='replace').decode('utf-8') if isinstance(x, str) else x)
     return df
 
-import os
-import duckdb
-import geopandas as gpd
-import pandas as pd
-from shapely import wkb
 
-def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=15000):
+def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=7000):
     
     if method == 'duckdb':
         log_to_gui(log_widget, "Starting intersection processing using DuckDB...")
@@ -185,19 +180,24 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
             asset_data = asset_data.drop(columns=['geometry'])
             geocode_data = geocode_data.drop(columns=['geometry'])
 
-            log_to_gui(log_widget, f"Splitting the data to be processed into chunks of {chunk_size} objects.")
-            for start in range(0, len(asset_data), chunk_size):
+            total_chunks = (len(asset_data) + chunk_size - 1) // chunk_size
+            chunk_num_width = len(str(total_chunks))  # Calculate the width for zero-padding
+            log_to_gui(log_widget, f"Splitting the data to be processed into {total_chunks} chunks of {chunk_size} objects.")
+
+            for i, start in enumerate(range(0, len(asset_data), chunk_size)):
                 chunk = asset_data.iloc[start:start + chunk_size]
 
                 if chunk.empty:
-                    log_to_gui(log_widget, f"Chunk {start // chunk_size + 1} is empty, skipping.")
+                    log_to_gui(log_widget, f"Chunk {str(i + 1).zfill(chunk_num_width)} is empty, skipping.")
                     continue
 
+                log_to_gui(log_widget, f"Processing chunk {str(i + 1).zfill(chunk_num_width)} of {total_chunks}.")
+
+                # Register the tables for each chunk
                 con.register('asset_chunk', chunk)
                 con.register('geocode_table', geocode_data)
 
-                # Adjust this query to include all columns from both datasets
-                chunk_parquet_path = os.path.join(parquet_folder, f"intersections_chunk_{start // chunk_size + 1}.parquet")
+                chunk_parquet_path = os.path.join(parquet_folder, f"intersections_chunk_{str(i + 1).zfill(chunk_num_width)}.parquet")
                 intersection_query = f"""
                     COPY (
                         SELECT 
@@ -213,8 +213,12 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
                 """
 
                 con.execute(intersection_query)
-                log_to_gui(log_widget, f"Processed chunk {start // chunk_size + 1}")
+                log_to_gui(log_widget, f"Processed chunk {str(i + 1).zfill(chunk_num_width)} of {total_chunks}.")
                 chunk_files.append(chunk_parquet_path)
+
+                # Unregister the tables after processing the chunk
+                con.unregister('asset_chunk')
+                con.unregister('geocode_table')
 
         except Exception as e:
             log_to_gui(log_widget, f"Error during DuckDB processing: {e}")
@@ -226,16 +230,24 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
         try:
             if not chunk_files:
                 log_to_gui(log_widget, "No valid chunks processed. No data to combine.")
-                return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
+                return gpd.GeoDataFrame(columns=asset_data.columns)
+
             log_to_gui(log_widget, "Combining chunks.")
             combined_dfs = []
             for chunk_file in chunk_files:
                 df = pd.read_parquet(chunk_file)
                 df['geometry'] = df['g_geometry_wkb'].apply(wkb.loads)
                 combined_dfs.append(df)
+                del df  # Explicitly delete the DataFrame to free up memory
 
             result_df = pd.concat(combined_dfs, ignore_index=True)
-            result_gdf = gpd.GeoDataFrame(result_df, geometry='geometry', crs=workingprojection_epsg)
+            result_gdf = gpd.GeoDataFrame(result_df, geometry='geometry')
+
+            if result_gdf.empty:
+                log_to_gui(log_widget, "Final GeoDataFrame is empty.")
+                return gpd.GeoDataFrame(columns=asset_data.columns)
+
+            result_gdf = result_gdf.set_crs(workingprojection_epsg)
             result_gdf.drop(columns=['g_geometry_wkb', 'a_geometry_wkb'], inplace=True)
 
             log_to_gui(log_widget, f"Final GeoDataFrame prepared with {len(result_gdf)} rows.")
@@ -243,10 +255,10 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
 
         except Exception as e:
             log_to_gui(log_widget, f"Error during GeoDataFrame creation: {e}")
-            return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
+            return gpd.GeoDataFrame(columns=asset_data.columns)
     else:
         log_to_gui(log_widget, "No valid intersection method specified.")
-        return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
+        return gpd.GeoDataFrame(columns=asset_data.columns)
 
 
 
