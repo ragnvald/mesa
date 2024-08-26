@@ -163,10 +163,10 @@ def save_data_to_parquet(df, parquet_file, geom_col='geometry'):
 
 
 
-def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=10000):
+def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size):
     
     if method == 'duckdb':
-        log_to_gui(log_widget, "Starting intersection processing using DuckDB...")
+        log_to_gui(log_widget, f"Starting intersection processing using DuckDB with chunk size {chunk_size}...")
 
         if not parquet_folder:
             parquet_folder = os.path.join(original_working_directory, "output/")
@@ -252,8 +252,9 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     else:
         log_to_gui(log_widget, "No valid intersection method specified.")
         return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
+    
 
-def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
+def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
     update_progress(10)
 
@@ -298,7 +299,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     log_to_gui(log_widget, asset_data.head())  # Inspect asset_data after merging
 
     # Perform the intersection using the updated intersect_asset_and_geocode function
-    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, 'duckdb', None, workingprojection_epsg)
+    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, 'duckdb', None, workingprojection_epsg, chunk_size)
     
     if intersected_data.empty:
         log_to_gui(log_widget, "No intersected data returned.")
@@ -449,8 +450,8 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
 
 
 # Process all steps and create final tables
-def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg):
-    main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg)
+def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg,chunk_size):
+    main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg,chunk_size)
     main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg) 
     update_progress(94)
 
@@ -499,7 +500,7 @@ mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 
-chunk_size              = config['DEFAULT']['chunk_size']
+chunk_size              = int(config['DEFAULT'].get('chunk_size', '10000'))  # Default to 10000 if not set in config
 
 classification = {}
 
@@ -535,7 +536,7 @@ if __name__ == "__main__":
     button_frame.pack(pady=5)
 
     process_all_btn = ttk.Button(button_frame, text="Process", command=lambda: threading.Thread(
-        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg), daemon=True).start())
+        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg, chunk_size), daemon=True).start())
     process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
     close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
