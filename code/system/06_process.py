@@ -155,7 +155,15 @@ def ensure_utf8_encoding(df):
     return df
 
 
-def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=7000):
+# Function to convert geometries to WKB and save to Parquet
+def save_data_to_parquet(df, parquet_file, geom_col='geometry'):
+    df['geometry_wkb'] = df[geom_col].apply(lambda geom: shapely.wkb.dumps(geom) if geom else None)
+    df.drop(columns=[geom_col], inplace=True)
+    df.to_parquet(parquet_file, index=False, compression='snappy')
+
+
+
+def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=10000):
     
     if method == 'duckdb':
         log_to_gui(log_widget, "Starting intersection processing using DuckDB...")
@@ -166,36 +174,32 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
         if not os.path.exists(parquet_folder):
             os.makedirs(parquet_folder)
 
+        # Save asset and geocode data to Parquet files
+        asset_parquet_file = os.path.join(parquet_folder, "assets.parquet")
+        geocode_parquet_file = os.path.join(parquet_folder, "geocodes.parquet")
+        save_data_to_parquet(asset_data, asset_parquet_file)
+        save_data_to_parquet(geocode_data, geocode_parquet_file)
+
         con = duckdb.connect()
         con.execute("INSTALL spatial;")
         con.execute("LOAD spatial;")
 
         try:
             chunk_files = []
-            log_to_gui(log_widget, "Converting the geometry columns to Well Known Binary-format (WKB)")
-            asset_data['geometry_wkb'] = asset_data['geometry'].apply(lambda geom: shapely.wkb.dumps(geom) if geom else None)
-            geocode_data['geometry_wkb'] = geocode_data['geometry'].apply(lambda geom: shapely.wkb.dumps(geom) if geom else None)
-            log_to_gui(log_widget, "Completed")
+            log_to_gui(log_widget, "Reading Parquet files into DuckDB.")
+            con.execute(f"CREATE TABLE asset_data AS SELECT * FROM read_parquet('{asset_parquet_file}');")
+            con.execute(f"CREATE TABLE geocode_data AS SELECT * FROM read_parquet('{geocode_parquet_file}');")
 
-            asset_data = asset_data.drop(columns=['geometry'])
-            geocode_data = geocode_data.drop(columns=['geometry'])
+            con.execute("CREATE INDEX idx_asset_geometry ON asset_data(geometry_wkb);")
+            con.execute("CREATE INDEX idx_geocode_geometry ON geocode_data(geometry_wkb);")
+            log_to_gui(log_widget, "Indexes created on geometry columns.")
 
             total_chunks = (len(asset_data) + chunk_size - 1) // chunk_size
             chunk_num_width = len(str(total_chunks))  # Calculate the width for zero-padding
             log_to_gui(log_widget, f"Splitting the data to be processed into {total_chunks} chunks of {chunk_size} objects.")
 
             for i, start in enumerate(range(0, len(asset_data), chunk_size)):
-                chunk = asset_data.iloc[start:start + chunk_size]
-
-                if chunk.empty:
-                    log_to_gui(log_widget, f"Chunk {str(i + 1).zfill(chunk_num_width)} is empty, skipping.")
-                    continue
-
                 log_to_gui(log_widget, f"Processing chunk {str(i + 1).zfill(chunk_num_width)} of {total_chunks}.")
-
-                # Register the tables for each chunk
-                con.register('asset_chunk', chunk)
-                con.register('geocode_table', geocode_data)
 
                 chunk_parquet_path = os.path.join(parquet_folder, f"intersections_chunk_{str(i + 1).zfill(chunk_num_width)}.parquet")
                 intersection_query = f"""
@@ -205,8 +209,8 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
                         a.*,
                         g.geometry_wkb AS g_geometry_wkb,  
                         a.geometry_wkb AS a_geometry_wkb
-                        FROM geocode_table g
-                        INNER JOIN asset_chunk a
+                        FROM geocode_data g
+                        INNER JOIN (SELECT * FROM asset_data LIMIT {chunk_size} OFFSET {start}) a
                         ON ST_Intersects(ST_GeomFromWKB(g.geometry_wkb), ST_GeomFromWKB(a.geometry_wkb))
                     ) 
                     TO '{chunk_parquet_path}' (FORMAT PARQUET);
@@ -215,10 +219,6 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
                 con.execute(intersection_query)
                 log_to_gui(log_widget, f"Processed chunk {str(i + 1).zfill(chunk_num_width)} of {total_chunks}.")
                 chunk_files.append(chunk_parquet_path)
-
-                # Unregister the tables after processing the chunk
-                con.unregister('asset_chunk')
-                con.unregister('geocode_table')
 
         except Exception as e:
             log_to_gui(log_widget, f"Error during DuckDB processing: {e}")
@@ -230,8 +230,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
         try:
             if not chunk_files:
                 log_to_gui(log_widget, "No valid chunks processed. No data to combine.")
-                return gpd.GeoDataFrame(columns=asset_data.columns)
-
+                return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
             log_to_gui(log_widget, "Combining chunks.")
             combined_dfs = []
             for chunk_file in chunk_files:
@@ -241,13 +240,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
                 del df  # Explicitly delete the DataFrame to free up memory
 
             result_df = pd.concat(combined_dfs, ignore_index=True)
-            result_gdf = gpd.GeoDataFrame(result_df, geometry='geometry')
-
-            if result_gdf.empty:
-                log_to_gui(log_widget, "Final GeoDataFrame is empty.")
-                return gpd.GeoDataFrame(columns=asset_data.columns)
-
-            result_gdf = result_gdf.set_crs(workingprojection_epsg)
+            result_gdf = gpd.GeoDataFrame(result_df, geometry='geometry', crs=workingprojection_epsg)
             result_gdf.drop(columns=['g_geometry_wkb', 'a_geometry_wkb'], inplace=True)
 
             log_to_gui(log_widget, f"Final GeoDataFrame prepared with {len(result_gdf)} rows.")
@@ -255,13 +248,10 @@ def intersect_asset_and_geocode(asset_data, geocode_data, geom_types, log_widget
 
         except Exception as e:
             log_to_gui(log_widget, f"Error during GeoDataFrame creation: {e}")
-            return gpd.GeoDataFrame(columns=asset_data.columns)
+            return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
     else:
         log_to_gui(log_widget, "No valid intersection method specified.")
-        return gpd.GeoDataFrame(columns=asset_data.columns)
-
-
-
+        return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
@@ -308,7 +298,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     log_to_gui(log_widget, asset_data.head())  # Inspect asset_data after merging
 
     # Perform the intersection using the updated intersect_asset_and_geocode function
-    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, [], log_widget, progress_var, 'duckdb', None, workingprojection_epsg)
+    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, 'duckdb', None, workingprojection_epsg)
     
     if intersected_data.empty:
         log_to_gui(log_widget, "No intersected data returned.")
@@ -509,7 +499,8 @@ mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 
-# Global declaration
+chunk_size              = config['DEFAULT']['chunk_size']
+
 classification = {}
 
 if __name__ == "__main__":
@@ -551,5 +542,7 @@ if __name__ == "__main__":
     close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
 
     log_to_gui(log_widget, "Opened processing subprocess.")
+    
+    log_to_gui(log_widget, f"Chunk size is {chunk_size}.")
 
     root.mainloop()
