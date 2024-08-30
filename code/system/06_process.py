@@ -115,17 +115,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
 # Spatial functions
 
-def unused_intersection_with_geocode_data(asset_df, geocode_df, geom_type):
-    asset_filtered = asset_df[asset_df.geometry.geom_type == geom_type]
-
-    if asset_filtered.empty:
-        return gpd.GeoDataFrame()
-
-    if asset_filtered.crs != geocode_df.crs:
-        asset_filtered = asset_filtered.to_crs(geocode_df.crs)
-
-    intersection_result = gpd.sjoin(geocode_df, asset_filtered, how='inner', predicate='intersects')
-    return intersection_result
 
 
 
@@ -158,6 +147,18 @@ def intersection_with_geocode_data(asset_df, geocode_df, geom_type):
     return intersection_result
 
 
+def process_geocode_chunk(geocode_chunk, asset_data):
+    intersections = []
+    for geom_type in asset_data.geometry.geom_type.unique():
+        asset_filtered = asset_data[asset_data.geometry.geom_type == geom_type]
+        if asset_filtered.empty:
+            continue
+
+        # Perform the intersection
+        intersection_result = intersection_with_geocode_data(asset_filtered, geocode_chunk, geom_type)
+        intersections.append(intersection_result)
+    
+    return pd.concat(intersections, ignore_index=True)
 
 def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=1000, memory_limit=120):
     
@@ -165,168 +166,40 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     
     log_to_gui(log_widget, f"Processing method is {method}.")
 
-    if method == 'duckdb':
-        log_to_gui(log_widget, "Starting intersection processing using DuckDB...")
-
-        if not parquet_folder:
-            parquet_folder = os.path.join(original_working_directory, "output/")
-        
-        if not os.path.exists(parquet_folder):
-            os.makedirs(parquet_folder)
-
-        # Define the paths for the Parquet files
-        asset_parquet_file = os.path.join(parquet_folder, "assets.parquet")
-        geocode_parquet_file = os.path.join(parquet_folder, "geocodes.parquet")
-
-        # Save asset and geocode data to Parquet files
-        save_data_to_parquet(asset_data, asset_parquet_file)
-        save_data_to_parquet(geocode_data, geocode_parquet_file)
-
-        con = duckdb.connect()
-        con.execute("INSTALL spatial;")
-        con.execute("LOAD spatial;")
-
-        try:
-            chunk_files = []
-            log_to_gui(log_widget, "Reading Parquet files into DuckDB.")
-            con.execute(f"CREATE TABLE asset_data AS SELECT * FROM read_parquet('{asset_parquet_file}');")
-            con.execute(f"CREATE TABLE geocode_data AS SELECT * FROM read_parquet('{geocode_parquet_file}');")
-
-            con.execute("CREATE INDEX idx_asset_geometry ON asset_data(geometry_wkb);")
-            con.execute("CREATE INDEX idx_geocode_geometry ON geocode_data(geometry_wkb);")
-            log_to_gui(log_widget, "Indexes created on geometry columns.")
-
-            total_chunks = (len(asset_data) + chunk_size - 1) // chunk_size
-            chunk_num_width = len(str(total_chunks))  # Calculate the width for zero-padding
-            log_to_gui(log_widget, f"Splitting the data to be processed into {total_chunks} chunks of {chunk_size} objects.")
-
-            for i, start in enumerate(range(0, len(asset_data), chunk_size)):
-                log_to_gui(log_widget, f"Processing chunk {str(i + 1).zfill(chunk_num_width)} of {total_chunks}.")
-
-                chunk_parquet_path = os.path.join(parquet_folder, f"intersections_chunk_{str(i + 1).zfill(chunk_num_width)}.parquet")
-                intersection_query = f"""
-                    COPY (
-                        SELECT 
-                        g.*,
-                        a.*,
-                        g.geometry_wkb AS g_geometry_wkb,  
-                        a.geometry_wkb AS a_geometry_wkb
-                        FROM geocode_data g
-                        INNER JOIN (SELECT * FROM asset_data LIMIT {chunk_size} OFFSET {start}) a
-                        ON ST_Intersects(ST_GeomFromWKB(g.geometry_wkb), ST_GeomFromWKB(a.geometry_wkb))
-                    ) 
-                    TO '{chunk_parquet_path}' (FORMAT PARQUET);
-                """
-
-                try:
-                    con.execute(intersection_query)
-                    chunk_files.append(chunk_parquet_path)
-                except Exception as e:
-                    log_to_gui(log_widget, f"Error processing chunk {str(i + 1).zfill(chunk_num_width)}: {e}")
-                    break
-
-                # Force garbage collection
-                gc.collect()
-
-        except Exception as e:
-            log_to_gui(log_widget, f"Error during DuckDB processing: {e}")
-        finally:
-            con.close()
-            log_to_gui(log_widget, "DuckDB connection closed successfully.")
-
-        # Once all chunks are processed, combine them into a single GeoDataFrame
-        if chunk_files:
-            combined_dfs = []
-            for chunk_file in chunk_files:
-                df = pd.read_parquet(chunk_file)
-                df['geometry'] = df['g_geometry_wkb'].apply(wkb.loads)
-                combined_dfs.append(df)
-                del df
-                gc.collect()
-
-            result_df = pd.concat(combined_dfs, ignore_index=True)
-            result_gdf = gpd.GeoDataFrame(result_df, geometry='geometry', crs=workingprojection_epsg)
-            result_gdf.drop(columns=['g_geometry_wkb', 'a_geometry_wkb'], inplace=True)
-            return result_gdf
-        else:
-            log_to_gui(log_widget, "No valid chunks processed. No data to combine.")
-            return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
-
-    elif method == 'threading':
+    if method == 'threading':
         Executor = concurrent.futures.ThreadPoolExecutor
 
-        for geom_type in asset_data.geometry.geom_type.unique():
-            asset_filtered = asset_data[asset_data.geometry.geom_type == geom_type]
-
-            if asset_filtered.empty:
-                log_to_gui(log_widget, f"No data for geometry type {geom_type}. Skipping...")
-                continue
-
-            total_objects = len(asset_filtered)
-            chunk_size = max(1, total_objects // 512)  # Ensure at least one object per chunk
-            asset_data_chunks = [asset_filtered.iloc[i:i + chunk_size] for i in range(0, total_objects, chunk_size)]
-            
-            total_chunks = len(asset_data_chunks)
-            
-            with Executor() as executor:
-                for idx, chunk in enumerate(asset_data_chunks, start=1):
-                    log_to_gui(log_widget, f"Starting with chunk {idx} of {total_chunks} for geometry type {geom_type}.")
-                    
-                    future_to_geom_type = {
-                        executor.submit(intersection_with_geocode_data, chunk, geocode_data, geom_type): geom_type
-                    }
-                    
-                    for future in concurrent.futures.as_completed(future_to_geom_type):
-                        geom_type = future_to_geom_type[future]
-                        try:
-                            result = future.result()
-                            log_to_gui(log_widget, f"Processed chunk {idx} of {total_chunks} for {geom_type} with {len(result)} intersections.")
-                            intersections.append(result)
-                            update_progress(progress_var.get() + (3 / total_chunks))
-                        except Exception as e:
-                            log_to_gui(log_widget, f"Error processing chunk {idx} of {total_chunks} for {geom_type}: {e}")
+        # Pre-indexing the geocode data
+        geocode_data.sindex
+        
+        total_geocodes = len(geocode_data)
+        chunk_size = max(1, total_geocodes // 512)  # Ensure at least one object per chunk
+        geocode_data_chunks = [geocode_data.iloc[i:i + chunk_size] for i in range(0, total_geocodes, chunk_size)]
+        
+        total_chunks = len(geocode_data_chunks)
+        
+        with Executor() as executor:
+            for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
+                log_to_gui(log_widget, f"Starting with geocode chunk {idx} of {total_chunks}.")
+                
+                # Pre-indexing each chunk
+                geocode_chunk.sindex
+                
+                future_to_chunk = {
+                    executor.submit(process_geocode_chunk, geocode_chunk, asset_data): idx
+                }
+                
+                for future in concurrent.futures.as_completed(future_to_chunk):
+                    chunk_idx = future_to_chunk[future]
+                    try:
+                        result = future.result()
+                        log_to_gui(log_widget, f"Processed geocode chunk {chunk_idx} of {total_chunks} with {len(result)} intersections.")
+                        intersections.append(result)
+                        update_progress(progress_var.get() + (3 / total_chunks))
+                    except Exception as e:
+                        log_to_gui(log_widget, f"Error processing geocode chunk {chunk_idx} of {total_chunks}: {e}")
 
         return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
-
-    elif method == 'dask':
-        log_to_gui(log_widget, f"Initializing Dask client with {memory_limit}GB memory limit.")
-        
-        cluster = LocalCluster(n_workers=4, threads_per_worker=1, memory_limit=f'{memory_limit/4}GB')
-        client = Client(cluster)
-
-        try:
-            log_to_gui(log_widget, "Splitting geocode data into manageable chunks...")
-            
-            num_partitions = max(1, len(geocode_data) // chunk_size)
-            dask_geocode_data = dgpd.from_geopandas(geocode_data, npartitions=num_partitions).persist()
-
-            @delayed
-            def process_geocode_chunk(geocode_chunk):
-                dask_intersections = dgpd.sjoin(geocode_chunk, asset_data, how='inner', predicate='intersects')
-                return dask_intersections.compute()
-
-            intersections = []
-            for i, chunk in enumerate(dask_geocode_data.to_delayed()):
-                log_to_gui(log_widget, f"Processing geocode chunk {i + 1} of {num_partitions}...")
-                delayed_result = process_geocode_chunk(chunk)
-                intersections.append(delayed_result)
-
-            log_to_gui(log_widget, "Computing final intersection results...")
-            with ProgressBar():
-                result_dfs = dask.compute(*intersections)
-            
-            if result_dfs:
-                log_to_gui(log_widget, "Combining all intersection results.")
-                result_gdf = gpd.GeoDataFrame(pd.concat(result_dfs, ignore_index=True), crs=workingprojection_epsg)
-                return result_gdf
-            else:
-                log_to_gui(log_widget, "No valid intersections found.")
-                return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
-        finally:
-            client.close()
-    else:
-        log_to_gui(log_widget, "No valid intersection method specified.")
-        return gpd.GeoDataFrame(columns=asset_data.columns, crs=workingprojection_epsg)
     
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
