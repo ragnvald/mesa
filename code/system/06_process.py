@@ -16,14 +16,16 @@ import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import time
 import shapely.wkb
 from shapely import wkb
+from shapely.geometry import box  # Import the box function from shapely.geometry
 import gc
 import os
 import concurrent.futures
-import duckdb
+import numpy as np
 #import dask_geopandas as dgpd
 #import dask
 #from dask.distributed import Client, LocalCluster, progress
@@ -160,6 +162,62 @@ def process_geocode_chunk(geocode_chunk, asset_data):
     
     return pd.concat(intersections, ignore_index=True)
 
+
+# Additional functions for grid creation and asset assignment
+def create_grid(geodata, cell_size):
+    bounds = geodata.total_bounds  # Get the spatial extent (xmin, ymin, xmax, ymax)
+    xmin, ymin, xmax, ymax = bounds
+    x_cells = np.arange(xmin, xmax + cell_size, cell_size)
+    y_cells = np.arange(ymin, ymax + cell_size, cell_size)
+    
+    cells = []
+    for x in x_cells:
+        for y in y_cells:
+            cells.append((
+                x, y,
+                x + cell_size, y + cell_size
+            ))
+    
+    return cells
+
+def process_chunk(geodata_chunk, grid_gdf):
+    # Spatial join for each chunk
+    return gpd.sjoin(geodata_chunk, grid_gdf, how="left", predicate="intersects")
+
+
+def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers=16):
+    log_to_gui(log_widget, "Creating grid GeoDataFrame.")
+
+    # Create a GeoDataFrame for the grid cells
+    grid_gdf = gpd.GeoDataFrame({
+        'grid_cell': range(len(grid_cells)),
+        'geometry': [box(xmin, ymin, xmax, ymax) for xmin, ymin, xmax, ymax in grid_cells]
+    }, crs=geodata.crs)
+
+    log_to_gui(log_widget, "Grid GeoDataFrame created. Building spatial index for grid cells.")
+    
+    # Create a spatial index for the grid cells
+    grid_gdf.sindex  # Just creating the index
+
+    # Split the geodata into chunks for parallel processing
+    geodata_chunks = np.array_split(geodata, max_workers)
+
+    log_to_gui(log_widget, f"Processing {len(geodata_chunks)} chunks in parallel using {max_workers} workers.")
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(process_chunk, geodata_chunks, [grid_gdf] * len(geodata_chunks)))
+
+    log_to_gui(log_widget, "Combining results from all chunks.")
+    
+    # Combine results from all chunks
+    geodata = gpd.GeoDataFrame(pd.concat(results, ignore_index=True), crs=geodata.crs)
+    
+    log_to_gui(log_widget, "Cleaning up the result.")
+    
+    return geodata.drop(columns='index_right')
+
+
+
 def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=1000, memory_limit=120):
     
     intersections = []
@@ -169,15 +227,24 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     if method == 'threading':
         Executor = concurrent.futures.ThreadPoolExecutor
 
-        # Pre-indexing the geocode data
-        geocode_data.sindex
-        
-        total_geocodes = len(geocode_data)
-        chunk_size = max(1, total_geocodes // 512)  # Ensure at least one object per chunk
-        geocode_data_chunks = [geocode_data.iloc[i:i + chunk_size] for i in range(0, total_geocodes, chunk_size)]
+        # Ensure that geocode data is in a CRS with meters as units (e.g., UTM)
+        asset_data = asset_data.to_crs(epsg=32633)  # Adjust EPSG code to your region
+        geocode_data = geocode_data.to_crs(asset_data.crs)
+
+        # Create a grid with 4000 meters cell size and assign assets to grid cells
+        cell_size = 4000  # 4000 meters
+        log_to_gui(log_widget, "Creating analysis grid.")
+        grid_cells = create_grid(geocode_data, cell_size)
+        log_to_gui(log_widget, "Assigning assets to grid.")
+        geocode_data = assign_assets_to_grid(geocode_data, grid_cells, log_widget)
+
+        log_to_gui(log_widget, f"Grouping geocodes into chunks according to cell size of {cell_size}.")
+        # Group geocode data into chunks based on the grid cells
+        geocode_data_chunks = [geocode_data[geocode_data['grid_cell'] == idx] for idx in geocode_data['grid_cell'].unique()]
         
         total_chunks = len(geocode_data_chunks)
-        
+        log_to_gui(log_widget, f"MOving on with the work split in {total_chunks} chunks.")
+
         with Executor() as executor:
             for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
                 log_to_gui(log_widget, f"Starting with geocode chunk {idx} of {total_chunks}.")
@@ -200,6 +267,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
                         log_to_gui(log_widget, f"Error processing geocode chunk {chunk_idx} of {total_chunks}: {e}")
 
         return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
+
     
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
@@ -243,8 +311,6 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     )
     log_to_gui(log_widget, "Asset data merged.")
     update_progress(30)
-
-    log_to_gui(log_widget, asset_data.head())  # Inspect asset_data after merging
 
     # Perform the intersection using the updated intersect_asset_and_geocode function
     intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, None, workingprojection_epsg, chunk_size)
