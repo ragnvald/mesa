@@ -15,15 +15,12 @@ import argparse
 import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
-import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
 import time
 import shapely.wkb
 from shapely import wkb
 from shapely.geometry import box  # Import the box function from shapely.geometry
 import gc
-import os
 import concurrent.futures
 import numpy as np
 #import dask_geopandas as dgpd
@@ -117,15 +114,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
 # Spatial functions
 
-
-
-
-def ensure_utf8_encoding(df):
-    for col in df.select_dtypes(include=[object]):  # Select only string columns
-        df[col] = df[col].apply(lambda x: x.encode('utf-8', errors='replace').decode('utf-8') if isinstance(x, str) else x)
-    return df
-
-
 # Function to convert geometries to WKB and save to Parquet
 def save_data_to_parquet(df, parquet_file, geom_col='geometry'):
     df['geometry_wkb'] = df[geom_col].apply(lambda geom: shapely.wkb.dumps(geom) if geom else None)
@@ -216,25 +204,36 @@ def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers=16):
     
     return geodata.drop(columns='index_right')
 
-
-
-def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, parquet_folder, workingprojection_epsg, chunk_size=1000, memory_limit=120):
+def process_chunk_and_log(idx, geocode_chunk, asset_data, total_chunks):
+    try:
+        # Pre-indexing each chunk
+        geocode_chunk.sindex
+        
+        result = process_geocode_chunk(geocode_chunk, asset_data)
+        
+        return (idx, len(result), result)  # Return necessary info for logging and processing
+    except Exception as e:
+        return (idx, 0, None, str(e))  # Return error info if something goes wrong
     
+
+
+def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, workingprojection_epsg, cell_size, max_workers):
     intersections = []
     
     log_to_gui(log_widget, f"Processing method is {method}.")
 
-    if method == 'threading':
-        Executor = concurrent.futures.ThreadPoolExecutor
+    if method == 'ProcessPoolExecutor':
+        Executor = concurrent.futures.ProcessPoolExecutor
 
-        # Ensure that geocode data is in a CRS with meters as units (e.g., UTM)
-        asset_data = asset_data.to_crs(epsg=32633)  # Adjust EPSG code to your region
-        geocode_data = geocode_data.to_crs(asset_data.crs)
+        # Calculate cell_size in degrees
+        # Assuming the cell_size is in meters (from EPSG:3395) and converting it to degrees (for EPSG:4326)
+        meters_per_degree = 111320  # Approximation at the equator
+        cell_size_degrees = cell_size / meters_per_degree
+        log_to_gui(log_widget, f"Cell size converted to degrees: {cell_size_degrees:.6f} degrees")
 
-        # Create a grid with 4000 meters cell size and assign assets to grid cells
-        cell_size = 4000  # 4000 meters
+        # Create a grid cell where each of the sides is cell_size_degrees long
         log_to_gui(log_widget, "Creating analysis grid.")
-        grid_cells = create_grid(geocode_data, cell_size)
+        grid_cells = create_grid(geocode_data, cell_size_degrees)
         log_to_gui(log_widget, "Assigning assets to grid.")
         geocode_data = assign_assets_to_grid(geocode_data, grid_cells, log_widget)
 
@@ -243,32 +242,44 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
         geocode_data_chunks = [geocode_data[geocode_data['grid_cell'] == idx] for idx in geocode_data['grid_cell'].unique()]
         
         total_chunks = len(geocode_data_chunks)
-        log_to_gui(log_widget, f"MOving on with the work split in {total_chunks} chunks.")
+        log_to_gui(log_widget, f"Processing {total_chunks} chunks with a maximum of {max_workers} workers.")
 
-        with Executor() as executor:
+        with Executor(max_workers=max_workers) as executor:
+            future_to_chunk = {}
             for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
-                log_to_gui(log_widget, f"Starting with geocode chunk {idx} of {total_chunks}.")
-                
-                # Pre-indexing each chunk
-                geocode_chunk.sindex
-                
-                future_to_chunk = {
-                    executor.submit(process_geocode_chunk, geocode_chunk, asset_data): idx
-                }
-                
-                for future in concurrent.futures.as_completed(future_to_chunk):
-                    chunk_idx = future_to_chunk[future]
-                    try:
-                        result = future.result()
-                        log_to_gui(log_widget, f"Processed geocode chunk {chunk_idx} of {total_chunks} with {len(result)} intersections.")
-                        intersections.append(result)
-                        update_progress(progress_var.get() + (3 / total_chunks))
-                    except Exception as e:
-                        log_to_gui(log_widget, f"Error processing geocode chunk {chunk_idx} of {total_chunks}: {e}")
+                future = executor.submit(process_chunk_and_log, idx, geocode_chunk, asset_data, total_chunks)
+                future_to_chunk[future] = idx
 
+                # When the number of futures reaches max_workers, wait for them to complete
+                if len(future_to_chunk) >= max_workers:
+                    done, _ = concurrent.futures.wait(future_to_chunk, return_when=concurrent.futures.FIRST_COMPLETED)
+
+                    for future in done:
+                        idx, num_results, result, *error = future.result()
+                        if error:
+                            log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
+                        elif result is not None:
+                            log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
+                            intersections.append(result)
+                            update_progress(progress_var.get() + (3 / total_chunks))
+
+                        # Remove the completed future from the dictionary
+                        del future_to_chunk[future]
+
+            # Process any remaining futures
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                idx, num_results, result, *error = future.result()
+                if error:
+                    log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
+                elif result is not None:
+                    log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
+                    intersections.append(result)
+                    update_progress(progress_var.get() + (3 / total_chunks))
+
+        # Return the combined GeoDataFrame
         return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
-    
+
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
@@ -313,7 +324,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     update_progress(30)
 
     # Perform the intersection using the updated intersect_asset_and_geocode function
-    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, None, workingprojection_epsg, chunk_size)
+    intersected_data = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, workingprojection_epsg, cell_size, max_workers)
     
     if intersected_data.empty:
         log_to_gui(log_widget, "No intersected data returned.")
@@ -516,6 +527,8 @@ workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
 
 chunk_size              = int(config['DEFAULT'].get('chunk_size', '10000'))  # Default to 10000 if not set in config
 method                  = str(config['DEFAULT'].get('method'))  
+max_workers             = int(config['DEFAULT'].get('max_workers'))
+cell_size               = int(config['DEFAULT'].get('cell_size'))
 
 classification = {}
 
