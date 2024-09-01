@@ -1,7 +1,6 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # This is where evertything comes together for the gridded assets.
 #
-
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
@@ -15,20 +14,14 @@ import argparse
 import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
+import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
 import time
+from datetime import datetime, timedelta
 import shapely.wkb
 from shapely import wkb
 from shapely.geometry import box  # Import the box function from shapely.geometry
-import gc
-import concurrent.futures
 import numpy as np
-#import dask_geopandas as dgpd
-#import dask
-#from dask.distributed import Client, LocalCluster, progress
-#from dask.diagnostics import ResourceProfiler, Profiler, CacheProfiler
-#from dask.diagnostics import ProgressBar
-#from dask import delayed
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # This script processes geospatial data by reading assets and geocode objects,
@@ -75,7 +68,7 @@ def close_application(root):
 
 # Log messages to the GUI log widget and a log file
 def log_to_gui(log_widget, message):
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    timestamp = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
     log_widget.insert(tk.END, formatted_message + "\n")
     log_widget.see(tk.END)
@@ -225,6 +218,9 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     if method == 'ProcessPoolExecutor':
         Executor = concurrent.futures.ProcessPoolExecutor
 
+        # Start timing the process
+        start_time = time.time()
+
         # Calculate cell_size in degrees
         # Assuming the cell_size is in meters (from EPSG:3395) and converting it to degrees (for EPSG:4326)
         meters_per_degree = 111320  # Approximation at the equator
@@ -246,6 +242,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
 
         with Executor(max_workers=max_workers) as executor:
             future_to_chunk = {}
+            chunks_processed = 0
             for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
                 future = executor.submit(process_chunk_and_log, idx, geocode_chunk, asset_data, total_chunks)
                 future_to_chunk[future] = idx
@@ -256,6 +253,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
 
                     for future in done:
                         idx, num_results, result, *error = future.result()
+                        chunks_processed += 1
                         if error:
                             log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
                         elif result is not None:
@@ -263,12 +261,25 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
                             intersections.append(result)
                             update_progress(progress_var.get() + (3 / total_chunks))
 
+                        # Estimate time remaining
+                        current_time = time.time()
+                        elapsed_time = current_time - start_time
+                        estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
+                        estimated_time_remaining = estimated_total_time - elapsed_time
+
+                        # Calculate estimated completion time
+                        estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
+                        estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
+
+                        log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
+
                         # Remove the completed future from the dictionary
                         del future_to_chunk[future]
 
             # Process any remaining futures
             for future in concurrent.futures.as_completed(future_to_chunk):
                 idx, num_results, result, *error = future.result()
+                chunks_processed += 1
                 if error:
                     log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
                 elif result is not None:
@@ -276,9 +287,38 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
                     intersections.append(result)
                     update_progress(progress_var.get() + (3 / total_chunks))
 
+                # Estimate time remaining for the last chunks
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
+                estimated_time_remaining = estimated_total_time - elapsed_time
+
+                # Calculate estimated completion time for remaining chunks
+                estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
+                estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
+
+                log_to_gui(log_widget, f"{elapsed_time:.2f} of {estimated_total_time:.2f} seconds elapsed, {estimated_time_remaining:.2f} seconds remaining. This roughly translates to {estimated_completion_time_str}.")
+
+        # Calculate the total time taken
+        end_time = time.time()
+        total_time = end_time - start_time
+        time_per_chunk = total_time / total_chunks if total_chunks > 0 else 0
+
+        # Calculate the processing rates
+        asset_objects_per_second = len(asset_data) / total_time if total_time > 0 else 0
+        geocode_objects_per_second = len(geocode_data) / total_time if total_time > 0 else 0
+
+        # Log the time taken, processing rates, and the number of objects processed
+        log_to_gui(log_widget, "Core comptuation concluded. Statistics will follow.")
+        log_to_gui(log_widget, f"Processing completed in {total_time:.2f} seconds.")
+        log_to_gui(log_widget, f"Average time per chunk: {time_per_chunk:.2f} seconds.")
+        log_to_gui(log_widget, f"Total asset objects processed: {len(asset_data)}.")
+        log_to_gui(log_widget, f"Asset objects processed per second: {asset_objects_per_second:.2f}.")
+        log_to_gui(log_widget, f"Total geocode objects processed: {len(geocode_data)}.")
+        log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
+
         # Return the combined GeoDataFrame
         return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
-
 
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
@@ -334,7 +374,7 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     update_progress(49)
 
     # Ensure geometries are valid and calculate areas
-    log_to_gui(log_widget, "Calculating grid cell areas.")
+    log_to_gui(log_widget, "Qualify grid cell areas.")
     intersected_data = intersected_data[intersected_data.geometry.notna()]
     
     if intersected_data.empty:
