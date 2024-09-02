@@ -14,6 +14,7 @@ import argparse
 import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
+import multiprocessing
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import time
@@ -166,7 +167,7 @@ def process_chunk(geodata_chunk, grid_gdf):
     return gpd.sjoin(geodata_chunk, grid_gdf, how="left", predicate="intersects")
 
 
-def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers=16):
+def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers):
     log_to_gui(log_widget, "Creating grid GeoDataFrame.")
 
     # Create a GeoDataFrame for the grid cells
@@ -214,6 +215,18 @@ def process_chunk_and_log(idx, geocode_chunk, asset_data, total_chunks):
 
 def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, workingprojection_epsg, cell_size, max_workers):
     intersections = []
+
+    # If max_workers is set to 0, determine the number of physical CPU cores
+    if max_workers == 0:
+        try:
+            # Get the number of physical cores
+            max_workers = multiprocessing.cpu_count()
+            log_to_gui(log_widget, f"Number of workers determined by system to {max_workers}.")
+        except NotImplementedError:
+            # Fallback to a default value in case cpu_count() is not implemented
+            max_workers = 4
+    else:
+        log_to_gui(log_widget, f"Number of workers determinedset in config to {max_workers}.")
     
     log_to_gui(log_widget, f"Processing method is {method}.")
 
@@ -231,7 +244,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     log_to_gui(log_widget, "Creating analysis grid.")
     grid_cells = create_grid(geocode_data, cell_size_degrees)
     log_to_gui(log_widget, "Assigning assets to grid.")
-    geocode_data = assign_assets_to_grid(geocode_data, grid_cells, log_widget)
+    geocode_data = assign_assets_to_grid(geocode_data, grid_cells, log_widget, max_workers)
 
     log_to_gui(log_widget, f"Grouping geocodes into chunks according to cell size of {cell_size}.")
     geocode_data_chunks = [geocode_data[geocode_data['grid_cell'] == idx] for idx in geocode_data['grid_cell'].unique()]
@@ -314,9 +327,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
     log_to_gui(log_widget, f"Processing completed in {int(hours)}h {int(minutes)}m {int(seconds)}s.")
    
-
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
-
 
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
@@ -402,7 +413,6 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     update_progress(50)
 
 
-
 # Create tbl_flat by aggregating values from tbl_stacked
 def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
@@ -471,7 +481,6 @@ def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
 
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
-
 
 
 # Classify data based on configuration
