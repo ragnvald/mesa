@@ -199,6 +199,7 @@ def process_line_file(filepath, line_objects, line_id_counter, log_widget):
         log_to_gui(log_widget, f"Unsupported file format for {filepath}")
     return line_id_counter
 
+
 def get_file_metadata(file_path):
     """Extracts number of features from a geospatial file."""
     try:
@@ -209,11 +210,16 @@ def get_file_metadata(file_path):
         log_to_gui(log_widget, f"Error reading {file_path}: {e}")
         return (file_path, 0)
 
+#Sorting files by filepaths (filenames). If there is only one file no counting necessary.
 def sort_files_by_feature_count(file_paths):
     """Sorts file paths by the number of features, descending."""
+    if len(file_paths) == 1:
+        return file_paths
+    
     files_with_metadata = [get_file_metadata(fp) for fp in file_paths]
-    sorted_files = sorted(files_with_metadata, key=lambda x: x[1], reverse=False)
+    sorted_files = sorted(files_with_metadata, key=lambda x: x[1], reverse=True)
     return [fp[0] for fp in sorted_files]
+
 
 def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     geocode_groups = []
@@ -266,6 +272,7 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}")
     return geocode_groups_gdf, geocode_objects_gdf
 
+
 # Import line data and export to geopackage
 def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
     line_objects    = []
@@ -304,6 +311,7 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
     return line_objects_gdf
 
+
 # Thread function to run import of geocodes
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
 
@@ -331,6 +339,7 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
     
     increment_stat_value(config_file, 'mesa_stat_import_geocodes', increment_value=1)
 
+
 # Emtpy the destination table. Not sure if this one works 100%, but we will
 # stick with it for now.
 def initialize_empty_table(gpkg_file, dest_table, schema):
@@ -341,6 +350,7 @@ def initialize_empty_table(gpkg_file, dest_table, schema):
     
     # Save the empty GeoDataFrame to the destination table, replacing any existing content
     empty_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
+
 
 # Original lines are copied to tbl_lines where the user can make
 # edits to segment width and length. Furthermore name (title) and description
@@ -385,6 +395,7 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
     # Save the transformed GeoDataFrame to the now-empty destination table
     dest_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
 
+
 # Thread function to run import lines
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
 
@@ -409,6 +420,7 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     
     increment_stat_value(config_file, 'mesa_stat_import_lines', increment_value=1)
 
+
 def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
     # Assuming data.total_bounds gives you [minx, miny, maxx, maxy]
     bbox = data.total_bounds
@@ -430,6 +442,7 @@ def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
     })
     return group_id_counter + 1
 
+
 def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
     # Example logic to append to asset_objects based on processed data
     for _, row in data.iterrows():
@@ -442,12 +455,14 @@ def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
         object_id_counter += 1
     return object_id_counter
 
+
 def process_geopackage_layer(filepath, layer_name, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
     data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
     if not data.empty:
         group_id_counter = append_to_asset_groups(layer_name, data, asset_groups, group_id_counter)
         object_id_counter = append_to_asset_objects(data, asset_objects, object_id_counter, group_id_counter - 1)
     return group_id_counter, object_id_counter
+
 
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
     asset_objects       = []
