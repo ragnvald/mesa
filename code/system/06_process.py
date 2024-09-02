@@ -217,11 +217,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     
     log_to_gui(log_widget, f"Processing method is {method}.")
 
-    if method == 'ProcessPoolExecutor':
-        # Ensure that ThreadPoolExecutor is available in this scope
-        Executor = ThreadPoolExecutor
-    else:
-        Executor = concurrent.futures.ProcessPoolExecutor
+    Executor = ThreadPoolExecutor
 
     # Start timing the process
     start_time = time.time()
@@ -301,6 +297,10 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     total_time = end_time - start_time
     time_per_chunk = total_time / total_chunks if total_chunks > 0 else 0
 
+    # Convert total time to hours, minutes, and seconds
+    hours, rem = divmod(total_time, 3600)
+    minutes, seconds = divmod(rem, 60)
+
     # Calculate the processing rates
     asset_objects_per_second = len(asset_data) / total_time if total_time > 0 else 0
     geocode_objects_per_second = len(geocode_data) / total_time if total_time > 0 else 0
@@ -312,6 +312,8 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     log_to_gui(log_widget, f"Asset objects processed per second: {asset_objects_per_second:.2f}.")
     log_to_gui(log_widget, f"Total geocode objects processed: {len(geocode_data)}.")
     log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
+    log_to_gui(log_widget, f"Processing completed in {int(hours)}h {int(minutes)}m {int(seconds)}s.")
+   
 
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
