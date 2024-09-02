@@ -18,10 +18,7 @@ import datetime
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-import concurrent.futures
 import sys
-import duckdb
-import shapely.wkb
 from shapely import wkb
 
 
@@ -261,7 +258,6 @@ def run_subprocess(command, fallback_command, gpkg_file):
         log_to_logfile(f"File not found for command: {command}, error: {e}")
 
 
-
 def get_script_paths(file_name,original_working_directory):
     """Determine the paths for the Python script and the executable file."""
     if hasattr(sys, '_MEIPASS'):
@@ -415,7 +411,6 @@ def edit_lines():
     else:
         run_subprocess(["python", python_script], [exe_file], gpkg_file)
     
-
 
 def edit_atlas():
     
