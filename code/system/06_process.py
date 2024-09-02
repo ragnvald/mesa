@@ -281,6 +281,14 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
                     estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
                     estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
 
+                    # Calculate the difference in days from today
+                    days_diff = (estimated_completion_time.date() - datetime.now().date()).days
+
+                    # Add a red "+N" if the timestamp is in the future
+                    if days_diff > 0:
+                        red_plus_n = f"\033[91m+{days_diff}\033[0m"  # ANSI escape code for red
+                        estimated_completion_time_str += red_plus_n
+
                     log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
                     del future_to_chunk[future]
 
@@ -301,10 +309,20 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
             estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
             estimated_time_remaining = estimated_total_time - elapsed_time
             estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
+
+            # Calculate estimated completion time
+            estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
             estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
 
-            log_to_gui(log_widget, f"{elapsed_time:.2f} of {estimated_total_time:.2f} seconds elapsed, {estimated_time_remaining:.2f} seconds remaining. This roughly translates to {estimated_completion_time_str}.")
+            days_diff = (estimated_completion_time.date() - datetime.now().date()).days
 
+            # Add a red "+N" if the timestamp is in the future
+            if days_diff > 0:
+                red_plus_n = f"\033[91m+{days_diff}\033[0m"  # ANSI escape code for red
+                estimated_completion_time_str += red_plus_n
+
+            log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
+            
     # Calculate the total time taken
     end_time = time.time()
     total_time = end_time - start_time
@@ -318,14 +336,14 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     asset_objects_per_second = len(asset_data) / total_time if total_time > 0 else 0
     geocode_objects_per_second = len(geocode_data) / total_time if total_time > 0 else 0
 
-    log_to_gui(log_widget, "Core computation concluded. Statistics will follow.")
+    log_to_gui(log_widget, "Core computation concluded.")
     log_to_gui(log_widget, f"Processing completed in {total_time:.2f} seconds.")
     log_to_gui(log_widget, f"Average time per chunk: {time_per_chunk:.2f} seconds.")
     log_to_gui(log_widget, f"Total asset objects processed: {len(asset_data)}.")
     log_to_gui(log_widget, f"Asset objects processed per second: {asset_objects_per_second:.2f}.")
     log_to_gui(log_widget, f"Total geocode objects processed: {len(geocode_data)}.")
     log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
-    log_to_gui(log_widget, f"Processing completed in {int(hours)}h {int(minutes)}m {int(seconds)}s.")
+    log_to_gui(log_widget, f"Processing completed in {int(hours)}h {int(minutes)}m {int(seconds)}s - a total of {round(total_time,1)} seconds.")
    
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
