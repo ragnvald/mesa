@@ -15,7 +15,7 @@ import datetime
 import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import concurrent.futures
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import time
 from datetime import datetime, timedelta
 import shapely.wkb
@@ -185,7 +185,8 @@ def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers=16):
 
     log_to_gui(log_widget, f"Processing {len(geodata_chunks)} chunks in parallel using {max_workers} workers.")
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    # Use ThreadPoolExecutor instead of ProcessPoolExecutor
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(process_chunk, geodata_chunks, [grid_gdf] * len(geodata_chunks)))
 
     log_to_gui(log_widget, "Combining results from all chunks.")
@@ -196,6 +197,7 @@ def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers=16):
     log_to_gui(log_widget, "Cleaning up the result.")
     
     return geodata.drop(columns='index_right')
+
 
 def process_chunk_and_log(idx, geocode_chunk, asset_data, total_chunks):
     try:
@@ -216,109 +218,103 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     log_to_gui(log_widget, f"Processing method is {method}.")
 
     if method == 'ProcessPoolExecutor':
+        # Ensure that ThreadPoolExecutor is available in this scope
+        Executor = ThreadPoolExecutor
+    else:
         Executor = concurrent.futures.ProcessPoolExecutor
 
-        # Start timing the process
-        start_time = time.time()
+    # Start timing the process
+    start_time = time.time()
 
-        # Calculate cell_size in degrees
-        # Assuming the cell_size is in meters (from EPSG:3395) and converting it to degrees (for EPSG:4326)
-        meters_per_degree = 111320  # Approximation at the equator
-        cell_size_degrees = cell_size / meters_per_degree
-        log_to_gui(log_widget, f"Cell size converted to degrees: {cell_size_degrees:.6f} degrees")
+    # Calculate cell_size in degrees
+    meters_per_degree = 111320  # Approximation at the equator
+    cell_size_degrees = cell_size / meters_per_degree
+    log_to_gui(log_widget, f"Cell size converted to degrees: {cell_size_degrees:.6f} degrees")
 
-        # Create a grid cell where each of the sides is cell_size_degrees long
-        log_to_gui(log_widget, "Creating analysis grid.")
-        grid_cells = create_grid(geocode_data, cell_size_degrees)
-        log_to_gui(log_widget, "Assigning assets to grid.")
-        geocode_data = assign_assets_to_grid(geocode_data, grid_cells, log_widget)
+    # Create a grid cell where each of the sides is cell_size_degrees long
+    log_to_gui(log_widget, "Creating analysis grid.")
+    grid_cells = create_grid(geocode_data, cell_size_degrees)
+    log_to_gui(log_widget, "Assigning assets to grid.")
+    geocode_data = assign_assets_to_grid(geocode_data, grid_cells, log_widget)
 
-        log_to_gui(log_widget, f"Grouping geocodes into chunks according to cell size of {cell_size}.")
-        # Group geocode data into chunks based on the grid cells
-        geocode_data_chunks = [geocode_data[geocode_data['grid_cell'] == idx] for idx in geocode_data['grid_cell'].unique()]
-        
-        total_chunks = len(geocode_data_chunks)
-        log_to_gui(log_widget, f"Processing {total_chunks} chunks with a maximum of {max_workers} workers.")
+    log_to_gui(log_widget, f"Grouping geocodes into chunks according to cell size of {cell_size}.")
+    geocode_data_chunks = [geocode_data[geocode_data['grid_cell'] == idx] for idx in geocode_data['grid_cell'].unique()]
+    
+    total_chunks = len(geocode_data_chunks)
+    log_to_gui(log_widget, f"Processing {total_chunks} chunks with a maximum of {max_workers} workers.")
 
-        with Executor(max_workers=max_workers) as executor:
-            future_to_chunk = {}
-            chunks_processed = 0
-            for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
-                future = executor.submit(process_chunk_and_log, idx, geocode_chunk, asset_data, total_chunks)
-                future_to_chunk[future] = idx
+    with Executor(max_workers=max_workers) as executor:
+        future_to_chunk = {}
+        chunks_processed = 0
+        for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
+            future = executor.submit(process_chunk_and_log, idx, geocode_chunk, asset_data, total_chunks)
+            future_to_chunk[future] = idx
 
-                # When the number of futures reaches max_workers, wait for them to complete
-                if len(future_to_chunk) >= max_workers:
-                    done, _ = concurrent.futures.wait(future_to_chunk, return_when=concurrent.futures.FIRST_COMPLETED)
+            if len(future_to_chunk) >= max_workers:
+                done, _ = concurrent.futures.wait(future_to_chunk, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    idx, num_results, result, *error = future.result()
+                    chunks_processed += 1
+                    if error:
+                        log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
+                    elif result is not None:
+                        log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
+                        intersections.append(result)
+                        update_progress(progress_var.get() + (3 / total_chunks))
 
-                    for future in done:
-                        idx, num_results, result, *error = future.result()
-                        chunks_processed += 1
-                        if error:
-                            log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
-                        elif result is not None:
-                            log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
-                            intersections.append(result)
-                            update_progress(progress_var.get() + (3 / total_chunks))
+                    # Estimate time remaining
+                    current_time = time.time()
+                    elapsed_time = current_time - start_time
+                    estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
+                    estimated_time_remaining = estimated_total_time - elapsed_time
 
-                        # Estimate time remaining
-                        current_time = time.time()
-                        elapsed_time = current_time - start_time
-                        estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
-                        estimated_time_remaining = estimated_total_time - elapsed_time
+                    # Calculate estimated completion time
+                    estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
+                    estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
 
-                        # Calculate estimated completion time
-                        estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
-                        estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
+                    log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
+                    del future_to_chunk[future]
 
-                        log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
+        # Process any remaining futures
+        for future in concurrent.futures.as_completed(future_to_chunk):
+            idx, num_results, result, *error = future.result()
+            chunks_processed += 1
+            if error:
+                log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
+            elif result is not None:
+                log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
+                intersections.append(result)
+                update_progress(progress_var.get() + (3 / total_chunks))
 
-                        # Remove the completed future from the dictionary
-                        del future_to_chunk[future]
+            # Estimate time remaining for the last chunks
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
+            estimated_time_remaining = estimated_total_time - elapsed_time
+            estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
+            estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
 
-            # Process any remaining futures
-            for future in concurrent.futures.as_completed(future_to_chunk):
-                idx, num_results, result, *error = future.result()
-                chunks_processed += 1
-                if error:
-                    log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
-                elif result is not None:
-                    log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
-                    intersections.append(result)
-                    update_progress(progress_var.get() + (3 / total_chunks))
+            log_to_gui(log_widget, f"{elapsed_time:.2f} of {estimated_total_time:.2f} seconds elapsed, {estimated_time_remaining:.2f} seconds remaining. This roughly translates to {estimated_completion_time_str}.")
 
-                # Estimate time remaining for the last chunks
-                current_time = time.time()
-                elapsed_time = current_time - start_time
-                estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
-                estimated_time_remaining = estimated_total_time - elapsed_time
+    # Calculate the total time taken
+    end_time = time.time()
+    total_time = end_time - start_time
+    time_per_chunk = total_time / total_chunks if total_chunks > 0 else 0
 
-                # Calculate estimated completion time for remaining chunks
-                estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
-                estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
+    # Calculate the processing rates
+    asset_objects_per_second = len(asset_data) / total_time if total_time > 0 else 0
+    geocode_objects_per_second = len(geocode_data) / total_time if total_time > 0 else 0
 
-                log_to_gui(log_widget, f"{elapsed_time:.2f} of {estimated_total_time:.2f} seconds elapsed, {estimated_time_remaining:.2f} seconds remaining. This roughly translates to {estimated_completion_time_str}.")
+    log_to_gui(log_widget, "Core computation concluded. Statistics will follow.")
+    log_to_gui(log_widget, f"Processing completed in {total_time:.2f} seconds.")
+    log_to_gui(log_widget, f"Average time per chunk: {time_per_chunk:.2f} seconds.")
+    log_to_gui(log_widget, f"Total asset objects processed: {len(asset_data)}.")
+    log_to_gui(log_widget, f"Asset objects processed per second: {asset_objects_per_second:.2f}.")
+    log_to_gui(log_widget, f"Total geocode objects processed: {len(geocode_data)}.")
+    log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
 
-        # Calculate the total time taken
-        end_time = time.time()
-        total_time = end_time - start_time
-        time_per_chunk = total_time / total_chunks if total_chunks > 0 else 0
+    return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
-        # Calculate the processing rates
-        asset_objects_per_second = len(asset_data) / total_time if total_time > 0 else 0
-        geocode_objects_per_second = len(geocode_data) / total_time if total_time > 0 else 0
-
-        # Log the time taken, processing rates, and the number of objects processed
-        log_to_gui(log_widget, "Core comptuation concluded. Statistics will follow.")
-        log_to_gui(log_widget, f"Processing completed in {total_time:.2f} seconds.")
-        log_to_gui(log_widget, f"Average time per chunk: {time_per_chunk:.2f} seconds.")
-        log_to_gui(log_widget, f"Total asset objects processed: {len(asset_data)}.")
-        log_to_gui(log_widget, f"Asset objects processed per second: {asset_objects_per_second:.2f}.")
-        log_to_gui(log_widget, f"Total geocode objects processed: {len(geocode_data)}.")
-        log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
-
-        # Return the combined GeoDataFrame
-        return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
 
 def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
