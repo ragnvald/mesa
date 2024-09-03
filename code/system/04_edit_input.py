@@ -1,7 +1,7 @@
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 import configparser
 import pandas as pd
 import geopandas as gpd
@@ -13,14 +13,8 @@ import os
 import sys
 
 # Setting variables
-#
-# Define fixed widths for each column
 column_widths = [35, 13, 13, 13, 13, 30]
-
-# Define global variable for valid input values
 valid_input_values = []
-
-# Global declaration
 classification = {}
 
 # Shared/general functions
@@ -59,20 +53,20 @@ def determine_category(sensitivity):
 
 def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries, df_assetgroup):
     try:
-        importance      = int(entry_importance.get())
-        susceptibility  = int(entry_susceptibility.get())
-        sensitivity     = importance * susceptibility
+        importance = int(entry_importance.get())
+        susceptibility = int(entry_susceptibility.get())
+        sensitivity = importance * susceptibility
         sensitivity_code, sensitivity_description = determine_category(sensitivity)
 
-        entries[index]['sensitivity']['text']               = str(sensitivity)
-        entries[index]['sensitivity_code']['text']          = sensitivity_code
-        entries[index]['sensitivity_description']['text']   = sensitivity_description
+        entries[index]['sensitivity']['text'] = str(sensitivity)
+        entries[index]['sensitivity_code']['text'] = sensitivity_code
+        entries[index]['sensitivity_description']['text'] = sensitivity_description
 
-        df_assetgroup.at[index, 'importance']               = importance
-        df_assetgroup.at[index, 'susceptibility']           = susceptibility
-        df_assetgroup.at[index, 'sensitivity']              = sensitivity
-        df_assetgroup.at[index, 'sensitivity_code']         = sensitivity_code
-        df_assetgroup.at[index, 'sensitivity_description']  = sensitivity_description
+        df_assetgroup.at[index, 'importance'] = importance
+        df_assetgroup.at[index, 'susceptibility'] = susceptibility
+        df_assetgroup.at[index, 'sensitivity'] = sensitivity
+        df_assetgroup.at[index, 'sensitivity_code'] = sensitivity_code
+        df_assetgroup.at[index, 'sensitivity_description'] = sensitivity_description
 
     except ValueError:
         messagebox.showerror("Input Error", "Enter valid integers for susceptibility and importance.")
@@ -80,25 +74,25 @@ def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries
 def update_all_rows_immediately(entries, df_assetgroup):
     for entry in entries:
         try:
-            importance      = int(entry['importance'].get())
-            susceptibility  = int(entry['susceptibility'].get())
+            importance = int(entry['importance'].get())
+            susceptibility = int(entry['susceptibility'].get())
             
             sensitivity = importance * susceptibility
             sensitivity_code, sensitivity_description = determine_category(sensitivity)
             
             index = entry['row_index']
-            df_assetgroup.at[index, 'importance']               = importance
-            df_assetgroup.at[index, 'susceptibility']           = susceptibility
-            df_assetgroup.at[index, 'sensitivity']              = sensitivity
-            df_assetgroup.at[index, 'sensitivity_code']         = sensitivity_code
-            df_assetgroup.at[index, 'sensitivity_description']  = sensitivity_description
+            df_assetgroup.at[index, 'importance'] = importance
+            df_assetgroup.at[index, 'susceptibility'] = susceptibility
+            df_assetgroup.at[index, 'sensitivity'] = sensitivity
+            df_assetgroup.at[index, 'sensitivity_code'] = sensitivity_code
+            df_assetgroup.at[index, 'sensitivity_description'] = sensitivity_description
             
             if 'geom' in entry:
                 df_assetgroup.at[index, 'geom'] = entry['geom']
 
-            entry['sensitivity']['text']                = str(sensitivity)
-            entry['sensitivity_code']['text']           = sensitivity_code
-            entry['sensitivity_description']['text']    = sensitivity_description
+            entry['sensitivity']['text'] = str(sensitivity)
+            entry['sensitivity_code']['text'] = sensitivity_code
+            entry['sensitivity_description']['text'] = sensitivity_description
 
         except ValueError as e:
             log_to_file(f"Input Error: {e}")
@@ -201,23 +195,19 @@ def save_to_excel(df_assetgroup, excel_file):
     except Exception as e:
         log_to_file(f"Failed to save data to Excel: {e}")
 
-
 def load_from_excel(excel_file, df_assetgroup):
     try:
         df_excel = pd.read_excel(excel_file)
         log_to_file("Data loaded successfully from Excel.")
         
-        # Update values in the DataFrame using the Excel data
         for _, row in df_excel.iterrows():
             name_original = row['name_original']
             if name_original in df_assetgroup['name_original'].values:
                 idx = df_assetgroup[df_assetgroup['name_original'] == name_original].index[0]
                 
-                # Update susceptibility and importance from Excel data
                 df_assetgroup.loc[idx, 'susceptibility'] = row['susceptibility']
                 df_assetgroup.loc[idx, 'importance'] = row['importance']
                 
-                # Recalculate sensitivity, sensitivity_code, and sensitivity_description
                 importance = int(df_assetgroup.at[idx, 'importance'])
                 susceptibility = int(df_assetgroup.at[idx, 'susceptibility'])
                 sensitivity = importance * susceptibility
@@ -237,7 +227,6 @@ def load_from_excel(excel_file, df_assetgroup):
         log_to_file(f"Failed to load data from Excel: {e}")
         return df_assetgroup
 
-
 def close_application():
     save_to_gpkg(df_assetgroup, gpkg_file)
     root.destroy()
@@ -252,11 +241,11 @@ def setup_headers(frame, column_widths):
 def update_df_assetgroup(entries):
     for entry in entries:
         index = entry['row_index']
-        df_assetgroup.at[index, 'importance']               = entry['importance'].get()
-        df_assetgroup.at[index, 'susceptibility']           = entry['susceptibility'].get()
-        df_assetgroup.at[index, 'sensitivity']              = entry['sensitivity']['text']
-        df_assetgroup.at[index, 'sensitivity_code']         = entry['sensitivity_code']['text']
-        df_assetgroup.at[index, 'sensitivity_description']  = entry['sensitivity_description']['text']
+        df_assetgroup.at[index, 'importance'] = entry['importance'].get()
+        df_assetgroup.at[index, 'susceptibility'] = entry['susceptibility'].get()
+        df_assetgroup.at[index, 'sensitivity'] = entry['sensitivity']['text']
+        df_assetgroup.at[index, 'sensitivity_code'] = entry['sensitivity_code']['text']
+        df_assetgroup.at[index, 'sensitivity_description'] = entry['sensitivity_description']['text']
         df_assetgroup.at[index, 'geom'] = entry['geom']
 
 def create_scrollable_area(root):
@@ -318,27 +307,24 @@ def log_to_file(message):
     with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
 
-
-
 def handle_load_from_excel():
     global df_assetgroup
-    if os.path.exists(excel_file):
+    input_folder = os.path.join(original_working_directory, "input")
+    excel_file = filedialog.askopenfilename(title="Select Excel File", initialdir=input_folder, filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")])
+    if excel_file:
         df_assetgroup = load_from_excel(excel_file, df_assetgroup)  # Load data and update df_assetgroup
         
         for entry in entries:
             name_original = entry['name'].cget("text")
             if name_original in df_assetgroup['name_original'].values:
-                # Get the corresponding index from df_assetgroup
                 index = df_assetgroup[df_assetgroup['name_original'] == name_original].index[0]
                 
-                # Update susceptibility and importance from the updated df_assetgroup
                 entry['importance'].delete(0, tk.END)
                 entry['importance'].insert(0, str(df_assetgroup.at[index, 'importance']))
                 
                 entry['susceptibility'].delete(0, tk.END)
                 entry['susceptibility'].insert(0, str(df_assetgroup.at[index, 'susceptibility']))
 
-                # Calculate sensitivity and update the labels
                 importance = int(df_assetgroup.at[index, 'importance'])
                 susceptibility = int(df_assetgroup.at[index, 'susceptibility'])
                 sensitivity = importance * susceptibility
@@ -350,12 +336,22 @@ def handle_load_from_excel():
             else:
                 log_to_file(f"Warning: {name_original} not found in the Excel file. Skipping this entry.")
         
-        # Refresh the UI explicitly
         root.update_idletasks()
         log_to_file("Data loaded and UI updated from Excel.")
 
+def handle_save_to_excel():
+    global df_assetgroup
+    input_folder = os.path.join(original_working_directory, "input")
+    excel_file = filedialog.asksaveasfilename(title="Save Excel File", initialdir=input_folder, defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")])
+    if excel_file:
+        save_to_excel(df_assetgroup, excel_file)
 
-
+def handle_save_to_gpkg():
+    global df_assetgroup
+    input_folder = os.path.join(original_working_directory, "input")
+    gpkg_file = filedialog.asksaveasfilename(title="Save GeoPackage File", initialdir=input_folder, defaultextension=".gpkg", filetypes=[("GeoPackage Files", "*.gpkg"), ("All Files", "*.*")])
+    if gpkg_file:
+        save_to_gpkg(df_assetgroup, gpkg_file)
 
 #####################################################################################
 #  Main
@@ -367,21 +363,20 @@ args = parser.parse_args()
 original_working_directory = args.original_working_directory
 
 if original_working_directory is None or original_working_directory == '':
-    original_working_directory  = os.getcwd()
+    original_working_directory = os.getcwd()
     if str("system") in str(original_working_directory):
         original_working_directory = os.path.join(os.getcwd(),'../')
 
-config_file                 = os.path.join(original_working_directory, "system/config.ini")
-gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
-excel_file                  = os.path.join(original_working_directory, "input/settings.xlsx")
+config_file = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file = os.path.join(original_working_directory, "output/mesa.gpkg")
+excel_file = os.path.join(original_working_directory, "input/settings.xlsx")
 
-config                      = read_config(config_file)
-
-ttk_bootstrap_theme         = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg      = config['DEFAULT']['workingprojection_epsg']
+config = read_config(config_file)
+ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg = config['DEFAULT']['workingprojection_epsg']
                                        
-valid_input_values          = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
-classification              = read_config_classification(config_file)
+valid_input_values = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
+classification = read_config_classification(config_file)
 
 increment_stat_value(config_file, 'mesa_stat_setup', increment_value=1)
 
@@ -408,10 +403,10 @@ if __name__ == "__main__":
     close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
     close_button.pack(side='right', padx=10, pady=10)
 
-    save_button = ttk.Button(root, text="Save to GeoPackage", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=SUCCESS)
+    save_button = ttk.Button(root, text="Save to GeoPackage", command=handle_save_to_gpkg, bootstyle=SUCCESS)
     save_button.pack(side='right', padx=10, pady=10)
 
-    save_excel_button = ttk.Button(root, text="Save to Excel", command=lambda: save_to_excel(df_assetgroup, excel_file), bootstyle=INFO)
+    save_excel_button = ttk.Button(root, text="Save to Excel", command=handle_save_to_excel, bootstyle=INFO)
     save_excel_button.pack(side='right', padx=10, pady=10)
 
     load_excel_button = ttk.Button(root, text="Load from Excel", command=handle_load_from_excel, bootstyle=PRIMARY)
