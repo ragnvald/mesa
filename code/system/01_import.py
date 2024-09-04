@@ -337,30 +337,30 @@ def import_spatial_data_lines(input_folder_lines, log_widget, progress_var):
 
 # Thread function to run import of geocodes
 def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var):
+    log_to_gui(log_widget, "Preparing to import geocode groups and objects.")
 
-    log_to_gui(log_widget, f"Preparing import of geocode groups and objects.")
+    # Delete old geocode group and object tables
+    log_to_gui(log_widget, "Cleaning up old geocodes. Deleting geocode groups and objects if they exist.")
+    delete_table_from_geopackage(gpkg_file, 'tbl_geocode_group', log_widget)
+    delete_table_from_geopackage(gpkg_file, 'tbl_geocode_object', log_widget)
 
-    log_to_gui(log_widget, "Cleaning up. Deleting old geocodes, if they exist.")
-
-    delete_table_from_geopackage(gpkg_file, 'tbl_geocode_group', log_widget=None)
-    delete_table_from_geopackage(gpkg_file, 'tbl_geocode_object', log_widget=None)
-
-
-    log_to_gui(log_widget, f"Looking through the input folder.")
+    # Import new geocode data
     geocode_groups_gdf, geocode_objects_gdf = import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var)
 
-
+    # Check if the GeoDataFrame is not empty before exporting
     if not geocode_groups_gdf.empty:
+        log_to_gui(log_widget, "Exporting geocode groups to geopackage")
         export_to_geopackage(geocode_groups_gdf, gpkg_file, 'tbl_geocode_group', log_widget)
-
+    
     if not geocode_objects_gdf.empty:
+        log_to_gui(log_widget, "Exporting geocode objects to geopackage")
         export_to_geopackage(geocode_objects_gdf, gpkg_file, 'tbl_geocode_object', log_widget)
 
-    log_to_gui(log_widget, "COMPLETED: Geocoding imports done.")
+    log_to_gui(log_widget, "COMPLETED: Geocode import done.")
     progress_var.set(100)
     update_progress(100)
-    
     increment_stat_value(config_file, 'mesa_stat_import_geocodes', increment_value=1)
+
 
 
 # Emtpy the destination table. Not sure if this one works 100%, but we will
@@ -740,38 +740,36 @@ def update_asset_objects_with_name_gis(db_file, log_widget):
 
 # Thread function to run import without freezing GUI
 def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
-    
     log_to_gui(log_widget, "Starting asset import process...")
 
-    log_to_gui(log_widget, "Cleaning up. Deleting old assets, if they exist.")
+    # Delete asset group and object tables
+    log_to_gui(log_widget, "Cleaning up old assets. Deleting asset groups and objects if they exist.")
+    delete_table_from_geopackage(gpkg_file, 'tbl_asset_group', log_widget)
+    delete_table_from_geopackage(gpkg_file, 'tbl_asset_object', log_widget)
 
-    delete_table_from_geopackage(gpkg_file, 'tbl_asset_object', log_widget=None)
-
-    delete_table_from_geopackage(gpkg_file, 'tbl_asset_group', log_widget=None)
-
+    # Import new data
     asset_objects_gdf, asset_groups_gdf, total_bbox_geom = import_spatial_data_asset(input_folder_asset, log_widget, progress_var)
 
     # Check if the GeoDataFrame is not empty before exporting
-    if not asset_objects_gdf.empty:  # Corrected line
-        log_to_gui(log_widget, "Starting export of asset objects to geopackage")
+    if not asset_objects_gdf.empty:
+        log_to_gui(log_widget, "Exporting asset objects to geopackage")
         export_to_geopackage(asset_objects_gdf, gpkg_file, 'tbl_asset_object', log_widget)
     else:
         log_to_gui(log_widget, "No asset objects to export.")
     
-    
     if not asset_groups_gdf.empty:
-        log_to_gui(log_widget, "Starting export of asset groups to geopackage")
+        log_to_gui(log_widget, "Exporting asset groups to geopackage")
         export_to_geopackage(asset_groups_gdf, gpkg_file, 'tbl_asset_group', log_widget)
     else:
         log_to_gui(log_widget, "No asset groups to export.")
-        
+    
     update_asset_objects_with_name_gis(gpkg_file, log_widget)
 
     log_to_gui(log_widget, "COMPLETED: Asset import done.")
     progress_var.set(100)
     update_progress(100)
-
     increment_stat_value(config_file, 'mesa_stat_import_assets', increment_value=1)
+
 
 # Function to delete a table from a GeoPackage file
 def delete_table_from_geopackage(gpkg_file, table_name, log_widget=None):
@@ -779,34 +777,29 @@ def delete_table_from_geopackage(gpkg_file, table_name, log_widget=None):
         # Open the GeoPackage in update mode
         ds = ogr.Open(gpkg_file, update=True)
         if ds is not None:
-            # Check if the specified table exists
+            # Check if the specified table (layer) exists
             layer = ds.GetLayerByName(table_name)
             if layer is not None:
                 ds.DeleteLayer(table_name)
                 message = f"Table {table_name} deleted from {gpkg_file}."
-                if log_widget:
-                    log_to_gui(log_widget, message)
-                else:
-                    print(message)
             else:
                 message = f"Table {table_name} does not exist in {gpkg_file}."
-                if log_widget:
-                    log_to_gui(log_widget, message)
-                else:
-                    print(message)
-            ds = None  # Ensure the data source is closed
         else:
             message = f"Failed to open {gpkg_file}."
-            if log_widget:
-                log_to_gui(log_widget, message)
-            else:
-                print(message)
-    except Exception as e:
-        message = f"An error occurred while attempting to delete table {table_name} from {gpkg_file}: {e}"
+        # Close the data source
+        ds = None
+        # Log the result
         if log_widget:
             log_to_gui(log_widget, message)
         else:
             print(message)
+    except Exception as e:
+        error_message = f"Error deleting table {table_name} from {gpkg_file}: {e}"
+        if log_widget:
+            log_to_gui(log_widget, error_message)
+        else:
+            print(error_message)
+
 
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
