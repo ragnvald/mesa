@@ -346,13 +346,6 @@ def handle_save_to_excel():
     if excel_file:
         save_to_excel(df_assetgroup, excel_file)
 
-def handle_save_to_gpkg():
-    global df_assetgroup
-    input_folder = os.path.join(original_working_directory, "input")
-    gpkg_file = filedialog.asksaveasfilename(title="Save GeoPackage File", initialdir=input_folder, defaultextension=".gpkg", filetypes=[("GeoPackage Files", "*.gpkg"), ("All Files", "*.*")])
-    if gpkg_file:
-        save_to_gpkg(df_assetgroup, gpkg_file)
-
 #####################################################################################
 #  Main
 #
@@ -403,7 +396,7 @@ if __name__ == "__main__":
     close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
     close_button.pack(side='right', padx=10, pady=10)
 
-    save_button = ttk.Button(root, text="Save to GeoPackage", command=handle_save_to_gpkg, bootstyle=SUCCESS)
+    save_button = ttk.Button(root, text="Save to GeoPackage", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=SUCCESS)
     save_button.pack(side='right', padx=10, pady=10)
 
     save_excel_button = ttk.Button(root, text="Save to Excel", command=handle_save_to_excel, bootstyle=INFO)
