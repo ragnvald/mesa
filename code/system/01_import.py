@@ -144,24 +144,47 @@ def process_geocode_layer(data, geocode_groups, geocode_objects, group_id_counte
 # Function to process each geocode file
 def process_geocode_file(filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget):
     if filepath.endswith('.gpkg'):
-        ds = ogr.Open(filepath)
-        for i in range(ds.GetLayerCount()):
-            layer = ds.GetLayerByIndex(i)
-            layer_name = layer.GetName()
-            data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
-            log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
-            group_id_counter, object_id_counter = process_geocode_layer(
-                data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
-        ds = None
+        try:
+            # List layers in the geopackage
+            layers = fiona.listlayers(filepath)
+            log_to_gui(log_widget, f"Found layers in {filepath}: {layers}")
+            
+            # Process each layer
+            for layer_name in layers:
+                log_to_gui(log_widget, f"Processing geopackage layer: {layer_name}")
+                
+                # Explicitly specify the layer when reading the file
+                data = gpd.read_file(filepath, layer=layer_name)
+                
+                # Reproject if necessary
+                data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)  
+                
+                # Process the geocode layer
+                group_id_counter, object_id_counter = process_geocode_layer(
+                    data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget
+                )
+        except Exception as e:
+            log_to_gui(log_widget, f"Error processing geopackage {filepath}: {e}")
+    
     elif filepath.endswith('.shp'):
-        data = read_and_reproject(filepath, log_widget=log_widget)
-        layer_name = os.path.splitext(os.path.basename(filepath))[0]
-        log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
-        group_id_counter, object_id_counter = process_geocode_layer(
-            data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget)
+        try:
+            # Process shapefile directly
+            data = read_and_reproject(filepath, log_widget=log_widget)
+            layer_name = os.path.splitext(os.path.basename(filepath))[0]
+            log_to_gui(log_widget, f"Processing shapefile layer: {layer_name}")
+            
+            group_id_counter, object_id_counter = process_geocode_layer(
+                data, geocode_groups, geocode_objects, group_id_counter, object_id_counter, layer_name, log_widget
+            )
+        except Exception as e:
+            log_to_gui(log_widget, f"Error processing shapefile {filepath}: {e}")
     else:
         log_to_gui(log_widget, f"Unsupported file format for {filepath}")
+    
     return group_id_counter, object_id_counter
+
+
+
 
 # Function to ensure unique 'code' attributes in geocode_objects
 def ensure_unique_codes(geocode_objects, log_widget):
@@ -607,14 +630,13 @@ def delete_layer(gpkg_file, layer_name, log_widget):
     except Exception as e:
         log_to_gui(log_widget, f"An error occurred while attempting to delete layer {layer_name} from {gpkg_file}: {e}")
 
+
 # Function exports data to geopackage and secures replacing relevant data.  
 def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
     # Check if the input is a list and convert it to a GeoDataFrame
     if isinstance(gdf_or_list, list):
-        # Assuming each dictionary in the list has a 'geom' key with geometry data
         if gdf_or_list and 'geom' in gdf_or_list[0]:
             gdf = gpd.GeoDataFrame(gdf_or_list)
-            # Convert geometries from WKT or GeoJSON to Shapely geometries if they are not already
             gdf['geometry'] = gdf['geom'].apply(lambda x: shape(x) if not isinstance(x, gpd.geoseries.GeoSeries) else x)
             gdf.drop('geom', axis=1, inplace=True)
         else:
@@ -630,14 +652,18 @@ def export_to_geopackage(gdf_or_list, gpkg_file, layer_name, log_widget):
     if gdf.crs is None:
         gdf.set_crs(epsg=workingprojection_epsg, inplace=True)
     
+    # Delete the layer first if it exists to avoid overwrite issues
+    delete_layer(gpkg_file, layer_name, log_widget)
+    
     # Attempt to save the GeoDataFrame to the specified layer in the GeoPackage
     try:
-        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+        gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
         log_to_gui(log_widget, f"Data successfully exported to {layer_name} in {gpkg_file}.")
         progress_var.set(95)
         update_progress(95)
     except Exception as e:
         log_to_gui(log_widget, f"Failed to export data to GeoPackage: {str(e)}")
+
 
 # Function exports data to geopackage and secures replacing relevant data.  
 def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
