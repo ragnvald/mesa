@@ -372,7 +372,7 @@ def initialize_empty_table(gpkg_file, dest_table, schema):
         empty_gdf[column] = pd.Series(dtype=dtype)
     
     # Save the empty GeoDataFrame to the destination table, replacing any existing content
-    empty_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
+    empty_gdf.to_file(gpkg_file, layer=dest_table)
 
 
 # Original lines are copied to tbl_lines where the user can make
@@ -416,32 +416,48 @@ def copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length):
     dest_gdf = dest_gdf[['name_gis', 'name_user', 'segment_length', 'segment_width', 'description', 'length_m', 'geometry']]
     
     # Save the transformed GeoDataFrame to the now-empty destination table
-    dest_gdf.to_file(gpkg_file, layer=dest_table, if_exists='replace')
+    dest_gdf.to_file(gpkg_file, layer=dest_table)
 
 
 # Thread function to run import lines
 def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
-
-    log_to_gui(log_widget, f"Preparing import of lines.")
+    log_to_gui(log_widget, "Preparing import of lines.")
     
+    # Delete old lines, if they exist
     log_to_gui(log_widget, "First deleting old lines, if they exist.")
+    delete_table_from_geopackage(gpkg_file, 'tbl_lines_original', log_widget)
+    delete_table_from_geopackage(gpkg_file, 'tbl_lines', log_widget)
+    
+    log_to_gui(log_widget, "Looking through input folder.")
 
-    delete_table_from_geopackage(gpkg_file, 'tbl_lines', log_widget=None)
-    
-    log_to_gui(log_widget, "Looking trough input folder.")
-    
+    # Import new line data
     line_objects_gdf = import_spatial_data_lines(input_folder_lines, log_widget, progress_var)
 
+    # Check if the GeoDataFrame is not empty before proceeding
     if not line_objects_gdf.empty:
+        # Check if CRS is set, if not, set it to the working projection
+        if line_objects_gdf.crs is None:
+            log_to_gui(log_widget, f"No CRS found, setting CRS to EPSG:{workingprojection_epsg}")
+            line_objects_gdf.set_crs(epsg=workingprojection_epsg, inplace=True)
+
+        # Reproject to the working projection
+        log_to_gui(log_widget, f"Reprojecting lines to EPSG:{workingprojection_epsg}")
+        line_objects_gdf = line_objects_gdf.to_crs(epsg=workingprojection_epsg)
+
+        log_to_gui(log_widget, "Exporting line objects to geopackage.")
         export_line_to_geopackage(line_objects_gdf, gpkg_file, 'tbl_lines_original', log_widget)
-
-    log_to_gui(log_widget, "COMPLETED: Line imports done.")
-
+    
+    # Copy original lines to tbl_lines for further user editing
+    log_to_gui(log_widget, "Copying original lines to tbl_lines.")
     copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length)
 
-    update_progress(100)
+    log_to_gui(log_widget, "COMPLETED: Line imports done.")
     
+    # Update progress bar and stats
+    progress_var.set(100)
+    update_progress(100)
     increment_stat_value(config_file, 'mesa_stat_import_lines', increment_value=1)
+
 
 
 def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
@@ -679,7 +695,7 @@ def export_line_to_geopackage(gdf, gpkg_file, layer_name, log_widget):
             delete_layer(gpkg_file, 'tbl_lines_original', log_widget)
             delete_layer(gpkg_file, 'tbl_lines', log_widget)
 
-            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG', if_exists='replace')
+            gdf.to_file(gpkg_file, layer=layer_name, driver='GPKG')
             log_to_gui(log_widget, f"Data for layer {layer_name} saved in GeoPackage.")
         else:
             log_to_gui(log_widget, f"Warning: Attempted to save an empty GeoDataFrame for layer {layer_name}.")
