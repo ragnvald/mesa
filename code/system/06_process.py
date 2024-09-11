@@ -211,8 +211,11 @@ def process_chunk_and_log(idx, geocode_chunk, asset_data, total_chunks):
     except Exception as e:
         return (idx, 0, None, str(e))  # Return error info if something goes wrong
     
-
-
+    
+# This is perhaps the most important function in this program. The function calculates intersects
+# between the assets and geocodes. It handles a substantial amount of data. This is where
+# efforts should be made to look at methods for parallell computing using threading or even
+# using procedures which interact with the GPU.
 def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, workingprojection_epsg, cell_size, max_workers):
     intersections = []
 
