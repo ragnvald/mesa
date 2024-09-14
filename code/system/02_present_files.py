@@ -262,13 +262,11 @@ def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
         create_line_statistic_image(line_name, line_segments['sensitivity_code_max'], color_codes, length_m, max_image_path)
         create_line_statistic_image(line_name, line_segments['sensitivity_code_min'], color_codes, length_m, min_image_path)
         
-        pages.append(('new_page', None))
-        pages.append(('heading(2)', f"Line: {line_name}"))
-        pages.append(('text', f"Total length: {length_m/1000} km"))
-        pages.append(('text', f"Number of segments: {len(line_segments)}"))
-        pages.append(('text', "Sensitivity Code Max:"))
+        pages.append(('heading(3)', f"Line: {line_name}"))
+        pages.append(('text', f"Total length: {length_m/1000} km, with a total number of {len(line_segments)} segments."))
+        pages.append(('text', "Line showing maximum sensitivity along the line."))
         pages.append(('image', max_image_path))
-        pages.append(('text', "Sensitivity Code Min:"))
+        pages.append(('text', "Line showing maximum sensitivity along the line."))
         pages.append(('image', min_image_path))
     
     log_df = pd.DataFrame(log_data)
@@ -405,7 +403,6 @@ write_to_log("Line statistics images created")
 
 timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 time_info = f"Timestamp for this report is: {timestamp}"
-spatialstatistics_info = "*) Points and lines does not represent areas. So their areas are zero."
 
 order_list = [
     ('heading(1)', "MESA report"),
@@ -416,8 +413,8 @@ order_list = [
     ('text', '../output/tmp/introduction.txt'),
     ('spacer', 2),
     ('heading(2)', "Asset object statistics"),
+    ('text', '../output/tmp/asset_objects_statistics_desc.txt'),
     ('table', object_stats_output),
-    ('text', spatialstatistics_info),
     ('new_page', None),
     ('heading(2)', "Map representation of all assets"),
     ('text', '../output/tmp/asset_desc.txt'),
