@@ -660,7 +660,7 @@ log_date_lastupdate         = config['DEFAULT']['log_date_lastupdate']
 log_org                     = config['DEFAULT']['log_org']
 log_bucket                  = config['DEFAULT']['log_bucket']
 log_host                    = config['DEFAULT']['log_host']
-log_token                   = "TOKEN_HERE"
+log_token                   = "Xp_sTOcg-46FFiQuplxz-Fqi-jEe5YGfOZarPR7gwZ4CMTMYseUPUjdKtp2xKV9w85TlBlh5X_lnaNzKULAhog=="
 
 mesa_stat_startup           = config['DEFAULT']['mesa_stat_startup']
 mesa_stat_process           = config['DEFAULT']['mesa_stat_process']
@@ -719,7 +719,7 @@ if ((now - log_date_lastupdate_dt) > timedelta(hours=1)) and (id_uuid_ok_value =
     # Parameters for store_logs_online function should be provided accordingly
     storing_usage_message = store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_version, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
     log_to_logfile(storing_usage_message)
-    
+
     storing_user_message = store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email )
     log_to_logfile(storing_user_message)
    
