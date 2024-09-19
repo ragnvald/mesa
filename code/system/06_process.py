@@ -289,7 +289,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
 
                     # Add a red "+N" if the timestamp is in the future
                     if days_diff > 0:
-                        red_plus_n = f"\033[91m+{days_diff}\033[0m"  # ANSI escape code for red
+                        red_plus_n = f" (+{days_diff} days)"  # ANSI escape code for red
                         estimated_completion_time_str += red_plus_n
 
                     log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
