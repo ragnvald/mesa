@@ -356,6 +356,8 @@ def run_import_geocode(input_folder_geocode, gpkg_file, log_widget, progress_var
         log_to_gui(log_widget, "Exporting geocode objects to geopackage")
         export_to_geopackage(geocode_objects_gdf, gpkg_file, 'tbl_geocode_object', log_widget)
 
+    save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, original_working_directory, log_widget)
+
     log_to_gui(log_widget, "COMPLETED: Geocode import done.")
     progress_var.set(100)
     update_progress(100)
@@ -779,6 +781,8 @@ def run_import_asset(input_folder_asset, gpkg_file, log_widget, progress_var):
     else:
         log_to_gui(log_widget, "No asset groups to export.")
     
+    save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_working_directory, log_widget)
+
     update_asset_objects_with_name_gis(gpkg_file, log_widget)
 
     log_to_gui(log_widget, "COMPLETED: Asset import done.")
@@ -867,6 +871,27 @@ def run_subprocess(command, fallback_command):
 # Function to close the application
 def close_application():
     root.destroy()
+
+def save_to_geoparquet(gdf, file_path, log_widget):
+    try:
+        gdf.to_parquet(file_path, index=False)
+        log_to_gui(log_widget, f"Saved to geoparquet: {file_path}")
+    except Exception as e:
+        log_to_gui(log_widget, f"Error saving to geoparquet: {e}")
+
+def save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_working_directory, log_widget):
+    try:
+        save_to_geoparquet(asset_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/assets_objects.parquet"), log_widget)
+        save_to_geoparquet(asset_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/assets_groups.parquet"), log_widget)
+    except Exception as e:
+        log_to_gui(log_widget, f"Error saving assets to geoparquet: {e}")
+
+def save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, original_working_directory, log_widget):
+    try:
+        save_to_geoparquet(geocode_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/geocodes_groups.parquet"), log_widget)
+        save_to_geoparquet(geocode_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/geocodes_objects.parquet"), log_widget)
+    except Exception as e:
+        log_to_gui(log_widget, f"Error saving geocodes to geoparquet: {e}")
 
 #####################################################################################
 #  Main
