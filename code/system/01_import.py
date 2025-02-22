@@ -65,17 +65,19 @@ def log_to_gui(log_widget, message):
 def read_and_reproject(filepath, layer=None, log_widget=None):
     try:
         data = gpd.read_file(filepath, layer=layer)
-        original_crs = data.crs
+        # Check if CRS is defined; if not, set to workingprojection_epsg
         if data.crs is None:
             log_to_gui(log_widget, f"No CRS found for {filepath}. Setting CRS to EPSG:{workingprojection_epsg}.")
             data.set_crs(epsg=workingprojection_epsg, inplace=True)
-        elif data.crs.to_epsg() != workingprojection_epsg:
-            log_to_gui(log_widget, f"Reprojecting data from {original_crs} to EPSG:{workingprojection_epsg}.")
-            data = data.to_crs(epsg=workingprojection_epsg)
+        # Reproject if the current CRS is different from the working projection
+        elif data.crs.to_epsg() != int(workingprojection_epsg):
+            log_to_gui(log_widget, f"Reprojecting data from {data.crs} to EPSG:{workingprojection_epsg}.")
+            data = data.to_crs(epsg=int(workingprojection_epsg))
         return data
     except Exception as e:
         log_to_gui(log_widget, f"Failed to read or reproject {filepath}: {e}")
         return gpd.GeoDataFrame()  # Return an empty GeoDataFrame on failure
+
 
 # Process the lines in a layer. Add appropriate attributes.
 def process_line_layer(data, line_objects, line_id_counter, layer_name, log_widget):
@@ -452,7 +454,11 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     # Copy original lines to tbl_lines for further user editing
     log_to_gui(log_widget, "Copying original lines to tbl_lines.")
     copy_original_lines_to_tbl_lines(gpkg_file, segment_width, segment_length)
-
+    
+    # --- NEW: Export lines as geoparquet files with consistent naming ---
+    log_to_gui(log_widget, "Exporting lines to geoparquet.")
+    save_lines_to_geoparquet(gpkg_file, original_working_directory, log_widget)
+    
     log_to_gui(log_widget, "COMPLETED: Line imports done.")
     
     # Update progress bar and stats
@@ -461,9 +467,7 @@ def run_import_lines(input_folder_lines, gpkg_file, log_widget, progress_var):
     increment_stat_value(config_file, 'mesa_stat_import_lines', increment_value=1)
 
 
-
-def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
-    # Assuming data.total_bounds gives you [minx, miny, maxx, maxy]
+def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter, object_count):
     bbox = data.total_bounds
     bbox_polygon = box(*bbox)  # Create a Polygon geometry from the bounding box
     
@@ -474,44 +478,41 @@ def append_to_asset_groups(layer_name, data, asset_groups, group_id_counter):
         'title_fromuser': layer_name,
         'date_import': datetime.datetime.now(),
         'geom': bbox_polygon,
-        'total_asset_objects': int(0),
+        'total_asset_objects': object_count,
         'importance': int(0),
         'susceptibility': int(0),
         'sensitivity': int(0),
-        'sensitivity_code': int(0),
-        'sensitivity_description': int(0)
+        'sensitivity_code': '',
+        'sensitivity_description': ''
     })
     return group_id_counter + 1
 
-
 def append_to_asset_objects(data, asset_objects, object_id_counter, group_id):
-    # Example logic to append to asset_objects based on processed data
     for _, row in data.iterrows():
         asset_objects.append({
             'id': object_id_counter,
             'ref_asset_group': group_id,
-            'geom': row.geometry,  # Directly use geometry
-            # Add other necessary attributes here
+            'geom': row.geometry,
+            'attributes': '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
         })
         object_id_counter += 1
     return object_id_counter
 
-
 def process_geopackage_layer(filepath, layer_name, asset_objects, asset_groups, object_id_counter, group_id_counter, log_widget):
     data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
     if not data.empty:
-        group_id_counter = append_to_asset_groups(layer_name, data, asset_groups, group_id_counter)
+        object_count = len(data)
+        group_id_counter = append_to_asset_groups(layer_name, data, asset_groups, group_id_counter, object_count)
         object_id_counter = append_to_asset_objects(data, asset_objects, object_id_counter, group_id_counter - 1)
     return group_id_counter, object_id_counter
 
-
 def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
-    asset_objects       = []
-    asset_groups        = []
-    group_id_counter    = 1
-    object_id_counter   = 1
-    file_patterns       = ['*.shp', '*.gpkg']
-    processed_files     = 0
+    asset_objects = []
+    asset_groups = []
+    group_id_counter = 1
+    object_id_counter = 1
+    file_patterns = ['*.shp', '*.gpkg']
+    processed_files = 0
 
     progress_var.set(10)
     update_progress(10)
@@ -530,14 +531,11 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
         for filepath in glob.glob(os.path.join(input_folder_asset, '**', pattern), recursive=True):
             filename = os.path.splitext(os.path.basename(filepath))[0]
             if filepath.endswith('.gpkg'):
-
-                # Handle geopackage: iterate over each layer
                 for layer_name in fiona.listlayers(filepath):
-                    
                     log_to_gui(log_widget, f"Importing geopackage layer: {layer_name}")
-                    
                     data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
                     if not data.empty:
+                        object_count = len(data)
                         bbox_polygon = box(*data.total_bounds)
                         asset_groups.append({
                             'id': group_id_counter,
@@ -546,37 +544,31 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                             'title_fromuser': filename,
                             'date_import': datetime.datetime.now(),
                             'geom': bbox_polygon,
-                            'total_asset_objects': int(0),
+                            'total_asset_objects': object_count,
                             'importance': int(0),
                             'susceptibility': int(0),
                             'sensitivity': int(0),
-                            'sensitivity_code': '',  # Default or placeholder value
-                            'sensitivity_description': ''  # Default or placeholder value
+                            'sensitivity_code': '',
+                            'sensitivity_description': ''
                         })
                         for _, row in data.iterrows():
-
                             attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
-
                             asset_objects.append({
                                 'id': object_id_counter,
                                 'asset_group_name': layer_name,
                                 'attributes': attributes,
                                 'process': True,
                                 'ref_asset_group': group_id_counter,
-                                'geom': row.geometry  # Original geometry in workingprojection_epsg
+                                'geom': row.geometry
                             })
-                            
                             object_id_counter += 1
                         group_id_counter += 1
-
             elif filepath.endswith('.shp'):
-                
                 layer_name = filename
-
                 log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
-                
                 data = read_and_reproject(filepath, log_widget=log_widget)
                 if not data.empty:
+                    object_count = len(data)
                     bbox_polygon = box(*data.total_bounds)
                     asset_groups.append({
                         'id': group_id_counter,
@@ -585,36 +577,30 @@ def import_spatial_data_asset(input_folder_asset, log_widget, progress_var):
                         'title_fromuser': filename,
                         'date_import': datetime.datetime.now(),
                         'geom': bbox_polygon,
-                        'total_asset_objects': int(0),
+                        'total_asset_objects': object_count,
                         'importance': int(0),
                         'susceptibility': int(0),
                         'sensitivity': int(0),
-                        'sensitivity_code': '',  # Default or placeholder value
-                        'sensitivity_description': '',  # Default or placeholder value
+                        'sensitivity_code': '',
+                        'sensitivity_description': ''
                     })
-
                     for index, row in data.iterrows():
-                        
                         attributes = '; '.join([f"{col}: {row[col]}" for col in data.columns if col != 'geometry'])
-
                         asset_objects.append({
                             'id': object_id_counter,
                             'asset_group_name': layer_name,
                             'attributes': attributes,
                             'process': True,
                             'ref_asset_group': group_id_counter,
-                            'geom': row.geometry  # Original geometry in workingprojection_epsg
+                            'geom': row.geometry
                         })
-
                         object_id_counter += 1
                     group_id_counter += 1
             else:
                 log_to_gui(log_widget, f"Unsupported file format for {filepath}")
 
             processed_files += 1
-
             progress_var.set(10 + processed_files * progress_increment)
-
             update_progress(10 + processed_files * progress_increment)
 
     asset_groups_gdf = gpd.GeoDataFrame(asset_groups, geometry='geom')
@@ -857,20 +843,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
         with open(config_file, 'w') as file:
             file.writelines(lines)
 
-def run_subprocess(command, fallback_command):
 
-    """ Utility function to run a subprocess with a fallback option. """
-    try:
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        try:
-            subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            log_to_gui(f"Failed to execute command: {command}")
-
-# Function to close the application
-def close_application():
-    root.destroy()
 
 def save_to_geoparquet(gdf, file_path, log_widget):
     try:
@@ -879,19 +852,53 @@ def save_to_geoparquet(gdf, file_path, log_widget):
     except Exception as e:
         log_to_gui(log_widget, f"Error saving to geoparquet: {e}")
 
+
+def run_subprocess(command, fallback_command):
+    """ Utility function to run a subprocess with a fallback option. """
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            subprocess.run(fallback_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            log_to_gui(log_widget, f"Failed to execute command: {command}")
+    except Exception as e:
+        log_to_gui(log_widget, f"Unexpected error: {e}")
+
+
+# Function to close the application
+def close_application():
+    root.destroy()
+
+
 def save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_working_directory, log_widget):
     try:
-        save_to_geoparquet(asset_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/assets_objects.parquet"), log_widget)
-        save_to_geoparquet(asset_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/assets_groups.parquet"), log_widget)
+        save_to_geoparquet(asset_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_asset_object.parquet"), log_widget)
+        save_to_geoparquet(asset_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_asset_group.parquet"), log_widget)
     except Exception as e:
         log_to_gui(log_widget, f"Error saving assets to geoparquet: {e}")
 
+
 def save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, original_working_directory, log_widget):
     try:
-        save_to_geoparquet(geocode_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/geocodes_groups.parquet"), log_widget)
-        save_to_geoparquet(geocode_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/geocodes_objects.parquet"), log_widget)
+        save_to_geoparquet(geocode_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_geocode_group.parquet"), log_widget)
+        save_to_geoparquet(geocode_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_geocode_object.parquet"), log_widget)
     except Exception as e:
         log_to_gui(log_widget, f"Error saving geocodes to geoparquet: {e}")
+
+
+def save_lines_to_geoparquet(gpkg_file, original_working_directory, log_widget):
+    try:
+        # Export the original lines (tbl_lines_original)
+        original_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines_original")
+        save_to_geoparquet(original_lines_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_lines_original.parquet"), log_widget)
+        
+        # Export the processed lines (tbl_lines)
+        processed_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines")
+        save_to_geoparquet(processed_lines_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_lines.parquet"), log_widget)
+    except Exception as e:
+        log_to_gui(log_widget, f"Error saving lines to geoparquet: {e}")
+
 
 #####################################################################################
 #  Main
