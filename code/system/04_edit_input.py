@@ -16,6 +16,7 @@ import sys
 column_widths = [35, 13, 13, 13, 13, 30]
 valid_input_values = []
 classification = {}
+entries = []  # Ensure entries is defined globally
 
 # Shared/general functions
 def read_config(file_name):
@@ -366,8 +367,8 @@ excel_file = os.path.join(original_working_directory, "input/settings.xlsx")
 
 config = read_config(config_file)
 ttk_bootstrap_theme = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg = config['DEFAULT']['workingprojection_epsg']
-                                       
+workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')  # Default to EPSG:4326 if not defined
+
 valid_input_values = list(map(int, config['VALID_VALUES']['valid_input'].split(',')))
 classification = read_config_classification(config_file)
 
