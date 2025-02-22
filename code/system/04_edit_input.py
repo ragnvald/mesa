@@ -228,8 +228,22 @@ def load_from_excel(excel_file, df_assetgroup):
         log_to_file(f"Failed to load data from Excel: {e}")
         return df_assetgroup
 
+def save_to_geoparquet(gdf, file_path):
+    try:
+        gdf.to_parquet(file_path, index=False)
+        log_to_file(f"Saved to GeoParquet: {file_path}")
+    except Exception as e:
+        log_to_file(f"Error saving to GeoParquet: {e}")
+
+def save_assets_to_geoparquet(df_assetgroup, original_working_directory):
+    try:
+        save_to_geoparquet(df_assetgroup, os.path.join(original_working_directory, "output/geoparquet/assets_groups.parquet"))
+    except Exception as e:
+        log_to_file(f"Error saving assets to GeoParquet: {e}")
+
 def close_application():
     save_to_gpkg(df_assetgroup, gpkg_file)
+    save_assets_to_geoparquet(df_assetgroup, original_working_directory)
     root.destroy()
 
 def setup_headers(frame, column_widths):
@@ -397,7 +411,7 @@ if __name__ == "__main__":
     close_button = ttk.Button(root, text="Exit", command=close_application, bootstyle=WARNING)
     close_button.pack(side='right', padx=10, pady=10)
 
-    save_button = ttk.Button(root, text="Save to GeoPackage", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=SUCCESS)
+    save_button = ttk.Button(root, text="Save", command=lambda: save_to_gpkg(df_assetgroup, gpkg_file), bootstyle=SUCCESS)
     save_button.pack(side='right', padx=10, pady=10)
 
     save_excel_button = ttk.Button(root, text="Save to Excel", command=handle_save_to_excel, bootstyle=INFO)
