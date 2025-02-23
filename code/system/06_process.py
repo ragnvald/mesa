@@ -350,8 +350,8 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
    
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
-
-def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
+# Process the tbl_stacked table by intersecting assets and geocodes.
+def process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
     update_progress(10)
 
@@ -435,8 +435,8 @@ def main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg
     update_progress(50)
 
 
-# Create tbl_flat by aggregating values from tbl_stacked
-def main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
+# Create tbl_flat by aggregating values from tbl_stacked.
+def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
@@ -545,8 +545,9 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
 
 # Process all steps and create final tables
 def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg,chunk_size):
-    main_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg,chunk_size)
-    main_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg) 
+    log_to_gui(log_widget, "Started processing of analysis and presentation layers.")
+    process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg,chunk_size)
+    process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg) 
     update_progress(94)
 
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
