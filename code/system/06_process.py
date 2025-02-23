@@ -350,7 +350,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
    
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
-# Process the tbl_stacked table by intersecting assets and geocodes.
+# Process the tbl_stacked table by intersecting assets and geocodes
 def process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size):
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
     update_progress(10)
@@ -435,7 +435,7 @@ def process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_e
     update_progress(50)
 
 
-# Create tbl_flat by aggregating values from tbl_stacked.
+# Create tbl_flat by aggregating values from tbl_stacked
 def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
