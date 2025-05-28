@@ -846,6 +846,9 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
 
 def save_to_geoparquet(gdf, file_path, log_widget):
+    # Ensure CRS is defined to prevent pyogrio warnings
+    if gdf.crs is None:
+        gdf.set_crs(epsg=workingprojection_epsg, inplace=True)
     try:
         gdf.to_parquet(file_path, index=False)
         log_to_gui(log_widget, f"Saved to geoparquet: {file_path}")
