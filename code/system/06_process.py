@@ -504,6 +504,19 @@ def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
 
+    # --- Save to GeoParquet with identical schema ---
+    parquet_folder = os.path.join(os.path.dirname(gpkg_file), "geoparquet")
+    os.makedirs(parquet_folder, exist_ok=True)
+    geoparquet_path = os.path.join(parquet_folder, "tbl_flat.parquet")
+    # Ensure geometry column is named 'geometry'
+    if tbl_flat.geometry.name != 'geometry':
+        tbl_flat = tbl_flat.rename_geometry('geometry')
+    # Ensure CRS is set
+    if tbl_flat.crs is None:
+        tbl_flat.set_crs(workingprojection_epsg, inplace=True)
+    tbl_flat.to_parquet(geoparquet_path, index=False)
+    log_to_gui(log_widget, f"tbl_flat also saved to geoparquet: {geoparquet_path}")
+
 
 # Classify data based on configuration
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
