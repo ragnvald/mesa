@@ -241,42 +241,40 @@ if __name__ == "__main__":
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
         # ---- Statistics: table + bar chart ----------------------------
-        ttk.Label(stats_frame, text="Area by sensitivity code",
-                  anchor="center", font=("TkDefaultFont", 10, "bold")).pack(pady=5)
+        stats_table_label = ttk.Label(stats_frame, text="Area by sensitivity code",
+                                     anchor="center", font=("TkDefaultFont", 10, "bold"))
+        stats_table_label.pack(pady=5)
 
-        style = ttk.Style()
-        style.configure("Treeview.Heading",
-                        font=("TkDefaultFont", 10, "bold"))
-        style.configure("Treeview", rowheight=28)  # Set to at least icon size + padding
+        # Use a frame to separate table and bar chart
+        stats_table_frame = ttk.Frame(stats_frame)
+        stats_table_frame.pack(fill=tk.BOTH, expand=False, padx=5, pady=(5, 0))
 
-        # ### CHANGED – tree column (#0) is visible and used for icon ###
         stats_table = ttk.Treeview(
-            stats_frame,
+            stats_table_frame,
             columns=("Sensitivity code", "Description", "Area (km²)"),
-            show="tree headings",                     # ← show tree + headings
+            show="tree headings",
             height=10
         )
-        stats_table.column("#0", width=40, anchor="center")  # icon column
-        stats_table.heading("#0", text="")                   # no heading
+        stats_table.column("#0", width=40, anchor="center")
+        stats_table.heading("#0", text="")
 
-        stats_table.heading("Sensitivity code", anchor="center",
-                            text="Sensitivity code")
-        stats_table.heading("Description",      anchor="center",
-                            text="Description")
-        stats_table.heading("Area (km²)",       anchor="center",
-                            text="Area (km²)")
+        stats_table.heading("Sensitivity code", anchor="center", text="Sensitivity code")
+        stats_table.heading("Description", anchor="center", text="Description")
+        stats_table.heading("Area (km²)", anchor="center", text="Area (km²)")
 
         stats_table.column("Sensitivity code", width=140, anchor="center")
-        stats_table.column("Description",      width=180, anchor="center")
-        stats_table.column("Area (km²)",       width=100, anchor="center")
-        stats_table.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        stats_table.column("Description", width=180, anchor="w")
+        stats_table.column("Area (km²)", width=100, anchor="e")
+        stats_table.pack(fill=tk.X, expand=False, padx=0, pady=0)
 
-        # Bar chart under the table
+        # Bar chart gets the remaining space below the table
+        stats_bar_frame = ttk.Frame(stats_frame)
+        stats_bar_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+
         fig_stats = Figure(figsize=(4, 3), dpi=100)
         ax_stats = fig_stats.add_subplot(111)
-        stats_canvas = FigureCanvasTkAgg(fig_stats, master=stats_frame)
-        stats_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True,
-                                          padx=5, pady=5)
+        stats_canvas = FigureCanvasTkAgg(fig_stats, master=stats_bar_frame)
+        stats_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         # ---- Controls (left pane) ------------------------------------
         geocode_var = tk.StringVar()
