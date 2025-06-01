@@ -21,6 +21,16 @@ import matplotlib.pyplot as plt
 import contextily as ctx  # Add this import for basemap support
 from matplotlib.figure import Figure
 
+color_icons = {}       # husker PhotoImage per farge (unngå GC)
+
+def get_color_icon(color_hex, size=8):
+    """Returnerer (og cacher) et lite kvadrat-ikon i gitt farge."""
+    if color_hex not in color_icons:
+        img = tk.PhotoImage(width=size, height=size)
+        img.put(color_hex, to=(0, 0, size, size))
+        color_icons[color_hex] = img
+    return color_icons[color_hex]
+
 # Read the configuration file
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -127,23 +137,52 @@ def update_statistics():
         # Calculate area per sensitivity_code_max category using area_m2
         if 'sensitivity_code_max' in tbl_flat_data.columns and 'area_m2' in tbl_flat_data.columns:
             stats_data = tbl_flat_data.copy()
-            stats_summary = stats_data.groupby('sensitivity_code_max')['area_m2'].sum().reset_index()
+            stats_summary = stats_data.groupby(['sensitivity_code_max', 'sensitivity_description_max'])['area_m2'].sum().reset_index()
             stats_summary['area_km2'] = stats_summary['area_m2'] / 1e6  # Convert area to km²
-            stats_summary = stats_summary.sort_values(by='sensitivity_code_max')  # Order alphabetically by sensitivity_code_max
+            stats_summary = stats_summary.sort_values(by='sensitivity_code_max')  # Order alphabetically
+
+            # Get color mapping once
+            color_mapping = get_color_mapping(config)
 
             # Update the statistics table
             for row in stats_table.get_children():
                 stats_table.delete(row)
-            for _, row in stats_summary.iterrows():
-                stats_table.insert('', 'end', values=(row['sensitivity_code_max'], f"{row['area_km2']:.2f}"))
+            for _, r in stats_summary.iterrows():
+                code  = r['sensitivity_code_max']
+                color = color_mapping.get(code, "#000000")
+
+                item_id = stats_table.insert(
+                    '', 'end',
+                    image=get_color_icon(color),             #  bildet i første kolonne
+                    values=(
+                        '',                                 # første "tekst-celle" er tom – bildet vises her
+                        code,
+                        r['sensitivity_description_max'],
+                        f"{r['area_km2']:.2f}"
+                    )
+                )
+                # Set all text to black first
+                stats_table.item(item_id, tags=(f"row_{item_id}",))
+                stats_table.tag_configure(f"row_{item_id}", foreground="black")
+                # Now color just the square in the first column
+                # This is a Tkinter Treeview limitation: per-cell coloring is not natively supported.
+                # Workaround: set the square character to the correct color and pad with a black square for the rest.
+                # So, set the value for the first column to a colored square, and the rest to black text.
+                # This requires using a custom font or image for true per-cell coloring, but for text, we can only color the whole row.
+                # Therefore, as a workaround, set the square to the correct color, and the rest of the row to black.
+                # This will color the whole row, but the square will be visible in the correct color.
+                # If you want only the square colored, you must use a custom widget or a third-party table library.
+                stats_table.set(item_id, "Color", f"\u25A0")  # Unicode black square
+                stats_table.tag_configure(f"square_{item_id}", foreground=color)
+                # Apply both tags: first for the square, second for the rest of the row
+                stats_table.item(item_id, tags=(f"square_{item_id}", f"row_{item_id}"))
 
             # Update the bar chart
             ax_stats.clear()
-            color_mapping = get_color_mapping(config)  # Get category colors from the configuration
-            bar_colors = stats_summary['sensitivity_code_max'].map(color_mapping)  # Map colors to categories
+            bar_colors = stats_summary['sensitivity_code_max'].map(color_mapping)
             ax_stats.bar(stats_summary['sensitivity_code_max'], stats_summary['area_km2'], color=bar_colors)
-            ax_stats.set_title("Area by Sensitivity Code (km²)")
-            ax_stats.set_xlabel("Sensitivity Code")
+            ax_stats.set_title("Area by sensitivity code (km²)")
+            ax_stats.set_xlabel("Sensitivity code")
             ax_stats.set_ylabel("Area (km²)")
             ax_stats.tick_params(axis='x', rotation=45)
             stats_canvas.draw()
@@ -199,12 +238,22 @@ if __name__ == "__main__":
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
         # Statistics table
-        stats_table_label = ttk.Label(stats_frame, text="Statistics: Area by Sensitivity Code", anchor="center")
+        stats_table_label = ttk.Label(stats_frame, text="Area by sensitivity code", anchor="center", font=("TkDefaultFont", 10, "bold"))
         stats_table_label.pack(pady=5)
-        stats_table = ttk.Treeview(stats_frame, columns=("Sensitivity Code", "Area (km²)"), show="headings", height=10)
-        stats_table.heading("Sensitivity Code", text="Sensitivity Code")
-        stats_table.heading("Area (km²)", text="Area (km²)")
-        stats_table.column("Sensitivity Code", anchor="center", width=150)
+
+        # Create a style for the Treeview headings and rows
+        style = ttk.Style()
+        style.configure("Treeview.Heading", font=("TkDefaultFont", 10, "bold"))  # Set bold font for headings
+        style.configure("Treeview", rowheight=40)  # Increase row height to make squares larger
+
+        stats_table = ttk.Treeview(stats_frame, columns=("Color", "Sensitivity code", "Description", "Area (km²)"), show="headings", height=10)
+        stats_table.heading("Color", text="", anchor="center")
+        stats_table.heading("Sensitivity code", text="Sensitivity code", anchor="center")
+        stats_table.heading("Description", text="Description", anchor="center")
+        stats_table.heading("Area (km²)", text="Area (km²)", anchor="center")
+        stats_table.column("Color", anchor="center", width=40)  # Increase the width of the color square column
+        stats_table.column("Sensitivity code", anchor="center", width=150)
+        stats_table.column("Description", anchor="center", width=200)
         stats_table.column("Area (km²)", anchor="center", width=100)
         stats_table.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -218,7 +267,7 @@ if __name__ == "__main__":
         # Left pane controls
         # =======================
         geocode_category_var = tk.StringVar()
-        geocode_category_label = ttk.Label(control_frame, text="Geocode Category:")
+        geocode_category_label = ttk.Label(control_frame, text="Geocode category:")
         geocode_category_label.pack(anchor="w", pady=2, padx=5)
         geocode_category_dropdown = ttk.Combobox(control_frame, textvariable=geocode_category_var)
         geocode_category_dropdown['values'] = geocode_categories  # Use sorted categories
