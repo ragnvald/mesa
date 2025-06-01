@@ -434,19 +434,69 @@ def process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_e
     log_to_gui(log_widget, "Done processing the analysis layer.")
     update_progress(50)
 
+    # --- REMOVE: Old direct export to geoparquet here ---
+    # (No direct export to geoparquet here; handled by export_gpkg_tables_to_geoparquet)
+
+def read_table_with_schema_validation(gpkg_file, table, log_widget):
+    """
+    Reads a table from a GeoPackage and validates its schema to ensure all attributes are read correctly.
+    """
+    try:
+        import fiona
+        # Open the GeoPackage layer using Fiona to inspect the schema
+        with fiona.open(gpkg_file, layer=table) as src:
+            schema = src.schema
+            crs = src.crs_wkt
+            log_to_gui(log_widget, f"Schema for {table}: {schema}")
+            log_to_gui(log_widget, f"CRS for {table}: {crs}")
+        
+        # Load the table into a GeoDataFrame
+        gdf = gpd.read_file(gpkg_file, layer=table)
+        
+        # Ensure all columns from the schema are present
+        for field in schema['properties']:
+            if field not in gdf.columns:
+                gdf[field] = None  # Add missing columns with default values
+        
+        return gdf
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed to read table {table} from GeoPackage: {e}")
+        return gpd.GeoDataFrame()  # Return an empty GeoDataFrame on failure
+
+# Replace gpd.read_file calls with read_table_with_schema_validation
+def export_gpkg_tables_to_geoparquet(gpkg_file, log_widget):
+    """
+    Copy tbl_stacked and tbl_flat from the geopackage to geoparquet files
+    in the geoparquet-folder (same schema, same data).
+    """
+    parquet_folder = os.path.join(os.path.dirname(gpkg_file), "geoparquet")
+    os.makedirs(parquet_folder, exist_ok=True)
+
+    for table in ["tbl_stacked", "tbl_flat"]:
+        try:
+            # Use the schema validation function to read the table
+            gdf = read_table_with_schema_validation(gpkg_file, table, log_widget)
+
+            # Ensure geometry column is last for compatibility
+            cols = [c for c in gdf.columns if c != gdf.geometry.name] + [gdf.geometry.name]
+            gdf = gdf[cols]
+
+            # Export to GeoParquet
+            geoparquet_path = os.path.join(parquet_folder, f"{table}.parquet")
+            gdf.to_parquet(geoparquet_path, index=False)
+            log_to_gui(log_widget, f"Copied {table} from GeoPackage to GeoParquet: {geoparquet_path}")
+        except Exception as e:
+            log_to_gui(log_widget, f"Failed to export {table} to GeoParquet: {e}")
 
 # Create tbl_flat by aggregating values from tbl_stacked
 def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg):
     log_to_gui(log_widget, "Building map database (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
 
-    # Log the initial state of tbl_stacked
     log_to_gui(log_widget, f"Initial tbl_stacked size: {len(tbl_stacked)}")
-    
     if 'code' not in tbl_stacked.columns:
         log_to_gui(log_widget, "Error: 'code' column is missing in tbl_stacked.")
         return
-    
     if tbl_stacked.crs is None:
         log_to_gui(log_widget, "CRS not found, setting default CRS for tbl_stacked.")
         tbl_stacked.set_crs(workingprojection_epsg, inplace=True)
@@ -455,7 +505,7 @@ def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg
     # Calculate overlap counts per 'code'
     overlap_counts = tbl_stacked['code'].value_counts().reset_index()
     overlap_counts.columns = ['code', 'assets_overlap_total']
-    
+
     # Aggregation functions
     aggregation_functions = {
         'importance': ['min', 'max'],
@@ -465,10 +515,10 @@ def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg
         'name_gis_geocodegroup': 'first',
         'asset_group_name': lambda x: ', '.join(x.unique()),
         'ref_asset_group': 'nunique',
-        'geometry': 'first'
+        'geometry': 'first',
+        'area_m2': 'first'
     }
 
-    # Group by 'code' and aggregate
     tbl_flat = tbl_stacked.groupby('code').agg(aggregation_functions)
     tbl_flat.columns = ['_'.join(col).strip() for col in tbl_flat.columns.values]
 
@@ -484,38 +534,44 @@ def process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg
         'name_gis_geocodegroup_first': 'name_gis_geocodegroup',
         'asset_group_name_<lambda>': 'asset_group_names',
         'ref_asset_group_nunique': 'asset_groups_total',
-        'geometry_first': 'geometry'
+        'geometry_first': 'geometry',
+        'area_m2_first': 'area_m2'
     }
-
     tbl_flat.rename(columns=renamed_columns, inplace=True)
 
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry', crs=workingprojection_epsg)
 
-    if tbl_flat.crs.is_geographic:
-        temp_tbl_flat = tbl_flat.copy()
-        temp_tbl_flat.geometry = temp_tbl_flat.geometry.to_crs("EPSG:3395")
-        tbl_flat['area_m2'] = temp_tbl_flat.geometry.area.astype('int64')
-    else:
-        tbl_flat['area_m2'] = tbl_flat.geometry.area.astype('int64')
+    # If area_m2 is missing or has NaN, recalculate
+    if 'area_m2' not in tbl_flat.columns or tbl_flat['area_m2'].isnull().all():
+        if tbl_flat.crs.is_geographic:
+            temp_tbl_flat = tbl_flat.copy()
+            temp_tbl_flat.geometry = temp_tbl_flat.geometry.to_crs("EPSG:3395")
+            tbl_flat['area_m2'] = temp_tbl_flat.geometry.area.astype('int64')
+        else:
+            tbl_flat['area_m2'] = tbl_flat.geometry.area.astype('int64')
 
     tbl_flat.reset_index(inplace=True)
-    tbl_flat = tbl_flat.merge(overlap_counts, on='code', how='left')
+    # Only merge if 'assets_overlap_total' is not already present
+    if 'assets_overlap_total' not in tbl_flat.columns:
+        tbl_flat = tbl_flat.merge(overlap_counts, on='code', how='left')
+
+    # --- Ensure all columns from the reference schema are present ---
+    reference_columns = [
+        'code', 'importance_min', 'importance_max', 'sensitivity_min', 'sensitivity_max',
+        'susceptibility_min', 'susceptibility_max', 'ref_geocodegroup', 'name_gis_geocodegroup',
+        'asset_group_names', 'asset_groups_total', 'area_m2', 'assets_overlap_total', 'geometry'
+    ]
+    for col in reference_columns:
+        if col not in tbl_flat.columns:
+            tbl_flat[col] = None
+
+    tbl_flat = tbl_flat[reference_columns]
 
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
     log_to_gui(log_widget, "tbl_flat processed and saved.")
 
-    # --- Save to GeoParquet with identical schema ---
-    parquet_folder = os.path.join(os.path.dirname(gpkg_file), "geoparquet")
-    os.makedirs(parquet_folder, exist_ok=True)
-    geoparquet_path = os.path.join(parquet_folder, "tbl_flat.parquet")
-    # Ensure geometry column is named 'geometry'
-    if tbl_flat.geometry.name != 'geometry':
-        tbl_flat = tbl_flat.rename_geometry('geometry')
-    # Ensure CRS is set
-    if tbl_flat.crs is None:
-        tbl_flat.set_crs(workingprojection_epsg, inplace=True)
-    tbl_flat.to_parquet(geoparquet_path, index=False)
-    log_to_gui(log_widget, f"tbl_flat also saved to geoparquet: {geoparquet_path}")
+    # --- REMOVE: Old direct export to geoparquet here ---
+    # (No direct export to geoparquet here; handled by export_gpkg_tables_to_geoparquet)
 
 
 # Classify data based on configuration
@@ -557,12 +613,17 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
 
 
 # Process all steps and create final tables
-def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg,chunk_size):
+def process_all(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg, chunk_size):
     log_to_gui(log_widget, "Started processing of analysis and presentation layers.")
-    process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg,chunk_size)
-    process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg) 
+    
+    # Process tbl_stacked
+    process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size)
+    
+    # Process tbl_flat
+    process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg)
     update_progress(94)
 
+    # Classify data
     classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
     update_progress(95)
 
@@ -572,7 +633,11 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
     classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
     update_progress(99)
 
+    # Increment process statistics
     increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
+
+    # Export GeoPackage tables to GeoParquet (moved to the end)
+    export_gpkg_tables_to_geoparquet(gpkg_file, log_widget)
 
     log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
     update_progress(100)
@@ -658,3 +723,52 @@ if __name__ == "__main__":
     log_to_gui(log_widget, f"Chunk size is {chunk_size}.")
 
     root.mainloop()
+
+# --- Library review for data type weaknesses ---
+
+"""
+GeoPandas (gpd):
+    - Strengths: Handles most geometry types (Point, LineString, Polygon, Multi*), supports attribute data, CRS, and IO with many formats.
+    - Weaknesses:
+        * Does not always preserve all field types (e.g., datetime, categorical, boolean) when reading/writing to/from GeoPackage or Parquet.
+        * May convert some integer columns with missing values to float.
+        * May not preserve field order or all metadata.
+        * Some string columns may be truncated if written via Fiona/OGR with default settings.
+
+Fiona:
+    - Strengths: Low-level access to OGR drivers, preserves schema and field types better than GeoPandas alone.
+    - Weaknesses:
+        * Limited support for some advanced pandas/numpy types (e.g., nullable integer, pandas categorical).
+        * May not support all pandas dtypes (e.g., Int64, boolean, datetime with timezone).
+        * Field names may be truncated to 10 characters for some formats (not GeoPackage, but beware for Shapefile).
+        * May not preserve pandas index.
+
+Pyarrow/Parquet (used by GeoPandas for .to_parquet):
+    - Strengths: Supports most pandas dtypes, including nullable integer, string, boolean, datetime.
+    - Weaknesses:
+        * Geometry is stored as WKB or WKT, which is robust, but some tools may not read it as geometry.
+        * Some metadata (e.g., CRS, field descriptions) may not be preserved.
+        * If columns have mixed types (e.g., int and str), may be upcast to object or string.
+        * Some very large integers may be converted to float if not using pandas nullable types.
+
+Shapely:
+    - Strengths: Robust geometry handling.
+    - Weaknesses: Not relevant for attribute types, but geometry collections may not always round-trip perfectly through all IO.
+
+General advice:
+    - For categorical data, use string columns instead of pandas.Categorical.
+    - For nullable integers, use pandas "Int64" dtype, not numpy "int64".
+    - For boolean, use pandas "boolean" dtype, not numpy "bool".
+    - For datetime, use pandas "datetime64[ns]" (timezone-naive).
+    - Always check dtypes after reading/writing, especially if you expect nulls or special types.
+    - When exporting to GeoPackage, field names longer than 63 characters may be truncated.
+    - When exporting to Parquet, field names and types are preserved, but some metadata may be lost.
+
+Summary:
+    - GeoPandas + Fiona + Parquet is robust for most workflows, but always check for:
+        * Loss of nullable integer/boolean/categorical types.
+        * Loss of field order or metadata.
+        * Truncation of long field names.
+        * Conversion of nulls to NaN (float).
+        * Loss of timezone info in datetimes.
+"""
