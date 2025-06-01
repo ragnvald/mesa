@@ -1,288 +1,304 @@
-# Code makes an initial map based on the contents in a geoparquet.
-# The data sets are in a file called flat_parquet. It must be 
-# filtered based on geocode category. The map is then displayed in 
-# a window with controls. One main control is a dropdown list that 
-# allows the user to select a geocode category. The map is then updated.
-# Optionally the user can switch to showing lines instead of polygons.
-# The user can also select a specific asset group to display. 
-# Furthermore the user can choose to add attributes from the asset.
+#!/usr/bin/env python3
+"""
+Maps Overview – Tkinter/GeoPandas/Matplotlib demo
+Displays polygons coloured by sensitivity class, lets the user
+filter by geocode category, and shows a side panel with an area
+table + bar chart.
+
+Only dependency‐free standard widgets are used; ttk.Treeview is
+coaxed into showing per-row colour squares by exposing the hidden
+tree column.
+"""
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-import tkinter as tk
-from tkinter import ttk
-import geopandas as gpd
-import pandas as pd
-import configparser
+
 import os
 import sys
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import configparser
+import tkinter as tk
+from tkinter import ttk
+
+import geopandas as gpd
+import pandas as pd
 import matplotlib.pyplot as plt
-import contextily as ctx  # Add this import for basemap support
 from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import contextily as ctx  # Basemap provider
 
-color_icons = {}       # husker PhotoImage per farge (unngå GC)
+# ----------------------------------------------------------------------
+# Helper: one tiny coloured square (PhotoImage) per hex colour,
+# cached so it survives garbage collection and re-use.
+# ----------------------------------------------------------------------
+color_icons = {}  # Keeps the PhotoImages alive
 
-def get_color_icon(color_hex, size=8):
-    """Returnerer (og cacher) et lite kvadrat-ikon i gitt farge."""
-    if color_hex not in color_icons:
+
+def get_color_icon(color_hex: str, size: int = 20) -> tk.PhotoImage:
+    """Return (cached) solid-colour PhotoImage square."""
+    key = (color_hex, size)
+    if key not in color_icons:
         img = tk.PhotoImage(width=size, height=size)
         img.put(color_hex, to=(0, 0, size, size))
-        color_icons[color_hex] = img
-    return color_icons[color_hex]
+        color_icons[key] = img
+    return color_icons[key]
 
-# Read the configuration file
-def read_config(file_name):
-    config = configparser.ConfigParser()
-    config.read(file_name)
-    return config
 
-# Load geoparquet data
-def load_geoparquet(file_path):
+# ----------------------------------------------------------------------
+# Configuration helpers
+# ----------------------------------------------------------------------
+def read_config(file_name: str) -> configparser.ConfigParser:
+    """Read .ini file and return ConfigParser object."""
+    cfg = configparser.ConfigParser()
+    cfg.read(file_name, encoding="utf-8")
+    return cfg
+
+
+def get_color_mapping(cfg: configparser.ConfigParser) -> dict[str, str]:
+    """Extract hex colours for sensitivity codes A-E from config."""
+    return {sec: cfg[sec]["category_colour"]
+            for sec in cfg.sections() if sec in "ABCDE"}
+
+
+# ----------------------------------------------------------------------
+# I/O
+# ----------------------------------------------------------------------
+def load_geoparquet(path: str) -> gpd.GeoDataFrame:
+    """Wrapper around GeoPandas parquet loader with error handling."""
     try:
-        return gpd.read_parquet(file_path)
-    except Exception as e:
-        print(f"Error loading geoparquet file: {e}")
-        return gpd.GeoDataFrame()
+        return gpd.read_parquet(path)
+    except Exception as exc:
+        print("Error reading geoparquet:", exc, file=sys.stderr)
+        return gpd.GeoDataFrame()  # empty
 
-# Get color mapping from the configuration file
-def get_color_mapping(config):
-    color_mapping = {}
-    for section in config.sections():
-        if section in ['A', 'B', 'C', 'D', 'E']:
-            color_mapping[section] = config[section]['category_colour']
-    return color_mapping
 
-# Update the map using only tbl_flat_data with color codes from config.ini
-def update_map(geocode_category):
+# ----------------------------------------------------------------------
+# Map drawing
+# ----------------------------------------------------------------------
+def update_map(geocode_category: str) -> None:
+    """Redraw the GeoPandas layer filtered on geocode category."""
     try:
-        # Explicitly create a copy of the filtered data
-        filtered_data = tbl_flat_data[tbl_flat_data['name_gis_geocodegroup'] == geocode_category].copy()
+        filtered = tbl_flat_data[
+            tbl_flat_data["name_gis_geocodegroup"] == geocode_category
+        ].copy()
+
         ax.clear()
-        if not filtered_data.empty:
-            color_mapping = get_color_mapping(config)
-            if 'sensitivity_code_max' in filtered_data.columns:
-                filtered_data['color'] = filtered_data['sensitivity_code_max'].map(color_mapping)
-                filtered_data.plot(ax=ax, color=filtered_data['color'], alpha=0.7)  # Add transparency for better visibility
+        if not filtered.empty:
+            colour_map = get_color_mapping(config)
+            if "sensitivity_code_max" in filtered.columns:
+                filtered["__colour"] = filtered["sensitivity_code_max"].map(colour_map)
+                filtered.plot(ax=ax, color=filtered["__colour"], alpha=0.7)
             else:
-                filtered_data.plot(ax=ax, alpha=0.7)
-            
-            # Add OpenStreetMap basemap
-            ctx.add_basemap(ax, crs=filtered_data.crs.to_string(), source=ctx.providers.OpenStreetMap.Mapnik)
-            
-            ax.set_aspect('equal')  # Ensure aspect ratio is equal
+                filtered.plot(ax=ax, alpha=0.7)
+
+            ctx.add_basemap(ax, crs=filtered.crs.to_string(),
+                            source=ctx.providers.OpenStreetMap.Mapnik)
+            ax.set_aspect("equal")
         else:
-            ax.text(0.5, 0.5, 'No data available for the selected category',
-                    horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+            ax.text(0.5, 0.5, "No data for selected category",
+                    ha="center", va="center", transform=ax.transAxes)
         canvas.draw()
-    except Exception as e:
-        print(f"Error updating map: {e}")
+    except Exception as exc:
+        print("Error updating map:", exc, file=sys.stderr)
 
-# Refresh the basemap after panning or zooming
-def refresh_basemap():
+
+# ----------------------------------------------------------------------
+# Basemap refresh after pan/zoom
+# ----------------------------------------------------------------------
+def refresh_basemap() -> None:
     try:
-        ctx.add_basemap(ax, crs=tbl_flat_data.crs.to_string(), source=ctx.providers.OpenStreetMap.Mapnik)
+        ctx.add_basemap(ax, crs=tbl_flat_data.crs.to_string(),
+                        source=ctx.providers.OpenStreetMap.Mapnik)
         canvas.draw()
-    except Exception as e:
-        print(f"Error refreshing basemap: {e}")
+    except Exception as exc:
+        print("Error refreshing basemap:", exc, file=sys.stderr)
 
-# Enable panning and zooming with basemap refresh
-def enable_pan_and_zoom():
-    def on_press(event):
-        if event.button == 1:  # Left mouse button for panning
-            ax.start_pan(event.x, event.y, event.button)  # Initialize panning
+
+# ----------------------------------------------------------------------
+# Enabling mouse interaction (pan + scroll zoom)
+# ----------------------------------------------------------------------
+def enable_pan_and_zoom() -> None:
+    """Connect Matplotlib mouse events to keep basemap in sync."""
+
+    def on_press(event):  # left-button press
+        if event.button == 1:
+            ax.start_pan(event.x, event.y, event.button)
 
     def on_release(event):
-        if event.button == 1:  # Left mouse button for panning
-            ax.end_pan()  # End panning
-            refresh_basemap()  # Refresh basemap after releasing the mouse button
+        if event.button == 1:
+            ax.end_pan()
+            refresh_basemap()
 
     def on_motion(event):
-        if event.button == 1:  # Left mouse button for panning
-            ax.drag_pan(1, None, event.x, event.y)  # Continue panning
+        if event.button == 1:
+            ax.drag_pan(1, None, event.x, event.y)
 
     def on_scroll(event):
-        # Zoom in or out based on the scroll direction
-        base_scale = 1.2
-        scale_factor = base_scale if event.step > 0 else 1 / base_scale
+        scale = 1.2 if event.step > 0 else 1 / 1.2
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        xs, ys = event.xdata, event.ydata
+        ax.set_xlim(xs - (xs - xlim[0]) * scale, xs + (xlim[1] - xs) * scale)
+        ax.set_ylim(ys - (ys - ylim[0]) * scale, ys + (ylim[1] - ys) * scale)
+        refresh_basemap()
 
-        xlim = ax.get_xlim()
-        ylim = ax.get_ylim()
+    fig.canvas.mpl_connect("button_press_event", on_press)
+    fig.canvas.mpl_connect("button_release_event", on_release)
+    fig.canvas.mpl_connect("motion_notify_event", on_motion)
+    fig.canvas.mpl_connect("scroll_event", on_scroll)
 
-        xdata = event.xdata  # Get mouse x position in data coordinates
-        ydata = event.ydata  # Get mouse y position in data coordinates
 
-        # Calculate new limits
-        new_xlim = [
-            xdata - (xdata - xlim[0]) * scale_factor,
-            xdata + (xlim[1] - xdata) * scale_factor,
-        ]
-        new_ylim = [
-            ydata - (ydata - ylim[0]) * scale_factor,
-            ydata + (ylim[1] - ydata) * scale_factor,
-        ]
-
-        ax.set_xlim(new_xlim)
-        ax.set_ylim(new_ylim)
-        refresh_basemap()  # Refresh basemap after zooming
-
-    fig.canvas.mpl_connect('button_press_event', on_press)
-    fig.canvas.mpl_connect('button_release_event', on_release)
-    fig.canvas.mpl_connect('motion_notify_event', on_motion)
-    fig.canvas.mpl_connect('scroll_event', on_scroll)  # Connect scroll event for zooming
-
-# Update the statistics table and graph
-def update_statistics():
+# ----------------------------------------------------------------------
+# Statistics (table + bar chart)
+# ----------------------------------------------------------------------
+def update_statistics() -> None:
+    """Recalculate area per sensitivity class and update UI."""
     try:
-        # Calculate area per sensitivity_code_max category using area_m2
-        if 'sensitivity_code_max' in tbl_flat_data.columns and 'area_m2' in tbl_flat_data.columns:
-            stats_data = tbl_flat_data.copy()
-            stats_summary = stats_data.groupby(['sensitivity_code_max', 'sensitivity_description_max'])['area_m2'].sum().reset_index()
-            stats_summary['area_km2'] = stats_summary['area_m2'] / 1e6  # Convert area to km²
-            stats_summary = stats_summary.sort_values(by='sensitivity_code_max')  # Order alphabetically
+        if {"sensitivity_code_max", "area_m2"} <= set(tbl_flat_data.columns):
+            stats = (tbl_flat_data
+                     .groupby(["sensitivity_code_max",
+                               "sensitivity_description_max"])["area_m2"]
+                     .sum()
+                     .reset_index())
+            stats["area_km2"] = stats["area_m2"] / 1e6
+            stats.sort_values("sensitivity_code_max", inplace=True)
 
-            # Get color mapping once
-            color_mapping = get_color_mapping(config)
+            colour_map = get_color_mapping(config)
 
-            # Update the statistics table
-            for row in stats_table.get_children():
-                stats_table.delete(row)
-            for _, r in stats_summary.iterrows():
-                code  = r['sensitivity_code_max']
-                color = color_mapping.get(code, "#000000")
+            # ------------- Treeview (table) ----------------
+            stats_table.delete(*stats_table.get_children())  # clear table
 
-                item_id = stats_table.insert(
-                    '', 'end',
-                    image=get_color_icon(color),             #  bildet i første kolonne
+            for _, row in stats.iterrows():
+                code = row["sensitivity_code_max"]
+                stats_table.insert(
+                    "", "end",
+                    image=get_color_icon(colour_map.get(code, "#000000"), size=20),
                     values=(
-                        '',                                 # første "tekst-celle" er tom – bildet vises her
                         code,
-                        r['sensitivity_description_max'],
-                        f"{r['area_km2']:.2f}"
+                        row["sensitivity_description_max"],
+                        f"{row['area_km2']:.2f}",
                     )
                 )
-                # Set all text to black first
-                stats_table.item(item_id, tags=(f"row_{item_id}",))
-                stats_table.tag_configure(f"row_{item_id}", foreground="black")
-                # Now color just the square in the first column
-                # This is a Tkinter Treeview limitation: per-cell coloring is not natively supported.
-                # Workaround: set the square character to the correct color and pad with a black square for the rest.
-                # So, set the value for the first column to a colored square, and the rest to black text.
-                # This requires using a custom font or image for true per-cell coloring, but for text, we can only color the whole row.
-                # Therefore, as a workaround, set the square to the correct color, and the rest of the row to black.
-                # This will color the whole row, but the square will be visible in the correct color.
-                # If you want only the square colored, you must use a custom widget or a third-party table library.
-                stats_table.set(item_id, "Color", f"\u25A0")  # Unicode black square
-                stats_table.tag_configure(f"square_{item_id}", foreground=color)
-                # Apply both tags: first for the square, second for the rest of the row
-                stats_table.item(item_id, tags=(f"square_{item_id}", f"row_{item_id}"))
 
-            # Update the bar chart
+            # ------------- Bar chart ------------------------
             ax_stats.clear()
-            bar_colors = stats_summary['sensitivity_code_max'].map(color_mapping)
-            ax_stats.bar(stats_summary['sensitivity_code_max'], stats_summary['area_km2'], color=bar_colors)
+            bars = stats["sensitivity_code_max"]
+            bar_cols = bars.map(colour_map)
+            ax_stats.bar(bars, stats["area_km2"], color=bar_cols)
             ax_stats.set_title("Area by sensitivity code (km²)")
             ax_stats.set_xlabel("Sensitivity code")
             ax_stats.set_ylabel("Area (km²)")
-            ax_stats.tick_params(axis='x', rotation=45)
+            ax_stats.tick_params(axis="x", rotation=45)
             stats_canvas.draw()
-    except Exception as e:
-        print(f"Error updating statistics: {e}")
+    except Exception as exc:
+        print("Error updating statistics:", exc, file=sys.stderr)
 
-# Update the map and statistics when a geocode category is selected
-def update_map_and_statistics(geocode_category):
+
+def update_map_and_statistics(geocode_category: str) -> None:
+    """Helper called from UI – refreshes both panels."""
     update_map(geocode_category)
     update_statistics()
 
-# Geocode category selection handler
-def on_geocode_category_selected(event):
-    update_map_and_statistics(geocode_category_var.get())
 
-# Main function
+# ----------------------------------------------------------------------
+# Main block
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        # Load configuration and tbl_flat geoparquet data only
-        config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../system/config.ini")
-        config = read_config(config_file)
-        tbl_flat_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../output/geoparquet/tbl_flat.parquet")
-        tbl_flat_data = load_geoparquet(tbl_flat_file)
-        if tbl_flat_data.empty:
-            raise ValueError("No data loaded from tbl_flat geoparquet file.")
-        
-        # Sort geocode categories alphabetically
-        geocode_categories = sorted(tbl_flat_data['name_gis_geocodegroup'].unique().tolist())
+        # ---- File locations (adjust to suit your project) -------------
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        config_file = os.path.join(base_dir, "../system/config.ini")
+        parquet_file = os.path.join(base_dir, "../output/geoparquet/tbl_flat.parquet")
 
-        # Create main Tkinter window
+        # ---- Load resources -------------------------------------------
+        config = read_config(config_file)
+        tbl_flat_data = load_geoparquet(parquet_file)
+        if tbl_flat_data.empty:
+            raise RuntimeError("tbl_flat.parquet is empty or missing")
+
+        geocode_categories = sorted(
+            tbl_flat_data["name_gis_geocodegroup"].unique().tolist()
+        )
+
+        # ---- Tk root window -------------------------------------------
         root = tk.Tk()
         root.title("Maps Overview")
         root.geometry("1600x900")
-        
-        # Create a horizontal PanedWindow as the main container
+
+        # ---- Paned layout (controls | map | stats) --------------------
         pw = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
         pw.pack(fill=tk.BOTH, expand=True)
-        
-        # Left pane: Controls (fixed width)
-        control_frame = ttk.Frame(pw, width=200)
-        # Center pane: Map (expandable)
-        map_frame = ttk.Frame(pw)
-        # Right pane: Statistics
-        stats_frame = ttk.Frame(pw, width=300)
-        
-        pw.add(control_frame, weight=0)
-        pw.add(map_frame, weight=1)
-        pw.add(stats_frame, weight=0)
 
-        # Create figure and canvas in the map pane
+        control_frame = ttk.Frame(pw, width=200)
+        map_frame = ttk.Frame(pw)
+        stats_frame = ttk.Frame(pw, width=300)
+
+        pw.add(control_frame, weight=0)
+        pw.add(map_frame,    weight=1)
+        pw.add(stats_frame,  weight=0)
+
+        # ---- Matplotlib figure for map --------------------------------
         fig, ax = plt.subplots(figsize=(16, 9))
         canvas = FigureCanvasTkAgg(fig, master=map_frame)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        
-        # Statistics table
-        stats_table_label = ttk.Label(stats_frame, text="Area by sensitivity code", anchor="center", font=("TkDefaultFont", 10, "bold"))
-        stats_table_label.pack(pady=5)
 
-        # Create a style for the Treeview headings and rows
+        # ---- Statistics: table + bar chart ----------------------------
+        ttk.Label(stats_frame, text="Area by sensitivity code",
+                  anchor="center", font=("TkDefaultFont", 10, "bold")).pack(pady=5)
+
         style = ttk.Style()
-        style.configure("Treeview.Heading", font=("TkDefaultFont", 10, "bold"))  # Set bold font for headings
-        style.configure("Treeview", rowheight=40)  # Increase row height to make squares larger
+        style.configure("Treeview.Heading",
+                        font=("TkDefaultFont", 10, "bold"))
+        style.configure("Treeview", rowheight=28)  # Set to at least icon size + padding
 
-        stats_table = ttk.Treeview(stats_frame, columns=("Color", "Sensitivity code", "Description", "Area (km²)"), show="headings", height=10)
-        stats_table.heading("Color", text="", anchor="center")
-        stats_table.heading("Sensitivity code", text="Sensitivity code", anchor="center")
-        stats_table.heading("Description", text="Description", anchor="center")
-        stats_table.heading("Area (km²)", text="Area (km²)", anchor="center")
-        stats_table.column("Color", anchor="center", width=40)  # Increase the width of the color square column
-        stats_table.column("Sensitivity code", anchor="center", width=150)
-        stats_table.column("Description", anchor="center", width=200)
-        stats_table.column("Area (km²)", anchor="center", width=100)
+        # ### CHANGED – tree column (#0) is visible and used for icon ###
+        stats_table = ttk.Treeview(
+            stats_frame,
+            columns=("Sensitivity code", "Description", "Area (km²)"),
+            show="tree headings",                     # ← show tree + headings
+            height=10
+        )
+        stats_table.column("#0", width=40, anchor="center")  # icon column
+        stats_table.heading("#0", text="")                   # no heading
+
+        stats_table.heading("Sensitivity code", anchor="center",
+                            text="Sensitivity code")
+        stats_table.heading("Description",      anchor="center",
+                            text="Description")
+        stats_table.heading("Area (km²)",       anchor="center",
+                            text="Area (km²)")
+
+        stats_table.column("Sensitivity code", width=140, anchor="center")
+        stats_table.column("Description",      width=180, anchor="center")
+        stats_table.column("Area (km²)",       width=100, anchor="center")
         stats_table.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Statistics bar chart
+        # Bar chart under the table
         fig_stats = Figure(figsize=(4, 3), dpi=100)
         ax_stats = fig_stats.add_subplot(111)
         stats_canvas = FigureCanvasTkAgg(fig_stats, master=stats_frame)
-        stats_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # =======================
-        # Left pane controls
-        # =======================
-        geocode_category_var = tk.StringVar()
-        geocode_category_label = ttk.Label(control_frame, text="Geocode category:")
-        geocode_category_label.pack(anchor="w", pady=2, padx=5)
-        geocode_category_dropdown = ttk.Combobox(control_frame, textvariable=geocode_category_var)
-        geocode_category_dropdown['values'] = geocode_categories  # Use sorted categories
-        geocode_category_dropdown.pack(anchor="w", pady=2, padx=5)
-        geocode_category_dropdown.bind("<<ComboboxSelected>>", on_geocode_category_selected)
-        
-        # Set default geocode category if available
+        stats_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True,
+                                          padx=5, pady=5)
+
+        # ---- Controls (left pane) ------------------------------------
+        geocode_var = tk.StringVar()
+        ttk.Label(control_frame, text="Geocode category:").pack(
+            anchor="w", pady=2, padx=5)
+
+        cb = ttk.Combobox(control_frame, textvariable=geocode_var,
+                          values=geocode_categories, state="readonly")
+        cb.pack(anchor="w", pady=2, padx=5)
+
+        def _on_select(event=None):
+            update_map_and_statistics(geocode_var.get())
+
+        cb.bind("<<ComboboxSelected>>", _on_select)
+
+        # ---- Initial draw --------------------------------------------
         if geocode_categories:
-            default_geocode_category = geocode_categories[0]
-            geocode_category_var.set(default_geocode_category)
-            update_map_and_statistics(default_geocode_category)
+            geocode_var.set(geocode_categories[0])
+            update_map_and_statistics(geocode_categories[0])
 
-        # Enable panning and zooming with basemap refresh
         enable_pan_and_zoom()
-
         root.mainloop()
-    except Exception as e:
-        print(f"An error occurred: {e}")
+
+    except Exception as err:
+        print("Fatal error:", err, file=sys.stderr)
