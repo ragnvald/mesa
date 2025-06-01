@@ -850,6 +850,11 @@ def save_to_geoparquet(gdf, file_path, log_widget):
     if gdf.crs is None:
         gdf.set_crs(epsg=workingprojection_epsg, inplace=True)
     try:
+        # --- FIX: Ensure geometry column is named 'geometry' before saving ---
+        if gdf.geometry.name != 'geometry':
+            gdf = gdf.set_geometry(gdf.geometry.name)
+            gdf = gdf.rename_geometry('geometry')
+        # Always save, even if empty, to ensure the file exists
         gdf.to_parquet(file_path, index=False)
         log_to_gui(log_widget, f"Saved to geoparquet: {file_path}")
     except Exception as e:
@@ -876,6 +881,11 @@ def close_application():
 
 def save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_working_directory, log_widget):
     try:
+        # Ensure both files are always created
+        if asset_objects_gdf.empty:
+            asset_objects_gdf = gpd.GeoDataFrame(columns=['id', 'asset_group_name', 'attributes', 'process', 'ref_asset_group', 'geometry'], geometry='geometry')
+        if asset_groups_gdf.empty:
+            asset_groups_gdf = gpd.GeoDataFrame(columns=['id', 'name_original', 'name_gis_assetgroup', 'title_fromuser', 'date_import', 'geom', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description'], geometry='geom')
         save_to_geoparquet(asset_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_asset_object.parquet"), log_widget)
         save_to_geoparquet(asset_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_asset_group.parquet"), log_widget)
     except Exception as e:
@@ -884,6 +894,11 @@ def save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_work
 
 def save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, original_working_directory, log_widget):
     try:
+        # Ensure both files are always created
+        if geocode_groups_gdf.empty:
+            geocode_groups_gdf = gpd.GeoDataFrame(columns=['id', 'name', 'name_gis_geocodegroup', 'title_user', 'description', 'geom'], geometry='geom')
+        if geocode_objects_gdf.empty:
+            geocode_objects_gdf = gpd.GeoDataFrame(columns=['code', 'ref_geocodegroup', 'name_gis_geocodegroup', 'geom'], geometry='geom')
         save_to_geoparquet(geocode_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_geocode_group.parquet"), log_widget)
         save_to_geoparquet(geocode_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_geocode_object.parquet"), log_widget)
     except Exception as e:
@@ -893,11 +908,17 @@ def save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, origina
 def save_lines_to_geoparquet(gpkg_file, original_working_directory, log_widget):
     try:
         # Export the original lines (tbl_lines_original)
-        original_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines_original")
+        try:
+            original_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines_original")
+        except Exception:
+            original_lines_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'attributes', 'length_m', 'geometry'], geometry='geometry')
         save_to_geoparquet(original_lines_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_lines_original.parquet"), log_widget)
         
         # Export the processed lines (tbl_lines)
-        processed_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines")
+        try:
+            processed_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines")
+        except Exception:
+            processed_lines_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'segment_length', 'segment_width', 'description', 'length_m', 'geometry'], geometry='geometry')
         save_to_geoparquet(processed_lines_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_lines.parquet"), log_widget)
     except Exception as e:
         log_to_gui(log_widget, f"Error saving lines to geoparquet: {e}")
