@@ -230,7 +230,7 @@ def process_and_buffer_lines(gpkg_file, log_widget):
         if buffered_lines_data:  # Check if there's any data to save
             all_buffered_lines_df = gpd.GeoDataFrame(buffered_lines_data, geometry='geometry', crs=crs)
 
-            all_buffered_lines_df.to_file(gpkg_file, layer="tbl_lines_buffered", driver="GPKG", if_exists='replace')
+            all_buffered_lines_df.to_file(gpkg_file, layer="tbl_lines_buffered", driver="GPKG")
             
             log_to_gui(log_widget, "All buffered lines added to the database.")
 
@@ -415,7 +415,7 @@ def create_segments_from_buffered_lines(gpkg_file, log_widget):
         all_segments_gdf.crs = lines_df.crs
 
         # Export the accumulated segments to 'tbl_segments' in one batch
-        all_segments_gdf.to_file(gpkg_file, layer="tbl_segments", driver="GPKG", if_exists="replace")
+        all_segments_gdf.to_file(gpkg_file, layer="tbl_segments", driver="GPKG")
 
         log_to_gui(log_widget, "All segments have been accumulated and saved to 'tbl_segments'.")
     else:
@@ -448,6 +448,16 @@ def intersection_with_segments(asset_data, segment_data, log_widget):
         log_to_gui(log_widget, f"Error in intersection: {str(e)}")
 
         return pd.DataFrame()
+
+
+def save_to_geoparquet(gdf, file_path, log_widget):
+    try:
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        gdf.to_parquet(file_path, index=False)
+        log_to_gui(log_widget, f"Saved to geoparquet: {file_path}")
+    except Exception as e:
+        log_to_gui(log_widget, f"Error saving to geoparquet: {e}")
 
 
 def build_stacked_data(gpkg_file, log_widget):
@@ -528,11 +538,15 @@ def build_stacked_data(gpkg_file, log_widget):
     intersected_data.crs = workingprojection_epsg
 
     # Write the intersected data to a new layer in the GeoPackage
-    intersected_data.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG', if_exists='replace')
+    intersected_data.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG')
 
     log_to_gui(log_widget, "Data processing completed.")
     
     update_progress(70)  # Final progress
+
+    # Save to geoparquet
+    geoparquet_path = os.path.join(parquet_folder, "geoparquet/tbl_segment_stacked.parquet")
+    save_to_geoparquet(intersected_data, geoparquet_path, log_widget)
 
 
 # Create tbl_segment_flat by reading out values from tbl_segment_stacked
@@ -594,6 +608,10 @@ def build_flat_data(gpkg_file, log_widget):
     
     log_to_gui(log_widget, "Completed flat segments...")
 
+    # Save to geoparquet
+    geoparquet_path = os.path.join(parquet_folder, "geoparquet/tbl_segment_flat.parquet")
+    save_to_geoparquet(tbl_segment_flat, geoparquet_path, log_widget)
+
 
 def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path):
     # Load classification configuration
@@ -625,7 +643,6 @@ def classify_data(log_widget, gpkg_file, process_layer, column_name, config_path
     gdf.to_file(gpkg_file, layer=process_layer, driver='GPKG')
 
     log_to_gui(log_widget, f"Data saved to {process_layer} with new fields {new_code_col} and {new_desc_col}")
-
 
 
 def build_flat_and_stacked(gpkg_file, log_widget):
@@ -724,6 +741,7 @@ input_folder_geocode    = os.path.join(original_working_directory, config['DEFAU
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
+parquet_folder          = os.path.join(original_working_directory, config['DEFAULT']['parquet_folder'])
 
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
