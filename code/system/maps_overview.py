@@ -293,6 +293,8 @@ if __name__ == "__main__":
 
         def close_application():
             root.destroy()
+            # Consider removing system exit when this part is integrated in the full system.
+            sys.exit(0)
 
         # ---- Exit button (lower left) --------------------------------
         exit_btn_frame = ttk.Frame(control_frame)
