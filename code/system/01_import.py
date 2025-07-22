@@ -37,6 +37,7 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from shapely.geometry import shape
 import fiona
+import concurrent.futures
 
 # Read the configuration file
 def read_config(file_name):
@@ -52,9 +53,9 @@ def update_progress(new_value):
     root.after(0, task)
 
 # Logging function to write to the GUI log
-def log_to_gui(log_widget, message):
-    timestamp           = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    formatted_message   = f"{timestamp} - {message}"
+def log_to_gui(log_widget, message, level="INFO"):
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted_message = f"{timestamp} [{level}] - {message}"
     log_widget.insert(tk.END, formatted_message + "\n")
     log_widget.see(tk.END)
     log_destination_file = os.path.join(original_working_directory, "log.txt")
@@ -204,20 +205,25 @@ def ensure_unique_codes(geocode_objects, log_widget):
 
 # Function to process each file while reading through the filepath.
 def process_line_file(filepath, line_objects, line_id_counter, log_widget):
+    # Always specify layer for GeoPackage to avoid layer warning
     if filepath.endswith('.gpkg'):
-        ds = ogr.Open(filepath)
-        for i in range(ds.GetLayerCount()):
-            layer       = ds.GetLayerByIndex(i)
-            layer_name  = layer.GetName()
-            data        = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
+        layers = fiona.listlayers(filepath)
+        for layer_name in layers:
+            data = read_and_reproject(filepath, layer=layer_name, log_widget=log_widget)
             log_to_gui(log_widget, f"Importing geopackage layer {layer_name}.")
+            # Ensure CRS is set before any further processing to avoid CRS warning
+            if data.crs is None:
+                log_to_gui(log_widget, f"No CRS found for {filepath} layer {layer_name}. Setting CRS to EPSG:{workingprojection_epsg}.")
+                data.set_crs(epsg=workingprojection_epsg, inplace=True)
             line_id_counter = process_line_layer(
                 data, line_objects, line_id_counter, layer_name, log_widget)
-        ds = None
     elif filepath.endswith('.shp'):
         data = read_and_reproject(filepath, log_widget=log_widget)
         layer_name = os.path.splitext(os.path.basename(filepath))[0]
         log_to_gui(log_widget, f"Importing shapefile layer: {layer_name}")
+        if data.crs is None:
+            log_to_gui(log_widget, f"No CRS found for {filepath}. Setting CRS to EPSG:{workingprojection_epsg}.")
+            data.set_crs(epsg=workingprojection_epsg, inplace=True)
         line_id_counter = process_line_layer(
             data, line_objects, line_id_counter, layer_name, log_widget)
     else:
@@ -246,23 +252,20 @@ def sort_files_by_feature_count(file_paths):
     return [fp[0] for fp in sorted_files]
 
 
+# Fix: Remove parallelization for geocode import, restore sequential processing
 def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     geocode_groups = []
     geocode_objects = []
     group_id_counter = 1
     object_id_counter = 1
     file_patterns = ['*.shp', '*.gpkg']
-    
-    log_to_gui(log_widget, "Working with imports...")
-    update_progress(5)  # Initial progress after starting
+    log_to_gui(log_widget, "Working with imports...", "INFO")
+    update_progress(5)
 
-    # Gather all file paths
     all_file_paths = [fp for pattern in file_patterns for fp in glob.glob(os.path.join(input_folder_geocode, '**', pattern), recursive=True)]
-    
-    log_to_gui(log_widget, "Sorting the geocode layers by increasing size")
-    update_progress(10)  # Initial progress after starting
+    log_to_gui(log_widget, "Sorting the geocode layers by increasing size", "INFO")
+    update_progress(10)
 
-    # Sort files by the number of features
     sorted_file_paths = sort_files_by_feature_count(all_file_paths)
     total_files = len(sorted_file_paths)
     processed_files = 0
@@ -270,31 +273,22 @@ def import_spatial_data_geocode(input_folder_geocode, log_widget, progress_var):
     if total_files == 0:
         progress_increment = 70
     else:
-        progress_increment = 70 / total_files  # Distribute 70% of progress bar over file processing
+        progress_increment = 70 / total_files
 
+    # Sequential processing (not parallel)
     for filepath in sorted_file_paths:
-        try:
-            layer_name = os.path.splitext(os.path.basename(filepath))[0]
-            log_to_gui(log_widget, f"Processing file: {filepath}")
-            progress_var.set(10 + processed_files * progress_increment)  # Update progress before processing each file
+        group_id_counter, object_id_counter = process_geocode_file(
+            filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget
+        )
+        processed_files += 1
+        update_progress(10 + processed_files * progress_increment)
 
-            group_id_counter, object_id_counter = process_geocode_file(
-                filepath, geocode_groups, geocode_objects, group_id_counter, object_id_counter, log_widget)
-
-            processed_files += 1
-            progress_var.set(10 + processed_files * progress_increment)  # Update progress after processing each file
-            update_progress(10 + processed_files * progress_increment)
-
-        except Exception as e:
-            log_to_gui(log_widget, f"Error processing file {filepath}: {e}")
-
-    ensure_unique_codes(geocode_objects, log_widget)  # Ensure unique codes after all files are processed
+    update_progress(90)
+    log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}", "INFO")
+    ensure_unique_codes(geocode_objects, log_widget)
 
     geocode_groups_gdf = gpd.GeoDataFrame(geocode_groups, geometry='geom' if geocode_groups else None)
     geocode_objects_gdf = gpd.GeoDataFrame(geocode_objects, geometry='geom' if geocode_objects else None)
-    
-    update_progress(90)
-    log_to_gui(log_widget, f"Total geocodes added: {object_id_counter - 1}")
     return geocode_groups_gdf, geocode_objects_gdf
 
 
@@ -846,15 +840,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
 
 def save_to_geoparquet(gdf, file_path, log_widget):
-    # Ensure CRS is defined to prevent pyogrio warnings
-    if gdf.crs is None:
-        gdf.set_crs(epsg=workingprojection_epsg, inplace=True)
     try:
-        # --- FIX: Ensure geometry column is named 'geometry' before saving ---
-        if gdf.geometry.name != 'geometry':
-            gdf = gdf.set_geometry(gdf.geometry.name)
-            gdf = gdf.rename_geometry('geometry')
-        # Always save, even if empty, to ensure the file exists
         gdf.to_parquet(file_path, index=False)
         log_to_gui(log_widget, f"Saved to geoparquet: {file_path}")
     except Exception as e:
@@ -881,11 +867,6 @@ def close_application():
 
 def save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_working_directory, log_widget):
     try:
-        # Ensure both files are always created
-        if asset_objects_gdf.empty:
-            asset_objects_gdf = gpd.GeoDataFrame(columns=['id', 'asset_group_name', 'attributes', 'process', 'ref_asset_group', 'geometry'], geometry='geometry')
-        if asset_groups_gdf.empty:
-            asset_groups_gdf = gpd.GeoDataFrame(columns=['id', 'name_original', 'name_gis_assetgroup', 'title_fromuser', 'date_import', 'geom', 'total_asset_objects', 'importance', 'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description'], geometry='geom')
         save_to_geoparquet(asset_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_asset_object.parquet"), log_widget)
         save_to_geoparquet(asset_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_asset_group.parquet"), log_widget)
     except Exception as e:
@@ -894,11 +875,6 @@ def save_assets_to_geoparquet(asset_objects_gdf, asset_groups_gdf, original_work
 
 def save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, original_working_directory, log_widget):
     try:
-        # Ensure both files are always created
-        if geocode_groups_gdf.empty:
-            geocode_groups_gdf = gpd.GeoDataFrame(columns=['id', 'name', 'name_gis_geocodegroup', 'title_user', 'description', 'geom'], geometry='geom')
-        if geocode_objects_gdf.empty:
-            geocode_objects_gdf = gpd.GeoDataFrame(columns=['code', 'ref_geocodegroup', 'name_gis_geocodegroup', 'geom'], geometry='geom')
         save_to_geoparquet(geocode_groups_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_geocode_group.parquet"), log_widget)
         save_to_geoparquet(geocode_objects_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_geocode_object.parquet"), log_widget)
     except Exception as e:
@@ -908,17 +884,11 @@ def save_geocodes_to_geoparquet(geocode_groups_gdf, geocode_objects_gdf, origina
 def save_lines_to_geoparquet(gpkg_file, original_working_directory, log_widget):
     try:
         # Export the original lines (tbl_lines_original)
-        try:
-            original_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines_original")
-        except Exception:
-            original_lines_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'attributes', 'length_m', 'geometry'], geometry='geometry')
+        original_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines_original")
         save_to_geoparquet(original_lines_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_lines_original.parquet"), log_widget)
         
         # Export the processed lines (tbl_lines)
-        try:
-            processed_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines")
-        except Exception:
-            processed_lines_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'segment_length', 'segment_width', 'description', 'length_m', 'geometry'], geometry='geometry')
+        processed_lines_gdf = gpd.read_file(gpkg_file, layer="tbl_lines")
         save_to_geoparquet(processed_lines_gdf, os.path.join(original_working_directory, "output/geoparquet/tbl_lines.parquet"), log_widget)
     except Exception as e:
         log_to_gui(log_widget, f"Error saving lines to geoparquet: {e}")
@@ -1020,4 +990,15 @@ import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
 exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
 exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
 
+root.mainloop()
+# Add button for importing lines data
+import_lines_btn = ttk.Button(button_frame, text="Import lines", bootstyle=PRIMARY, command=lambda: threading.Thread(
+    target=run_import_lines, args=(input_folder_lines, gpkg_file, log_widget, progress_var), daemon=True).start())
+import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
+
+# Exit button for this sub-program
+exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
+exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
+
+root.mainloop()
 root.mainloop()
