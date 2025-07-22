@@ -149,11 +149,12 @@ def enable_pan_and_zoom() -> None:
 # ----------------------------------------------------------------------
 # Statistics (table + bar chart)
 # ----------------------------------------------------------------------
-def update_statistics() -> None:
+def update_statistics(filtered_data=None) -> None:
     """Recalculate area per sensitivity class and update UI."""
     try:
-        if {"sensitivity_code_max", "area_m2"} <= set(tbl_flat_data.columns):
-            stats = (tbl_flat_data
+        data = filtered_data if filtered_data is not None else tbl_flat_data
+        if {"sensitivity_code_max", "area_m2"} <= set(data.columns):
+            stats = (data
                      .groupby(["sensitivity_code_max",
                                "sensitivity_description_max"])["area_m2"]
                      .sum()
@@ -195,7 +196,10 @@ def update_statistics() -> None:
 def update_map_and_statistics(geocode_category: str) -> None:
     """Helper called from UI – refreshes both panels."""
     update_map(geocode_category)
-    update_statistics()
+    # Filter tbl_flat_data for the selected geocode category before updating statistics
+    global tbl_flat_data_filtered
+    tbl_flat_data_filtered = tbl_flat_data[tbl_flat_data["name_gis_geocodegroup"] == geocode_category].copy()
+    update_statistics(tbl_flat_data_filtered)
 
 
 # ----------------------------------------------------------------------
@@ -293,10 +297,11 @@ if __name__ == "__main__":
         # ---- Initial draw --------------------------------------------
         if geocode_categories:
             geocode_var.set(geocode_categories[0])
+            # Use filtered data for initial draw
+            tbl_flat_data_filtered = tbl_flat_data[tbl_flat_data["name_gis_geocodegroup"] == geocode_categories[0]].copy()
             update_map_and_statistics(geocode_categories[0])
 
         enable_pan_and_zoom()
         root.mainloop()
-
     except Exception as err:
         print("Fatal error:", err, file=sys.stderr)
