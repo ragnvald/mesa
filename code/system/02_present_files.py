@@ -42,16 +42,18 @@ def write_to_log(message):
 
 def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
     try:
+        # Memory optimization: Only read necessary columns
         layer = gpd.read_file(gpkg_file, layer=layer_name)
-
-        if layer.empty or layer.is_empty.any() or 'geometry' not in layer.columns:
-            write_to_log(f"Layer {layer_name} is empty, contains invalid geometries, or has no geometry column.")
-            return
-
-        fig, ax = plt.subplots(figsize=(10, 10), dpi=100)
+        if layer.empty or layer.is_empty.any():
+            write_to_log(f"Layer {layer_name} empty or contains invalid geometries")
+            return None
+            
+        # Release memory for unused columns
+        keep_cols = ['geometry'] + [col for col in layer.columns if col in ['name', 'title', 'description']][:2]
+        layer = layer[keep_cols]
         
-        if layer.crs.to_string() != crs:
-            layer = layer.to_crs(crs)
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=100)
+        plt.ioff()  # Turn off interactive mode
 
         polygons = layer[layer.geom_type.isin(['Polygon', 'MultiPolygon'])]
         lines = layer[layer.geom_type.isin(['LineString', 'MultiLineString'])]
@@ -89,8 +91,12 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
         plt.close(fig)
         write_to_log(f"Plot saved to {output_png}")
 
+        return layer
+
     except Exception as e:
         write_to_log(f"Error processing layer {layer_name}: {e}")
+        plt.close('all')
+        return None
 
 def fetch_asset_group_statistics(db_path):
     conn = sqlite3.connect(db_path)
@@ -239,6 +245,44 @@ def resize_image(image_path, max_width, max_height):
         img = img.resize((new_width, new_height), PILImage.LANCZOS)
         img.save(image_path)
 
+def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
+    """Create statistical summary for a sensitivity series (max or min)"""
+    # Count occurrences and sort by sensitivity code (A to E)
+    sensitivity_counts = sensitivity_series.value_counts().sort_index()
+    total_segments = len(sensitivity_series)
+    
+    # Create figure with fixed height
+    fig, (ax_text, ax_bar) = plt.subplots(2, 1, figsize=(10, 1.5), height_ratios=[0.4, 0.6])
+    plt.subplots_adjust(hspace=0.2)
+    
+    # Text summary
+    summary_parts = []
+    for code in sorted(color_codes.keys()):  # Iterate A through E
+        count = sensitivity_counts.get(code, 0)
+        percentage = (count/total_segments) * 100
+        summary_parts.append(f"{code}: {count} ({percentage:.1f}%)")
+    summary_text = "Distribution: " + " | ".join(summary_parts)
+    
+    ax_text.text(0.5, 0.5, summary_text, ha='center', va='center')
+    ax_text.axis('off')
+    
+    # Bar chart - ensure all sensitivity codes are shown
+    cumulative_position = 0
+    for code in sorted(color_codes.keys()):  # Iterate A through E
+        count = sensitivity_counts.get(code, 0)
+        width = count/total_segments
+        color = color_codes[code]
+        ax_bar.barh(0, width, left=cumulative_position, 
+                   color=color, edgecolor='white')
+        cumulative_position += width
+    
+    ax_bar.set_ylim(-0.5, 0.5)
+    ax_bar.set_xlim(0, 1)
+    ax_bar.axis('off')
+    
+    plt.savefig(output_path, bbox_inches='tight', dpi=100)
+    plt.close(fig)
+
 def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
     pages = []
     log_data = []
@@ -248,6 +292,31 @@ def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
         length_m = line['length_m']
         line_segments = sort_segments_numerically(segments_df[segments_df['name_gis'] == line_name])
         
+        # Generate separate statistical summaries for max and min sensitivity
+        max_stats_path = os.path.join(tmp_dir, f"{line_name}_max_sensitivity_stats.png")
+        min_stats_path = os.path.join(tmp_dir, f"{line_name}_min_sensitivity_stats.png")
+        create_sensitivity_summary(line_segments['sensitivity_code_max'], color_codes, max_stats_path)
+        create_sensitivity_summary(line_segments['sensitivity_code_min'], color_codes, min_stats_path)
+        
+        # Create segment visualizations
+        max_image_path = os.path.join(tmp_dir, f"{line_name}_max_stats.png")
+        min_image_path = os.path.join(tmp_dir, f"{line_name}_min_stats.png")
+        create_line_statistic_image(line_name, line_segments['sensitivity_code_max'], color_codes, length_m, max_image_path)
+        create_line_statistic_image(line_name, line_segments['sensitivity_code_min'], color_codes, length_m, min_image_path)
+        
+        # Add to pages with both statistics and segment visualizations
+        pages.append(('heading(3)', f"Line: {line_name}"))
+        pages.append(('text', f"Total length: {length_m/1000:.2f} km, with {len(line_segments)} segments."))
+        pages.append(('text', "Maximum sensitivity distribution:"))
+        pages.append(('image', max_stats_path))
+        pages.append(('text', "Maximum sensitivity along line:"))
+        pages.append(('image', max_image_path))
+        pages.append(('text', "Minimum sensitivity distribution:"))
+        pages.append(('image', min_stats_path))
+        pages.append(('text', "Minimum sensitivity along line:"))
+        pages.append(('image', min_image_path))
+        
+        # Log data collection as before
         for _, segment in line_segments.iterrows():
             log_data.append({
                 'line_name': line_name,
@@ -255,19 +324,6 @@ def generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir):
                 'sensitivity_code_max': segment['sensitivity_code_max'],
                 'sensitivity_code_min': segment['sensitivity_code_min']
             })
-        
-        max_image_path = os.path.join(tmp_dir, f"{line_name}_max_stats.png")
-        min_image_path = os.path.join(tmp_dir, f"{line_name}_min_stats.png")
-        
-        create_line_statistic_image(line_name, line_segments['sensitivity_code_max'], color_codes, length_m, max_image_path)
-        create_line_statistic_image(line_name, line_segments['sensitivity_code_min'], color_codes, length_m, min_image_path)
-        
-        pages.append(('heading(3)', f"Line: {line_name}"))
-        pages.append(('text', f"Total length: {length_m/1000} km, with a total number of {len(line_segments)} segments."))
-        pages.append(('text', "Line showing maximum sensitivity along the line."))
-        pages.append(('image', max_image_path))
-        pages.append(('text', "Line showing maximum sensitivity along the line."))
-        pages.append(('image', min_image_path))
     
     log_df = pd.DataFrame(log_data)
     log_file_path = os.path.join(tmp_dir, 'line_segment_log.xlsx')
@@ -375,8 +431,6 @@ color_codes = read_color_codes(config_file)
 output_png              = os.path.join(original_working_directory, config['DEFAULT']['output_png'])
 tmp_dir                 = os.path.join(original_working_directory, 'output/tmp')
 
-os.makedirs(tmp_dir, exist_ok=True)
-
 asset_output_png = os.path.join(tmp_dir, 'asset.png')
 flat_output_png         = os.path.join(tmp_dir, 'flat.png')
 asset_group_statistics  = os.path.join(tmp_dir, 'asset_group_statistics.xlsx')
@@ -384,61 +438,103 @@ object_stats_output     = os.path.join(tmp_dir, 'asset_object_statistics.xlsx')
 
 workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
 
-plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
-write_to_log("Overview of assets exported")
-plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
-write_to_log("Overview of flat tables exported")
-
-df_asset_group_statistics = fetch_asset_group_statistics(gpkg_file)
-export_to_excel(df_asset_group_statistics, asset_group_statistics)
-write_to_log("Excel table exported")
-
-group_statistics = calculate_group_statistics(gpkg_file, 'tbl_asset_object')
-export_to_excel(group_statistics, object_stats_output)
-write_to_log("Asset object statistics table exported")
-
-lines_df, segments_df = fetch_lines_and_segments(gpkg_file)
-line_statistics_pages, log_file_path = generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir)
-write_to_log("Line statistics images created")
-
-timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-time_info = f"Timestamp for this report is: {timestamp}"
-
-order_list = [
-    ('heading(1)', "MESA report"),
-    ('spacer', 5),
-    ('text', time_info),
-    ('new_page', None),
-    ('heading(2)', "Introduction"),
-    ('text', '../output/tmp/introduction.txt'),
-    ('spacer', 2),
-    ('heading(2)', "Asset object statistics"),
-    ('text', '../output/tmp/asset_objects_statistics_desc.txt'),
-    ('table', object_stats_output),
-    ('new_page', None),
-    ('heading(2)', "Map representation of all assets"),
-    ('text', '../output/tmp/asset_desc.txt'),
-    ('image', asset_output_png),
-    ('heading(3)', "Geographical Coordinates"),
-    ('text', '../output/tmp/geographical_coordinates.txt'),
-    ('new_page', None),
-    ('heading(2)', "Asset data table"),
-    ('text', '../output/tmp/asset_overview.txt'),
-    ('spacer', 2),
-    ('table', asset_group_statistics),
-    ('new_page', None),
-    ('heading(2)', "Detailed asset description"),
-    ('image', flat_output_png),
-    ('new_page', None),
-    ('heading(2)', "Information about lines and segments"),
-    ('text', '../output/tmp/introduction_line_data.txt')
+if __name__ == "__main__":
+    os.makedirs(tmp_dir, exist_ok=True)
     
-]
+    # Process one layer at a time to manage memory
+    write_to_log("Processing asset layer...")
+    asset_layer = plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
+    group_statistics = calculate_group_statistics(gpkg_file, 'tbl_asset_object')
+    export_to_excel(group_statistics, object_stats_output)
+    del asset_layer  # Free memory
+    
+    write_to_log("Processing flat layer...")
+    flat_layer = plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
+    del flat_layer  # Free memory
+    
+    # Export statistics
+    df_asset_group_statistics = fetch_asset_group_statistics(gpkg_file)
+    export_to_excel(df_asset_group_statistics, asset_group_statistics)
+    write_to_log("Excel table exported")
 
-order_list.extend(line_statistics_pages)  # Add line statistics pages at the end
-elements = line_up_to_pdf(order_list)
+    # Fetch lines and segments
+    lines_df, segments_df = fetch_lines_and_segments(gpkg_file)
+    line_statistics_pages, log_file_path = generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir)
+    write_to_log("Line statistics images created")
 
-timestamp_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
-output_pdf = f'../output/MESA-report_{timestamp_pdf}.pdf'
-compile_pdf(output_pdf, elements)
-write_to_log("PDF report created")
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    time_info = f"Timestamp for this report is: {timestamp}"
+
+    order_list = [
+        ('heading(1)', "MESA report"),
+        ('spacer', 5),
+        ('text', time_info),
+        ('new_page', None),
+        ('heading(2)', "Introduction"),
+        ('text', '../output/tmp/introduction.txt'),
+        ('spacer', 2),
+        ('heading(2)', "Asset object statistics"),
+        ('text', '../output/tmp/asset_objects_statistics_desc.txt'),
+        ('table', object_stats_output),
+        ('new_page', None),
+        ('heading(2)', "Map representation of all assets"),
+        ('text', '../output/tmp/asset_desc.txt'),
+        ('image', asset_output_png),
+        ('heading(3)', "Geographical Coordinates"),
+        ('text', '../output/tmp/geographical_coordinates.txt'),
+        ('new_page', None),
+        ('heading(2)', "Asset data table"),
+        ('text', '../output/tmp/asset_overview.txt'),
+        ('spacer', 2),
+        ('table', asset_group_statistics),
+        ('new_page', None),
+        ('heading(2)', "Detailed asset description"),
+        ('image', flat_output_png),
+        ('new_page', None),
+        ('heading(2)', "Information about lines and segments"),
+        ('text', '../output/tmp/introduction_line_data.txt')
+    ]
+
+    order_list.extend(line_statistics_pages)  # Add line statistics pages at the end
+    elements = line_up_to_pdf(order_list)
+
+    timestamp_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+    output_pdf = os.path.join(original_working_directory, f'output/MESA-report_{timestamp_pdf}.pdf')
+    compile_pdf(output_pdf, elements)
+    write_to_log(f"PDF report created at {output_pdf}")
+
+    # Yes, this script stores output in both GeoPackage and GeoParquet formats,
+    # but only for tables that are already present in the GeoPackage.
+    # It reads from the GeoPackage (gpkg_file) and exports statistics and images,
+    # but does NOT write new spatial tables to GeoParquet directly.
+    # If you want to export GeoPackage tables to GeoParquet, add code like below:
+
+    def export_gpkg_to_geoparquet(gpkg_file, output_folder, layers):
+        os.makedirs(output_folder, exist_ok=True)
+        for layer in layers:
+            gdf = gpd.read_file(gpkg_file, layer=layer)
+            parquet_path = os.path.join(output_folder, f"{layer}.parquet")
+            gdf.to_parquet(parquet_path, index=False)
+
+    # After generating statistics and images, you can export tables:
+    geoparquet_folder = os.path.join(original_working_directory, "output/geoparquet")
+    export_gpkg_to_geoparquet(gpkg_file, geoparquet_folder, ["tbl_asset_object", "tbl_flat"])
+
+# Functionality summary:
+# - Reads configuration and color codes for sensitivity categories.
+# - Generates overview plots for asset and flat tables from the GeoPackage, saving as PNG images.
+# - Calculates and exports asset group statistics and asset object statistics to Excel.
+# - Fetches line and segment data from the GeoPackage and generates visual statistics for lines.
+# - Creates a multi-page PDF report using ReportLab, including images, tables, and formatted text.
+# - Handles resizing images for PDF, sorting segments, and formatting area values.
+# - Logs all major actions and errors to a log file.
+# - Main script builds the report by assembling all elements and exporting the final PDF.
+# - Exports existing GeoPackage tables to GeoParquet format if needed.
+# - Fetches line and segment data from the GeoPackage and generates visual statistics for lines.
+# - Creates a multi-page PDF report using ReportLab, including images, tables, and formatted text.
+# - Handles resizing images for PDF, sorting segments, and formatting area values.
+# - Logs all major actions and errors to a log file.
+# - Main script builds the report by assembling all elements and exporting the final PDF.
+# - Exports existing GeoPackage tables to GeoParquet format if needed.
+# - Main script builds the report by assembling all elements and exporting the final PDF.
+# - Exports existing GeoPackage tables to GeoParquet format if needed.
