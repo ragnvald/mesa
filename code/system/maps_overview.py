@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import contextily as ctx  # Basemap provider
+from ttkbootstrap.constants import WARNING
 
 # ----------------------------------------------------------------------
 # Helper: one tiny coloured square (PhotoImage) per hex colour,
@@ -149,12 +150,11 @@ def enable_pan_and_zoom() -> None:
 # ----------------------------------------------------------------------
 # Statistics (table + bar chart)
 # ----------------------------------------------------------------------
-def update_statistics(filtered_data=None) -> None:
+def update_statistics() -> None:
     """Recalculate area per sensitivity class and update UI."""
     try:
-        data = filtered_data if filtered_data is not None else tbl_flat_data
-        if {"sensitivity_code_max", "area_m2"} <= set(data.columns):
-            stats = (data
+        if {"sensitivity_code_max", "area_m2"} <= set(tbl_flat_data.columns):
+            stats = (tbl_flat_data
                      .groupby(["sensitivity_code_max",
                                "sensitivity_description_max"])["area_m2"]
                      .sum()
@@ -196,10 +196,7 @@ def update_statistics(filtered_data=None) -> None:
 def update_map_and_statistics(geocode_category: str) -> None:
     """Helper called from UI – refreshes both panels."""
     update_map(geocode_category)
-    # Filter tbl_flat_data for the selected geocode category before updating statistics
-    global tbl_flat_data_filtered
-    tbl_flat_data_filtered = tbl_flat_data[tbl_flat_data["name_gis_geocodegroup"] == geocode_category].copy()
-    update_statistics(tbl_flat_data_filtered)
+    update_statistics()
 
 
 # ----------------------------------------------------------------------
@@ -294,14 +291,22 @@ if __name__ == "__main__":
 
         cb.bind("<<ComboboxSelected>>", _on_select)
 
+        def close_application():
+            root.destroy()
+
+        # ---- Exit button (lower left) --------------------------------
+        exit_btn_frame = ttk.Frame(control_frame)
+        exit_btn_frame.pack(side="bottom", fill="x", expand=False)
+        close_btn = ttk.Button(exit_btn_frame, text="Exit", command=close_application, bootstyle=WARNING)
+        close_btn.pack(side="left", anchor="sw", padx=10, pady=10)
+
         # ---- Initial draw --------------------------------------------
         if geocode_categories:
             geocode_var.set(geocode_categories[0])
-            # Use filtered data for initial draw
-            tbl_flat_data_filtered = tbl_flat_data[tbl_flat_data["name_gis_geocodegroup"] == geocode_categories[0]].copy()
             update_map_and_statistics(geocode_categories[0])
 
         enable_pan_and_zoom()
         root.mainloop()
+
     except Exception as err:
         print("Fatal error:", err, file=sys.stderr)
