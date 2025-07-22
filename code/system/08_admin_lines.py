@@ -741,7 +741,10 @@ input_folder_geocode    = os.path.join(original_working_directory, config['DEFAU
 
 ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
 workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
-parquet_folder          = os.path.join(original_working_directory, config['DEFAULT']['parquet_folder'])
+parquet_folder          = os.path.join(
+    original_working_directory,
+    config['DEFAULT'].get('parquet_folder', 'output/geoparquet')
+)
 
 # Create the user interface using ttkbootstrap
 root = ttk.Window(themename=ttk_bootstrap_theme)
