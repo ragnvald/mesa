@@ -150,11 +150,16 @@ def enable_pan_and_zoom() -> None:
 # ----------------------------------------------------------------------
 # Statistics (table + bar chart)
 # ----------------------------------------------------------------------
-def update_statistics() -> None:
-    """Recalculate area per sensitivity class and update UI."""
+def update_statistics(geocode_category: str) -> None:
+    """Recalculate area per sensitivity class for the selected geocode category and update UI."""
     try:
-        if {"sensitivity_code_max", "area_m2"} <= set(tbl_flat_data.columns):
-            stats = (tbl_flat_data
+        # Filter for the selected geocode category
+        filtered = tbl_flat_data[
+            tbl_flat_data["name_gis_geocodegroup"] == geocode_category
+        ].copy()
+
+        if {"sensitivity_code_max", "area_m2"} <= set(filtered.columns):
+            stats = (filtered
                      .groupby(["sensitivity_code_max",
                                "sensitivity_description_max"])["area_m2"]
                      .sum()
@@ -196,7 +201,7 @@ def update_statistics() -> None:
 def update_map_and_statistics(geocode_category: str) -> None:
     """Helper called from UI – refreshes both panels."""
     update_map(geocode_category)
-    update_statistics()
+    update_statistics(geocode_category)
 
 
 # ----------------------------------------------------------------------
