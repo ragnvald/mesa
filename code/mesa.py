@@ -309,7 +309,7 @@ def edit_processing_setup():
         run_subprocess(["python", python_script], [exe_file], gpkg_file)
     
 
-def process_data():
+def process_data(gpkg_file):
 
     """Main function to import assets by running the appropriate script or executable."""
     python_script, exe_file,  = get_script_paths("06_process", original_working_directory)
@@ -323,7 +323,7 @@ def process_data():
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
-        run_subprocess(["python", python_script], [exe_file], gpkg_file)
+        run_subprocess(["python", python_script, arguments], [exe_file, arguments], gpkg_file)
 
 
 def make_atlas():
@@ -358,6 +358,19 @@ def admin_lines():
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
         run_subprocess(["python", python_script], [exe_file], gpkg_file)
+
+
+def open_maps_overview():
+    # Use the working directory logic to find the correct path in the system-folder
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = original_working_directory
+    python_script = os.path.join(base_path, "system", "maps_overview.py")
+    try:
+        subprocess.Popen(["python", python_script])
+    except Exception as e:
+        log_to_logfile(f"Failed to open maps_overview.py: {e}")
 
 
 def edit_assets():
@@ -759,20 +772,24 @@ if __name__ == "__main__":
     main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
     # Add buttons to left panel with spacing between buttons
-    import_assets_btn = ttk.Button(left_panel, text="Import", command=lambda: import_assets(gpkg_file), width=button_width, bootstyle=PRIMARY)
+    import_assets_btn       = ttk.Button(left_panel, text="Import", command=lambda: import_assets(gpkg_file), width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
 
-    setup_processing_btn = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
+    setup_processing_btn    = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
     setup_processing_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
 
-    process_data_btn = ttk.Button(left_panel, text="Process", command=lambda: process_data(), width=button_width)
+    process_data_btn        = ttk.Button(left_panel, text="Process", command=lambda: process_data(gpkg_file), width=button_width, bootstyle=PRIMARY)
     process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
 
-    admin_atlas_btn = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
+    admin_atlas_btn         = ttk.Button(left_panel, text="Atlas", command=make_atlas, width=button_width)
     admin_atlas_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
 
-    admin_lines_btn = ttk.Button(left_panel, text="Segments", command=admin_lines, width=button_width)
+    admin_lines_btn         = ttk.Button(left_panel, text="Segments", command=admin_lines, width=button_width)
     admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
+
+    # --- New button for Maps Overview ---
+    maps_overview_btn       = ttk.Button(left_panel, text="Maps overview", command=open_maps_overview, width=button_width, bootstyle=PRIMARY)
+    maps_overview_btn.grid(row=6, column=0, padx=button_padx, pady=button_pady)
 
     # Separator
     separator = ttk.Separator(main_frame, orient='vertical')
