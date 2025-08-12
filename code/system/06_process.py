@@ -702,6 +702,7 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
         
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
+        increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
         raise
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
@@ -760,12 +761,12 @@ if __name__ == "__main__":
     progress_label.pack(side=tk.LEFT, padx=5)
 
     info_label_text = ("This is where all assets and geocode objects (grids) are processed "
-                    "using the intersect function. For each such intersection a separate "
-                    "geocode object (grid cell) is established. At the same time we also "
-                    "calculate the sensitivity based on input asset importance and "
-                    "susceptibility. Our data model provides a rich set of attributes "
-                    "which we believe can be useful in your further analysis of the "
-                    "area sensitivities.")
+                       "using the intersect function. For each such intersection a separate "
+                       "geocode object (grid cell) is established. At the same time we also "
+                       "calculate the sensitivity based on input asset importance and "
+                       "susceptibility. Our data model provides a rich set of attributes "
+                       "which we believe can be useful in your further analysis of the "
+                       "area sensitivities.")
     info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
     info_label.pack(padx=10, pady=10)
 
@@ -845,6 +846,7 @@ if __name__ == "__main__":
         
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
+        increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
         raise
     progress_bar.pack(side=tk.LEFT)
 
@@ -852,12 +854,12 @@ if __name__ == "__main__":
     progress_label.pack(side=tk.LEFT, padx=5)
 
     info_label_text = ("This is where all assets and geocode objects (grids) are processed "
-                    "using the intersect function. For each such intersection a separate "
-                    "geocode object (grid cell) is established. At the same time we also "
-                    "calculate the sensitivity based on input asset importance and "
-                    "susceptibility. Our data model provides a rich set of attributes "
-                    "which we believe can be useful in your further analysis of the "
-                    "area sensitivities.")
+                       "using the intersect function. For each such intersection a separate "
+                       "geocode object (grid cell) is established. At the same time we also "
+                       "calculate the sensitivity based on input asset importance and "
+                       "susceptibility. Our data model provides a rich set of attributes "
+                       "which we believe can be useful in your further analysis of the "
+                       "area sensitivities.")
     info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
     info_label.pack(padx=10, pady=10)
 
@@ -937,10 +939,8 @@ if __name__ == "__main__":
         
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
-        raise
         increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
-
-        log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
+        raise
         update_progress(100)
         
     except Exception as e:
