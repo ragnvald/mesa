@@ -545,7 +545,7 @@ def build_stacked_data(gpkg_file, log_widget):
     update_progress(70)  # Final progress
 
     # Save to geoparquet
-    geoparquet_path = os.path.join(parquet_folder, "geoparquet/tbl_segment_stacked.parquet")
+    geoparquet_path = os.path.join(parquet_folder, "tbl_segment_stacked.parquet")
     save_to_geoparquet(intersected_data, geoparquet_path, log_widget)
 
 
@@ -609,7 +609,7 @@ def build_flat_data(gpkg_file, log_widget):
     log_to_gui(log_widget, "Completed flat segments...")
 
     # Save to geoparquet
-    geoparquet_path = os.path.join(parquet_folder, "geoparquet/tbl_segment_flat.parquet")
+    geoparquet_path = os.path.join(parquet_folder, "tbl_segment_flat.parquet")
     save_to_geoparquet(tbl_segment_flat, geoparquet_path, log_widget)
 
 
