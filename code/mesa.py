@@ -81,50 +81,41 @@ def create_link_icon(parent, url, row, col, padx, pady):
 # This function updates the stats in the labelframe. Clear labels first,
 # then write the updates.
 def update_stats(gpkg_file):
-    
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
-    # This part checks if the file exists. If it does not exist just print info about next step
-    # and abort. Without this oune the geopackage file is "touched" and will exist as an invalid
-    # geopackage file. This will effectively block imports to the file.
     if not os.path.exists(gpkg_file):
-        status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
-        status_label.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-
-        message_label = ttk.Label(info_labelframe, text="No data imported.\nStart with importing data.", justify='left')
-        message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
-        
+        status_label = ttk.Label(info_labelframe, text='\u26AB', bootstyle='danger')
+        status_label.grid(row=1, column=0, padx=5, pady=5)
+        message_label = ttk.Label(info_labelframe,
+                                  text="No data imported.\nStart with importing data.",
+                                  wraplength=380, justify="left")
+        message_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
-
-        return  # Exit the function if the file does not exist
-
-
-    my_status = get_status(gpkg_file)
-
-    if not my_status.empty and {'Status', 'Message' ,'Link'}.issubset(my_status.columns):
-        for index, row in my_status.iterrows():
-            status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='success' if row['Status'] == "+" else 'warning' if row['Status'] == "/" else 'danger')
-            status_label.grid(row=index, column=0, sticky="nsew", padx=5, pady=5)
-
-            message_label = ttk.Label(info_labelframe, text=row['Message'], justify='left', wraplength=380)
-            message_label.grid(row=index, column=1, sticky="nsew", padx=5, pady=5)
-
-            create_link_icon(info_labelframe, row['Link'], index, 2, 5, 5)
-
-        root.update_idletasks()
-
     else:
+        my_status = get_status(gpkg_file)
+        if not my_status.empty and {'Status', 'Message', 'Link'}.issubset(my_status.columns):
+            for idx, row in my_status.iterrows():
+                symbol = row['Status']
+                boot = 'success' if symbol == "+" else 'warning' if symbol == "/" else 'danger'
+                lbl_status = ttk.Label(info_labelframe, text='\u26AB', bootstyle=boot)
+                lbl_status.grid(row=idx, column=0, padx=5, pady=5)
+                lbl_msg = ttk.Label(info_labelframe, text=row['Message'], wraplength=380, justify="left")
+                lbl_msg.grid(row=idx, column=1, padx=5, pady=5, sticky="w")
+                create_link_icon(info_labelframe, row['Link'], idx, 2, 5, 5)
+        else:
+            status_label = ttk.Label(info_labelframe, text='\u26AB', bootstyle='danger')
+            status_label.grid(row=1, column=0, padx=5, pady=5)
+            message_label = ttk.Label(info_labelframe,
+                                      text="To initiate the system please import assets.\n"
+                                           "Press the Import button.",
+                                      wraplength=380, justify="left")
+            message_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
 
-        status_label = ttk.Label(info_labelframe, text='\u26AB', justify='left', bootstyle='danger')
-        status_label.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-
-        initial_message = "To initiate the system please import \nassets.Start doing this by pressing the \nImport-button. Make sure you \nhave asset and geocode files\nstored in the respective \nfolders."
-
-        message_label = ttk.Label(info_labelframe, text=initial_message, justify='left')
-        message_label.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
-
-        create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
+    # Always refresh the UI so the new lights actually appear
+    root.update_idletasks()
+    root.update()
 
 
 def get_status(gpkg_file):
