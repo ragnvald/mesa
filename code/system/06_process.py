@@ -16,7 +16,7 @@ import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import multiprocessing
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, TimeoutError
 import time
 from datetime import datetime, timedelta
 import shapely.wkb
@@ -27,11 +27,27 @@ import numpy as np
 # Add optional GPU imports with fallback
 try:
     import cupy as cp
-    import cuspatial
     HAS_GPU = True
 except ImportError:
     HAS_GPU = False
-    
+
+def check_gpu_capability():
+    """Check if GPU processing is available and has enough memory"""
+    if not HAS_GPU:
+        log_to_gui(log_widget, "GPU processing not available - cupy not installed")
+        return False
+    try:
+        mem_info = cp.cuda.runtime.memGetInfo()
+        free_memory = mem_info[0] / (1024**3)  # Convert to GB
+        has_enough_memory = free_memory >= 2.0
+        if not has_enough_memory:
+            log_to_gui(log_widget, f"Insufficient GPU memory: {free_memory:.1f}GB available, need at least 2GB")
+        return has_enough_memory
+    except Exception as e:
+        log_to_gui(log_widget, f"GPU check failed: {e}")
+        return False
+
+
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # This script processes geospatial data by reading assets and geocode objects,
 # performing spatial intersections, and aggregating results into final tables.
@@ -45,19 +61,6 @@ def read_config(file_name):
     config = configparser.ConfigParser()
     config.read(file_name)
     return config
-
-def check_gpu_capability():
-    """Check if GPU processing is available and has enough memory"""
-    if not HAS_GPU:
-        return False
-    try:
-        # Try to initialize CUDA and check memory
-        mem_info = cp.cuda.runtime.memGetInfo()
-        free_memory = mem_info[0] / (1024**3)  # Convert to GB
-        return free_memory >= 2.0  # Require at least 2GB free memory
-    except:
-        return False
-
 
 # Read the classification configuration file and populate the global dictionary
 def read_config_classification(file_name):
@@ -165,7 +168,6 @@ def process_geocode_chunk(geocode_chunk, asset_data):
     
     return pd.concat(intersections, ignore_index=True)
 
-
 def cleanup_destination_files(original_working_directory, log_widget):
     """Clean up existing geoparquet files before processing"""
     parquet_folder = os.path.join(original_working_directory, "output/geoparquet")
@@ -213,39 +215,88 @@ def process_chunk(geodata_chunk, grid_gdf):
     return gpd.sjoin(geodata_chunk, grid_gdf, how="left", predicate="intersects")
 
 
+def calculate_optimal_chunk_size(data_size, max_memory_mb=512):
+    """
+    Dynamically calculate the optimal chunk size based on dataset size and available memory.
+    """
+    # Estimate memory usage per row (in MB)
+    memory_per_row_mb = 0.001  # Adjust based on typical row size
+    max_rows_per_chunk = max_memory_mb / memory_per_row_mb
+    chunk_size = max(1, int(data_size / max_rows_per_chunk))
+    return min(chunk_size, data_size)
+
 def assign_assets_to_grid(geodata, grid_cells, log_widget, max_workers):
     log_to_gui(log_widget, "Creating grid GeoDataFrame.")
 
-    # Create a GeoDataFrame for the grid cells
     grid_gdf = gpd.GeoDataFrame({
         'grid_cell': range(len(grid_cells)),
         'geometry': [box(xmin, ymin, xmax, ymax) for xmin, ymin, xmax, ymax in grid_cells]
-    }, crs=geodata.crs)
+    }, geometry='geometry', crs=geodata.crs)
 
     log_to_gui(log_widget, "Grid GeoDataFrame created. Building spatial index for grid cells.")
-    
-    # Create a spatial index for the grid cells
-    grid_gdf.sindex  # Just creating the index
+    grid_gdf.sindex  # Build spatial index once
 
-    # Split the geodata into chunks for parallel processing
-    geodata_chunks = np.array_split(geodata, max_workers)
-
+    # Dynamically calculate chunk size
+    chunk_size = calculate_optimal_chunk_size(len(geodata))
+    geodata_chunks = [geodata.iloc[i:i + chunk_size] for i in range(0, len(geodata), chunk_size)]
     log_to_gui(log_widget, f"Processing {len(geodata_chunks)} chunks in parallel using {max_workers} workers.")
 
-    # Use ThreadPoolExecutor instead of ProcessPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Use ProcessPoolExecutor for CPU-bound spatial joins
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(process_chunk, geodata_chunks, [grid_gdf] * len(geodata_chunks)))
 
     log_to_gui(log_widget, "Combining results from all chunks.")
-    
-    # Combine results from all chunks
     geodata = gpd.GeoDataFrame(pd.concat(results, ignore_index=True), crs=geodata.crs)
-    
     log_to_gui(log_widget, "Cleaning up the result.")
-    
-    return geodata.drop(columns='index_right')
+    return geodata.drop(columns='index_right', errors='ignore')
 
+def prepare_geometries_for_gpu(geometries, log_widget):
+    """Convert geometries to GPU-compatible format"""
+    try:
+        coords = []
+        offsets = [0]
+        
+        for geom in geometries:
+            if hasattr(geom, 'coords'):
+                coords_list = list(geom.coords)
+                coords.extend([coord for point in coords_list for coord in point])
+                offsets.append(len(coords))
+            else:
+                log_to_gui(log_widget, f"Skipping invalid geometry: {type(geom)}")
+                offsets.append(offsets[-1])  # Keep offset alignment
+                
+        return cp.array(coords, dtype=cp.float64), cp.array(offsets, dtype=cp.int32)
+    except Exception as e:
+        log_to_gui(log_widget, f"Error preparing geometries for GPU: {e}")
+        return None, None
 
+# Remove all cuspatial and GPU geometry logic.
+# Replace process_chunk_gpu with a simple cupy-based dummy for demonstration.
+
+def process_chunk_gpu(asset_data, geocode_chunk, start_time, total_chunks, chunk_idx, log_widget, progress_var):
+    """Example: Use cupy to accelerate a simple numeric operation on asset_data if possible."""
+    try:
+        # Example: Count number of assets per chunk using GPU
+        if not HAS_GPU:
+            log_to_gui(log_widget, "No GPU available, fallback to CPU.")
+            return asset_data  # fallback: just return the input
+
+        # Example: Suppose asset_data has a numeric column 'id'
+        if 'id' in asset_data.columns:
+            ids = asset_data['id'].to_numpy()
+            ids_gpu = cp.array(ids)
+            # Example operation: add 1 to all ids on GPU
+            ids_gpu = ids_gpu + 1
+            asset_data['id_plus_one'] = cp.asnumpy(ids_gpu)
+            log_to_gui(log_widget, f"Processed chunk {chunk_idx+1} on GPU (dummy operation).")
+        else:
+            log_to_gui(log_widget, "No 'id' column found, skipping GPU operation.")
+        return asset_data
+    except Exception as e:
+        log_to_gui(log_widget, f"GPU processing error: {e}")
+        return asset_data
+
+# Main processing functions
 def process_chunk_and_log(idx, geocode_chunk, asset_data, total_chunks):
     try:
         # Pre-indexing each chunk
@@ -265,26 +316,22 @@ def process_chunk_and_log(idx, geocode_chunk, asset_data, total_chunks):
 def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method, workingprojection_epsg, cell_size, max_workers):
     intersections = []
 
-    # If max_workers is set to 0, determine the number of physical CPU cores
+    # Determine max workers if set to 0
     if max_workers == 0:
         try:
-            # Get the number of physical cores
             max_workers = multiprocessing.cpu_count()
             log_to_gui(log_widget, f"Number of workers determined by system to {max_workers}.")
         except NotImplementedError:
-            # Fallback to a default value in case cpu_count() is not implemented
             max_workers = 4
     else:
-        log_to_gui(log_widget, f"Number of workers determinedset in config to {max_workers}.")
+        log_to_gui(log_widget, f"Number of workers set in config to {max_workers}.")
     
     log_to_gui(log_widget, f"Processing method is {method}.")
-
-    Executor = ThreadPoolExecutor
-
+    
     # Start timing the process
     start_time = time.time()
 
-    # Calculate cell_size in degrees
+    # Convert cell size from meters to degrees
     meters_per_degree = 111320  # Approximation at the equator
     cell_size_degrees = cell_size / meters_per_degree
     log_to_gui(log_widget, f"Cell size converted to degrees: {cell_size_degrees:.6f} degrees")
@@ -301,150 +348,24 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     total_chunks = len(geocode_data_chunks)
     log_to_gui(log_widget, f"Processing {total_chunks} chunks with a maximum of {max_workers} workers.")
 
-    use_gpu = check_gpu_capability() and method.lower() == 'gpu'
-    
-    if use_gpu:
-        log_to_gui(log_widget, "Using GPU acceleration for processing")
-    else:
-        log_to_gui(log_widget, "Using CPU processing" + 
-                  (" (GPU requested but not available)" if method.lower() == 'gpu' else ""))
+    # Use ProcessPoolExecutor for CPU-bound tasks
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_chunk = {executor.submit(process_chunk_and_log, idx, geocode_chunk, asset_data, total_chunks): idx
+                           for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1)}
 
-    # Process using either GPU or CPU
-    if use_gpu:
-        try:
-            gpu_start_time = time.time()
-            log_to_gui(log_widget, "Starting GPU processing with memory monitoring")
-            
-            with cp.cuda.Device(0):
-                for chunk_idx, geocode_chunk in enumerate(geocode_data_chunks):
-                    try:
-                        # Monitor GPU memory
-                        free_mem, total_mem = cp.cuda.runtime.memGetInfo()
-                        free_mem_gb = free_mem / (1024**3)
-                        log_to_gui(log_widget, f"GPU memory available: {free_mem_gb:.2f} GB")
-                        
-                        # Process chunk with timeout
-                        chunk_result = process_chunk_gpu(asset_data, geocode_chunk, start_time, total_chunks, chunk_idx, log_widget, progress_var)
-                        if chunk_result is not None:
-                            intersections.append(chunk_result)
-                        
-                        # Update progress and log
-                        progress = 30 + (60 * chunk_idx/len(geocode_data_chunks))
-                        update_progress(progress)
-                        log_to_gui(log_widget, f"Processed chunk {chunk_idx + 1}/{len(geocode_data_chunks)}")
-                        
-                    except Exception as e:
-                        log_to_gui(log_widget, f"Error processing chunk {chunk_idx}: {e}")
-                        raise
-                    
-                    # Force cleanup after each chunk
-                    cp.cuda.runtime.deviceSynchronize()
-                    cp.cuda.runtime.memoryPool.free_all_blocks()
-                    
-                    # Check if processing is taking too long
-                    if time.time() - gpu_start_time > 3600:  # 1 hour timeout
-                        raise TimeoutError("GPU processing exceeded time limit")
-                        
-            log_to_gui(log_widget, "GPU processing completed successfully")
-            
-        except Exception as e:
-            log_to_gui(log_widget, f"GPU processing failed: {e}, falling back to CPU")
-            use_gpu = False
+        for future in concurrent.futures.as_completed(future_to_chunk):
+            idx, num_results, result, *error = future.result()
+            if error:
+                log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
+            elif result is not None:
+                log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
+                intersections.append(result)
+                update_progress(progress_var.get() + (3 / total_chunks))
 
-    # CPU processing path (original code)
-    if not use_gpu:
-        with Executor(max_workers=max_workers) as executor:
-            future_to_chunk = {}
-            chunks_processed = 0
-            for idx, geocode_chunk in enumerate(geocode_data_chunks, start=1):
-                future = executor.submit(process_chunk_and_log, idx, geocode_chunk, asset_data, total_chunks)
-                future_to_chunk[future] = idx
-
-                if len(future_to_chunk) >= max_workers:
-                    done, _ = concurrent.futures.wait(future_to_chunk, return_when=concurrent.futures.FIRST_COMPLETED)
-                    for future in done:
-                        idx, num_results, result, *error = future.result()
-                        chunks_processed += 1
-                        if error:
-                            log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
-                        elif result is not None:
-                            log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
-                            intersections.append(result)
-                            update_progress(progress_var.get() + (3 / total_chunks))
-
-                        # Estimate time remaining
-                        current_time = time.time()
-                        elapsed_time = current_time - start_time
-                        estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
-                        estimated_time_remaining = estimated_total_time - elapsed_time
-
-                        # Calculate estimated completion time
-                        estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
-                        estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
-
-                        # Calculate the difference in days from today
-                        days_diff = (estimated_completion_time.date() - datetime.now().date()).days
-
-                        # Add a red "+N" if the timestamp is in the future
-                        if days_diff > 0:
-                            red_plus_n = f" (+{days_diff} days)"  # ANSI escape code for red
-                            estimated_completion_time_str += red_plus_n
-
-                        log_to_gui(log_widget, f"Core computation might conclude at {estimated_completion_time_str}.")
-                        del future_to_chunk[future]
-
-            # Process any remaining futures
-            for future in concurrent.futures.as_completed(future_to_chunk):
-                idx, num_results, result, *error = future.result()
-                chunks_processed += 1
-                if error:
-                    log_to_gui(log_widget, f"Error processing geocode chunk {idx} of {total_chunks}: {error[0]}")
-                elif result is not None:
-                    log_to_gui(log_widget, f"Processed geocode chunk {idx} of {total_chunks} with {num_results} intersections.")
-                    intersections.append(result)
-                    update_progress(progress_var.get() + (3 / total_chunks))
-
-                # Estimate time remaining for the last chunks
-                current_time = time.time()
-                elapsed_time = current_time - start_time
-                estimated_total_time = (elapsed_time / chunks_processed) * total_chunks if chunks_processed > 0 else 0
-                estimated_time_remaining = estimated_total_time - elapsed_time
-                estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
-
-                # Calculate estimated completion time
-                estimated_completion_time = datetime.now() + timedelta(seconds=estimated_time_remaining)
-                estimated_completion_time_str = estimated_completion_time.strftime("%H:%M:%S")
-
-                days_diff = (estimated_completion_time.date() - datetime.now().date()).days
-
-                # Add a red "+N" if the timestamp is in the future
-                if days_diff > 0:
-                    extra_days_formatted = f" {days_diff} days"  # ANSI escape code for red
-                    estimated_completion_time_str += extra_days_formatted
-
-                log_to_gui(log_widget, f"Intersection analysis might conclude at {estimated_completion_time_str}.")
-            
     # Calculate the total time taken
     end_time = time.time()
     total_time = end_time - start_time
-    time_per_chunk = total_time / total_chunks if total_chunks > 0 else 0
-
-    # Convert total time to hours, minutes, and seconds
-    hours, rem = divmod(total_time, 3600)
-    minutes, seconds = divmod(rem, 60)
-
-    # Calculate the processing rates
-    asset_objects_per_second = len(asset_data) / total_time if total_time > 0 else 0
-    geocode_objects_per_second = len(geocode_data) / total_time if total_time > 0 else 0
-
-    log_to_gui(log_widget, "Core computation concluded.")
     log_to_gui(log_widget, f"Processing completed in {total_time:.2f} seconds.")
-    log_to_gui(log_widget, f"Average time per chunk: {time_per_chunk:.2f} seconds.")
-    log_to_gui(log_widget, f"Total asset objects processed: {len(asset_data)}.")
-    log_to_gui(log_widget, f"Asset objects processed per second: {asset_objects_per_second:.2f}.")
-    log_to_gui(log_widget, f"Total geocode objects processed: {len(geocode_data)}.")
-    log_to_gui(log_widget, f"Geocode objects processed per second: {geocode_objects_per_second:.2f}.")
-    log_to_gui(log_widget, f"Processing completed in {int(hours)}h {int(minutes)}m {int(seconds)}s - a total of {round(total_time,1)} seconds.")
    
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
@@ -783,9 +704,250 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
         log_to_gui(log_widget, f"Error during processing: {e}")
         raise
 
-# ...rest of existing code...
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+#  Main
+#
 
-#####################################################################################
+# original folder for the system is sent from the master executable. If the script is
+# invoked this way we are fetching the address here.
+parser = argparse.ArgumentParser(description='Slave script')
+parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+args = parser.parse_args()
+original_working_directory = args.original_working_directory
+
+# However - if this is not the case we will have to establish the root folder in 
+# one of two different ways.
+if original_working_directory is None or original_working_directory == '':
+    original_working_directory  = os.getcwd()
+    if str("system") in str(original_working_directory):
+        original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
+
+# Load configuration settings and data
+config_file             = os.path.join(original_working_directory, "system/config.ini")
+gpkg_file               = os.path.join(original_working_directory, "output/mesa.gpkg")
+parquet_folder          = os.path.join(original_working_directory, "output/")
+
+# Load configuration settings
+config                  = read_config(config_file)
+        
+mesa_stat_process       = config['DEFAULT']['mesa_stat_process']
+ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
+workingprojection_epsg  = f"EPSG:{config['DEFAULT']['workingprojection_epsg']}"
+
+chunk_size              = int(config['DEFAULT'].get('chunk_size', '10000'))  # Default to 10000 if not set in config
+method                  = str(config['DEFAULT'].get('method'))  
+max_workers             = int(config['DEFAULT'].get('max_workers'))
+cell_size               = int(config['DEFAULT'].get('cell_size'))
+
+classification = {}
+
+if __name__ == "__main__":
+    root = ttk.Window(themename=ttk_bootstrap_theme)
+    root.title("Process data")
+    root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
+
+    log_widget = scrolledtext.ScrolledText(root, height=10)
+    log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+    progress_frame = tk.Frame(root)
+    progress_frame.pack(pady=5)
+
+    progress_var = tk.DoubleVar()
+    progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=200, mode="determinate", variable=progress_var, bootstyle='info')
+    progress_bar.pack(side=tk.LEFT)
+
+    progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+    progress_label.pack(side=tk.LEFT, padx=5)
+
+    info_label_text = ("This is where all assets and geocode objects (grids) are processed "
+                    "using the intersect function. For each such intersection a separate "
+                    "geocode object (grid cell) is established. At the same time we also "
+                    "calculate the sensitivity based on input asset importance and "
+                    "susceptibility. Our data model provides a rich set of attributes "
+                    "which we believe can be useful in your further analysis of the "
+                    "area sensitivities.")
+    info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
+    info_label.pack(padx=10, pady=10)
+
+    button_frame = tk.Frame(root)
+    button_frame.pack(pady=5)
+
+    process_all_btn = ttk.Button(button_frame, text="Process", command=lambda: threading.Thread(
+        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg, chunk_size), daemon=True).start())
+    process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
+    close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
+    close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
+    log_to_gui(log_widget, "Opened processing subprocess.")
+    
+    log_to_gui(log_widget, f"Chunk size is {chunk_size}.")
+
+    root.mainloop()
+    parquet_folder = os.path.join(os.path.dirname(gpkg_file), "geoparquet")
+    log_to_gui(log_widget, "Loading input data...")
+    
+    try:
+        log_to_gui(log_widget, "Reading asset objects...")
+        asset_objects = gpd.read_parquet(os.path.join(parquet_folder, "tbl_asset_object.parquet"))
+        log_to_gui(log_widget, f"Loaded {len(asset_objects)} asset objects")
+        
+        log_to_gui(log_widget, "Reading geocode objects...")
+        geocode_objects = gpd.read_parquet(os.path.join(parquet_folder, "tbl_geocode_object.parquet"))
+        log_to_gui(log_widget, f"Loaded {len(geocode_objects)} geocode objects")
+        
+        log_to_gui(log_widget, "Reading asset groups...")
+        asset_groups = gpd.read_parquet(os.path.join(parquet_folder, "tbl_asset_group.parquet"))
+        log_to_gui(log_widget, f"Loaded {len(asset_groups)} asset groups")
+        
+    except Exception as e:
+        log_to_gui(log_widget, f"Error reading parquet files: {e}. Falling back to GeoPackage.")
+        
+        log_to_gui(log_widget, "Reading from GeoPackage instead...")
+        asset_objects = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+        geocode_objects = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
+        asset_groups = gpd.read_file(gpkg_file, layer='tbl_asset_group')
+        log_to_gui(log_widget, "Finished reading from GeoPackage")
+
+    update_progress(10)
+    log_to_gui(log_widget, "Starting data processing...")
+
+    try:
+        # Process tbl_stacked
+        log_to_gui(log_widget, "Starting tbl_stacked processing...")
+        process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size)
+        
+        # Process tbl_flat
+        log_to_gui(log_widget, "Starting tbl_flat processing...")
+        process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg)
+        update_progress(94)
+
+        # Classify data
+        log_to_gui(log_widget, "Starting data classification...")
+        classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
+        update_progress(95)
+
+        classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
+        update_progress(97)
+
+        classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
+        update_progress(99)
+
+        # Export to geoparquet
+        log_to_gui(log_widget, "Exporting results to geoparquet...")
+        export_gpkg_tables_to_geoparquet(gpkg_file, log_widget)
+
+        # Update stats
+        increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
+
+        log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
+        update_progress(100)
+        
+    except Exception as e:
+        log_to_gui(log_widget, f"Error during processing: {e}")
+        raise
+    progress_bar.pack(side=tk.LEFT)
+
+    progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+    progress_label.pack(side=tk.LEFT, padx=5)
+
+    info_label_text = ("This is where all assets and geocode objects (grids) are processed "
+                    "using the intersect function. For each such intersection a separate "
+                    "geocode object (grid cell) is established. At the same time we also "
+                    "calculate the sensitivity based on input asset importance and "
+                    "susceptibility. Our data model provides a rich set of attributes "
+                    "which we believe can be useful in your further analysis of the "
+                    "area sensitivities.")
+    info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
+    info_label.pack(padx=10, pady=10)
+
+    button_frame = tk.Frame(root)
+    button_frame.pack(pady=5)
+
+    process_all_btn = ttk.Button(button_frame, text="Process", command=lambda: threading.Thread(
+        target=process_all, args=(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg, chunk_size), daemon=True).start())
+    process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
+    close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
+    close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
+    log_to_gui(log_widget, "Opened processing subprocess.")
+    
+    log_to_gui(log_widget, f"Chunk size is {chunk_size}.")
+
+    root.mainloop()
+    parquet_folder = os.path.join(os.path.dirname(gpkg_file), "geoparquet")
+    log_to_gui(log_widget, "Loading input data...")
+    
+    try:
+        log_to_gui(log_widget, "Reading asset objects...")
+        asset_objects = gpd.read_parquet(os.path.join(parquet_folder, "tbl_asset_object.parquet"))
+        log_to_gui(log_widget, f"Loaded {len(asset_objects)} asset objects")
+        
+        log_to_gui(log_widget, "Reading geocode objects...")
+        geocode_objects = gpd.read_parquet(os.path.join(parquet_folder, "tbl_geocode_object.parquet"))
+        log_to_gui(log_widget, f"Loaded {len(geocode_objects)} geocode objects")
+        
+        log_to_gui(log_widget, "Reading asset groups...")
+        asset_groups = gpd.read_parquet(os.path.join(parquet_folder, "tbl_asset_group.parquet"))
+        log_to_gui(log_widget, f"Loaded {len(asset_groups)} asset groups")
+        
+    except Exception as e:
+        log_to_gui(log_widget, f"Error reading parquet files: {e}. Falling back to GeoPackage.")
+        
+        log_to_gui(log_widget, "Reading from GeoPackage instead...")
+        asset_objects = gpd.read_file(gpkg_file, layer='tbl_asset_object')
+        geocode_objects = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
+        asset_groups = gpd.read_file(gpkg_file, layer='tbl_asset_group')
+        log_to_gui(log_widget, "Finished reading from GeoPackage")
+
+    update_progress(10)
+    log_to_gui(log_widget, "Starting data processing...")
+
+    try:
+        # Process tbl_stacked
+        log_to_gui(log_widget, "Starting tbl_stacked processing...")
+        process_tbl_stacked(log_widget, progress_var, gpkg_file, workingprojection_epsg, chunk_size)
+        
+        # Process tbl_flat
+        log_to_gui(log_widget, "Starting tbl_flat processing...")
+        process_tbl_flat(log_widget, progress_var, gpkg_file, workingprojection_epsg)
+        update_progress(94)
+
+        # Classify data
+        log_to_gui(log_widget, "Starting data classification...")
+        classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_min', config_file)
+        update_progress(95)
+
+        classify_data(log_widget, gpkg_file, 'tbl_flat', 'sensitivity_max', config_file)
+        update_progress(97)
+
+        classify_data(log_widget, gpkg_file, 'tbl_stacked', 'sensitivity', config_file)
+        update_progress(99)
+
+        # Export to geoparquet
+        log_to_gui(log_widget, "Exporting results to geoparquet...")
+        export_gpkg_tables_to_geoparquet(gpkg_file, log_widget)
+
+        # Update stats
+        increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
+
+        log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
+        update_progress(100)
+        
+    except Exception as e:
+        log_to_gui(log_widget, f"Error during processing: {e}")
+        raise
+        increment_stat_value(config_file, 'mesa_stat_process', increment_value=1)
+
+        log_to_gui(log_widget, "COMPLETED: Processing of analysis and presentation layers completed.")
+        update_progress(100)
+        
+    except Exception as e:
+        log_to_gui(log_widget, f"Error during processing: {e}")
+        raise
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 #  Main
 #
 
