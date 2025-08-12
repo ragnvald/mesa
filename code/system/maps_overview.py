@@ -151,44 +151,52 @@ def enable_pan_and_zoom() -> None:
 # Statistics (table + bar chart)
 # ----------------------------------------------------------------------
 def update_statistics(geocode_category: str) -> None:
-    """Recalculate area per sensitivity class for the selected geocode category and update UI."""
+    """Recalculate area per sensitivity class and update UI, showing zeros for missing categories."""
     try:
-        # Filter for the selected geocode category
         filtered = tbl_flat_data[
             tbl_flat_data["name_gis_geocodegroup"] == geocode_category
         ].copy()
 
         if {"sensitivity_code_max", "area_m2"} <= set(filtered.columns):
-            stats = (filtered
-                     .groupby(["sensitivity_code_max",
-                               "sensitivity_description_max"])["area_m2"]
-                     .sum()
-                     .reset_index())
-            stats["area_km2"] = stats["area_m2"] / 1e6
-            stats.sort_values("sensitivity_code_max", inplace=True)
+            # 1) Original grouping
+            grp = (filtered
+                   .groupby(["sensitivity_code_max"])["area_m2"]
+                   .sum()
+                   .reset_index())
+            grp["area_km2"] = grp["area_m2"] / 1e6
 
+            # 2) Full list of codes & descriptions
             colour_map = get_color_mapping(config)
+            codes = list(colour_map.keys())
+            desc_map = {sec: config[sec]["description"] for sec in codes}
+            full = pd.DataFrame({
+                "sensitivity_code_max": codes,
+                "sensitivity_description_max": [desc_map[c] for c in codes]
+            })
 
-            # ------------- Treeview (table) ----------------
-            stats_table.delete(*stats_table.get_children())  # clear table
+            # 3) Merge and fill zeros (no negatives, keep floats)
+            stats = full.merge(grp[["sensitivity_code_max","area_km2"]],
+                               on="sensitivity_code_max", how="left")
+            stats["area_km2"] = stats["area_km2"].fillna(0.0)
 
+            # 4) Populate table
+            stats_table.delete(*stats_table.get_children())
             for _, row in stats.iterrows():
                 code = row["sensitivity_code_max"]
                 stats_table.insert(
                     "", "end",
-                    image=get_color_icon(colour_map.get(code, "#000000"), size=20),
+                    image=get_color_icon(colour_map[code], size=20),
                     values=(
                         code,
                         row["sensitivity_description_max"],
-                        f"{row['area_km2']:.2f}",
+                        f"{row['area_km2']:.2f}"
                     )
                 )
 
-            # ------------- Bar chart ------------------------
+            # 5) Plot bars
             ax_stats.clear()
-            bars = stats["sensitivity_code_max"]
-            bar_cols = bars.map(colour_map)
-            ax_stats.bar(bars, stats["area_km2"], color=bar_cols)
+            bar_cols = stats["sensitivity_code_max"].map(colour_map)
+            ax_stats.bar(stats["sensitivity_code_max"], stats["area_km2"], color=bar_cols)
             ax_stats.set_title("Area by sensitivity code (km²)")
             ax_stats.set_xlabel("Sensitivity code")
             ax_stats.set_ylabel("Area (km²)")
@@ -230,16 +238,23 @@ if __name__ == "__main__":
         root.geometry("1600x900")
 
         # ---- Paned layout (controls | map | stats) --------------------
-        pw = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
+        pw = tk.PanedWindow(
+            root,
+            orient=tk.HORIZONTAL,
+            sashrelief='raised',             # raised look on sash
+            sashwidth=8,                     # wider sash for visibility
+            sashcursor='sb_h_double_arrow'   # resize cursor when over sash
+        )
         pw.pack(fill=tk.BOTH, expand=True)
 
         control_frame = ttk.Frame(pw, width=200)
-        map_frame = ttk.Frame(pw)
-        stats_frame = ttk.Frame(pw, width=300)
+        map_frame     = ttk.Frame(pw)
+        stats_frame   = ttk.Frame(pw, width=300)
 
-        pw.add(control_frame, weight=0)
-        pw.add(map_frame,    weight=1)
-        pw.add(stats_frame,  weight=0)
+        # Side panes fixed size, only map_frame stretches
+        pw.add(control_frame, minsize=200, stretch='never')
+        pw.add(map_frame, stretch='always')
+        pw.add(stats_frame,   minsize=300, stretch='never')
 
         # ---- Matplotlib figure for map --------------------------------
         fig, ax = plt.subplots(figsize=(16, 9))
@@ -302,6 +317,21 @@ if __name__ == "__main__":
             sys.exit(0)
 
         # ---- Exit button (lower left) --------------------------------
+        exit_btn_frame = ttk.Frame(control_frame)
+        exit_btn_frame.pack(side="bottom", fill="x", expand=False)
+        close_btn = ttk.Button(exit_btn_frame, text="Exit", command=close_application, bootstyle=WARNING)
+        close_btn.pack(side="left", anchor="sw", padx=10, pady=10)
+
+        # ---- Initial draw --------------------------------------------
+        if geocode_categories:
+            geocode_var.set(geocode_categories[0])
+            update_map_and_statistics(geocode_categories[0])
+
+        enable_pan_and_zoom()
+        root.mainloop()
+
+    except Exception as err:
+        print("Fatal error:", err, file=sys.stderr)
         exit_btn_frame = ttk.Frame(control_frame)
         exit_btn_frame.pack(side="bottom", fill="x", expand=False)
         close_btn = ttk.Button(exit_btn_frame, text="Exit", command=close_application, bootstyle=WARNING)
