@@ -95,8 +95,14 @@ def close_application(root):
 def log_to_gui(log_widget, message):
     timestamp = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    log_widget.insert(tk.END, formatted_message + "\n")
-    log_widget.see(tk.END)
+    try:
+        # Only write to log_widget if it still exists (not destroyed)
+        if log_widget.winfo_exists():
+            log_widget.insert(tk.END, formatted_message + "\n")
+            log_widget.see(tk.END)
+    except tk.TclError:
+        # Widget has been destroyed, skip GUI logging
+        pass
     log_destination_file = os.path.join(original_working_directory, "log.txt")
     with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
@@ -644,6 +650,7 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
     parquet_folder = os.path.join(os.path.dirname(gpkg_file), "geoparquet")
     log_to_gui(log_widget, "Loading input data...")
     
+    used_source = None
     try:
         log_to_gui(log_widget, "Reading asset objects...")
         asset_objects = gpd.read_parquet(os.path.join(parquet_folder, "tbl_asset_object.parquet"))
@@ -656,7 +663,7 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
         log_to_gui(log_widget, "Reading asset groups...")
         asset_groups = gpd.read_parquet(os.path.join(parquet_folder, "tbl_asset_group.parquet"))
         log_to_gui(log_widget, f"Loaded {len(asset_groups)} asset groups")
-        
+        used_source = "geoparquet"
     except Exception as e:
         log_to_gui(log_widget, f"Error reading parquet files: {e}. Falling back to GeoPackage.")
         
@@ -665,7 +672,9 @@ def process_all(log_widget, progress_var, gpkg_file, config_file, workingproject
         geocode_objects = gpd.read_file(gpkg_file, layer='tbl_geocode_object')
         asset_groups = gpd.read_file(gpkg_file, layer='tbl_asset_group')
         log_to_gui(log_widget, "Finished reading from GeoPackage")
+        used_source = "geopackage"
 
+    log_to_gui(log_widget, f"Processing using data source: {used_source}")
     update_progress(10)
     log_to_gui(log_widget, "Starting data processing...")
 
@@ -946,24 +955,6 @@ if __name__ == "__main__":
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
         raise
-
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
-#  Main
-#
-
-# original folder for the system is sent from the master executable. If the script is
-# invoked this way we are fetching the address here.
-parser = argparse.ArgumentParser(description='Slave script')
-parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
-args = parser.parse_args()
-original_working_directory = args.original_working_directory
-
-# However - if this is not the case we will have to establish the root folder in 
-# one of two different ways.
-if original_working_directory is None or original_working_directory == '':
-    original_working_directory  = os.getcwd()
-    if str("system") in str(original_working_directory):
-        original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
 
 # Load configuration settings and data
 config_file             = os.path.join(original_working_directory, "system/config.ini")
@@ -1018,6 +1009,15 @@ if __name__ == "__main__":
     process_all_btn = ttk.Button(button_frame, text="Process", command=lambda: threading.Thread(
         target=process_all, args=(log_widget, progress_var, gpkg_file, config_file, workingprojection_epsg, chunk_size), daemon=True).start())
     process_all_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
+    close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
+    close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
+
+    log_to_gui(log_widget, "Opened processing subprocess.")
+    
+    log_to_gui(log_widget, f"Chunk size is {chunk_size}.")
+
+    root.mainloop()
 
     close_btn = ttk.Button(button_frame, text="Exit", command=lambda: close_application(root), bootstyle=WARNING)
     close_btn.pack(side=tk.LEFT, padx=5, expand=False, fill=tk.X)
