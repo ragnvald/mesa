@@ -49,12 +49,15 @@ def purge_h3_groups_from_gpkg(gpkg: Path | str) -> int:
         return 0
 
 def append_h3_group_to_gpkg(gpkg: Path | str, group_name: str, geom, res: int) -> int:
-    """Append a new H3 group entry and return its generated ID."""
+    """Append a new H3 group entry and return its generated ID. Data model matches import."""
     gdf = gpd.read_file(gpkg, layer="tbl_geocode_group")
     ids = gdf["id"].astype(int) if not gdf.empty else []
     new_id = int(ids.max() + 1) if len(ids) else 1
 
-    # Use 'geometry' as the column name to match GeoDataFrame expectations
+    from shapely.geometry import MultiPolygon, Polygon
+    if isinstance(geom, Polygon):
+        geom = MultiPolygon([geom])
+
     row = {
         "id": new_id,
         "name": group_name,
@@ -63,15 +66,51 @@ def append_h3_group_to_gpkg(gpkg: Path | str, group_name: str, geom, res: int) -
         "description": f"H3 hexagons at resolution {res}",
         "geometry": geom
     }
-    # Create a single-row GeoDataFrame
-    row_gdf = gpd.GeoDataFrame([row], geometry="geometry", crs=gdf.crs)
-
-    # Concatenate and ensure only one geometry column exists
+    # Use the same column order as in import
+    group_columns = [
+        "id", "name", "name_gis_geocodegroup", "title_user", "description", "geometry"
+    ]
+    row_gdf = gpd.GeoDataFrame([row], columns=group_columns, geometry="geometry", crs=gdf.crs)
     new_gdf = pd.concat([gdf, row_gdf], ignore_index=True)
-    new_gdf = gpd.GeoDataFrame(new_gdf, geometry="geometry", crs=gdf.crs)
-
+    new_gdf = gpd.GeoDataFrame(new_gdf, columns=group_columns, geometry="geometry", crs=gdf.crs)
     new_gdf.to_file(gpkg, layer="tbl_geocode_group", driver="GPKG", mode="w")
+
+    # --- Save to GeoParquet ---
+    geoparquet_dir = Path(gpkg).parent / "geoparquet"
+    geoparquet_dir.mkdir(exist_ok=True)
+    group_parquet = geoparquet_dir / "tbl_geocode_group.parquet"
+    new_gdf.to_parquet(group_parquet, index=False)
+
     return new_id
+
+def append_h3_to_gpkg(gpkg: Path | str, hex_gdf: gpd.GeoDataFrame,
+                      ref_group_id: int, group_name: str) -> int:
+    """Append hexagons to tbl_geocode_object, return number written. Data model matches import."""
+    if hex_gdf.empty:
+        return 0
+    gdf = hex_gdf.copy()
+    gdf = gdf.rename(columns={"h3_index": "code"})
+    gdf["ref_geocodegroup"] = ref_group_id
+    gdf["name_gis_geocodegroup"] = group_name
+    object_columns = [
+        "code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"
+    ]
+    # Read existing objects to append
+    try:
+        existing = gpd.read_file(gpkg, layer="tbl_geocode_object")
+        new_gdf = pd.concat([existing, gdf[object_columns]], ignore_index=True)
+    except Exception:
+        new_gdf = gdf[object_columns]
+    new_gdf = gpd.GeoDataFrame(new_gdf, columns=object_columns, geometry="geometry", crs=gdf.crs)
+    new_gdf.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG", mode="w")
+
+    # --- Save to GeoParquet ---
+    geoparquet_dir = Path(gpkg).parent / "geoparquet"
+    geoparquet_dir.mkdir(exist_ok=True)
+    object_parquet = geoparquet_dir / "tbl_geocode_object.parquet"
+    new_gdf.to_parquet(object_parquet, index=False)
+
+    return len(gdf[object_columns])
 
 # ---------------------------------------------------------------------------
 #  Locale – force English formatting for the log window
@@ -219,15 +258,32 @@ def h3_from_geom(geom, res: int):
 
 def append_h3_to_gpkg(gpkg: Path | str, hex_gdf: gpd.GeoDataFrame,
                       ref_group_id: int, group_name: str) -> int:
-    """Append hexagons to tbl_geocode_object, return number written."""
+    """Append hexagons to tbl_geocode_object, return number written. Data model matches import."""
     if hex_gdf.empty:
         return 0
     gdf = hex_gdf.copy()
-    gdf["code"] = gdf["h3_index"]
+    gdf = gdf.rename(columns={"h3_index": "code"})
     gdf["ref_geocodegroup"] = ref_group_id
     gdf["name_gis_geocodegroup"] = group_name
-    gdf.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG", mode="a")
-    return len(gdf)
+    object_columns = [
+        "code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"
+    ]
+    # Read existing objects to append
+    try:
+        existing = gpd.read_file(gpkg, layer="tbl_geocode_object")
+        new_gdf = pd.concat([existing, gdf[object_columns]], ignore_index=True)
+    except Exception:
+        new_gdf = gdf[object_columns]
+    new_gdf = gpd.GeoDataFrame(new_gdf, columns=object_columns, geometry="geometry", crs=gdf.crs)
+    new_gdf.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG", mode="w")
+
+    # --- Save to GeoParquet ---
+    geoparquet_dir = Path(gpkg).parent / "geoparquet"
+    geoparquet_dir.mkdir(exist_ok=True)
+    object_parquet = geoparquet_dir / "tbl_geocode_object.parquet"
+    new_gdf.to_parquet(object_parquet, index=False)
+
+    return len(gdf[object_columns])
 
 
 def purge_h3_from_gpkg(gpkg: Path | str) -> int:
@@ -260,9 +316,9 @@ def run_gui(gpkg: Path):
     frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
     ttk.Label(frame, text="H3 resolution range (coarse → fine)").pack(anchor="w")
-    var_from, var_to = tk.IntVar(value=6), tk.IntVar(value=7)
-    box_from = ttk.Combobox(frame, textvariable=var_from, values=list(range(6, 16)), state="readonly", width=5)
-    box_to = ttk.Combobox(frame, textvariable=var_to, values=list(range(6, 16)), state="readonly", width=5)
+    var_from, var_to = tk.IntVar(value=3), tk.IntVar(value=5)
+    box_from = ttk.Combobox(frame, textvariable=var_from, values=list(range(3, 16)), state="readonly", width=5)
+    box_to = ttk.Combobox(frame, textvariable=var_to, values=list(range(3, 16)), state="readonly", width=5)
     box_from.pack(anchor="w")
     ttk.Label(frame, text="to").pack(anchor="w")
     box_to.pack(anchor="w", pady=(0, 8))
@@ -311,6 +367,48 @@ def run_gui(gpkg: Path):
 #  CLI entry-point
 # ---------------------------------------------------------------------------
 
+def ensure_gpkg_and_tables(gpkg: Path):
+    """Create the GeoPackage and required tables if missing, matching import data model."""
+    import geopandas as gpd
+    from shapely.geometry import MultiPolygon
+
+    # Data model for tbl_geocode_group (aligns with import)
+    group_columns = [
+        "id", "name", "name_gis_geocodegroup", "title_user", "description", "geometry"
+    ]
+    group_schema = {
+        "id": pd.Series(dtype="int"),
+        "name": pd.Series(dtype="str"),
+        "name_gis_geocodegroup": pd.Series(dtype="str"),
+        "title_user": pd.Series(dtype="str"),
+        "description": pd.Series(dtype="str"),
+        "geometry": pd.Series(dtype="object"),
+    }
+    group_gdf = gpd.GeoDataFrame(group_schema, columns=group_columns, geometry="geometry", crs="EPSG:4326")
+
+    # Data model for tbl_geocode_object (aligns with import)
+    object_columns = [
+        "code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"
+    ]
+    object_schema = {
+        "code": pd.Series(dtype="str"),
+        "ref_geocodegroup": pd.Series(dtype="int"),
+        "name_gis_geocodegroup": pd.Series(dtype="str"),
+        "geometry": pd.Series(dtype="object"),
+    }
+    object_gdf = gpd.GeoDataFrame(object_schema, columns=object_columns, geometry="geometry", crs="EPSG:4326")
+
+    if not gpkg.exists():
+        group_gdf.to_file(gpkg, layer="tbl_geocode_group", driver="GPKG")
+        object_gdf.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG")
+    else:
+        import fiona
+        layers = set(fiona.listlayers(gpkg))
+        if "tbl_geocode_group" not in layers:
+            group_gdf.to_file(gpkg, layer="tbl_geocode_group", driver="GPKG")
+        if "tbl_geocode_object" not in layers:
+            object_gdf.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG")
+
 def cli():
     """Generate H3 hexagons for asset geometries in a GeoPackage."""
     # Quick capability check
@@ -321,13 +419,15 @@ def cli():
     parser = argparse.ArgumentParser(
         description="Generate H3 geocodes for asset geometries in a GeoPackage."
     )
-    # climb up from .../code/system → .../code → .../mesa, then into output/
-    default_pkg = Path(__file__).resolve().parents[2] / "output" / "mesa.gpkg"
-
     parser.add_argument(
         "--gpkg", "-g", metavar="FILE",
-        help="Path to GeoPackage",
-        default=str(default_pkg)
+        help="Path to GeoPackage (optional, overrides computed default)",
+        default=None
+    )
+    parser.add_argument(
+        "--original_working_directory", "-o", metavar="DIR",
+        help="Root folder of the project (defaults to two levels up from this script)",
+        default=None
     )
     parser.add_argument(
         "--from", "-f", dest="start_res", type=int,
@@ -343,9 +443,20 @@ def cli():
     )
     args = parser.parse_args()
 
-    gpkg = Path(args.gpkg)
-    if not gpkg.exists():
-        sys.exit(f"Error: GeoPackage not found: {gpkg}")
+    # Determine base directory
+    if args.original_working_directory:
+        base_dir = Path(args.original_working_directory)
+    else:
+        base_dir = Path(__file__).resolve().parents[1]  # .../mesa/code
+
+    # Compute GeoPackage path
+    if args.gpkg:
+        gpkg = Path(args.gpkg)
+    else:
+        gpkg = base_dir / "output" / "mesa.gpkg"
+
+    # Always ensure both tables exist before any read/write
+    ensure_gpkg_and_tables(gpkg)
 
     # Read & buffer union of asset-group geometries
     union_geom = read_asset_union(gpkg)
@@ -384,5 +495,4 @@ if __name__ == "__main__":
     # Uncomment for quick env sanity check while debugging:
     # import sys as _sys; import h3 as _h3
     # print("python:", _sys.executable, "h3:", getattr(_h3, "__version__", "unknown"))
-    cli()
     cli()
