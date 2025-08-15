@@ -64,11 +64,13 @@ def append_h3_group_to_gpkg(gpkg: Path | str, group_name: str, geom, res: int) -
         "name_gis_geocodegroup": group_name,
         "title_user": f"H3 resolution {res}",
         "description": f"H3 hexagons at resolution {res}",
+        "total_geocode_objects": 0,  # Ensure this field matches the imported data model
         "geometry": geom
     }
     # Use the same column order as in import
     group_columns = [
-        "id", "name", "name_gis_geocodegroup", "title_user", "description", "geometry"
+        "id", "name", "name_gis_geocodegroup", "title_user", "description",
+        "total_geocode_objects", "geometry"
     ]
     row_gdf = gpd.GeoDataFrame([row], columns=group_columns, geometry="geometry", crs=gdf.crs)
     new_gdf = pd.concat([gdf, row_gdf], ignore_index=True)
@@ -92,8 +94,9 @@ def append_h3_to_gpkg(gpkg: Path | str, hex_gdf: gpd.GeoDataFrame,
     gdf = gdf.rename(columns={"h3_index": "code"})
     gdf["ref_geocodegroup"] = ref_group_id
     gdf["name_gis_geocodegroup"] = group_name
+    gdf["attributes"] = None  # Ensure this field matches the imported data model
     object_columns = [
-        "code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"
+        "code", "ref_geocodegroup", "name_gis_geocodegroup", "attributes", "geometry"
     ]
     # Read existing objects to append
     try:
@@ -265,8 +268,9 @@ def append_h3_to_gpkg(gpkg: Path | str, hex_gdf: gpd.GeoDataFrame,
     gdf = gdf.rename(columns={"h3_index": "code"})
     gdf["ref_geocodegroup"] = ref_group_id
     gdf["name_gis_geocodegroup"] = group_name
+    gdf["attributes"] = None  # Ensure this field matches the imported data model
     object_columns = [
-        "code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"
+        "code", "ref_geocodegroup", "name_gis_geocodegroup", "attributes", "geometry"
     ]
     # Read existing objects to append
     try:
