@@ -959,11 +959,11 @@ progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
 progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
 
 # Information text field below the progress bar
-info_label_text = ("On this page you can import assets, geocodes (grids) and lines. The features will "
-                   "be placed in our database and used in the analysis. Assets are geopackage files with "
-                   "layers or shapefiles placed in the input/assets-folder. All assets will later be associated "
-                   "with importance and susceptibility values. Geocodes are usually grid cells. Lines are being used "
-                   "to create segments which will have a similar calulation to the geocode areas. ")
+info_label_text = ("On this page you can import assets, geocodes (grids) and lines. "
+                   "The features will be placed in our database and used in the analysis. "
+                   "Assets are geopackage files with layers or shapefiles placed in the input/assets-folder. "
+                   "All assets will later be associated with importance and susceptibility values. "
+                   "Geocodes are usually grid cells. Lines are being used to create segments which will have a similar calulation to the geocode areas. ")
 info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
@@ -1000,5 +1000,4 @@ import_lines_btn.grid(row=0, column=2, padx=10, pady=5, sticky='ew')
 exit_btn = ttk.Button(button_frame, text="Exit", command=close_application, bootstyle=WARNING)
 exit_btn.grid(row=0, column=3, padx=10, sticky='ew')
 
-root.mainloop()
 root.mainloop()
