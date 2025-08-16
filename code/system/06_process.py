@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-# CPU-optimized, Windows-safe (spawn) multiprocessing.
+# CPU-optimized, Windows-safe (spawn) multiprocessing + extended categorisation + heartbeats.
 # - Top-level worker functions (pickle-friendly)
 # - ProcessPoolExecutor with initializer to share large data once
-# - Coarser spatial chunking, specialized predicates, throttled UI logging
+# - Corrected chunking (rows-per-chunk), not millions of tiny tasks
+# - Periodic heartbeat logs + ETA during grid assignment and intersections
+# - Classification columns (code/description) for importance/susceptibility/sensitivity (min/max/mean)
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
@@ -26,7 +28,7 @@ import geopandas as gpd
 import tkinter as tk
 from tkinter import scrolledtext
 
-from shapely.geometry import box, Polygon, MultiPolygon
+from shapely.geometry import box
 
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
@@ -38,7 +40,8 @@ original_working_directory = None
 log_widget = None
 progress_var = None
 progress_label = None
-classification = {}
+classification_cfg = {}   # A..E -> {range, description}
+HEARTBEAT_SECS = 10       # default heartbeat frequency (can be overridden via config)
 
 # ----------------------------
 # UI / Logging / Config utils
@@ -96,45 +99,58 @@ def increment_stat_value(config_file: str, stat_name: str, increment_value: int)
         f.writelines(lines)
 
 # --------------------
-# Classification (unchanged)
+# Classification utils
 # --------------------
 def read_config_classification(file_name: str) -> dict:
-    global classification
+    """
+    Reads A..E sections with 'range' and optional 'description'.
+    Example:
+      [E]
+      range = 1-2
+      description = Very low
+    """
     cfg = configparser.ConfigParser()
     cfg.read(file_name)
-    classification.clear()
+    out = {}
     for section in cfg.sections():
-        if section in ['A', 'B', 'C', 'D', 'E']:
+        if section in ['A','B','C','D','E']:
             rng = cfg[section].get('range', '').strip()
             desc = cfg[section].get('description', '').strip()
             if "-" in rng:
                 try:
                     start, end = map(int, rng.split("-"))
-                    classification[section] = {"range": range(start, end + 1), "description": desc}
+                    out[section] = {"range": range(start, end+1), "description": desc}
                 except Exception as e:
                     log_to_gui(log_widget, f"Invalid range in [{section}]: {rng} ({e})")
-    return classification
+    return out
 
-def classify_data(gpkg_file: str, layer: str, column_name: str, config_path: str) -> None:
-    read_config_classification(config_path)
-    gdf = gpd.read_file(gpkg_file, layer=layer)
-    if column_name not in gdf.columns:
-        log_to_gui(log_widget, f"Column '{column_name}' not in {layer}; skipping.")
-        return
-    def classify_value(v):
-        for label, info in classification.items():
-            if isinstance(v, (int, np.integer)) and v in info['range']:
-                return label, info['description']
-        return 'Unknown', 'No description available'
-    base, *suf = column_name.rsplit('_', 1)
-    suf = suf[0] if suf else ''
-    code_col = f"{base}_code_{suf}" if suf else f"{base}_code"
-    desc_col = f"{base}_description_{suf}" if suf else f"{base}_description"
-    codes, descs = zip(*gdf[column_name].apply(classify_value))
-    gdf[code_col] = codes
-    gdf[desc_col] = descs
-    gdf.to_file(gpkg_file, layer=layer, driver='GPKG')
-    log_to_gui(log_widget, f"Saved {layer} with {code_col}, {desc_col}")
+def _classify_value(v) -> tuple:
+    """Return (code, description) using classification_cfg; Unknown if no match."""
+    if pd.isna(v):
+        return ("Unknown", "No data")
+    try:
+        iv = int(round(float(v)))
+    except Exception:
+        return ("Unknown", "No data")
+    for label, info in classification_cfg.items():
+        if iv in info['range']:
+            return (label, info.get('description', ''))
+    return ("Unknown", "No description available")
+
+def add_classification_columns(gdf: gpd.GeoDataFrame, base: str, stats=('min','max','mean')) -> gpd.GeoDataFrame:
+    """
+    For each stat in stats, read column f'{base}_{stat}' and add
+      f'{base}_code_{stat}', f'{base}_description_{stat}'
+    If the source column is missing, skip quietly.
+    """
+    for st in stats:
+        col = f"{base}_{st}"
+        if col not in gdf.columns:
+            continue
+        codes, descs = zip(*gdf[col].apply(_classify_value))
+        gdf[f"{base}_code_{st}"] = codes
+        gdf[f"{base}_description_{st}"] = descs
+    return gdf
 
 # -----------------
 # Spatial utilities (top-level)
@@ -178,7 +194,6 @@ def create_grid(geodata: gpd.GeoDataFrame, cell_size_deg: float) -> list:
 # -----------------
 _GLOBAL_GRID_GDF = None
 def _grid_pool_init(grid_gdf):
-    # Called in each worker process once
     global _GLOBAL_GRID_GDF
     _GLOBAL_GRID_GDF = grid_gdf
 
@@ -188,10 +203,14 @@ def _process_chunk_indexed(geodata_chunk: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gpd.sjoin(geodata_chunk, _GLOBAL_GRID_GDF, how="left", predicate="intersects")
 
 def calculate_optimal_chunk_size(data_size: int, max_memory_mb: int = 512) -> int:
+    """
+    Return the **rows per chunk** (not number of chunks).
+    """
+    # crude estimate ~1 KB/row -> tune if needed
     memory_per_row_mb = 0.001
-    max_rows_per_chunk = max_memory_mb / memory_per_row_mb
-    chunk_size = max(1, int(data_size / max_rows_per_chunk))
-    return min(chunk_size, data_size)
+    rows_per_chunk = int(max_memory_mb / memory_per_row_mb)  # e.g. 512 / 0.001 = 512,000 rows
+    rows_per_chunk = max(1, min(rows_per_chunk, data_size))
+    return rows_per_chunk
 
 def assign_assets_to_grid(geodata: gpd.GeoDataFrame,
                           grid_cells: list,
@@ -207,17 +226,74 @@ def assign_assets_to_grid(geodata: gpd.GeoDataFrame,
     log_to_gui(log_widget, "Grid built. Building spatial index…")
     _ = grid_gdf.sindex
 
-    chunk_size = calculate_optimal_chunk_size(len(geodata))
-    chunks = [geodata.iloc[i:i + chunk_size] for i in range(0, len(geodata), chunk_size)]
-    log_to_gui(log_widget, f"Assigning to grid using {len(chunks)} chunks with {max_workers} workers.")
+    # --- fixed: rows-per-chunk ---
+    rows_per_chunk = calculate_optimal_chunk_size(len(geodata))
+    total_chunks = math.ceil(len(geodata) / rows_per_chunk)
+    log_to_gui(
+        log_widget,
+        f"Assigning to grid using ~{total_chunks} chunks (≈{rows_per_chunk} rows/chunk) with {max_workers} workers. "
+        f"Heartbeat every {HEARTBEAT_SECS}s."
+    )
 
     results = []
     with ProcessPoolExecutor(max_workers=max_workers,
                              initializer=_grid_pool_init,
                              initargs=(grid_gdf,)) as ex:
-        for part in ex.map(_process_chunk_indexed, chunks):
-            results.append(part)
+        futures = []
+        for start in range(0, len(geodata), rows_per_chunk):
+            chunk = geodata.iloc[start:start + rows_per_chunk]
+            futures.append(ex.submit(_process_chunk_indexed, chunk))
 
+        pending = set(futures)
+        done_count = 0
+        started_at = time.time()
+        last_ping = started_at
+
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending, timeout=HEARTBEAT_SECS,
+                return_when=concurrent.futures.FIRST_COMPLETED
+            )
+
+            if not done:
+                # heartbeat even if nothing finished recently
+                elapsed = time.time() - started_at
+                pct = (done_count / total_chunks) * 100 if total_chunks else 100.0
+                eta = "?"
+                if done_count:
+                    est_total = elapsed / done_count * total_chunks
+                    eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
+                    eta = eta_ts.strftime("%H:%M:%S")
+                    dd = (eta_ts.date() - datetime.now().date()).days
+                    if dd > 0:
+                        eta += f" (+{dd}d)"
+                log_to_gui(log_widget, f"[grid-assign heartbeat] {done_count}/{total_chunks} chunks (~{pct:.2f}%) … ETA {eta}")
+                continue
+
+            for fut in done:
+                try:
+                    part = fut.result()
+                    results.append(part)
+                except Exception as e:
+                    log_to_gui(log_widget, f"[grid-assign] worker error: {e}")
+                done_count += 1
+
+                now = time.time()
+                if now - last_ping >= HEARTBEAT_SECS or done_count == total_chunks:
+                    elapsed = now - started_at
+                    pct = (done_count / total_chunks) * 100 if total_chunks else 100.0
+                    eta = "?"
+                    if done_count:
+                        est_total = elapsed / done_count * total_chunks
+                        eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
+                        eta = eta_ts.strftime("%H:%M:%S")
+                        dd = (eta_ts.date() - datetime.now().date()).days
+                        if dd > 0:
+                            eta += f" (+{dd}d)"
+                    log_to_gui(log_widget, f"[grid-assign] {done_count}/{total_chunks} chunks (~{pct:.2f}%) … ETA {eta}")
+                    last_ping = now
+
+    log_to_gui(log_widget, "Merging grid assignment results.")
     j = gpd.GeoDataFrame(pd.concat(results, ignore_index=True), crs=geodata.crs)
     return j.drop(columns='index_right', errors='ignore')
 
@@ -239,7 +315,6 @@ _POOL_ASSETS = None
 _POOL_ASSET_GEOM_TYPES = None
 
 def _intersect_pool_init(asset_df, asset_geom_types):
-    # Called in each worker process once
     global _POOL_ASSETS, _POOL_ASSET_GEOM_TYPES
     _POOL_ASSETS = asset_df
     _POOL_ASSET_GEOM_TYPES = asset_geom_types
@@ -280,7 +355,7 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     log_to_gui(log_widget, f"Processing method is {method}. (CPU-optimized)")
     start_time = time.time()
 
-    # meters→degrees approx (prefer projected CRS in meters in your data upstream)
+    # meters→degrees approx (prefer projected CRS in meters upstream)
     meters_per_degree = 111320.0
     cell_size_degrees = cell_size / meters_per_degree
     log_to_gui(log_widget, f"Cell size converted to degrees: {cell_size_degrees:.6f} degrees")
@@ -294,40 +369,69 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     # Build coarser chunks
     chunks = make_spatial_chunks(geocode_tagged, max_workers, multiplier=4)
     total_chunks = len(chunks)
-    log_to_gui(log_widget, f"Processing {total_chunks} chunks with up to {max_workers} workers.")
+    log_to_gui(log_widget, f"Processing {total_chunks} chunks with up to {max_workers} workers. Heartbeat every {HEARTBEAT_SECS}s.")
 
     # Cache asset geometry types once
     asset_geom_types = asset_data.geometry.geom_type.unique().tolist()
 
-    # Share ASSETS once per worker via initializer (lighter than sending every task)
+    # Heartbeat loop
     completed = 0
-    next_log_tick = 0.0
+    started_at = time.time()
+    last_ping = started_at
+
     with ProcessPoolExecutor(max_workers=max_workers,
                              initializer=_intersect_pool_init,
                              initargs=(asset_data, asset_geom_types)) as ex:
         futures = {ex.submit(_intersection_worker, (i, ch)): i
                    for i, ch in enumerate(chunks, start=1)}
-        for fut in concurrent.futures.as_completed(futures):
-            idx, nrows, res, err = fut.result()
-            completed += 1
-            if err:
-                log_to_gui(log_widget, f"[{completed}/{total_chunks}] Error: {err}")
-            elif nrows:
-                intersections.append(res)
+        pending = set(futures.keys())
 
-            pct = 30.0 + (completed / max(total_chunks, 1)) * 15.0
-            if pct >= next_log_tick:
-                update_progress(pct)
-                if completed % max(1, total_chunks // 20) == 0 or completed == total_chunks:
-                    elapsed = time.time() - start_time
-                    est_total = (elapsed / completed) * total_chunks if completed else 0.0
-                    eta = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
-                    ts = eta.strftime("%H:%M:%S")
-                    days_diff = (eta.date() - datetime.now().date()).days
-                    if days_diff > 0:
-                        ts += f" (+{days_diff} days)"
-                    log_to_gui(log_widget, f"Core computation might conclude at {ts}.")
-                next_log_tick = pct + 1.0
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending, timeout=HEARTBEAT_SECS,
+                return_when=concurrent.futures.FIRST_COMPLETED
+            )
+
+            if not done:
+                elapsed = time.time() - started_at
+                pct = (completed / total_chunks) * 100 if total_chunks else 100.0
+                eta = "?"
+                if completed:
+                    est_total = elapsed / completed * total_chunks
+                    eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
+                    eta = eta_ts.strftime("%H:%M:%S")
+                    dd = (eta_ts.date() - datetime.now().date()).days
+                    if dd > 0:
+                        eta += f" (+{dd}d)"
+                log_to_gui(log_widget, f"[intersect heartbeat] {completed}/{total_chunks} chunks (~{pct:.2f}%) … ETA {eta}")
+                continue
+
+            for fut in done:
+                idx, nrows, res, err = fut.result()
+                completed += 1
+                if err:
+                    log_to_gui(log_widget, f"[{completed}/{total_chunks}] Error: {err}")
+                elif nrows:
+                    intersections.append(res)
+
+                # progress + periodic ETA
+                now = time.time()
+                if now - last_ping >= HEARTBEAT_SECS or completed == total_chunks:
+                    elapsed = now - started_at
+                    pct = (completed / total_chunks) * 100 if total_chunks else 100.0
+                    eta = "?"
+                    if completed:
+                        est_total = elapsed / completed * total_chunks
+                        eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
+                        eta = eta_ts.strftime("%H:%M:%S")
+                        dd = (eta_ts.date() - datetime.now().date()).days
+                        if dd > 0:
+                            eta += f" (+{dd}d)"
+                    log_to_gui(log_widget, f"[intersect] {completed}/{total_chunks} chunks (~{pct:.2f}%) … ETA {eta}")
+                    # UI mapping (30–45% of the bar during intersect)
+                    pct_ui = 30.0 + (completed / max(total_chunks, 1)) * 15.0
+                    update_progress(pct_ui)
+                    last_ping = now
 
     # Wrap up
     total_time = time.time() - start_time
@@ -349,22 +453,29 @@ def intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_v
     return gpd.GeoDataFrame(pd.concat(intersections, ignore_index=True), crs=workingprojection_epsg)
 
 # ------------------------------------
-# Table builders
+# Table builders + classification
 # ------------------------------------
 def process_tbl_stacked(gpkg_file: str,
                         workingprojection_epsg: str,
                         method: str,
                         cell_size: int,
-                        max_workers: int) -> None:
+                        max_workers: int,
+                        config_file: str) -> None:
     log_to_gui(log_widget, "Started building analysis table (tbl_stacked).")
     update_progress(10)
 
+    # Read A..E config once
+    global classification_cfg
+    classification_cfg = read_config_classification(config_file)
+
+    # Assets
     log_to_gui(log_widget, "Reading assets…")
     asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object'); _ = asset_data.sindex
     if asset_data.crs is None:
         asset_data.set_crs(workingprojection_epsg, inplace=True)
     update_progress(15)
 
+    # Geocodes
     log_to_gui(log_widget, "Reading geocodes…")
     geocode_data = gpd.read_file(gpkg_file, layer='tbl_geocode_object'); _ = geocode_data.sindex
     if geocode_data.crs is None:
@@ -372,14 +483,16 @@ def process_tbl_stacked(gpkg_file: str,
     update_progress(20)
     log_to_gui(log_widget, f"Geocode objects: {len(geocode_data)}")
 
+    # Asset groups
     log_to_gui(log_widget, "Reading asset groups…")
     asset_groups = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    cols = ['id', 'name_gis_assetgroup', 'total_asset_objects', 'importance',
-            'susceptibility', 'sensitivity', 'sensitivity_code', 'sensitivity_description']
+    cols = ['id','name_gis_assetgroup','total_asset_objects','importance',
+            'susceptibility','sensitivity','sensitivity_code','sensitivity_description']
     keep = [c for c in cols if c in asset_groups.columns]
     asset_data = asset_data.merge(asset_groups[keep], left_on='ref_asset_group', right_on='id', how='left')
     update_progress(30)
 
+    # Intersections
     log_to_gui(log_widget, "Intersecting assets and geocodes (CPU)…")
     stacked = intersect_asset_and_geocode(asset_data, geocode_data, log_widget, progress_var, method,
                                           workingprojection_epsg, cell_size, max_workers)
@@ -390,6 +503,7 @@ def process_tbl_stacked(gpkg_file: str,
         stacked.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
         update_progress(50); return
 
+    # Area in m²
     log_to_gui(log_widget, "Calculating areas…")
     if stacked.crs is None:
         stacked.set_crs(workingprojection_epsg, inplace=True)
@@ -399,23 +513,44 @@ def process_tbl_stacked(gpkg_file: str,
     else:
         stacked['area_m2'] = stacked.geometry.area.astype('float64').fillna(0).astype('int64')
 
-    stacked.drop(columns=['geometry_wkb', 'geometry_wkb_1', 'process'], errors='ignore', inplace=True)
+    # Classification on stacked rows (if numeric fields exist)
+    for base_col in ['importance','susceptibility','sensitivity']:
+        if base_col in stacked.columns:
+            codes, descs = zip(*stacked[base_col].apply(_classify_value))
+            stacked[f'{base_col}_code'] = codes
+            stacked[f'{base_col}_description'] = descs
+
+    stacked.drop(columns=['geometry_wkb','geometry_wkb_1','process'], errors='ignore', inplace=True)
     stacked.to_file(gpkg_file, layer='tbl_stacked', driver='GPKG')
     log_to_gui(log_widget, "tbl_stacked saved."); update_progress(50)
 
-def process_tbl_flat(gpkg_file: str, workingprojection_epsg: str) -> None:
+def process_tbl_flat(gpkg_file: str, workingprojection_epsg: str, config_file: str) -> None:
     log_to_gui(log_widget, "Building presentation table (tbl_flat).")
     tbl_stacked = gpd.read_file(gpkg_file, layer='tbl_stacked')
     log_to_gui(log_widget, f"tbl_stacked rows: {len(tbl_stacked)}")
 
+    # Read A..E config once
+    global classification_cfg
+    classification_cfg = read_config_classification(config_file)
+
     if tbl_stacked.empty:
-        empty = gpd.GeoDataFrame(columns=[
-            'code','importance_min','importance_max','sensitivity_min','sensitivity_max',
-            'susceptibility_min','susceptibility_max','ref_geocodegroup','name_gis_geocodegroup',
+        cols = [
+            'code','importance_min','importance_max','importance_mean',
+            'sensitivity_min','sensitivity_max','sensitivity_mean',
+            'susceptibility_min','susceptibility_max','susceptibility_mean',
+            'ref_geocodegroup','name_gis_geocodegroup',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total','geometry'
-        ], geometry='geometry', crs=workingprojection_epsg)
+        ]
+        empty = gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=workingprojection_epsg)
+        # also create code/description columns so schema is stable
+        for base in ['importance','susceptibility','sensitivity']:
+            for st in ['min','max','mean']:
+                empty[f'{base}_code_{st}'] = None
+                empty[f'{base}_description_{st}'] = None
         empty.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
-        log_to_gui(log_widget, "tbl_flat saved (empty)."); update_progress(65); return
+        log_to_gui(log_widget, "tbl_flat saved (empty).")
+        update_progress(65)
+        return
 
     if 'code' not in tbl_stacked.columns:
         log_to_gui(log_widget, "Error: 'code' missing in tbl_stacked; cannot aggregate."); return
@@ -423,31 +558,43 @@ def process_tbl_flat(gpkg_file: str, workingprojection_epsg: str) -> None:
         tbl_stacked.set_crs(workingprojection_epsg, inplace=True)
     update_progress(60)
 
+    # Overlap per code
     overlap = tbl_stacked['code'].value_counts().reset_index()
     overlap.columns = ['code','assets_overlap_total']
 
+    # Aggregations incl. means
     agg = {
-        'importance':['min','max'],
-        'sensitivity':['min','max'],
-        'susceptibility':['min','max'],
-        'ref_geocodegroup':'first',
-        'name_gis_geocodegroup':'first',
-        'name_gis_assetgroup':(lambda x: ', '.join(pd.Series(x).dropna().unique())),
-        'ref_asset_group':'nunique',
-        'geometry':'first', 'area_m2':'first'
+        'importance': ['min','max','mean'],
+        'sensitivity': ['min','max','mean'],
+        'susceptibility': ['min','max','mean'],
+        'ref_geocodegroup': 'first',
+        'name_gis_geocodegroup': 'first',
+        'name_gis_assetgroup': (lambda x: ', '.join(pd.Series(x).dropna().unique())),
+        'ref_asset_group': 'nunique',
+        'geometry': 'first',
+        'area_m2': 'first'
     }
-    present_agg = {k:v for k,v in agg.items() if k in tbl_stacked.columns}
+    present_agg = {k:v for k,v in agg.items() if k in tbl_stacked.columns or k in ['geometry','area_m2']}
     tbl_flat = tbl_stacked.groupby('code').agg(present_agg)
     tbl_flat.columns = ['_'.join(c).strip() if isinstance(c, tuple) else c for c in tbl_flat.columns]
+
     rename = {
         'ref_geocodegroup_first':'ref_geocodegroup',
         'name_gis_geocodegroup_first':'name_gis_geocodegroup',
         'name_gis_assetgroup_<lambda>':'asset_group_names',
         'ref_asset_group_nunique':'asset_groups_total',
-        'geometry_first':'geometry','area_m2_first':'area_m2'
+        'geometry_first':'geometry',
+        'area_m2_first':'area_m2'
     }
     tbl_flat.rename(columns=rename, inplace=True, errors='ignore')
+
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry='geometry', crs=workingprojection_epsg)
+
+    # Round means to nearest int before classification
+    for base in ['importance','sensitivity','susceptibility']:
+        col = f'{base}_mean'
+        if col in tbl_flat.columns:
+            tbl_flat[col] = pd.to_numeric(tbl_flat[col], errors='coerce').round().astype('Int64')
 
     if 'area_m2' not in tbl_flat.columns or tbl_flat['area_m2'].isna().all():
         if tbl_flat.crs.is_geographic:
@@ -460,17 +607,30 @@ def process_tbl_flat(gpkg_file: str, workingprojection_epsg: str) -> None:
     if 'assets_overlap_total' not in tbl_flat.columns:
         tbl_flat = tbl_flat.merge(overlap, on='code', how='left')
 
-    reference_columns = [
-        'code','importance_min','importance_max','sensitivity_min','sensitivity_max',
-        'susceptibility_min','susceptibility_max','ref_geocodegroup','name_gis_geocodegroup',
-        'asset_group_names','asset_groups_total','area_m2','assets_overlap_total','geometry'
+    # Add code/description for importance, susceptibility, sensitivity (min/max/mean)
+    for base in ['importance','susceptibility','sensitivity']:
+        tbl_flat = add_classification_columns(tbl_flat, base, stats=('min','max','mean'))
+
+    # Ensure stable schema ordering
+    preferred = [
+        'code',
+        'importance_min','importance_max','importance_mean','importance_code_min','importance_description_min',
+        'importance_code_max','importance_description_max','importance_code_mean','importance_description_mean',
+        'sensitivity_min','sensitivity_max','sensitivity_mean','sensitivity_code_min','sensitivity_description_min',
+        'sensitivity_code_max','sensitivity_description_max','sensitivity_code_mean','sensitivity_description_mean',
+        'susceptibility_min','susceptibility_max','susceptibility_mean','susceptibility_code_min','susceptibility_description_min',
+        'susceptibility_code_max','susceptibility_description_max','susceptibility_code_mean','susceptibility_description_mean',
+        'ref_geocodegroup','name_gis_geocodegroup','asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
+        'geometry'
     ]
-    for c in reference_columns:
+    for c in preferred:
         if c not in tbl_flat.columns:
             tbl_flat[c] = None
-    tbl_flat = tbl_flat[reference_columns]
+    tbl_flat = tbl_flat[preferred]
+
     tbl_flat.to_file(gpkg_file, layer='tbl_flat', driver='GPKG')
-    log_to_gui(log_widget, "tbl_flat saved."); update_progress(75)
+    log_to_gui(log_widget, "tbl_flat saved with extended categorisation.")
+    update_progress(75)
 
 # ----------------------------
 # Export helpers
@@ -531,13 +691,8 @@ def process_all(gpkg_file: str,
         log_to_gui(log_widget, "Started processing of analysis and presentation layers.")
         cleanup_destination_files(); update_progress(5)
 
-        process_tbl_stacked(gpkg_file, workingprojection_epsg, method, cell_size, max_workers)
-        process_tbl_flat(gpkg_file, workingprojection_epsg); update_progress(90)
-
-        # Optional classification (uncomment if you use ranges)
-        # classify_data(gpkg_file, 'tbl_flat', 'sensitivity_min', config_file); update_progress(94)
-        # classify_data(gpkg_file, 'tbl_flat', 'sensitivity_max', config_file); update_progress(97)
-        # classify_data(gpkg_file, 'tbl_stacked', 'sensitivity',     config_file); update_progress(99)
+        process_tbl_stacked(gpkg_file, workingprojection_epsg, method, cell_size, max_workers, config_file)
+        process_tbl_flat(gpkg_file, workingprojection_epsg, config_file); update_progress(90)
 
         log_to_gui(log_widget, "Exporting to GeoParquet…")
         export_gpkg_tables_to_geoparquet(gpkg_file)
@@ -553,7 +708,7 @@ def process_all(gpkg_file: str,
 # Entrypoint
 # -----------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CPU-optimized processing (Windows spawn-safe)")
+    parser = argparse.ArgumentParser(description="CPU-optimized processing (Windows spawn-safe) + categorisation + heartbeats")
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     args = parser.parse_args()
     original_working_directory = args.original_working_directory or os.getcwd()
@@ -570,8 +725,14 @@ if __name__ == "__main__":
     cell_size = int(cfg['DEFAULT'].get('cell_size', '18000'))
     ttk_bootstrap_theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 
+    # Optional: override heartbeat from config
+    try:
+        HEARTBEAT_SECS = int(cfg['DEFAULT'].get('heartbeat_secs', str(HEARTBEAT_SECS)))
+    except Exception:
+        pass
+
     root = tb.Window(themename=ttk_bootstrap_theme)
-    root.title("Process data (CPU-optimized, spawn-safe)")
+    root.title("Process data (CPU-optimized, spawn-safe) — with categorisation & heartbeat")
     try:
         icon_path = os.path.join(original_working_directory, "system_resources", "mesa.ico")
         if os.path.exists(icon_path): root.iconbitmap(icon_path)
@@ -588,8 +749,8 @@ if __name__ == "__main__":
     progress_bar.pack(side=tk.LEFT)
     progress_label = tk.Label(progress_frame, text="0%", bg="light grey"); progress_label.pack(side=tk.LEFT, padx=8)
 
-    info_label_text = ("CPU-optimized & Windows spawn-safe. Processes use shared data via initializer. "
-                       "Use a projected CRS (meters) upstream if possible for best accuracy/perf.")
+    info_label_text = ("Initiate the processing below. This build logs a heartbeat every\n "
+                       f"{HEARTBEAT_SECS}s during heavy phases (grid assign & intersections).")
     tk.Label(root, text=info_label_text, wraplength=680, justify="left").pack(padx=10, pady=10)
 
     btn_frame = tk.Frame(root); btn_frame.pack(pady=6)
@@ -599,5 +760,5 @@ if __name__ == "__main__":
                                                daemon=True).start()).pack(side=tk.LEFT, padx=5)
     tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=lambda: close_application(root)).pack(side=tk.LEFT, padx=5)
 
-    log_to_gui(log_widget, "Opened processing subprocess (CPU-optimized, spawn-safe).")
+    log_to_gui(log_widget, "Opened processing subprocess (CPU-optimized, spawn-safe, heartbeat).")
     root.mainloop()
