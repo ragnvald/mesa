@@ -1,466 +1,437 @@
 #!/usr/bin/env python3
-# Maps Overview — dynamic basemap refresh on pan/zoom, fills pane, A–E only, 10% chart border, clean exit
+# -*- coding: utf-8 -*-
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
-import os
-import sys
+import os, sys
 import configparser
-import tkinter as tk
-from tkinter import ttk, filedialog
-
-import numpy as np
 import pandas as pd
 import geopandas as gpd
+from shapely.geometry import mapping
+import webview  # pip install pywebview
 
-import matplotlib
-matplotlib.use("TkAgg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.colors import to_rgba
-from matplotlib.figure import Figure
+# -------------------------------
+# Paths / constants
+# -------------------------------
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE  = os.path.join(BASE_DIR, "../system/config.ini")
+PARQUET_FILE = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")
+PLOT_CRS     = "EPSG:4326"
 
-import contextily as ctx
-from ttkbootstrap.constants import WARNING
-
-# ----------------------------------------------------------
-# Small cache of solid-colour squares for the stats table
-# ----------------------------------------------------------
-_color_icons = {}  # (hex, size) -> PhotoImage
-def get_color_icon(color_hex: str, size: int = 20) -> tk.PhotoImage:
-    key = (color_hex, size)
-    if key not in _color_icons:
-        img = tk.PhotoImage(width=size, height=size)
-        img.put(color_hex, to=(0, 0, size, size))
-        _color_icons[key] = img
-    return _color_icons[key]
-
-# ----------------------------------------------------------
-# Config helpers
-# ----------------------------------------------------------
+# -------------------------------
+# Config / colors
+# -------------------------------
 def read_config(path: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg.read(path, encoding="utf-8")
     return cfg
 
-def _safe_rgba(col: str, fallback: str) -> str:
-    try:
-        to_rgba(col)
-        return col
-    except Exception:
-        return fallback
+def _safe_hex(s, fb="#BDBDBD"):
+    s = (s or "").strip() or fb
+    return s
 
 def get_color_mapping(cfg: configparser.ConfigParser) -> dict:
-    fallback = cfg["DEFAULT"].get("category_colour_unknown", "#BDBDBD").strip()
-    fallback = _safe_rgba(fallback, "#BDBDBD")
-    colour_map = {}
-    for sec in ("A", "B", "C", "D", "E"):
-        if sec in cfg:
-            raw = cfg[sec].get("category_colour", "").strip()
-            colour_map[sec] = _safe_rgba(raw or fallback, fallback)
-    return colour_map
-
-def get_descriptions(cfg: configparser.ConfigParser) -> dict:
-    return {sec: cfg[sec].get("description", "") for sec in ("A","B","C","D","E") if sec in cfg}
-
-# ----------------------------------------------------------
-# I/O
-# ----------------------------------------------------------
-def load_geoparquet(path: str) -> gpd.GeoDataFrame:
-    try:
-        return gpd.read_parquet(path)
-    except Exception as exc:
-        print("Error reading geoparquet:", exc, file=sys.stderr)
-        return gpd.GeoDataFrame()
-
-# ----------------------------------------------------------
-# Globals set at runtime
-# ----------------------------------------------------------
-config = None
-tbl_flat_data = None
-colour_map = None
-desc_map = None
-FULL_EXTENT = None
-
-root = None
-fig = None
-ax = None
-canvas = None
-toolbar = None
-
-fig_stats = None
-ax_stats = None
-stats_canvas = None
-stats_table = None
-
-geocode_var = None
-
-# Basemap refresh state
-BASEMAP_IMG = None
-CURRENT_CRS_STR = None
-_basemap_after_id = None  # debounce timer id
-
-# Track current nav mode (so we don’t poke private toolbar attrs)
-CURRENT_MODE = "NONE"   # NONE | PAN | ZOOM
-
-# ----------------------------------------------------------
-# Map drawing
-# ----------------------------------------------------------
-def _only_A_to_E(df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    code_col = "sensitivity_code_max"
-    if code_col not in df.columns:
-        return df.iloc[0:0]
-    out = df.copy()
-    out = out[out.geometry.notna()]
-    out[code_col] = out[code_col].astype("string").str.strip().str.upper()
-    out = out[out[code_col].isin(list("ABCDE"))]
+    fb = _safe_hex(cfg["DEFAULT"].get("category_colour_unknown", "#BDBDBD"))
+    out = {}
+    for c in "ABCDE":
+        if c in cfg:
+            out[c] = _safe_hex(cfg[c].get("category_colour", ""), fb)
+        else:
+            out[c] = fb
     return out
 
-def _apply_map_axes_layout():
-    # Fill the map pane: tiny visual edge (1%)
-    ax.set_position([0.01, 0.01, 0.98, 0.98])
+def get_desc_mapping(cfg: configparser.ConfigParser) -> dict:
+    return {c: (cfg[c].get("description","") if c in cfg else "") for c in "ABCDE"}
 
-def _remove_old_basemap():
-    global BASEMAP_IMG
+# -------------------------------
+# Data
+# -------------------------------
+def load_parquet(path: str) -> gpd.GeoDataFrame:
     try:
-        if BASEMAP_IMG is not None:
-            BASEMAP_IMG.remove()
-    except Exception:
-        pass
-    BASEMAP_IMG = None
+        return gpd.read_parquet(path)
+    except Exception as e:
+        print("Failed to read parquet:", e, file=sys.stderr)
+        return gpd.GeoDataFrame()
 
-def _add_basemap_if_crs(crs_str: str | None):
-    """Add base map for current view; do not change extent."""
-    global BASEMAP_IMG
-    if not crs_str:
-        return
-    try:
-        _remove_old_basemap()
-        # reset_extent=False keeps current zoom/pan
-        BASEMAP_IMG = ctx.add_basemap(
-            ax,
-            crs=crs_str,
-            source=ctx.providers.OpenStreetMap.Mapnik,
-            reset_extent=False
+def only_A_to_E(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.empty: return gdf
+    keep = gdf[gdf.geometry.notna()].copy()
+    if "sensitivity_code_max" in keep.columns:
+        keep["sensitivity_code_max"] = (
+            keep["sensitivity_code_max"].astype("string").fillna("").str.strip().str.upper()
         )
-    except Exception as exc:
-        print("Basemap error:", exc, file=sys.stderr)
+        keep = keep[keep["sensitivity_code_max"].isin(list("ABCDE"))]
+    return keep
 
-def _fit_bounds(bounds, pad_frac=0.05):
-    xmin, ymin, xmax, ymax = bounds
-    dx = xmax - xmin
-    dy = ymax - ymin
-    if dx == 0 or dy == 0:
-        pad_x = pad_y = 1.0
-    else:
-        pad_x = dx * pad_frac
-        pad_y = dy * pad_frac
-    ax.set_xlim(xmin - pad_x, xmax + pad_x)
-    ax.set_ylim(ymin - pad_y, ymax + pad_y)
-
-def update_map(geocode_category: str) -> None:
-    """Redraw the layer for selected category with A–E only, basemap included."""
-    global CURRENT_CRS_STR
-    try:
-        filtered = tbl_flat_data[
-            tbl_flat_data["name_gis_geocodegroup"] == geocode_category
-        ].copy()
-        filtered = _only_A_to_E(filtered)
-
-        ax.clear()
-        _apply_map_axes_layout()
-        CURRENT_CRS_STR = filtered.crs.to_string() if getattr(filtered, "crs", None) else None
-
-        if not filtered.empty:
-            # Draw polygons on top of basemap
-            col = filtered["sensitivity_code_max"].map(colour_map)
-            # Add basemap first so polygons sit above it
-            _fit_bounds(filtered.total_bounds, pad_frac=0.05)
-            _add_basemap_if_crs(CURRENT_CRS_STR)
-            filtered.plot(ax=ax, color=col.tolist(), alpha=0.80, linewidth=0.2, edgecolor='white', zorder=10)
-            ax.set_aspect("equal")
-        else:
-            _remove_old_basemap()
-            ax.text(0.5, 0.5, "No A–E data for selected category",
-                    ha="center", va="center", transform=ax.transAxes)
-
-        canvas.draw_idle()
-    except Exception as exc:
-        print("Error updating map:", exc, file=sys.stderr)
-
-def refresh_basemap_now():
-    """Re-add basemap for the current view (debounced externally)."""
-    if CURRENT_CRS_STR:
-        _add_basemap_if_crs(CURRENT_CRS_STR)
-        canvas.draw_idle()
-
-def schedule_basemap_refresh(delay_ms: int = 120):
-    """Debounce basemap refreshing so we don’t hammer tiles while dragging."""
-    global _basemap_after_id
-    if root is None:
-        return
-    if _basemap_after_id is not None:
+def to_plot_crs(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
+    if gdf.crs is None:
+        epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
+        gdf = gdf.set_crs(epsg=epsg, allow_override=True)
+    if str(gdf.crs).upper() != PLOT_CRS:
         try:
-            root.after_cancel(_basemap_after_id)
+            gdf = gdf.to_crs(PLOT_CRS)
         except Exception:
-            pass
-    _basemap_after_id = root.after(delay_ms, refresh_basemap_now)
+            epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
+            gdf = gdf.set_crs(epsg=epsg, allow_override=True).to_crs(PLOT_CRS)
+    return gdf
 
-# ----------------------------------------------------------
-# Nav controls (Home/Fit/Pan/Zoom/Save)
-# ----------------------------------------------------------
-def _ensure_toolbar():
-    if toolbar is not None:
-        toolbar.update()
-
-def nav_home():
-    global FULL_EXTENT
-    if FULL_EXTENT is not None:
-        ax.clear()
-        _apply_map_axes_layout()
-        if geocode_var.get():
-            update_map(geocode_var.get())
-        _fit_bounds(FULL_EXTENT, pad_frac=0.05)
-        schedule_basemap_refresh(10)
-    _ensure_toolbar()
-
-def nav_fit_layer():
-    if geocode_var.get():
-        update_map(geocode_var.get())
-    schedule_basemap_refresh(10)
-    _ensure_toolbar()
-
-def nav_set_mode(mode: str):
-    global CURRENT_MODE
-    if toolbar is None:
-        return
-    if mode == "PAN":
-        toolbar.pan()
-        CURRENT_MODE = "PAN"
-    elif mode == "ZOOM":
-        toolbar.zoom()
-        CURRENT_MODE = "ZOOM"
+def bounds_to_leaflet(b):
+    minx, miny, maxx, maxy = [float(x) for x in b]
+    dx, dy = maxx-minx, maxy-miny
+    if dx <= 0 or dy <= 0:
+        pad = 0.1
+        minx -= pad; maxx += pad; miny -= pad; maxy += pad
     else:
-        # toggle off if already on
-        if CURRENT_MODE == "PAN":
-            toolbar.pan()
-        elif CURRENT_MODE == "ZOOM":
-            toolbar.zoom()
-        CURRENT_MODE = "NONE"
-    _ensure_toolbar()
+        minx -= dx*0.1; maxx += dx*0.1
+        miny -= dy*0.1; maxy += dy*0.1
+    minx = max(-180.0, minx); maxx = min(180.0, maxx)
+    miny = max(-85.0,  miny); maxy = min(85.0,  maxy)
+    return [[miny, minx],[maxy, maxx]]  # [[south, west],[north, east]]
 
-def nav_save_png():
-    try:
-        fname = filedialog.asksaveasfilename(
-            title="Save map as PNG",
-            defaultextension=".png",
-            filetypes=[("PNG Image","*.png")]
-        )
-        if fname:
-            fig.savefig(fname, dpi=150, bbox_inches="tight")
-    except Exception as exc:
-        print("Save error:", exc, file=sys.stderr)
-
-# ----------------------------------------------------------
-# Statistics (table + bar chart with 10% border)
-# ----------------------------------------------------------
-def _apply_stats_axes_layout():
-    ax_stats.set_position([0.10, 0.10, 0.80, 0.80])
-
-def update_statistics(geocode_category: str) -> None:
-    """Recalculate area per sensitivity class (A–E only) and update UI."""
-    try:
-        filtered = tbl_flat_data[
-            tbl_flat_data["name_gis_geocodegroup"] == geocode_category
-        ].copy()
-        filtered = _only_A_to_E(filtered)
-
-        if "area_m2" not in filtered.columns:
-            return
-
-        codes = list("ABCDE")
-        grp = (filtered.groupby("sensitivity_code_max")["area_m2"].sum())
-        area_km2 = pd.Series({c: grp.get(c, 0.0)/1e6 for c in codes}, name="area_km2")
-        stats = pd.DataFrame({
-            "code": codes,
-            "description": [desc_map.get(c, "") for c in codes],
-            "area_km2": area_km2.values
+def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
+    feats = []
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        feats.append({
+            "type": "Feature",
+            "geometry": mapping(geom),
+            "properties": {"sensitivity_code_max": row.get("sensitivity_code_max", None)}
         })
+    return {"type": "FeatureCollection", "features": feats}
 
-        # Table
-        stats_table.delete(*stats_table.get_children())
-        for _, row in stats.iterrows():
-            code = row["code"]
-            col = colour_map.get(code, "#BDBDBD")
-            stats_table.insert(
-                "", "end",
-                image=get_color_icon(col, size=18),
-                values=(code, row["description"], f"{row['area_km2']:.2f}")
-            )
+def compute_stats(gdf: gpd.GeoDataFrame) -> dict:
+    if gdf.empty or "area_m2" not in gdf.columns:
+        return {"labels": list("ABCDE"), "values": [0,0,0,0,0]}
+    grp = gdf.groupby("sensitivity_code_max")["area_m2"].sum()
+    vals = [float(grp.get(c, 0.0))/1e6 for c in "ABCDE"]  # km²
+    return {"labels": list("ABCDE"), "values": vals}
 
-        # Bars
-        ax_stats.clear()
-        bar_cols = [colour_map[c] for c in stats["code"]]
-        ax_stats.bar(stats["code"], stats["area_km2"], color=bar_cols)
-        ax_stats.set_title("Area by sensitivity code (km²)")
-        ax_stats.set_xlabel("Sensitivity code")
-        ax_stats.set_ylabel("Area (km²)")
-        ax_stats.margins(x=0.10, y=0.10)  # 10% data padding
-        _apply_stats_axes_layout()
-        stats_canvas.draw_idle()
+# -------------------------------
+# Load / state
+# -------------------------------
+cfg   = read_config(CONFIG_FILE)
+COLS  = get_color_mapping(cfg)
+DESC  = get_desc_mapping(cfg)
+GDF   = load_parquet(PARQUET_FILE)
+if GDF.empty or "name_gis_geocodegroup" not in GDF.columns:
+    print("GeoParquet missing or lacks 'name_gis_geocodegroup'", file=sys.stderr)
+    sys.exit(1)
+CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 
-    except Exception as exc:
-        print("Error updating statistics:", exc, file=sys.stderr)
+# -------------------------------
+# API exposed to JS
+# -------------------------------
+class Api:
+    def get_state(self):
+        return {"categories": CATS, "colors": COLS, "descriptions": DESC, "initial": CATS[0] if CATS else None}
 
-def update_map_and_statistics(geocode_category: str) -> None:
-    update_map(geocode_category)
-    update_statistics(geocode_category)
+    def get_layer(self, geocode_category):
+        try:
+            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            df = only_A_to_E(df)
+            df = to_plot_crs(df, cfg)
+            stats = compute_stats(df)
+            home  = bounds_to_leaflet(df.total_bounds) if not df.empty else [[0,0],[0,0]]
+            gj    = gdf_to_geojson_min(df)
+            return {"ok": True, "geojson": gj, "home_bounds": home, "stats": stats}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
-# ----------------------------------------------------------
-# Clean exit
-# ----------------------------------------------------------
-def close_application():
-    try:
-        plt.close(fig)
-        plt.close(fig_stats)
-    except Exception:
-        pass
-    try:
-        root.quit()
-        root.destroy()
-    finally:
-        os._exit(0)
+    def js_log(self, msg):
+        print("JS:", msg, file=sys.stderr)
 
-# ----------------------------------------------------------
-# Main
-# ----------------------------------------------------------
+api = Api()
+
+# -------------------------------
+# HTML / JS (Leaflet + Chart.js + live opacity slider + bulletproof chart resize)
+# -------------------------------
+HTML = r"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Maps Overview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+<style>
+  html, body { height:100%; margin:0; }
+  .wrap {
+    height:100%;
+    display:grid;
+    grid-template-columns: 260px 1fr 380px;
+    grid-template-rows: 44px 1fr;
+    grid-template-areas:
+      "ctrl bar stats"
+      "ctrl map stats";
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  }
+  .ctrl { grid-area: ctrl; border-right: 2px solid #2b3442; padding:10px; background:#eef0f3; position:relative; }
+  .bar  { grid-area: bar; display:flex; gap:10px; align-items:center; padding:6px 10px; }
+  .map  { grid-area: map; position:relative; background:#ddd; }
+  #map  { position:absolute; inset:0; }
+  .stats { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
+  .legend { padding:8px 10px; }
+  .legend table { width:100%; border-collapse:collapse; font-size:12px; }
+  .legend td { padding:2px 6px; vertical-align:middle; }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; border:1px solid #8884; }
+  .btn { padding:6px 10px; border:1px solid #ccd; background:#fff; border-radius:6px; cursor:pointer; }
+  .btn:active { transform:translateY(1px); }
+  select { padding:6px; width:100%; }
+  /* Chart container fills the remaining column space */
+  #chartBox { flex:1 1 auto; padding:8px 10px; position:relative; }
+  /* Canvas sized via JS to exact pixels; default to 100% so first paint fills */
+  #chart { position:absolute; inset:8px 10px 8px 12px; width:calc(100% - 22px); height:calc(100% - 16px); }
+  #err { color:#b00; padding:6px 10px; font-size:12px; display:none; }
+  #exitBtn { position:absolute; bottom:12px; left:10px; }
+  .slider { display:flex; align-items:center; gap:8px; }
+  .slider input[type=range]{ width:160px; }
+  .label-sm { font-size:12px; color:#333; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="ctrl">
+    <div style="font-weight:600; margin-bottom:6px;">Geocode category:</div>
+    <select id="cat"></select>
+    <button id="exitBtn" class="btn">Exit</button>
+  </div>
+
+  <div class="bar">
+    <button id="homeBtn" class="btn">Home</button>
+    <button id="fitBtn"  class="btn">Fit layer</button>
+    <div class="slider">
+      <span class="label-sm">Opacity</span>
+      <input id="opacity" type="range" min="10" max="100" value="80">
+      <span id="opv" class="label-sm">80%</span>
+    </div>
+  </div>
+
+  <div class="map"><div id="map"></div></div>
+
+  <div class="stats">
+    <div id="err"></div>
+    <div class="legend" id="legend"></div>
+    <div id="chartBox"><canvas id="chart"></canvas></div>
+  </div>
+</div>
+
+<script>
+var MAP=null, LAYER=null, COLOR_MAP={}, DESC_MAP={}, CURRENT_CAT=null, HOME_BOUNDS=null, CHART=null;
+var FILL_ALPHA = 0.8; // default 80%
+
+function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
+function setError(msg){
+  var e = document.getElementById('err');
+  if (msg){ e.style.display='block'; e.textContent = msg; }
+  else { e.style.display='none'; e.textContent=''; }
+}
+
+function mkLegend() {
+  var container = document.getElementById('legend');
+  var html = '<div style="font-weight:600; margin-bottom:6px;">Area by sensitivity code</div><table>';
+  var codes = ['A','B','C','D','E'];
+  for (var i=0;i<codes.length;i++){
+    var c = codes[i];
+    var color = COLOR_MAP[c] || '#bdbdbd';
+    var desc  = DESC_MAP[c] || '';
+    html += '<tr><td><span class="swatch" style="background:'+color+'"></span></td><td style="width:60px;">'+c+'</td><td>'+desc+'</td></tr>';
+  }
+  html += '</table>';
+  container.innerHTML = html;
+}
+
+function renderChart(stats) {
+  var ctx = document.getElementById('chart').getContext('2d');
+  if (CHART) CHART.destroy();
+
+  var colors = [];
+  for (var i=0;i<stats.labels.length;i++){
+    var code = stats.labels[i];
+    colors.push(COLOR_MAP[code] || '#bdbdbd');
+  }
+
+  CHART = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: stats.labels,
+      datasets: [{
+        label: 'km²',
+        data: stats.values,
+        backgroundColor: colors,
+        borderColor: '#ffffff',
+        borderWidth: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      resizeDelay: 0,
+      animation: false,
+      plugins: { legend: { display:false }, title: { display:true, text:'Area by sensitivity code (km²)' } },
+      scales: { y: { beginAtZero:true, ticks:{ padding:6 } }, x:{ ticks:{ padding:4 } } },
+      layout: { padding: { left: 0, right:0, top:0, bottom:0 } }
+    }
+  });
+
+  // ensure first fit to container pixels
+  resizeChartToBox();
+}
+
+function styleFeature(f){
+  var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
+  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
+}
+
+function loadLayer(cat, preserveView){
+  var prev = null;
+  if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
+
+  window.pywebview.api.get_layer(cat).then(function(res){
+    if (!res.ok){ setError('Failed to load layer: '+res.error); return; }
+    setError('');
+    CURRENT_CAT = cat;
+    HOME_BOUNDS = res.home_bounds;
+
+    if (LAYER){ MAP.removeLayer(LAYER); LAYER=null; }
+    LAYER = L.geoJSON(res.geojson, { style: styleFeature, renderer: L.canvas() }).addTo(MAP);
+
+    if (preserveView && prev){
+      MAP.setView(prev.center, prev.zoom, { animate:false });
+    } else {
+      MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
+    }
+    renderChart(res.stats);
+  }).catch(function(err){
+    setError('API error: '+err); logErr('API error: '+err);
+  });
+}
+
+// ---------- Responsive resizing for MAP and CHART ----------
+function debounce(fn, ms){
+  var t; return function(){ var ctx=this, args=arguments; clearTimeout(t); t=setTimeout(function(){ fn.apply(ctx,args); }, ms||50); };
+}
+
+function resizeChartToBox(){
+  if (!CHART) return;
+  var box = document.getElementById('chartBox');
+  var canvas = document.getElementById('chart');
+  var w = Math.max(0, box.clientWidth);
+  var h = Math.max(0, box.clientHeight);
+  // Set CSS size explicitly before Chart resize
+  canvas.style.width  = w + 'px';
+  canvas.style.height = h + 'px';
+  // Also drop width/height HTML attributes if any
+  canvas.removeAttribute('width');
+  canvas.removeAttribute('height');
+  // Tell Chart.js to resize to these pixels
+  CHART.resize(w, h);
+}
+
+function setupResizeObservers(){
+  var chartBox = document.getElementById('chartBox');
+  var mapBox   = document.getElementById('map');
+
+  var onChartResize = debounce(function(){ resizeChartToBox(); }, 25);
+  var onMapResize   = debounce(function(){ if (MAP) MAP.invalidateSize(false); }, 25);
+
+  if (typeof ResizeObserver !== 'undefined'){
+    try {
+      var ro1 = new ResizeObserver(onChartResize);
+      ro1.observe(chartBox);
+      var ro2 = new ResizeObserver(onMapResize);
+      ro2.observe(mapBox);
+    } catch (e){ logErr('ResizeObserver failed: '+e); }
+  }
+
+  // Window resize fallback
+  window.addEventListener('resize', function(){ onChartResize(); onMapResize(); });
+
+  // Last-resort polling (covers some embedded WebView edge cases)
+  var lastW = -1, lastH = -1;
+  setInterval(function(){
+    var w = chartBox.clientWidth, h = chartBox.clientHeight;
+    if (w !== lastW || h !== lastH){
+      lastW = w; lastH = h;
+      onChartResize();
+    }
+  }, 200);
+}
+
+function boot(){
+  // Leaflet map
+  MAP = L.map('map', { zoomControl:true, preferCanvas:true });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              { maxZoom:19, attribution:'© OpenStreetMap' }).addTo(MAP);
+  MAP.setView([0,0], 2);
+
+  setupResizeObservers();
+
+  // Load state
+  window.pywebview.api.get_state().then(function(state){
+    COLOR_MAP = state.colors || {};
+    DESC_MAP  = state.descriptions || {};
+    mkLegend();
+
+    var sel = document.getElementById('cat');
+    var cats = state.categories || [];
+    for (var i=0;i<cats.length;i++){
+      var o = document.createElement('option');
+      o.value = cats[i]; o.textContent = cats[i];
+      sel.appendChild(o);
+    }
+
+    if (state.initial){
+      sel.value = state.initial;
+      loadLayer(state.initial, false);
+    }
+
+    // Events
+    sel.addEventListener('change', function(){ loadLayer(sel.value, true); });
+    document.getElementById('homeBtn').addEventListener('click', function(){
+      if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
+    });
+    document.getElementById('fitBtn').addEventListener('click', function(){
+      if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
+    });
+    document.getElementById('exitBtn').addEventListener('click', function(){ window.close(); });
+
+    // Opacity slider
+    var slider = document.getElementById('opacity');
+    var opv    = document.getElementById('opv');
+    slider.addEventListener('input', function(){
+      var v = parseInt(slider.value, 10);
+      FILL_ALPHA = v / 100.0;
+      opv.textContent = v + '%';
+      if (LAYER) LAYER.setStyle({ fillOpacity: FILL_ALPHA });
+    });
+  }).catch(function(err){
+    setError('Failed to get state: '+err); logErr('get_state failed: '+err);
+  });
+}
+
+// Ensure API is ready
+window.addEventListener('pywebviewready', function(){ boot(); });
+// Fallback if pywebviewready never fires
+document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview && window.pywebview.api) { boot(); } });
+</script>
+</body>
+</html>
+"""
+
+# -------------------------------
+# Run
+# -------------------------------
 if __name__ == "__main__":
-    # ---- File locations -----------------------------------
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    config_file = os.path.join(base_dir, "../system/config.ini")
-    parquet_file = os.path.join(base_dir, "../output/geoparquet/tbl_flat.parquet")
-
-    # ---- Load resources -----------------------------------
-    config = read_config(config_file)
-    colour_map = get_color_mapping(config)
-    desc_map = get_descriptions(config)
-
-    tbl_flat_data = load_geoparquet(parquet_file)
-    if tbl_flat_data.empty:
-        print("Fatal: tbl_flat.parquet is empty or missing.", file=sys.stderr)
-        sys.exit(1)
-    if "name_gis_geocodegroup" not in tbl_flat_data.columns:
-        print("Fatal: Column 'name_gis_geocodegroup' missing in tbl_flat.", file=sys.stderr)
-        sys.exit(1)
-
-    only_valid = _only_A_to_E(tbl_flat_data)
-    FULL_EXTENT = only_valid.total_bounds if not only_valid.empty else tbl_flat_data.total_bounds
-    geocode_categories = sorted(tbl_flat_data["name_gis_geocodegroup"].dropna().unique().tolist())
-
-    # ---- Tk layout ----------------------------------------
-    root = tk.Tk()
-    root.title("Maps Overview")
-    root.geometry("1600x900")
-    root.protocol("WM_DELETE_WINDOW", close_application)
-
-    pw = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief='raised', sashwidth=8,
-                        sashcursor='sb_h_double_arrow')
-    pw.pack(fill=tk.BOTH, expand=True)
-
-    # Left controls
-    control_frame = ttk.Frame(pw, width=220)
-    ttk.Label(control_frame, text="Geocode category:").pack(anchor="w", pady=(8,2), padx=8)
-    geocode_var = tk.StringVar()
-    cb = ttk.Combobox(control_frame, textvariable=geocode_var,
-                      values=geocode_categories, state="readonly")
-    cb.pack(anchor="w", pady=(0,8), padx=8, fill=tk.X)
-    exit_btn = ttk.Button(control_frame, text="Exit", command=close_application, bootstyle=WARNING)
-    exit_btn.pack(side="bottom", anchor="sw", padx=8, pady=8)
-
-    # Middle: map + header toolbar
-    map_frame = ttk.Frame(pw)
-    header = ttk.Frame(map_frame)
-    header.pack(side="top", fill="x")
-
-    fig = Figure(figsize=(16, 9), dpi=100, constrained_layout=False)
-    ax = fig.add_subplot(111)
-    _apply_map_axes_layout()
-    canvas = FigureCanvasTkAgg(fig, master=map_frame)
-    canvas_widget = canvas.get_tk_widget()
-    canvas_widget.pack(fill=tk.BOTH, expand=True)
-
-    # Matplotlib toolbar (used by our custom buttons)
-    toolbar_container = ttk.Frame(map_frame)  # not packed visually
-    toolbar = NavigationToolbar2Tk(canvas, toolbar_container)
-    toolbar.update()
-
-    # Header buttons
-    ttk.Button(header, text="Home",    command=nav_home).pack(side="left", padx=6, pady=6)
-    ttk.Button(header, text="Fit layer", command=nav_fit_layer).pack(side="left", padx=6, pady=6)
-    ttk.Button(header, text="Pan ⊛",  command=lambda: nav_set_mode("PAN")).pack(side="left", padx=6, pady=6)
-    ttk.Button(header, text="Zoom ⊞", command=lambda: nav_set_mode("ZOOM")).pack(side="left", padx=6, pady=6)
-    ttk.Button(header, text="Save",   command=nav_save_png).pack(side="left", padx=6, pady=6)
-
-    # Hook pan/zoom events -> debounced basemap refresh
-    def _on_release(event):
-        # Mouse release after pan or zoom rectangle
-        schedule_basemap_refresh(120)
-
-    def _on_scroll(event):
-        # If you enable wheel zoom elsewhere, keep tiles in sync
-        schedule_basemap_refresh(120)
-
-    fig.canvas.mpl_connect("button_release_event", _on_release)
-    fig.canvas.mpl_connect("scroll_event", _on_scroll)
-
-    # Right: stats (table + bar chart)
-    stats_frame = ttk.Frame(pw, width=360)
-    stats_table_label = ttk.Label(stats_frame, text="Area by sensitivity code",
-                                  anchor="center", font=("TkDefaultFont", 10, "bold"))
-    stats_table_label.pack(pady=6)
-
-    stats_table_frame = ttk.Frame(stats_frame)
-    stats_table_frame.pack(fill=tk.X, expand=False, padx=8, pady=(0, 6))
-    stats_table = ttk.Treeview(
-        stats_table_frame,
-        columns=("Sensitivity code", "Description", "Area (km²)"),
-        show="tree headings",
-        height=8
+    window = webview.create_window(
+        title="Maps Overview",
+        html=HTML,
+        js_api=api,
+        width=1600, height=900, resizable=True
     )
-    stats_table.column("#0", width=36, anchor="center")
-    stats_table.heading("#0", text="")
-    stats_table.heading("Sensitivity code", anchor="center", text="Sensitivity code")
-    stats_table.heading("Description", anchor="center", text="Description")
-    stats_table.heading("Area (km²)", anchor="center", text="Area (km²)")
-    stats_table.column("Sensitivity code", width=120, anchor="center")
-    stats_table.column("Description", width=160, anchor="w")
-    stats_table.column("Area (km²)", width=100, anchor="e")
-    stats_table.pack(fill=tk.X, expand=False, padx=0, pady=0)
-
-    stats_bar_frame = ttk.Frame(stats_frame)
-    stats_bar_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 8))
-    fig_stats = Figure(figsize=(4, 3), dpi=100, constrained_layout=False)
-    ax_stats = fig_stats.add_subplot(111)
-    ax_stats.margins(x=0.10, y=0.10)  # 10% data padding
-    ax_stats.set_position([0.10, 0.10, 0.80, 0.80])  # 10% figure border
-    stats_canvas = FigureCanvasTkAgg(fig_stats, master=stats_bar_frame)
-    stats_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
-
-    # Add panes
-    pw.add(control_frame, minsize=200, stretch='never')
-    pw.add(map_frame, stretch='always')
-    pw.add(stats_frame, minsize=320, stretch='never')
-
-    # Combobox selection -> redraw
-    def _on_select(event=None):
-        if geocode_var.get():
-            update_map_and_statistics(geocode_var.get())
-    cb.bind("<<ComboboxSelected>>", _on_select)
-
-    # Initial draw
-    if geocode_categories:
-        geocode_var.set(geocode_categories[0])
-        update_map_and_statistics(geocode_categories[0])
-
-    root.mainloop()
+    # Force modern engine on Windows (Edge WebView2)
+    webview.start(gui="edgechromium", debug=False)
