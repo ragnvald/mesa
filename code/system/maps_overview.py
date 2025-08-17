@@ -14,10 +14,11 @@ import webview  # pip install pywebview
 # -------------------------------
 # Paths / constants
 # -------------------------------
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE  = os.path.join(BASE_DIR, "../system/config.ini")
-PARQUET_FILE = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")
-PLOT_CRS     = "EPSG:4326"
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE   = os.path.join(BASE_DIR, "../system/config.ini")
+PARQUET_FILE  = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")
+SEGMENT_FILE  = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
+PLOT_CRS      = "EPSG:4326"
 
 # -------------------------------
 # Config / colors
@@ -45,7 +46,7 @@ def get_desc_mapping(cfg: configparser.ConfigParser) -> dict:
     return {c: (cfg[c].get("description","") if c in cfg else "") for c in "ABCDE"}
 
 # -------------------------------
-# Data
+# Data helpers
 # -------------------------------
 def load_parquet(path: str) -> gpd.GeoDataFrame:
     try:
@@ -110,25 +111,42 @@ def compute_stats(gdf: gpd.GeoDataFrame) -> dict:
     return {"labels": list("ABCDE"), "values": vals}
 
 # -------------------------------
-# Load / state
+# Load datasets
 # -------------------------------
-cfg   = read_config(CONFIG_FILE)
-COLS  = get_color_mapping(cfg)
-DESC  = get_desc_mapping(cfg)
-GDF   = load_parquet(PARQUET_FILE)
+cfg          = read_config(CONFIG_FILE)
+COLS         = get_color_mapping(cfg)
+DESC         = get_desc_mapping(cfg)
+GDF          = load_parquet(PARQUET_FILE)
+SEG_GDF      = load_parquet(SEGMENT_FILE)
+
 if GDF.empty or "name_gis_geocodegroup" not in GDF.columns:
-    print("GeoParquet missing or lacks 'name_gis_geocodegroup'", file=sys.stderr)
+    print("GeoParquet missing or lacks 'name_gis_geocodegroup' (tbl_flat)", file=sys.stderr)
     sys.exit(1)
-CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist())
+
+CATS     = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist())
+
+# Segment categories are optional; if absent, we expose a single "All" bucket
+if not SEG_GDF.empty and "name_gis_geocodegroup" in SEG_GDF.columns:
+    SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
+else:
+    SEG_CATS = []  # "All" will be provided client-side if empty/not present
 
 # -------------------------------
-# API exposed to JS
+# API exposed to JavaScript
 # -------------------------------
 class Api:
     def get_state(self):
-        return {"categories": CATS, "colors": COLS, "descriptions": DESC, "initial": CATS[0] if CATS else None}
+        return {
+            "geocode_categories": CATS,
+            "segment_categories": SEG_CATS,
+            "colors": COLS,
+            "descriptions": DESC,
+            "initial_geocode": CATS[0] if CATS else None,
+            "has_segments": (not SEG_GDF.empty)
+        }
 
-    def get_layer(self, geocode_category):
+    def get_geocode_layer(self, geocode_category):
+        """Return GeoJSON + stats + home bounds for a geocode category."""
         try:
             df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
             df = only_A_to_E(df)
@@ -140,13 +158,38 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def get_segment_layer(self, seg_category_or_all):
+        """Return GeoJSON for the segments overlay (no stats, no bounds change)."""
+        try:
+            if SEG_GDF.empty:
+                return {"ok": False, "error": "Segments dataset is empty or missing."}
+            if "name_gis_geocodegroup" in SEG_GDF.columns and seg_category_or_all not in (None, "", "__ALL__"):
+                df = SEG_GDF[SEG_GDF["name_gis_geocodegroup"] == seg_category_or_all].copy()
+            else:
+                df = SEG_GDF.copy()  # no category column or '__ALL__' → all segments
+
+            df = only_A_to_E(df)
+            df = to_plot_crs(df, cfg)
+            gj = gdf_to_geojson_min(df)
+            return {"ok": True, "geojson": gj}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def js_log(self, msg):
         print("JS:", msg, file=sys.stderr)
+
+    def exit_app(self):
+        """Close the window from JS (Exit button)."""
+        try:
+            webview.destroy_window()
+        except Exception:
+            # Last-resort fallback to ensure the process exits in frozen builds
+            os._exit(0)
 
 api = Api()
 
 # -------------------------------
-# HTML / JS (Leaflet + Chart.js + live opacity slider + bulletproof chart resize)
+# HTML / JS UI
 # -------------------------------
 HTML = r"""
 <!doctype html>
@@ -163,30 +206,33 @@ HTML = r"""
   .wrap {
     height:100%;
     display:grid;
-    grid-template-columns: 260px 1fr 380px;
-    grid-template-rows: 44px 1fr;
+    grid-template-columns: 280px 1fr 420px;
+    grid-template-rows: 48px 1fr;
     grid-template-areas:
       "ctrl bar stats"
       "ctrl map stats";
     font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }
-  .ctrl { grid-area: ctrl; border-right: 2px solid #2b3442; padding:10px; background:#eef0f3; position:relative; }
-  .bar  { grid-area: bar; display:flex; gap:10px; align-items:center; padding:6px 10px; }
-  .map  { grid-area: map; position:relative; background:#ddd; }
-  #map  { position:absolute; inset:0; }
-  .stats { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
-  .legend { padding:8px 10px; }
+  .ctrl   { grid-area: ctrl; border-right: 2px solid #2b3442; padding:10px; background:#eef0f3; position:relative; overflow:auto; }
+  .section{ margin-bottom:12px; }
+  .section h3 { margin:8px 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .indent { padding-left:18px; }
+  .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; }
+  .map    { grid-area: map; position:relative; background:#ddd; }
+  #map    { position:absolute; inset:0; }
+  .stats  { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
+  .legend { padding:8px 12px; }
   .legend table { width:100%; border-collapse:collapse; font-size:12px; }
   .legend td { padding:2px 6px; vertical-align:middle; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; border:1px solid #8884; }
   .btn { padding:6px 10px; border:1px solid #ccd; background:#fff; border-radius:6px; cursor:pointer; }
   .btn:active { transform:translateY(1px); }
-  select { padding:6px; width:100%; }
-  /* Chart container fills the remaining column space */
-  #chartBox { flex:1 1 auto; padding:8px 10px; position:relative; }
-  /* Canvas sized via JS to exact pixels; default to 100% so first paint fills */
-  #chart { position:absolute; inset:8px 10px 8px 12px; width:calc(100% - 22px); height:calc(100% - 16px); }
-  #err { color:#b00; padding:6px 10px; font-size:12px; display:none; }
+  select, .chkrow { width:100%; }
+  select { padding:6px; }
+  .chkrow { display:flex; align-items:center; gap:8px; }
+  #chartBox { flex:1 1 auto; padding:8px 12px; position:relative; }
+  #chart { position:absolute; inset:8px 12px; width:calc(100% - 24px); height:calc(100% - 16px); }
+  #err { color:#b00; padding:6px 12px; font-size:12px; display:none; }
   #exitBtn { position:absolute; bottom:12px; left:10px; }
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
@@ -196,8 +242,35 @@ HTML = r"""
 <body>
 <div class="wrap">
   <div class="ctrl">
-    <div style="font-weight:600; margin-bottom:6px;">Geocode category:</div>
-    <select id="cat"></select>
+
+    <!-- Segments overlay group (top) -->
+    <div class="section">
+      <h3 class="chkrow">
+        <input type="checkbox" id="segToggle">
+        <label for="segToggle" style="font-weight:600;">Additional layer: Segments (on top)</label>
+      </h3>
+      <div class="indent">
+        <label for="segcat" class="label-sm">Segment category</label>
+        <select id="segcat" disabled></select>
+        <div id="segHint" class="label-sm" style="margin-top:6px; opacity:0.75;"></div>
+      </div>
+    </div>
+
+    <!-- Geocoded areas group -->
+    <div class="section">
+      <h3 class="chkrow">
+        <input type="checkbox" id="geoToggle" checked>
+        <label for="geoToggle" style="font-weight:600;">Geocoded areas</label>
+      </h3>
+      <div class="indent">
+        <label for="cat" class="label-sm">Category</label>
+        <select id="cat"></select>
+        <div class="label-sm" style="margin-top:6px; opacity:0.75;">
+          Controls the statistics on the right.
+        </div>
+      </div>
+    </div>
+
     <button id="exitBtn" class="btn">Exit</button>
   </div>
 
@@ -221,7 +294,7 @@ HTML = r"""
 </div>
 
 <script>
-var MAP=null, LAYER=null, COLOR_MAP={}, DESC_MAP={}, CURRENT_CAT=null, HOME_BOUNDS=null, CHART=null;
+var MAP=null, LAYER=null, LAYER_SEG=null, COLOR_MAP={}, DESC_MAP={}, HOME_BOUNDS=null, CHART=null;
 var FILL_ALPHA = 0.8; // default 80%
 
 function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
@@ -278,60 +351,25 @@ function renderChart(stats) {
     }
   });
 
-  // ensure first fit to container pixels
   resizeChartToBox();
 }
 
-function styleFeature(f){
-  var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
-  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
-}
-
-function loadLayer(cat, preserveView){
-  var prev = null;
-  if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
-
-  window.pywebview.api.get_layer(cat).then(function(res){
-    if (!res.ok){ setError('Failed to load layer: '+res.error); return; }
-    setError('');
-    CURRENT_CAT = cat;
-    HOME_BOUNDS = res.home_bounds;
-
-    if (LAYER){ MAP.removeLayer(LAYER); LAYER=null; }
-    LAYER = L.geoJSON(res.geojson, { style: styleFeature, renderer: L.canvas() }).addTo(MAP);
-
-    if (preserveView && prev){
-      MAP.setView(prev.center, prev.zoom, { animate:false });
-    } else {
-      MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
-    }
-    renderChart(res.stats);
-  }).catch(function(err){
-    setError('API error: '+err); logErr('API error: '+err);
-  });
-}
-
-// ---------- Responsive resizing for MAP and CHART ----------
+// --- Responsive resizing (map + chart) ---
 function debounce(fn, ms){
   var t; return function(){ var ctx=this, args=arguments; clearTimeout(t); t=setTimeout(function(){ fn.apply(ctx,args); }, ms||50); };
 }
-
 function resizeChartToBox(){
   if (!CHART) return;
   var box = document.getElementById('chartBox');
   var canvas = document.getElementById('chart');
   var w = Math.max(0, box.clientWidth);
   var h = Math.max(0, box.clientHeight);
-  // Set CSS size explicitly before Chart resize
   canvas.style.width  = w + 'px';
   canvas.style.height = h + 'px';
-  // Also drop width/height HTML attributes if any
   canvas.removeAttribute('width');
   canvas.removeAttribute('height');
-  // Tell Chart.js to resize to these pixels
   CHART.resize(w, h);
 }
-
 function setupResizeObservers(){
   var chartBox = document.getElementById('chartBox');
   var mapBox   = document.getElementById('map');
@@ -347,11 +385,8 @@ function setupResizeObservers(){
       ro2.observe(mapBox);
     } catch (e){ logErr('ResizeObserver failed: '+e); }
   }
-
-  // Window resize fallback
   window.addEventListener('resize', function(){ onChartResize(); onMapResize(); });
 
-  // Last-resort polling (covers some embedded WebView edge cases)
   var lastW = -1, lastH = -1;
   setInterval(function(){
     var w = chartBox.clientWidth, h = chartBox.clientHeight;
@@ -362,9 +397,71 @@ function setupResizeObservers(){
   }, 200);
 }
 
+// --- Layer styling ---
+function styleFeature(f){
+  var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
+  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
+}
+function styleFeatureSeg(f){
+  // Slightly stronger outline to distinguish overlay
+  var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
+  return { pane:'segmentsPane', color:'#f7f7f7', weight:0.7, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
+}
+
+// --- Loading geocoded layer (controls stats) ---
+function loadGeocodeLayer(cat, preserveView){
+  var prev = null;
+  if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
+  window.pywebview.api.get_geocode_layer(cat).then(function(res){
+    if (!res.ok){ setError('Failed to load geocode: '+res.error); return; }
+    setError('');
+    HOME_BOUNDS = res.home_bounds;
+
+    var geoVisible = document.getElementById('geoToggle').checked;
+    if (geoVisible){
+      if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
+      LAYER = L.geoJSON(res.geojson, { style: styleFeature, pane:'geocodePane', renderer: L.canvas() }).addTo(MAP);
+      // Keep segments visually on top after geocode layer refresh
+      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+      if (preserveView && prev){
+        MAP.setView(prev.center, prev.zoom, { animate:false });
+      } else {
+        MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
+      }
+    }
+    // Always update stats from selected geocode (even if hidden)
+    renderChart(res.stats);
+  }).catch(function(err){
+    setError('API error: '+err); logErr('API error: '+err);
+  });
+}
+
+// --- Loading / reloading segments overlay (independent, must be on top) ---
+function loadSegmentsLayer(segCatOrAll){
+  if (!document.getElementById('segToggle').checked){
+    if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; }
+    return;
+  }
+  window.pywebview.api.get_segment_layer(segCatOrAll).then(function(res){
+    if (!res.ok){ setError('Failed to load segments: '+res.error); return; }
+    setError('');
+    if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG = null; }
+    LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, pane:'segmentsPane', renderer: L.canvas() }).addTo(MAP);
+    // Ensure overlay stays above everything
+    try { LAYER_SEG.bringToFront(); } catch(e){}
+  }).catch(function(err){
+    setError('API error: '+err); logErr('API error: '+err);
+  });
+}
+
+// --- Boot
 function boot(){
-  // Leaflet map
+  // Leaflet map + panes to control z-order
   MAP = L.map('map', { zoomControl:true, preferCanvas:true });
+  // Base tiles (tilePane ~ 200). Put geocode above base, segments well above overlays.
+  MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
+  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650; // clearly on top
+
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               { maxZoom:19, attribution:'© OpenStreetMap' }).addTo(MAP);
   MAP.setView([0,0], 2);
@@ -377,37 +474,112 @@ function boot(){
     DESC_MAP  = state.descriptions || {};
     mkLegend();
 
-    var sel = document.getElementById('cat');
-    var cats = state.categories || [];
-    for (var i=0;i<cats.length;i++){
+    // Geocode controls
+    var geocat = document.getElementById('cat');
+    var geocodes = state.geocode_categories || [];
+    for (var i=0;i<geocodes.length;i++){
       var o = document.createElement('option');
-      o.value = cats[i]; o.textContent = cats[i];
-      sel.appendChild(o);
+      o.value = geocodes[i]; o.textContent = geocodes[i];
+      geocat.appendChild(o);
+    }
+    if (state.initial_geocode){
+      geocat.value = state.initial_geocode;
+      loadGeocodeLayer(state.initial_geocode, false);
     }
 
-    if (state.initial){
-      sel.value = state.initial;
-      loadLayer(state.initial, false);
+    // Segments controls
+    var segToggle = document.getElementById('segToggle');
+    var segcat    = document.getElementById('segcat');
+    var segHint   = document.getElementById('segHint');
+
+    if (state.has_segments){
+      var segcats = state.segment_categories || [];
+      segcat.innerHTML = '';
+      if (segcats.length === 0){
+        var o = document.createElement('option');
+        o.value = "__ALL__"; o.textContent = "All segments";
+        segcat.appendChild(o);
+        segHint.textContent = "This dataset has no categories; showing all segments.";
+      } else {
+        for (var i=0;i<segcats.length;i++){
+          var so = document.createElement('option');
+          so.value = segcats[i]; so.textContent = segcats[i];
+          segcat.appendChild(so);
+        }
+        segHint.textContent = "Choose an optional segments category to overlay.";
+      }
+    } else {
+      segToggle.disabled = true;
+      segcat.disabled = true;
+      segHint.textContent = "Segments dataset not available.";
     }
 
-    // Events
-    sel.addEventListener('change', function(){ loadLayer(sel.value, true); });
+    // Events: Segments (top) first
+    segToggle.addEventListener('change', function(){
+      segcat.disabled = !this.checked;
+      if (this.checked){
+        loadSegmentsLayer(segcat.value || "__ALL__");
+      } else {
+        if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; }
+      }
+    });
+    segcat.addEventListener('change', function(){
+      if (segToggle.checked){
+        loadSegmentsLayer(segcat.value || "__ALL__");
+      }
+    });
+
+    // Events: Geocode group toggle
+    document.getElementById('geoToggle').addEventListener('change', function(){
+      if (this.checked){
+        loadGeocodeLayer(geocat.value, true);
+      } else {
+        if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
+        if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+      }
+    });
+
+    // Events: geocode category change
+    geocat.addEventListener('change', function(){
+      var geoVisible = document.getElementById('geoToggle').checked;
+      loadGeocodeLayer(geocat.value, geoVisible); // preserve view iff visible
+    });
+
+    // Top bar buttons
     document.getElementById('homeBtn').addEventListener('click', function(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
+      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
     });
     document.getElementById('fitBtn').addEventListener('click', function(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
+      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
     });
-    document.getElementById('exitBtn').addEventListener('click', function(){ window.close(); });
 
-    // Opacity slider
+    // Exit button -> call Python API (works in WebView)
+    document.getElementById('exitBtn').addEventListener('click', function(){
+      if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
+        window.pywebview.api.exit_app();
+      }
+    });
+    // Optional: ESC to exit
+    window.addEventListener('keydown', function(e){
+      if (e.key === 'Escape'){
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
+          window.pywebview.api.exit_app();
+        }
+      }
+    });
+
+    // Opacity slider applies to BOTH layers
     var slider = document.getElementById('opacity');
     var opv    = document.getElementById('opv');
     slider.addEventListener('input', function(){
       var v = parseInt(slider.value, 10);
       FILL_ALPHA = v / 100.0;
       opv.textContent = v + '%';
-      if (LAYER) LAYER.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER)     LAYER.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER_SEG) LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
     });
   }).catch(function(err){
     setError('Failed to get state: '+err); logErr('get_state failed: '+err);
@@ -431,7 +603,7 @@ if __name__ == "__main__":
         title="Maps Overview",
         html=HTML,
         js_api=api,
-        width=1600, height=900, resizable=True
+        width=1300, height=800, resizable=True
     )
     # Force modern engine on Windows (Edge WebView2)
     webview.start(gui="edgechromium", debug=False)
