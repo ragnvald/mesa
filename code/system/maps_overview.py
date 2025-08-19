@@ -4,7 +4,7 @@
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
-import os, sys
+import os, sys, base64
 import configparser
 import pandas as pd
 import geopandas as gpd
@@ -129,7 +129,10 @@ CATS     = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 if not SEG_GDF.empty and "name_gis_geocodegroup" in SEG_GDF.columns:
     SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 else:
-    SEG_CATS = []  # "All" will be provided client-side if empty/not present
+    SEG_CATS = []
+
+# Optional Bing key (for aerial tiles)
+BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
 
 # -------------------------------
 # API exposed to JavaScript
@@ -142,11 +145,11 @@ class Api:
             "colors": COLS,
             "descriptions": DESC,
             "initial_geocode": CATS[0] if CATS else None,
-            "has_segments": (not SEG_GDF.empty)
+            "has_segments": (not SEG_GDF.empty),
+            "bing_key": BING_KEY
         }
 
     def get_geocode_layer(self, geocode_category):
-        """Return GeoJSON + stats + home bounds for a geocode category."""
         try:
             df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
             df = only_A_to_E(df)
@@ -159,15 +162,13 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_segment_layer(self, seg_category_or_all):
-        """Return GeoJSON for the segments overlay (no stats, no bounds change)."""
         try:
             if SEG_GDF.empty:
                 return {"ok": False, "error": "Segments dataset is empty or missing."}
             if "name_gis_geocodegroup" in SEG_GDF.columns and seg_category_or_all not in (None, "", "__ALL__"):
                 df = SEG_GDF[SEG_GDF["name_gis_geocodegroup"] == seg_category_or_all].copy()
             else:
-                df = SEG_GDF.copy()  # no category column or '__ALL__' → all segments
-
+                df = SEG_GDF.copy()
             df = only_A_to_E(df)
             df = to_plot_crs(df, cfg)
             gj = gdf_to_geojson_min(df)
@@ -175,16 +176,36 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def js_log(self, msg):
-        print("JS:", msg, file=sys.stderr)
-
     def exit_app(self):
-        """Close the window from JS (Exit button)."""
         try:
             webview.destroy_window()
         except Exception:
-            # Last-resort fallback to ensure the process exits in frozen builds
             os._exit(0)
+
+    def save_png(self, data_url: str):
+        """Receive data URL from JS and save PNG via a Save dialog (non-deprecated)."""
+        try:
+            if "," in data_url:
+                _, b64 = data_url.split(",", 1)
+            else:
+                b64 = data_url
+            data = base64.b64decode(b64)
+
+            win = webview.windows[0]
+            path = win.create_file_dialog(
+                webview.FileDialog.SAVE,            # <-- new constant
+                save_filename="map_export.png",
+                file_types=("PNG Files (*.png)",)
+            )
+            if not path:
+                return {"ok": False, "error": "User cancelled."}
+            if isinstance(path, (list, tuple)):
+                path = path[0]
+            with open(path, "wb") as f:
+                f.write(data)
+            return {"ok": True, "path": path}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
 api = Api()
 
@@ -201,12 +222,13 @@ HTML = r"""
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 <style>
   html, body { height:100%; margin:0; }
   .wrap {
     height:100%;
     display:grid;
-    grid-template-columns: 280px 1fr 420px;
+    grid-template-columns: 300px 1fr 420px;
     grid-template-rows: 48px 1fr;
     grid-template-areas:
       "ctrl bar stats"
@@ -217,17 +239,21 @@ HTML = r"""
   .section{ margin-bottom:12px; }
   .section h3 { margin:8px 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
   .indent { padding-left:18px; }
-  .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; }
+  .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; flex-wrap:wrap; }
   .map    { grid-area: map; position:relative; background:#ddd; }
   #map    { position:absolute; inset:0; }
+  /* Hide zoom control only while exporting */
+  #map.exporting .leaflet-control-zoom { display: none !important; }
   .stats  { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
-  .legend { padding:8px 12px; }
-  .legend table { width:100%; border-collapse:collapse; font-size:12px; }
-  .legend td { padding:2px 6px; vertical-align:middle; }
+  .legend { padding:8px 12px; font-size:12px; }
+  .legend table { width:100%; border-collapse:collapse; }
+  .legend th, .legend td { padding:4px 6px; vertical-align:middle; }
+  .legend thead th { border-bottom:1px solid #cdd4de; font-weight:600; }
+  .legend tfoot td { border-top:1px solid #cdd4de; font-weight:600; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; border:1px solid #8884; }
+  .num { text-align:right; white-space:nowrap; }
   .btn { padding:6px 10px; border:1px solid #ccd; background:#fff; border-radius:6px; cursor:pointer; }
   .btn:active { transform:translateY(1px); }
-  select, .chkrow { width:100%; }
   select { padding:6px; }
   .chkrow { display:flex; align-items:center; gap:8px; }
   #chartBox { flex:1 1 auto; padding:8px 12px; position:relative; }
@@ -236,7 +262,6 @@ HTML = r"""
   #exitBtn { position:absolute; bottom:12px; left:10px; }
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
-  .label-sm { font-size:12px; color:#333; }
 </style>
 </head>
 <body>
@@ -247,7 +272,7 @@ HTML = r"""
     <div class="section">
       <h3 class="chkrow">
         <input type="checkbox" id="segToggle">
-        <label for="segToggle" style="font-weight:600;">Additional layer: Segments (on top)</label>
+        <label for="segToggle" style="font-weight:600;">Sensitivity line segments</label>
       </h3>
       <div class="indent">
         <label for="segcat" class="label-sm">Segment category</label>
@@ -268,6 +293,16 @@ HTML = r"""
         <div class="label-sm" style="margin-top:6px; opacity:0.75;">
           Controls the statistics on the right.
         </div>
+
+        <!-- Basemap selector (left pane) -->
+        <div style="margin-top:10px;">
+          <label for="basemapSelLeft" class="label-sm">Basemap</label>
+          <select id="basemapSelLeft" title="Choose basemap">
+            <option value="osm">OpenStreetMap</option>
+            <option value="topo">OSM Topography</option>
+            <option value="sat">Bing Aerial / Satellite</option>
+          </select>
+        </div>
       </div>
     </div>
 
@@ -276,12 +311,15 @@ HTML = r"""
 
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
-    <button id="fitBtn"  class="btn">Fit layer</button>
+
     <div class="slider">
       <span class="label-sm">Opacity</span>
       <input id="opacity" type="range" min="10" max="100" value="80">
       <span id="opv" class="label-sm">80%</span>
     </div>
+
+    <!-- Single export button -->
+    <button id="exportBtn" class="btn" title="Export current map to PNG (~300 dpi)">Export PNG</button>
   </div>
 
   <div class="map"><div id="map"></div></div>
@@ -294,8 +332,10 @@ HTML = r"""
 </div>
 
 <script>
-var MAP=null, LAYER=null, LAYER_SEG=null, COLOR_MAP={}, DESC_MAP={}, HOME_BOUNDS=null, CHART=null;
+var MAP=null, BASE=null, BASE_SOURCES=null, LAYER=null, LAYER_SEG=null, COLOR_MAP={}, DESC_MAP={}, HOME_BOUNDS=null, CHART=null;
 var FILL_ALPHA = 0.8; // default 80%
+var BING_KEY_JS = null;
+var SATELLITE_FALLBACK = null;
 
 function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
 function setError(msg){
@@ -304,17 +344,46 @@ function setError(msg){
   else { e.style.display='none'; e.textContent=''; }
 }
 
-function mkLegend() {
+// --- Legend / totals table ---
+function renderLegend(stats) {
   var container = document.getElementById('legend');
-  var html = '<div style="font-weight:600; margin-bottom:6px;">Area by sensitivity code</div><table>';
   var codes = ['A','B','C','D','E'];
-  for (var i=0;i<codes.length;i++){
-    var c = codes[i];
+  var values = {};
+  var total = 0;
+
+  if (stats && Array.isArray(stats.labels) && Array.isArray(stats.values)) {
+    for (var i=0;i<stats.labels.length;i++){
+      var code = String(stats.labels[i] || '').toUpperCase();
+      var val  = Number(stats.values[i] || 0);
+      values[code] = val;
+      total += val;
+    }
+  } else {
+    for (var j=0;j<codes.length;j++) values[codes[j]] = 0;
+  }
+
+  function fmtKm2(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:2}); }
+  function fmtPct(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:1}); }
+
+  var html = '<div style="font-weight:600; margin-bottom:6px;">Totals by sensitivity</div>';
+  html += '<table><thead><tr><th></th><th>Code</th><th>Description</th><th class="num">Area (km²)</th><th class="num">Share</th></tr></thead><tbody>';
+
+  for (var k=0;k<codes.length;k++){
+    var c = codes[k];
     var color = COLOR_MAP[c] || '#bdbdbd';
     var desc  = DESC_MAP[c] || '';
-    html += '<tr><td><span class="swatch" style="background:'+color+'"></span></td><td style="width:60px;">'+c+'</td><td>'+desc+'</td></tr>';
+    var valKm2 = values[c] || 0;
+    var pct = total > 0 ? (valKm2 / total * 100.0) : 0;
+    html += '<tr>' +
+      '<td><span class="swatch" style="background:'+color+'"></span></td>' +
+      '<td style="width:48px;">'+c+'</td>' +
+      '<td>'+desc+'</td>' +
+      '<td class="num">'+fmtKm2(valKm2)+'</td>' +
+      '<td class="num">'+fmtPct(pct)+'%</td>' +
+    '</tr>';
   }
-  html += '</table>';
+  html += '</tbody><tfoot><tr><td></td><td></td><td>Total</td><td class="num">'+fmtKm2(total)+'</td><td class="num">100%</td></tr></tfoot></table>';
+
   container.innerHTML = html;
 }
 
@@ -345,7 +414,7 @@ function renderChart(stats) {
       maintainAspectRatio: false,
       resizeDelay: 0,
       animation: false,
-      plugins: { legend: { display:false }, title: { display:true, text:'Area by sensitivity code (km²)' } },
+      plugins: { legend: { display:false }, title: { display:true, text:'Overall area by sensitivity code (km²)' } },
       scales: { y: { beginAtZero:true, ticks:{ padding:6 } }, x:{ ticks:{ padding:4 } } },
       layout: { padding: { left: 0, right:0, top:0, bottom:0 } }
     }
@@ -397,13 +466,96 @@ function setupResizeObservers(){
   }, 200);
 }
 
+// --- Basemaps (incl. Bing Aerial) ---
+function tileXYToQuadKey(x, y, z){
+  var quadKey = '';
+  for (var i = z; i > 0; i--) {
+    var digit = 0;
+    var mask = 1 << (i - 1);
+    if ((x & mask) !== 0) digit += 1;
+    if ((y & mask) !== 0) digit += 2;
+    quadKey += digit.toString();
+  }
+  return quadKey;
+}
+var BingAerial = L.TileLayer.extend({
+  createTile: function(coords, done){
+    var tile = document.createElement('img');
+    var zoom = this._getZoomForUrl();
+    if (!BING_KEY_JS){
+      tile.onload = function(){ done(null, tile); };
+      tile.onerror = function(){ done(null, tile); };
+      tile.src = 'about:blank';
+      return tile;
+    }
+    var q = tileXYToQuadKey(coords.x, coords.y, zoom);
+    var t = (coords.x + coords.y) % 4;
+    var url = 'https://ecn.t'+t+'.tiles.virtualearth.net/tiles/a' + q + '.jpeg?g=1&n=z&key=' + encodeURIComponent(BING_KEY_JS);
+    tile.alt = '';
+    tile.setAttribute('role', 'presentation');
+    tile.style.width = this.options.tileSize + 'px';
+    tile.style.height = this.options.tileSize + 'px';
+    tile.crossOrigin = 'anonymous';
+    tile.onload = function(){ done(null, tile); };
+    tile.onerror = function(){ done(null, tile); };
+    tile.src = url;
+    return tile;
+  }
+});
+
+function buildBaseSources(){
+  var common = { maxZoom: 19, crossOrigin: true, tileSize: 256 };
+
+  var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    ...common,
+    attribution: '© OpenStreetMap'
+  });
+
+  var topo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+    ...common,
+    subdomains: ['a','b','c'],
+    maxZoom: 17,
+    attribution: '© OpenStreetMap, © OpenTopoMap (CC-BY-SA)'
+  });
+
+  SATELLITE_FALLBACK = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    ...common,
+    attribution: 'Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+  });
+
+  var bing = new BingAerial({ tileSize: 256 });
+
+  return { osm: osm, topo: topo, sat_bing: bing, sat_esri: SATELLITE_FALLBACK };
+}
+
+function setBasemap(kind){
+  var center = MAP.getCenter(), zoom = MAP.getZoom();
+  if (BASE){ MAP.removeLayer(BASE); BASE = null; }
+
+  if (kind === 'osm'){
+    BASE = BASE_SOURCES.osm;
+  } else if (kind === 'topo'){
+    BASE = BASE_SOURCES.topo;
+  } else if (kind === 'sat'){
+    BASE = BING_KEY_JS ? BASE_SOURCES.sat_bing : BASE_SOURCES.sat_esri;
+    if (!BING_KEY_JS){
+      setError('Bing key not set; using Esri World Imagery as satellite fallback.');
+      setTimeout(function(){ setError(''); }, 4000);
+    }
+  } else {
+    BASE = BASE_SOURCES.osm;
+  }
+
+  BASE.addTo(MAP);
+  MAP.setView(center, zoom, { animate:false });
+}
+
 // --- Layer styling ---
 function styleFeature(f){
   var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
   return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
 }
 function styleFeatureSeg(f){
-  // Slightly stronger outline to distinguish overlay
   var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
   return { pane:'segmentsPane', color:'#f7f7f7', weight:0.7, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
 }
@@ -421,7 +573,6 @@ function loadGeocodeLayer(cat, preserveView){
     if (geoVisible){
       if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
       LAYER = L.geoJSON(res.geojson, { style: styleFeature, pane:'geocodePane', renderer: L.canvas() }).addTo(MAP);
-      // Keep segments visually on top after geocode layer refresh
       if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
       if (preserveView && prev){
         MAP.setView(prev.center, prev.zoom, { animate:false });
@@ -429,14 +580,14 @@ function loadGeocodeLayer(cat, preserveView){
         MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
       }
     }
-    // Always update stats from selected geocode (even if hidden)
+    renderLegend(res.stats);
     renderChart(res.stats);
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
   });
 }
 
-// --- Loading / reloading segments overlay (independent, must be on top) ---
+// --- Loading / reloading segments overlay (top) ---
 function loadSegmentsLayer(segCatOrAll){
   if (!document.getElementById('segToggle').checked){
     if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; }
@@ -447,32 +598,76 @@ function loadSegmentsLayer(segCatOrAll){
     setError('');
     if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG = null; }
     LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, pane:'segmentsPane', renderer: L.canvas() }).addTo(MAP);
-    // Ensure overlay stays above everything
     try { LAYER_SEG.bringToFront(); } catch(e){}
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
   });
 }
 
+// --- Export current map view to PNG (hide zoom buttons during capture) ---
+function exportMapPng(){
+  var node = document.getElementById('map');
+
+  function capture(){
+    return html2canvas(node, {
+      useCORS: true,
+      allowTaint: false,
+      backgroundColor: '#ffffff',
+      scale: 3  // ~300 dpi on 96-dpi basis
+    });
+  }
+
+  // Temporarily hide zoom buttons by adding a class
+  node.classList.add('exporting');
+  var baseWasOn = BASE && MAP.hasLayer(BASE);
+
+  capture().then(function(canvas){
+    node.classList.remove('exporting');
+    var png = canvas.toDataURL('image/png');
+    return window.pywebview.api.save_png(png);
+  }).then(function(res){
+    if (!res.ok){ setError('Save cancelled or failed: ' + (res.error || '')); setTimeout(function(){ setError(''); }, 4000); }
+  }).catch(function(){
+    // Retry without basemap (in case of CORS tainting)
+    if (baseWasOn) MAP.removeLayer(BASE);
+    capture().then(function(canvas){
+      node.classList.remove('exporting');
+      if (baseWasOn) BASE.addTo(MAP);
+      var png = canvas.toDataURL('image/png');
+      return window.pywebview.api.save_png(png);
+    }).then(function(res){
+      if (!res.ok){ setError('Save cancelled or failed: ' + (res.error || '')); setTimeout(function(){ setError(''); }, 4000); }
+    }).catch(function(err2){
+      node.classList.remove('exporting');
+      if (baseWasOn) BASE.addTo(MAP);
+      setError('Export failed. Try OSM/Topography basemap.'); logErr(err2);
+      setTimeout(function(){ setError(''); }, 5000);
+    });
+  });
+}
+
 // --- Boot
 function boot(){
-  // Leaflet map + panes to control z-order
   MAP = L.map('map', { zoomControl:true, preferCanvas:true });
-  // Base tiles (tilePane ~ 200). Put geocode above base, segments well above overlays.
   MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
-  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650; // clearly on top
+  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650;
 
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-              { maxZoom:19, attribution:'© OpenStreetMap' }).addTo(MAP);
+  // Add a scale bar bottom-left
+  L.control.scale({ position:'bottomleft', metric:true, imperial:false, maxWidth:200 }).addTo(MAP);
+
+  BASE_SOURCES = buildBaseSources();
+  BASE = BASE_SOURCES.osm.addTo(MAP);
+
   MAP.setView([0,0], 2);
-
   setupResizeObservers();
 
   // Load state
   window.pywebview.api.get_state().then(function(state){
     COLOR_MAP = state.colors || {};
     DESC_MAP  = state.descriptions || {};
-    mkLegend();
+    BING_KEY_JS = (state.bing_key || '').trim() || null;
+
+    renderLegend(null); // initial empty table
 
     // Geocode controls
     var geocat = document.getElementById('cat');
@@ -499,7 +694,7 @@ function boot(){
         var o = document.createElement('option');
         o.value = "__ALL__"; o.textContent = "All segments";
         segcat.appendChild(o);
-        segHint.textContent = "This dataset has no categories; showing all segments.";
+        segHint.textContent = "Line segments only.";
       } else {
         for (var i=0;i<segcats.length;i++){
           var so = document.createElement('option');
@@ -514,7 +709,7 @@ function boot(){
       segHint.textContent = "Segments dataset not available.";
     }
 
-    // Events: Segments (top) first
+    // Events: Segments
     segToggle.addEventListener('change', function(){
       segcat.disabled = !this.checked;
       if (this.checked){
@@ -529,7 +724,7 @@ function boot(){
       }
     });
 
-    // Events: Geocode group toggle
+    // Events: geocode
     document.getElementById('geoToggle').addEventListener('change', function(){
       if (this.checked){
         loadGeocodeLayer(geocat.value, true);
@@ -538,30 +733,31 @@ function boot(){
         if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
       }
     });
-
-    // Events: geocode category change
     geocat.addEventListener('change', function(){
       var geoVisible = document.getElementById('geoToggle').checked;
-      loadGeocodeLayer(geocat.value, geoVisible); // preserve view iff visible
+      loadGeocodeLayer(geocat.value, geoVisible);
     });
 
-    // Top bar buttons
+    // Left-pane basemap selector
+    document.getElementById('basemapSelLeft').addEventListener('change', function(){
+      setBasemap(this.value);
+    });
+
+    // Home (fit to current geocode bounds)
     document.getElementById('homeBtn').addEventListener('click', function(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
       if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
     });
-    document.getElementById('fitBtn').addEventListener('click', function(){
-      if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
-      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
-    });
 
-    // Exit button -> call Python API (works in WebView)
+    // Export (top bar)
+    document.getElementById('exportBtn').addEventListener('click', exportMapPng);
+
+    // Exit button
     document.getElementById('exitBtn').addEventListener('click', function(){
       if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
         window.pywebview.api.exit_app();
       }
     });
-    // Optional: ESC to exit
     window.addEventListener('keydown', function(e){
       if (e.key === 'Escape'){
         if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
@@ -570,7 +766,7 @@ function boot(){
       }
     });
 
-    // Opacity slider applies to BOTH layers
+    // Opacity slider (both layers)
     var slider = document.getElementById('opacity');
     var opv    = document.getElementById('opv');
     slider.addEventListener('input', function(){
@@ -588,7 +784,6 @@ function boot(){
 
 // Ensure API is ready
 window.addEventListener('pywebviewready', function(){ boot(); });
-// Fallback if pywebviewready never fires
 document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview && window.pywebview.api) { boot(); } });
 </script>
 </body>
@@ -600,10 +795,9 @@ document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview &
 # -------------------------------
 if __name__ == "__main__":
     window = webview.create_window(
-        title="Maps Overview",
+        title="Maps overview",
         html=HTML,
         js_api=api,
         width=1300, height=800, resizable=True
     )
-    # Force modern engine on Windows (Edge WebView2)
     webview.start(gui="edgechromium", debug=False)
