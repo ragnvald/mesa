@@ -7,11 +7,10 @@ Create geocodes: H3 or Basic Mosaic (polygonize-based)
 
 GUI (ttkbootstrap) with log panel + progress bar. Also supports CLI via --nogui.
 
-Basic mosaic now uses:
-  - buffer points/lines (meters, metric CRS)
-  - unary_union of *boundaries* (lines)
-  - polygonize() to get atomic faces
-  - STRtree-based filtering to keep only faces covered by at least one input polygon
+- H3: robust across h3 v3/v4 (uses geo_to_cells with fallbacks).
+- Mosaic: buffer → boundary unary_union → polygonize → robust coverage filter
+  (validates polygons, avoids global union, and uses safe point-in-poly checks).
+- Groups (tbl_geocode_group) store a SINGLE bounding-box Polygon (WGS84).
 """
 
 from __future__ import annotations
@@ -24,16 +23,27 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Union, Optional
 
+import numpy as np
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import (
+    Polygon, MultiPolygon, GeometryCollection, Point, box
+)
+from shapely.geometry import mapping as shp_mapping
 from shapely.ops import unary_union, polygonize
+from shapely.prepared import prep
+
+# make_valid (Shapely >=2), optional
+try:
+    from shapely.validation import make_valid as shapely_make_valid
+except Exception:
+    shapely_make_valid = None
 
 # --- H3 optional ---
 try:
-    import h3
+    import h3  # v3 or v4
 except Exception:
     h3 = None
 
@@ -81,7 +91,7 @@ def resolve_base_dir(cli_root: str | None) -> Path:
     if cli_root:
         return Path(cli_root)
     base = Path(os.getcwd())
-    if base.name == "system":
+    if base.name.lower() == "system":
         return base.parent
     return base
 
@@ -103,8 +113,9 @@ def update_progress(new_value: float):
     if root is None or progress_var is None or progress_label is None:
         return
     def task():
-        progress_var.set(new_value)
-        progress_label.config(text=f"{int(new_value)}%")
+        v = max(0, min(100, float(new_value)))
+        progress_var.set(v)
+        progress_label.config(text=f"{int(v)}%")
     root.after(0, task)
 
 def log_to_gui(message: str, level: str = "INFO"):
@@ -127,11 +138,14 @@ def log_to_gui(message: str, level: str = "INFO"):
 # -----------------------------------------------------------------------------
 def ensure_wgs84(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if gdf.empty:
-        return gdf
-    if gdf.crs is None:
+        return gdf.set_crs("EPSG:4326", allow_override=True)
+    try:
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+        elif str(gdf.crs).upper() not in ("EPSG:4326", "WGS84"):
+            gdf = gdf.to_crs(4326)
+    except Exception:
         gdf = gdf.set_crs("EPSG:4326", allow_override=True)
-    elif gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(4326)
     return gdf
 
 def working_metric_crs_for(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> str:
@@ -143,7 +157,7 @@ def working_metric_crs_for(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser
         return f"EPSG:{epsg}"
     if gdf.crs and getattr(gdf.crs, "is_projected", False):
         return gdf.crs.to_string()
-    return "EPSG:3857"
+    return "EPSG:3857"  # reasonable metric default
 
 def ensure_gpkg_tables(gpkg: Path):
     import fiona
@@ -188,8 +202,8 @@ def save_groups_objects_parquet(base_dir: Path):
     try:
         g = read_gpkg_layer(gpkg, "tbl_geocode_group")
         o = read_gpkg_layer(gpkg, "tbl_geocode_object")
-        g.to_parquet(geodir / "tbl_geocode_group.parquet", index=False)
-        o.to_parquet(geodir / "tbl_geocode_object.parquet", index=False)
+        ensure_wgs84(g).to_parquet(geodir / "tbl_geocode_group.parquet", index=False)
+        ensure_wgs84(o).to_parquet(geodir / "tbl_geocode_object.parquet", index=False)
         log_to_gui("Updated GeoParquet mirrors for geocodes.")
     except Exception as e:
         log_to_gui(f"Parquet sync failed: {e}", "WARN")
@@ -201,6 +215,7 @@ def purge_group_and_objects(gpkg: Path, group_name: str) -> Tuple[int, int]:
         if not g.empty and "name_gis_geocodegroup" in g:
             keep = g[g["name_gis_geocodegroup"] != group_name]
             removed_g = len(g) - len(keep)
+            keep = ensure_wgs84(keep)
             keep.to_file(gpkg, layer="tbl_geocode_group", driver="GPKG")
     except Exception as e:
         log_to_gui(f"Purge groups failed: {e}", "WARN")
@@ -209,23 +224,57 @@ def purge_group_and_objects(gpkg: Path, group_name: str) -> Tuple[int, int]:
         if not o.empty and "name_gis_geocodegroup" in o:
             keep = o[o["name_gis_geocodegroup"] != group_name]
             removed_o = len(o) - len(keep)
+            keep = ensure_wgs84(keep)
             keep.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG")
     except Exception as e:
         log_to_gui(f"Purge objects failed: {e}", "WARN")
     return removed_g, removed_o
 
-def write_group(gpkg: Path, name: str, title: str, description: str, geom) -> int:
+# --- NEW: bbox helper --------------------------------------------------------
+def _bbox_polygon_from(
+    thing: Union[gpd.GeoDataFrame, gpd.GeoSeries, Polygon, MultiPolygon, GeometryCollection]
+) -> Optional[Polygon]:
+    """
+    Produce a single bounding-box Polygon (WGS84) for the given geometry or Geo(Data)Frame.
+    Returns None if bounds cannot be determined.
+    """
+    try:
+        if isinstance(thing, (gpd.GeoDataFrame, gpd.GeoSeries)):
+            t = ensure_wgs84(thing)
+            if t.empty:
+                return None
+            minx, miny, maxx, maxy = t.total_bounds
+        else:
+            if thing is None or getattr(thing, "is_empty", True):
+                return None
+            minx, miny, maxx, maxy = thing.bounds
+        arr = np.array([minx, miny, maxx, maxy], dtype=float)
+        if not np.isfinite(arr).all():
+            return None
+        if maxx <= minx or maxy <= miny:
+            dx = dy = 1e-6
+            minx, miny, maxx, maxy = minx - dx, miny - dy, maxx + dx, maxy + dy
+        return box(minx, miny, maxx, maxy)
+    except Exception:
+        return None
+
+def write_group(gpkg: Path, name: str, title: str, description: str, geom_bbox_wgs84: Polygon) -> int:
+    """
+    Write/append a single group row where geometry is a **bounding-box Polygon** in WGS84.
+    """
+    if geom_bbox_wgs84 is None or getattr(geom_bbox_wgs84, "is_empty", True):
+        raise ValueError("write_group: bbox polygon is empty or None.")
+
     groups = read_gpkg_layer(gpkg, "tbl_geocode_group")
-    next_id = int(groups["id"].max() + 1) if ("id" in groups and not groups.empty) else 1
-    if isinstance(geom, Polygon):
-        geom = MultiPolygon([geom])
+    next_id = int(groups["id"].max() + 1) if ("id" in groups.columns and not groups.empty) else 1
+
     row = {
         "id": next_id,
         "name": name,
         "name_gis_geocodegroup": name,
         "title_user": title,
         "description": description,
-        "geometry": geom,
+        "geometry": geom_bbox_wgs84,
     }
     newg = pd.concat([groups, gpd.GeoDataFrame([row], geometry="geometry", crs="EPSG:4326")], ignore_index=True)
     newg = ensure_wgs84(newg)
@@ -235,69 +284,149 @@ def write_group(gpkg: Path, name: str, title: str, description: str, geom) -> in
 def append_objects(gpkg: Path, objects_gdf: gpd.GeoDataFrame):
     objects_gdf = ensure_wgs84(objects_gdf)
     existing = read_gpkg_layer(gpkg, "tbl_geocode_object")
+
+    # Align schemas
     for col in objects_gdf.columns:
         if col not in existing.columns:
             existing[col] = None
     for col in existing.columns:
         if col not in objects_gdf.columns:
             objects_gdf[col] = None
+
     merged = pd.concat([existing[objects_gdf.columns], objects_gdf], ignore_index=True)
     merged = gpd.GeoDataFrame(merged, geometry="geometry", crs="EPSG:4326")
     merged.to_file(gpkg, layer="tbl_geocode_object", driver="GPKG")
 
 # -----------------------------------------------------------------------------
-# H3 helpers (unchanged)
+# H3 helpers (robust across v3/v4)
 # -----------------------------------------------------------------------------
-def _boundary_func():
-    if h3 is None:
-        raise RuntimeError("h3 not installed")
-    ver = getattr(h3, "__version__", "")
-    if ver.startswith("4."):
-        def _b(idx):
-            for kw in (dict(geo_json=True), dict(geojson=True), dict()):
-                try:
-                    return h3.cell_to_boundary(idx, **kw)
-                except TypeError:
-                    continue
-            pts = h3.cell_to_boundary(idx)
-            return [(p[1], p[0]) for p in pts]
-        return _b
-    return lambda idx: h3.h3_to_geo_boundary(idx, geo_json=True)
+def _h3_version() -> str:
+    return getattr(h3, "__version__", "unknown") if h3 else "none"
 
-def _cells_from_polygon(poly, res: int):
+def _cell_boundary(index) -> list[tuple]:
+    """
+    Return boundary ring as [(lng, lat), ...] for a cell index across h3 v3/v4.
+    """
     if h3 is None:
-        raise RuntimeError("h3 not installed")
-    ver = getattr(h3, "__version__", "")
-    if ver.startswith("4.") and hasattr(h3, "geo_to_cells"):
-        return h3.geo_to_cells(poly, res)
-    ring = list(poly.exterior.coords)
+        return []
+    b = h3.cell_to_boundary(index) if hasattr(h3, "cell_to_boundary") else h3.h3_to_geo_boundary(index)
+    out = []
+    for p in b:
+        if isinstance(p, dict):
+            lat = p.get("lat") or p.get("latitude")
+            lng = p.get("lng") or p.get("lon") or p.get("longitude")
+            if lat is not None and lng is not None:
+                out.append((lng, lat))
+        elif isinstance(p, (list, tuple)) and len(p) >= 2:
+            lat, lng = p[0], p[1]  # v4 returns (lat, lng)
+            out.append((lng, lat))
+    return out
+
+def _extract_polygonal(geom):
+    """Return Polygon or MultiPolygon from any geometry; None if nothing polygonal."""
+    if geom is None:
+        return None
+    if isinstance(geom, (Polygon, MultiPolygon)):
+        return geom
+    if isinstance(geom, GeometryCollection):
+        polys = [g for g in geom.geoms if isinstance(g, (Polygon, MultiPolygon))]
+        if not polys:
+            return None
+        u = unary_union(polys)
+        return u.buffer(0) if not u.is_empty else None
     try:
-        return h3.polyfill(ring, res, geo_json=True)
-    except TypeError:
-        return h3.polyfill(ring, res, True)
+        g0 = geom.buffer(0)
+        if isinstance(g0, (Polygon, MultiPolygon)):
+            return g0
+        if g0.geom_type == "GeometryCollection":
+            polys = [g for g in g0.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
+            if not polys:
+                return None
+            return unary_union(polys)
+    except Exception:
+        pass
+    return None
+
+def _polyfill_cells(poly: Polygon, res: int) -> set[str]:
+    """
+    Preferred v4 path: h3.geo_to_cells(geo_interface, res).
+    Fallbacks: v3 h3.polyfill(geojson, res, True/geo_json_conformant=True).
+    """
+    gj = shp_mapping(poly)  # proper GeoJSON (lon, lat)
+    # --- v4 preferred ---
+    if hasattr(h3, "geo_to_cells"):
+        try:
+            return set(h3.geo_to_cells(gj, res))
+        except Exception as e:
+            log_to_gui(f"H3 geo_to_cells failed (R{res}): {e}", "WARN")
+    # --- v3 fallback ---
+    if hasattr(h3, "polyfill"):
+        try:
+            return set(h3.polyfill(gj, res, True))
+        except TypeError:
+            pass
+        for kw in ({"geo_json_conformant": True}, {"geojson_conformant": True}):
+            try:
+                return set(h3.polyfill(gj, res, **kw))
+            except TypeError:
+                continue
+        log_to_gui(f"H3 polyfill failed (R{res}) with all signatures.", "WARN")
+    raise RuntimeError("No compatible H3 polyfill signature worked.")
 
 def h3_from_union(union_geom, res: int) -> gpd.GeoDataFrame:
-    if union_geom is None or union_geom.is_empty:
+    """Build hex polygons covering union_geom at given resolution."""
+    if union_geom is None:
         return gpd.GeoDataFrame(columns=["h3_index", "geometry"], geometry="geometry", crs="EPSG:4326")
-    boundary_of = _boundary_func()
-    polys = union_geom.geoms if union_geom.geom_type == "MultiPolygon" else [union_geom]
+
+    geom_poly = _extract_polygonal(union_geom)
+    if geom_poly is None or geom_poly.is_empty:
+        return gpd.GeoDataFrame(columns=["h3_index", "geometry"], geometry="geometry", crs="EPSG:4326")
+
+    polys = list(geom_poly.geoms) if geom_poly.geom_type == "MultiPolygon" else [geom_poly]
     hexes: set[str] = set()
     for poly in polys:
         try:
-            hexes |= set(_cells_from_polygon(poly, res))
+            hexes |= _polyfill_cells(poly, res)
         except Exception as e:
             log_to_gui(f"H3 polyfill failed (R{res}): {e}", "WARN")
-            continue
-    rows = [{"h3_index": h, "geometry": Polygon(boundary_of(h))} for h in hexes]
+
+    if not hexes:
+        return gpd.GeoDataFrame(columns=["h3_index", "geometry"], geometry="geometry", crs="EPSG:4326")
+
+    rows = [{"h3_index": h, "geometry": Polygon(_cell_boundary(h))} for h in hexes]
     return gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
 
-def union_from_asset_groups(gpkg: Path):
+
+def union_from_asset_groups_or_objects(gpkg: Path):
+    """
+    Prefer union from tbl_asset_group if it has area geometry; else fall back to tbl_asset_object.
+    Always returns WGS84 polygonal geometry or None.
+    """
     g = read_gpkg_layer(gpkg, "tbl_asset_group")
-    if g.empty or "geometry" not in g:
-        return None
     g = ensure_wgs84(g)
-    u = g.geometry.unary_union
-    return u.buffer(0) if not u.is_empty else None
+    g = g[g.geometry.notna()] if "geometry" in g else g
+    union_geom = None
+    if not g.empty and "geometry" in g:
+        try:
+            u = unary_union(g.geometry)
+            u = _extract_polygonal(u)
+            if u and not u.is_empty:
+                union_geom = u
+        except Exception:
+            union_geom = None
+
+    if union_geom is None:
+        ao = read_gpkg_layer(gpkg, "tbl_asset_object")
+        ao = ensure_wgs84(ao)
+        if not ao.empty and "geometry" in ao:
+            try:
+                u = unary_union(ao.geometry)
+                u = _extract_polygonal(u)
+                if u and not u.is_empty:
+                    union_geom = u
+            except Exception:
+                union_geom = None
+    return union_geom
 
 def purge_all_h3(gpkg: Path):
     try:
@@ -312,21 +441,29 @@ def purge_all_h3(gpkg: Path):
 def write_h3_range(base_dir: Path, r_from: int, r_to: int) -> int:
     gpkg = gpkg_path(base_dir)
     ensure_gpkg_tables(gpkg)
-    union_geom = union_from_asset_groups(gpkg)
+    union_geom = union_from_asset_groups_or_objects(gpkg)
     if union_geom is None:
-        raise RuntimeError("tbl_asset_group is missing or empty.")
+        raise RuntimeError("No polygonal geometry found in tbl_asset_group or tbl_asset_object.")
+
     purge_all_h3(gpkg)
     total = 0
+    log_to_gui(f"H3 version: { _h3_version() }", "INFO")
     for r in range(r_from, r_to + 1):
         update_progress(5 + (r - r_from) * (80 / max(1, (r_to - r_from + 1))))
         group_name = f"H3_R{r}"
+
+        # Group geometry = a single bbox polygon
+        bbox_poly = _bbox_polygon_from(union_geom)
+        if bbox_poly is None:
+            raise RuntimeError("Failed to compute bbox for H3 group.")
         gid = write_group(
-            gpkg,
-            name=group_name,
-            title=f"H3 resolution {r}",
-            description=f"H3 hexagons at resolution {r}",
-            geom=union_geom,
+                gpkg,
+                name=group_name,
+                title=f"H3 resolution {r}",
+                description=f"H3 hexagons at resolution {r}",
+                geom_bbox_wgs84=bbox_poly,
         )
+
         gdf = h3_from_union(union_geom, r)
         if gdf.empty:
             log_to_gui(f"No H3 cells produced for resolution {r}.", "WARN")
@@ -362,6 +499,19 @@ def load_asset_objects(base_dir: Path) -> gpd.GeoDataFrame:
         log_to_gui(f"Fallback read tbl_asset_object failed: {e}", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
+def _fix_valid(g):
+    try:
+        if shapely_make_valid is not None:
+            gg = shapely_make_valid(g)
+            if gg is not None and not gg.is_empty:
+                return gg
+    except Exception:
+        pass
+    try:
+        return g.buffer(0)
+    except Exception:
+        return g
+
 def explode_polygons(geoms: List) -> List[Polygon]:
     out = []
     for g in geoms:
@@ -372,16 +522,125 @@ def explode_polygons(geoms: List) -> List[Polygon]:
             out.append(g)
         elif gt == "MultiPolygon":
             out.extend(list(g.geoms))
+        elif gt == "GeometryCollection":
+            for sub in g.geoms:
+                if sub.geom_type == "Polygon":
+                    out.append(sub)
+                elif sub.geom_type == "MultiPolygon":
+                    out.extend(list(sub.geoms))
+    return out
+
+def _safe_covers(poly: Polygon, pt: Point) -> bool:
+    """Robust covers test with fallbacks to avoid GEOS topology exceptions."""
+    try:
+        return poly.covers(pt)
+    except Exception:
+        try:
+            pp = _fix_valid(poly)
+            return pp.covers(pt)
+        except Exception:
+            try:
+                return poly.contains(pt)
+            except Exception:
+                try:
+                    pp = _fix_valid(poly)
+                    return pp.contains(pt)
+                except Exception:
+                    return False
+
+def _covered_faces_via_strtree(originals: List[Polygon], faces: List[Polygon]) -> List[Polygon]:
+    """
+    STRtree-based coverage without query predicate (robust).
+    Query by bbox first, then do safe point-in-poly checks.
+    """
+    if not originals or STRtree is None:
+        return []
+    tree = STRtree(originals)
+    covered = []
+
+    for f in faces:
+        try:
+            pt = f.representative_point()
+        except Exception:
+            # Fall back to centroid if needed
+            try:
+                pt = f.centroid
+            except Exception:
+                continue
+
+        try:
+            cands = tree.query(pt)  # bbox candidates, no predicate
+        except Exception:
+            cands = []
+
+        keep = False
+        if isinstance(cands, np.ndarray):
+            # cands are indices
+            for idx in cands.tolist():
+                geom = originals[int(idx)]
+                if _safe_covers(geom, pt):
+                    keep = True
+                    break
+        else:
+            # cands might be geometries already
+            for geom in cands:
+                if isinstance(geom, (int, np.integer)):
+                    geom = originals[int(geom)]
+                if _safe_covers(geom, pt):
+                    keep = True
+                    break
+
+        if keep:
+            covered.append(f)
+
+    return covered
+
+def _covered_faces_via_union(originals: List[Polygon], faces: List[Polygon]) -> List[Polygon]:
+    """
+    Fallback: build a single prepared union and test representative points.
+    More robust; cost is a single unary_union + cheap point tests.
+    """
+    if not originals:
+        return []
+    try:
+        # Validate originals before union to avoid topology errors
+        originals_valid = [_fix_valid(p) for p in originals]
+        mask = unary_union(originals_valid)
+        if mask.is_empty:
+            return []
+        pmask = prep(mask)
+    except Exception as e:
+        log_to_gui(f"Prepared-union fallback failed to build: {e}", "WARN")
+        return []
+
+    out = []
+    for f in faces:
+        try:
+            pt = f.representative_point()
+        except Exception:
+            try:
+                pt = f.centroid
+            except Exception:
+                continue
+        try:
+            if pmask.covers(pt):
+                out.append(f)
+        except Exception:
+            try:
+                if mask.covers(pt):
+                    out.append(f)
+            except Exception:
+                pass
     return out
 
 def build_basic_mosaic_polygonize(base_dir: Path, cfg: configparser.ConfigParser,
                                   line_buffer_m: float, point_buffer_m: float):
-    """Polygonize-based mosaic (fast): buffer → edges → polygonize → STRtree filter."""
+    """Polygonize-based mosaic (fast): buffer → edges → polygonize → robust coverage filter."""
     assets = load_asset_objects(base_dir)
     if assets.empty or "geometry" not in assets:
         return None, gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
 
-    # honor process flag if present
+    # Honor process flag if present
     if "process" in assets.columns:
         assets = assets[assets["process"].fillna(True)]
 
@@ -392,27 +651,27 @@ def build_basic_mosaic_polygonize(base_dir: Path, cfg: configparser.ConfigParser
         assets = assets.to_crs(metric_crs)
 
     gt = assets.geometry.geom_type
-    pts  = assets[gt.isin(["Point", "MultiPoint"])].copy()
-    lns  = assets[gt.isin(["LineString", "MultiLineString"])].copy()
-    polys = assets[gt.isin(["Polygon", "MultiPolygon"])].copy()
+    pts   = assets[gt.isin(["Point", "MultiPoint"])].copy()
+    lns   = assets[gt.isin(["LineString", "MultiLineString"])].copy()
+    polys = assets[gt.isin(["Polygon", "MultiPolygon", "GeometryCollection"])].copy()
 
     pieces = []
 
     if not pts.empty:
         buf_p = max(0.01, float(point_buffer_m))
         log_to_gui(f"Buffering {len(pts)} points by {buf_p} m …")
-        pts["geometry"] = pts.buffer(buf_p)
+        pts["geometry"] = pts.buffer(buf_p).apply(_fix_valid)
         pieces.append(pts.geometry)
 
     if not lns.empty:
         buf_l = max(0.01, float(line_buffer_m))
         log_to_gui(f"Buffering {len(lns)} lines by {buf_l} m …")
-        lns["geometry"] = lns.buffer(buf_l)
+        lns["geometry"] = lns.buffer(buf_l).apply(_fix_valid)
         pieces.append(lns.geometry)
 
     if not polys.empty:
         log_to_gui(f"Fixing validity for {len(polys)} polygons …")
-        polys["geometry"] = polys.buffer(0)
+        polys["geometry"] = polys.geometry.apply(_fix_valid)
         pieces.append(polys.geometry)
 
     if not pieces:
@@ -422,9 +681,12 @@ def build_basic_mosaic_polygonize(base_dir: Path, cfg: configparser.ConfigParser
     all_polys_series = gpd.GeoSeries(pd.concat(pieces, ignore_index=True), crs=metric_crs)
     all_polys_series = all_polys_series[~all_polys_series.is_empty]
 
-    # --- NEW: polygonize approach ---
+    # Additional defensive validity on the merged set
+    all_polys_series = all_polys_series.apply(_fix_valid)
+    all_polys_series = all_polys_series[~all_polys_series.is_empty]
+
+    # --- polygonize approach ---
     log_to_gui("Building edge network (unary_union of boundaries) …")
-    # Unary-union **of boundaries** (much cheaper than area dissolve)
     try:
         boundaries = [g.boundary for g in all_polys_series.geometry]
         edge_net = unary_union(boundaries)
@@ -434,7 +696,12 @@ def build_basic_mosaic_polygonize(base_dir: Path, cfg: configparser.ConfigParser
 
     update_progress(50)
     log_to_gui("Polygonizing edge network into atomic faces …")
-    faces = list(polygonize(edge_net))
+    try:
+        faces = list(polygonize(edge_net))
+    except Exception as e:
+        log_to_gui(f"Polygonize failed: {e}", "ERROR")
+        return None, gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
+
     if not faces:
         log_to_gui("Polygonize produced no faces.", "WARN")
         return None, gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
@@ -442,53 +709,46 @@ def build_basic_mosaic_polygonize(base_dir: Path, cfg: configparser.ConfigParser
     update_progress(60)
     log_to_gui(f"Polygonize produced {len(faces)} candidate faces. Filtering to covered faces …")
 
-    # Fast coverage test with STRtree on original polygons (no global dissolve)
-    covered: List[Polygon] = []
     originals = explode_polygons(list(all_polys_series.geometry))
-    if STRtree is None:
-        # Fallback without STRtree (slower)
-        for f in faces:
-            pt = f.representative_point()
-            keep = any(p.contains(pt) for p in originals)
-            if keep:
-                covered.append(f)
-    else:
-        tree = STRtree(originals)
-        for f in faces:
-            pt = f.representative_point()
-            # query candidates via point (cheap)
-            cands = tree.query(pt)
-            if any(c.contains(pt) for c in cands):
-                covered.append(f)
+    # Validate originals again (cheap if already valid)
+    originals = [_fix_valid(p) for p in originals if p and not p.is_empty]
+
+    # 1) Try STRtree-based coverage (robust, no predicate)
+    covered = _covered_faces_via_strtree(originals, faces)
+
+    # 2) If nothing survived, robust fallback: prepared union
+    if not covered:
+        log_to_gui("STRtree coverage returned 0 faces; falling back to prepared-union coverage …", "WARN")
+        covered = _covered_faces_via_union(originals, faces)
 
     if not covered:
-        log_to_gui("No covered faces remain after filtering.", "WARN")
+        log_to_gui("No covered faces remain after robust filtering.", "WARN")
         return None, gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
 
     update_progress(75)
-    # Build GDF in metric → WGS84
     gdf_metric = gpd.GeoDataFrame([{"geometry": p} for p in covered], geometry="geometry", crs=metric_crs)
     gdf_wgs = gdf_metric.to_crs(4326)
 
-    # Group geometry = union of disjoint faces (cheap)
-    try:
-        union_wgs = unary_union(list(gdf_wgs.geometry))
-    except Exception:
-        union_wgs = MultiPolygon(list(gdf_wgs.geometry))
+    # We no longer build a global union (avoids topology errors and heavy ops).
+    return None, gdf_wgs
 
-    return union_wgs, gdf_wgs
-
-def write_basic_mosaic(base_dir: Path, union_geom, polys_wgs: gpd.GeoDataFrame) -> int:
+def write_basic_mosaic(base_dir: Path, _union_geom_wgs_unused, polys_wgs: gpd.GeoDataFrame) -> int:
     gpkg = gpkg_path(base_dir)
     ensure_gpkg_tables(gpkg)
 
     purge_group_and_objects(gpkg, "basic_mosaic")
+
+    # Group geometry = bbox over mosaic faces
+    bbox_poly = _bbox_polygon_from(polys_wgs)
+    if bbox_poly is None:
+        raise RuntimeError("Failed to compute bbox for basic_mosaic group.")
+
     gid = write_group(
         gpkg,
         name="basic_mosaic",
         title="Basic mosaic",
         description="Unique polygons representing all overlapping polygons in the assets. Make sure the objects refer to the right geocode group.",
-        geom=union_geom,
+        geom_bbox_wgs84=bbox_poly,
     )
 
     out = polys_wgs.copy()
@@ -527,13 +787,13 @@ def start_mosaic_thread(base_dir: Path, cfg: configparser.ConfigParser, line_m: 
         try:
             log_to_gui(f"Building Basic mosaic (line buffer {line_m} m, point buffer {point_m} m) …")
             update_progress(5)
-            union_wgs, polys = build_basic_mosaic_polygonize(base_dir, cfg, line_m, point_m)
-            if union_wgs is None or polys.empty:
+            union_wgs_unused, polys = build_basic_mosaic_polygonize(base_dir, cfg, line_m, point_m)
+            if polys.empty:
                 log_to_gui("No geometry produced for mosaic.", "WARN")
                 update_progress(0)
                 return
             update_progress(90)
-            n = write_basic_mosaic(base_dir, union_wgs, polys)
+            n = write_basic_mosaic(base_dir, union_wgs_unused, polys)
             update_progress(100)
             log_to_gui(f"COMPLETED: Basic mosaic wrote {n} polygons.")
         except Exception as e:
@@ -566,7 +826,7 @@ def run_gui(base_dir: Path, cfg: configparser.ConfigParser):
 
     info_text = (
         "Choose H3 hexagons or a Basic mosaic built from all asset objects.\n"
-        "Basic mosaic uses a polygonize-based approach (fast) to create unique polygons."
+        "Mosaic uses polygonize + robust coverage filter. Group geometries are bbox (WGS84)."
     )
     ttk.Label(root, text=info_text, wraplength=680, justify="left").pack(padx=10, pady=8)
 
@@ -636,10 +896,10 @@ def main():
         n = write_h3_range(base, args.start_res, args.end_res)
         print(f"Done — wrote {n} H3 cells.")
     else:
-        union_wgs, polys = build_basic_mosaic_polygonize(base, cfg, args.line_buffer_m, args.point_buffer_m)
-        if union_wgs is None or polys.empty:
+        union_wgs_unused, polys = build_basic_mosaic_polygonize(base, cfg, args.line_buffer_m, args.point_buffer_m)
+        if polys.empty:
             print("No geometry produced for mosaic."); sys.exit(4)
-        n = write_basic_mosaic(base, union_wgs, polys)
+        n = write_basic_mosaic(base, union_wgs_unused, polys)
         print(f"Done — wrote {n} mosaic polygons.")
 
 if __name__ == "__main__":
