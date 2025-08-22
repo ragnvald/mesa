@@ -49,10 +49,13 @@ def get_desc_mapping(cfg: configparser.ConfigParser) -> dict:
 # Data helpers
 # -------------------------------
 def load_parquet(path: str) -> gpd.GeoDataFrame:
+    """Load a GeoParquet if it exists; return empty GeoDataFrame otherwise."""
     try:
+        if not os.path.exists(path):
+            return gpd.GeoDataFrame()
         return gpd.read_parquet(path)
     except Exception as e:
-        print("Failed to read parquet:", e, file=sys.stderr)
+        print(f"Failed to read parquet {path}: {e}", file=sys.stderr)
         return gpd.GeoDataFrame()
 
 def only_A_to_E(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -66,15 +69,24 @@ def only_A_to_E(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return keep
 
 def to_plot_crs(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
+    if gdf.empty:
+        return gdf.set_crs(PLOT_CRS, allow_override=True) if gdf.crs is None else gdf
     if gdf.crs is None:
-        epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
-        gdf = gdf.set_crs(epsg=epsg, allow_override=True)
+        # workingprojection can be set as integer like 4326
+        try:
+            epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
+            gdf = gdf.set_crs(epsg=epsg, allow_override=True)
+        except Exception:
+            gdf = gdf.set_crs(PLOT_CRS, allow_override=True)
     if str(gdf.crs).upper() != PLOT_CRS:
         try:
             gdf = gdf.to_crs(PLOT_CRS)
         except Exception:
-            epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
-            gdf = gdf.set_crs(epsg=epsg, allow_override=True).to_crs(PLOT_CRS)
+            try:
+                epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
+                gdf = gdf.set_crs(epsg=epsg, allow_override=True).to_crs(PLOT_CRS)
+            except Exception:
+                gdf = gdf.set_crs(PLOT_CRS, allow_override=True)
     return gdf
 
 def bounds_to_leaflet(b):
@@ -111,7 +123,7 @@ def compute_stats(gdf: gpd.GeoDataFrame) -> dict:
     return {"labels": list("ABCDE"), "values": vals}
 
 # -------------------------------
-# Load datasets
+# Load datasets (robust, non-fatal)
 # -------------------------------
 cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
@@ -119,17 +131,16 @@ DESC         = get_desc_mapping(cfg)
 GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
 
-if GDF.empty or "name_gis_geocodegroup" not in GDF.columns:
-    print("GeoParquet missing or lacks 'name_gis_geocodegroup' (tbl_flat)", file=sys.stderr)
-    sys.exit(1)
+# Availability flags (no crashing)
+GEOCODE_AVAILABLE = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
+SEGMENTS_AVAILABLE = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 
-CATS     = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist())
-
-# Segment categories are optional; if absent, we expose a single "All" bucket
-if not SEG_GDF.empty and "name_gis_geocodegroup" in SEG_GDF.columns:
+# Categories (safe)
+CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
+if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
     SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 else:
-    SEG_CATS = []
+    SEG_CATS = []  # empty means "All segments" option only, if segments exist
 
 # Optional Bing key (for aerial tiles)
 BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
@@ -138,19 +149,38 @@ BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
 # API exposed to JavaScript
 # -------------------------------
 class Api:
+    # Optional logger to silence JS debug calls
+    def js_log(self, message: str):
+        try:
+            print(f"[JS] {message}")
+        except Exception:
+            pass
+
     def get_state(self):
+        """Return UI state, including availability and category lists."""
         return {
-            "geocode_categories": CATS,
-            "segment_categories": SEG_CATS,
+            "geocode_available": GEOCODE_AVAILABLE,
+            "geocode_categories": CATS if GEOCODE_AVAILABLE else [],
+            "segment_available": SEGMENTS_AVAILABLE,
+            "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],
             "colors": COLS,
             "descriptions": DESC,
-            "initial_geocode": CATS[0] if CATS else None,
-            "has_segments": (not SEG_GDF.empty),
+            "initial_geocode": (CATS[0] if (GEOCODE_AVAILABLE and CATS) else None),
+            "has_segments": SEGMENTS_AVAILABLE,
             "bing_key": BING_KEY
         }
 
     def get_geocode_layer(self, geocode_category):
+        """Return GeoJSON + stats for selected geocode category (or empty if unavailable)."""
         try:
+            if not GEOCODE_AVAILABLE:
+                # Empty geocode layer & stats
+                return {
+                    "ok": True,
+                    "geojson": {"type":"FeatureCollection","features":[]},
+                    "home_bounds": [[0,0],[0,0]],
+                    "stats": {"labels": list("ABCDE"), "values": [0,0,0,0,0]}
+                }
             df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
             df = only_A_to_E(df)
             df = to_plot_crs(df, cfg)
@@ -162,8 +192,9 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_segment_layer(self, seg_category_or_all):
+        """Return segments overlay; if unavailable, respond with error (UI will grey out anyway)."""
         try:
-            if SEG_GDF.empty:
+            if not SEGMENTS_AVAILABLE:
                 return {"ok": False, "error": "Segments dataset is empty or missing."}
             if "name_gis_geocodegroup" in SEG_GDF.columns and seg_category_or_all not in (None, "", "__ALL__"):
                 df = SEG_GDF[SEG_GDF["name_gis_geocodegroup"] == seg_category_or_all].copy()
@@ -193,7 +224,7 @@ class Api:
 
             win = webview.windows[0]
             path = win.create_file_dialog(
-                webview.FileDialog.SAVE,            # <-- new constant
+                webview.FileDialog.SAVE,
                 save_filename="map_export.png",
                 file_types=("PNG Files (*.png)",)
             )
@@ -236,7 +267,8 @@ HTML = r"""
     font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }
   .ctrl   { grid-area: ctrl; border-right: 2px solid #2b3442; padding:10px; background:#eef0f3; position:relative; overflow:auto; }
-  .section{ margin-bottom:12px; }
+  .section{ margin-bottom:12px; transition: opacity .15s ease; }
+  .section.disabled { opacity: 0.5; }
   .section h3 { margin:8px 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
   .indent { padding-left:18px; }
   .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; flex-wrap:wrap; }
@@ -262,6 +294,7 @@ HTML = r"""
   #exitBtn { position:absolute; bottom:12px; left:10px; }
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
+  .hint { margin-top:6px; opacity:0.75; }
 </style>
 </head>
 <body>
@@ -269,7 +302,7 @@ HTML = r"""
   <div class="ctrl">
 
     <!-- Segments overlay group (top) -->
-    <div class="section">
+    <div class="section" id="segmentsSection">
       <h3 class="chkrow">
         <input type="checkbox" id="segToggle">
         <label for="segToggle" style="font-weight:600;">Sensitivity line segments</label>
@@ -277,12 +310,12 @@ HTML = r"""
       <div class="indent">
         <label for="segcat" class="label-sm">Segment category</label>
         <select id="segcat" disabled></select>
-        <div id="segHint" class="label-sm" style="margin-top:6px; opacity:0.75;"></div>
+        <div id="segHint" class="label-sm hint"></div>
       </div>
     </div>
 
     <!-- Geocoded areas group -->
-    <div class="section">
+    <div class="section" id="geocodeSection">
       <h3 class="chkrow">
         <input type="checkbox" id="geoToggle" checked>
         <label for="geoToggle" style="font-weight:600;">Geocoded areas</label>
@@ -290,9 +323,7 @@ HTML = r"""
       <div class="indent">
         <label for="cat" class="label-sm">Category</label>
         <select id="cat"></select>
-        <div class="label-sm" style="margin-top:6px; opacity:0.75;">
-          Controls the statistics on the right.
-        </div>
+        <div class="label-sm hint" id="geoHint">Controls the statistics on the right.</div>
 
         <!-- Basemap selector (left pane) -->
         <div style="margin-top:10px;">
@@ -391,19 +422,22 @@ function renderChart(stats) {
   var ctx = document.getElementById('chart').getContext('2d');
   if (CHART) CHART.destroy();
 
+  var labels = (stats && stats.labels) ? stats.labels : ['A','B','C','D','E'];
+  var values = (stats && stats.values) ? stats.values : [0,0,0,0,0];
+
   var colors = [];
-  for (var i=0;i<stats.labels.length;i++){
-    var code = stats.labels[i];
+  for (var i=0;i<labels.length;i++){
+    var code = labels[i];
     colors.push(COLOR_MAP[code] || '#bdbdbd');
   }
 
   CHART = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: stats.labels,
+      labels: labels,
       datasets: [{
         label: 'km²',
-        data: stats.values,
+        data: values,
         backgroundColor: colors,
         borderColor: '#ffffff',
         borderWidth: 1
@@ -663,31 +697,52 @@ function boot(){
 
   // Load state
   window.pywebview.api.get_state().then(function(state){
-    COLOR_MAP = state.colors || {};
-    DESC_MAP  = state.descriptions || {};
+    COLOR_MAP   = state.colors || {};
+    DESC_MAP    = state.descriptions || {};
     BING_KEY_JS = (state.bing_key || '').trim() || null;
 
     renderLegend(null); // initial empty table
+    renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]}); // empty chart
 
     // Geocode controls
+    var geocodeSection = document.getElementById('geocodeSection');
+    var geoToggle = document.getElementById('geoToggle');
     var geocat = document.getElementById('cat');
-    var geocodes = state.geocode_categories || [];
-    for (var i=0;i<geocodes.length;i++){
-      var o = document.createElement('option');
-      o.value = geocodes[i]; o.textContent = geocodes[i];
-      geocat.appendChild(o);
-    }
-    if (state.initial_geocode){
-      geocat.value = state.initial_geocode;
-      loadGeocodeLayer(state.initial_geocode, false);
+    var geoHint = document.getElementById('geoHint');
+
+    if (state.geocode_available){
+      var geocodes = state.geocode_categories || [];
+      for (var i=0;i<geocodes.length;i++){
+        var o = document.createElement('option');
+        o.value = geocodes[i]; o.textContent = geocodes[i];
+        geocat.appendChild(o);
+      }
+      if (state.initial_geocode){
+        geocat.value = state.initial_geocode;
+        loadGeocodeLayer(state.initial_geocode, false);
+      }
+      geoToggle.disabled = false;
+      geocat.disabled = false;
+      geocodeSection.classList.remove('disabled');
+      geoHint.textContent = "Controls the statistics on the right.";
+    } else {
+      // Grey out and disable entire geocode group
+      geoToggle.checked = false;
+      geoToggle.disabled = true;
+      geocat.disabled = true;
+      geocodeSection.classList.add('disabled');
+      geocat.innerHTML = '';
+      geoHint.textContent = "Geocoded areas are not available.";
+      // keep legend/chart empty (already rendered)
     }
 
     // Segments controls
+    var segmentsSection = document.getElementById('segmentsSection');
     var segToggle = document.getElementById('segToggle');
     var segcat    = document.getElementById('segcat');
     var segHint   = document.getElementById('segHint');
 
-    if (state.has_segments){
+    if (state.segment_available){
       var segcats = state.segment_categories || [];
       segcat.innerHTML = '';
       if (segcats.length === 0){
@@ -703,9 +758,14 @@ function boot(){
         }
         segHint.textContent = "Choose an optional segments category to overlay.";
       }
+      segToggle.disabled = false;
+      segmentsSection.classList.remove('disabled');
     } else {
+      // Grey out and disable segments group
+      segToggle.checked = false;
       segToggle.disabled = true;
       segcat.disabled = true;
+      segmentsSection.classList.add('disabled');
       segHint.textContent = "Segments dataset not available.";
     }
 
@@ -725,16 +785,19 @@ function boot(){
     });
 
     // Events: geocode
-    document.getElementById('geoToggle').addEventListener('change', function(){
+    geoToggle.addEventListener('change', function(){
       if (this.checked){
         loadGeocodeLayer(geocat.value, true);
       } else {
         if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
         if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+        // Clear stats when layer hidden
+        renderLegend({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
+        renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
       }
     });
     geocat.addEventListener('change', function(){
-      var geoVisible = document.getElementById('geoToggle').checked;
+      var geoVisible = geoToggle.checked;
       loadGeocodeLayer(geocat.value, geoVisible);
     });
 
