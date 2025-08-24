@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import locale
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-
-import os, sys, base64
-import configparser
+import os, sys, base64, configparser, locale
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import mapping
 import webview  # pip install pywebview
+
+# ===============================
+# Locale (safe)
+# ===============================
+try:
+    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+except Exception:
+    pass
 
 # ===============================
 # Paths / constants
@@ -18,9 +22,11 @@ BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE      = os.path.join(BASE_DIR, "../system/config.ini")
 PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")
 SEGMENT_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
+ASSET_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_asset_object.parquet")
 PLOT_CRS         = "EPSG:4326"
-BASIC_GROUP_NAME = "basic_mosaic"   # <- always use this for the right-hand stats
+BASIC_GROUP_NAME = "basic_mosaic"   # stats always from here
 ZOOM_THRESHOLD   = 10               # tooltips appear when map zoom >= this
+STEEL_BLUE       = "#4682B4"        # assets color (semi-transparent via fillOpacity)
 
 # ===============================
 # Config / colors
@@ -104,7 +110,7 @@ def bounds_to_leaflet(b):
     return [[miny, minx],[maxy, maxx]]  # [[south, west],[north, east]]
 
 def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
-    """GeoJSON with compact, tooltip-friendly properties."""
+    """GeoJSON with compact, tooltip-friendly properties for geocodes/segments."""
     feats = []
     for _, row in gdf.iterrows():
         geom = row.geometry
@@ -115,15 +121,23 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
             "area_km2": (float(row.get("area_m2", 0.0)) / 1e6) if ("area_m2" in row) else None,
             "geocode_group": row.get("name_gis_geocodegroup", None),
         }
-        # Optional extras (only if present in tbl_flat)
         if "name_asset_object" in row: props["name_asset_object"] = row.get("name_asset_object", None)
         if "id_asset_object"   in row: props["id_asset_object"]   = row.get("id_asset_object", None)
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
+    return {"type": "FeatureCollection", "features": feats}
 
-        feats.append({
-            "type": "Feature",
-            "geometry": mapping(geom),
-            "properties": props
-        })
+def assets_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
+    """Minimal GeoJSON for assets overlay (steel blue, no category colors)."""
+    feats = []
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        props = {
+            "id_asset_object": row.get("id_asset_object", None),
+            "name_asset_object": row.get("name_asset_object", None),
+        }
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
 
 def compute_stats(gdf: gpd.GeoDataFrame) -> dict:
@@ -158,9 +172,11 @@ COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
+ASSET_GDF    = load_parquet(ASSET_FILE)
 
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
+ASSETS_AVAILABLE    = (not ASSET_GDF.empty) and ("geometry" in ASSET_GDF.columns)
 
 CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
 if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
@@ -187,6 +203,7 @@ class Api:
             "geocode_categories": CATS if GEOCODE_AVAILABLE else [],
             "segment_available": SEGMENTS_AVAILABLE,
             "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],
+            "assets_available": ASSETS_AVAILABLE,
             "colors": COLS,
             "descriptions": DESC,
             "initial_geocode": (CATS[0] if (GEOCODE_AVAILABLE and CATS) else None),
@@ -240,6 +257,21 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def get_assets_layer(self):
+        """Return assets overlay (steel blue, sits just above basemap)."""
+        try:
+            if not ASSETS_AVAILABLE:
+                return {"ok": False, "error": "Assets dataset is empty or missing."}
+            df = ASSET_GDF.copy()
+            df = df[df.geometry.notna()]
+            if df.empty:
+                return {"ok": False, "error": "No valid geometries found in assets."}
+            df = to_plot_crs(df, cfg)
+            gj = assets_to_geojson(df)
+            return {"ok": True, "geojson": gj}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def exit_app(self):
         try:
             webview.destroy_window()
@@ -247,7 +279,7 @@ class Api:
             os._exit(0)
 
     def save_png(self, data_url: str):
-        """Receive data URL from JS and save PNG via a Save dialog (non-deprecated)."""
+        """Receive data URL from JS and save PNG via a Save dialog."""
         try:
             if "," in data_url:
                 _, b64 = data_url.split(",", 1)
@@ -274,9 +306,9 @@ class Api:
 api = Api()
 
 # ===============================
-# HTML / JS UI
+# HTML / JS UI (no %-formatting; use placeholder replacement)
 # ===============================
-HTML = r"""
+HTML_TEMPLATE = r"""
 <!doctype html>
 <html>
 <head>
@@ -307,7 +339,6 @@ HTML = r"""
   .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; flex-wrap:wrap; }
   .map    { grid-area: map; position:relative; background:#ddd; }
   #map    { position:absolute; inset:0; }
-  /* Hide zoom control only while exporting */
   #map.exporting .leaflet-control-zoom { display: none !important; }
   .stats  { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
   .legend { padding:8px 12px; font-size:12px; }
@@ -329,33 +360,13 @@ HTML = r"""
   .slider input[type=range]{ width:160px; }
   .hint { margin-top:6px; opacity:0.75; }
 
-  /* Styled polygon tooltips */
   .leaflet-tooltip.poly-tip {
-    background: #0f172a;         /* slate-900 */
-    color: #e5e7eb;              /* gray-200 */
-    border: 1px solid #1f2937;   /* gray-800 */
-    border-radius: 8px;
-    box-shadow: 0 6px 20px rgba(0,0,0,.25);
-    padding: 10px 12px;
-    font-size: 12px;
-    line-height: 1.25;
-    max-width: 280px;
+    background: #0f172a; color: #e5e7eb; border: 1px solid #1f2937;
+    border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    padding: 10px 12px; font-size: 12px; line-height: 1.25; max-width: 280px;
   }
-  .poly-tip .hdr {
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: .2px;
-    margin-bottom: 6px;
-    display:flex; align-items:center; gap:8px; justify-content:space-between;
-  }
-  .poly-tip .chip {
-    display: inline-block;
-    font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 6px;
-    background: rgba(255,255,255,.1);
-    border: 1px solid rgba(255,255,255,.2);
-  }
+  .poly-tip .hdr { font-size: 12px; font-weight: 700; letter-spacing: .2px; margin-bottom: 6px; display:flex; align-items:center; gap:8px; justify-content:space-between; }
+  .poly-tip .chip { display:inline-block; font-weight:700; padding:2px 6px; border-radius:6px; background: rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.2); }
   .poly-tip .kv { display: grid; grid-template-columns: 92px 1fr; gap: 4px 10px; }
   .poly-tip .k  { opacity: .8; }
   .poly-tip .v  { text-align: right; white-space: nowrap; }
@@ -364,6 +375,17 @@ HTML = r"""
 <body>
 <div class="wrap">
   <div class="ctrl">
+
+    <!-- Assets overlay group (just above basemap) -->
+    <div class="section" id="assetsSection">
+      <h3 class="chkrow">
+        <input type="checkbox" id="assetsToggle">
+        <label for="assetsToggle" style="font-weight:600;">Assets (steel blue)</label>
+      </h3>
+      <div class="indent">
+        <div id="assetsHint" class="label-sm hint">Drawn just above the basemap; overlapping shapes look denser.</div>
+      </div>
+    </div>
 
     <!-- Segments overlay group (top) -->
     <div class="section" id="segmentsSection">
@@ -415,7 +437,6 @@ HTML = r"""
       <span id="opv" class="label-sm">80%</span>
     </div>
 
-    <!-- Single export button -->
     <button id="exportBtn" class="btn" title="Export current map to PNG (~300 dpi)">Export PNG</button>
   </div>
 
@@ -429,11 +450,12 @@ HTML = r"""
 </div>
 
 <script>
-var MAP=null, BASE=null, BASE_SOURCES=null, LAYER=null, LAYER_SEG=null, COLOR_MAP={}, DESC_MAP={}, HOME_BOUNDS=null, CHART=null;
+var MAP=null, BASE=null, BASE_SOURCES=null, LAYER=null, LAYER_SEG=null, LAYER_ASSETS=null, COLOR_MAP={}, DESC_MAP={}, HOME_BOUNDS=null, CHART=null;
 var FILL_ALPHA = 0.8; // default 80%
 var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
 var ZOOM_THRESHOLD_JS = 12;
+const ASSET_COLOR = "__ASSET_COLOR__";
 
 function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
 function setError(msg){
@@ -445,7 +467,7 @@ function setError(msg){
 // Formatting helpers
 function fmtKm2(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:2}); }
 
-// Build tooltip HTML
+// Build tooltip HTML (for polygons only)
 function buildTipHTML(props){
   const code = (props && props.sensitivity_code_max) ? String(props.sensitivity_code_max).toUpperCase() : '?';
   const desc = (DESC_MAP && DESC_MAP[code]) ? DESC_MAP[code] : '';
@@ -453,7 +475,6 @@ function buildTipHTML(props){
   const oid  = props && props.id_asset_object   ? String(props.id_asset_object)   : null;
   const area = props && props.area_km2 != null  ? fmtKm2(props.area_km2)          : '—';
 
-  // Optional colored chip using category color
   const chipColor = (COLOR_MAP && COLOR_MAP[code]) ? COLOR_MAP[code] : '#bdbdbd';
   const chipStyle = 'background:' + chipColor + '22;border-color:' + chipColor + '55;color:#fff;text-shadow:0 1px 0 #0003;';
 
@@ -472,32 +493,20 @@ function buildTipHTML(props){
   `;
 }
 
-/* ---------- Safe tooltip helpers (prevents 'isOpen' undefined errors) ---------- */
-function getTT(layer){
-  return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null;
-}
-function ttIsOpen(layer){
-  const tt = getTT(layer);
-  return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen());
-}
+/* ---------- Safe tooltip helpers ---------- */
+function getTT(layer){ return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null; }
+function ttIsOpen(layer){ const tt = getTT(layer); return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen()); }
 function ttEnsure(layer, feature){
   const html = buildTipHTML((feature && feature.properties) || {});
   if (!getTT(layer)){
-    layer.bindTooltip(html, {
-      className: 'poly-tip',
-      sticky: true,
-      direction: 'auto',
-      opacity: 0.98
-    });
+    layer.bindTooltip(html, { className: 'poly-tip', sticky: true, direction: 'auto', opacity: 0.98 });
   } else {
     layer.setTooltipContent(html);
   }
 }
-function ttCloseIfAny(layer){
-  if (ttIsOpen(layer)) layer.closeTooltip();
-}
+function ttCloseIfAny(layer){ if (ttIsOpen(layer)) layer.closeTooltip(); }
 
-// --- Legend / totals table ---
+/* ---------- Legend / chart ---------- */
 function renderLegend(stats) {
   var container = document.getElementById('legend');
   var codes = ['A','B','C','D','E'];
@@ -578,10 +587,8 @@ function renderChart(stats) {
   resizeChartToBox();
 }
 
-// --- Responsive resizing (map + chart) ---
-function debounce(fn, ms){
-  var t; return function(){ var ctx=this, args=arguments; clearTimeout(t); t=setTimeout(function(){ fn.apply(ctx,args); }, ms||50); };
-}
+/* ---------- Resize handling ---------- */
+function debounce(fn, ms){ var t; return function(){ var ctx=this, args=arguments; clearTimeout(t); t=setTimeout(function(){ fn.apply(ctx,args); }, ms||50); }; }
 function resizeChartToBox(){
   if (!CHART) return;
   var box = document.getElementById('chartBox');
@@ -590,38 +597,29 @@ function resizeChartToBox(){
   var h = Math.max(0, box.clientHeight);
   canvas.style.width  = w + 'px';
   canvas.style.height = h + 'px';
-  canvas.removeAttribute('width');
-  canvas.removeAttribute('height');
+  canvas.removeAttribute('width'); canvas.removeAttribute('height');
   CHART.resize(w, h);
 }
 function setupResizeObservers(){
   var chartBox = document.getElementById('chartBox');
   var mapBox   = document.getElementById('map');
-
   var onChartResize = debounce(function(){ resizeChartToBox(); }, 25);
   var onMapResize   = debounce(function(){ if (MAP) MAP.invalidateSize(false); }, 25);
-
   if (typeof ResizeObserver !== 'undefined'){
     try {
-      var ro1 = new ResizeObserver(onChartResize);
-      ro1.observe(chartBox);
-      var ro2 = new ResizeObserver(onMapResize);
-      ro2.observe(mapBox);
+      var ro1 = new ResizeObserver(onChartResize); ro1.observe(chartBox);
+      var ro2 = new ResizeObserver(onMapResize);   ro2.observe(mapBox);
     } catch (e){ logErr('ResizeObserver failed: '+e); }
   }
   window.addEventListener('resize', function(){ onChartResize(); onMapResize(); });
-
   var lastW = -1, lastH = -1;
   setInterval(function(){
     var w = chartBox.clientWidth, h = chartBox.clientHeight;
-    if (w !== lastW || h !== lastH){
-      lastW = w; lastH = h;
-      onChartResize();
-    }
+    if (w !== lastW || h !== lastH){ lastW = w; lastH = h; onChartResize(); }
   }, 200);
 }
 
-// --- Basemaps (incl. Bing Aerial) ---
+/* ---------- Basemaps (incl. Bing Aerial) ---------- */
 function tileXYToQuadKey(x, y, z){
   var quadKey = '';
   for (var i = z; i > 0; i--) {
@@ -662,24 +660,18 @@ function buildBaseSources(){
   var common = { maxZoom: 19, crossOrigin: true, tileSize: 256 };
 
   var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    ...common,
-    attribution: '© OpenStreetMap'
+    ...common, attribution: '© OpenStreetMap'
   });
 
   var topo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-    ...common,
-    subdomains: ['a','b','c'],
-    maxZoom: 17,
-    attribution: '© OpenStreetMap, © OpenTopoMap (CC-BY-SA)'
+    ...common, subdomains: ['a','b','c'], maxZoom: 17, attribution: '© OpenStreetMap, © OpenTopoMap (CC-BY-SA)'
   });
 
   SATELLITE_FALLBACK = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    ...common,
-    attribution: 'Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+    ...common, attribution: 'Esri, Maxar, Earthstar Geographics, and the GIS User Community'
   });
 
   var bing = new BingAerial({ tileSize: 256 });
-
   return { osm: osm, topo: topo, sat_bing: bing, sat_esri: SATELLITE_FALLBACK };
 }
 
@@ -687,35 +679,35 @@ function setBasemap(kind){
   var center = MAP.getCenter(), zoom = MAP.getZoom();
   if (BASE){ MAP.removeLayer(BASE); BASE = null; }
 
-  if (kind === 'osm'){
-    BASE = BASE_SOURCES.osm;
-  } else if (kind === 'topo'){
-    BASE = BASE_SOURCES.topo;
-  } else if (kind === 'sat'){
+  if (kind === 'osm'){ BASE = BASE_SOURCES.osm; }
+  else if (kind === 'topo'){ BASE = BASE_SOURCES.topo; }
+  else if (kind === 'sat'){
     BASE = BING_KEY_JS ? BASE_SOURCES.sat_bing : BASE_SOURCES.sat_esri;
     if (!BING_KEY_JS){
       setError('Bing key not set; using Esri World Imagery as satellite fallback.');
       setTimeout(function(){ setError(''); }, 4000);
     }
-  } else {
-    BASE = BASE_SOURCES.osm;
-  }
+  } else { BASE = BASE_SOURCES.osm; }
 
   BASE.addTo(MAP);
   MAP.setView(center, zoom, { animate:false });
 }
 
-// --- Layer styling ---
+/* ---------- Layer styling ---------- */
 function styleFeature(f){
   var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
-  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
+  return { pane:'geocodePane', color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
 }
 function styleFeatureSeg(f){
   var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
   return { pane:'segmentsPane', color:'#f7f7f7', weight:0.7, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
 }
+function styleFeatureAssets(f){
+  // Use same color for stroke & fill to get denser look as shapes overlap
+  return { pane:'assetsPane', color: ASSET_COLOR, weight: 0.6, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR };
+}
 
-// --- Tooltip attachment for polygons (only when zoomed in) ---
+/* ---------- Tooltips for polygons (geocodes) ---------- */
 function attachPolygonTooltip(layer, feature){
   layer.on('mouseover', function () {
     if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
@@ -735,7 +727,7 @@ function attachPolygonTooltip(layer, feature){
   });
 }
 
-// --- Loading geocoded layer (controls map only; stats come from "basic_mosaic") ---
+/* ---------- Loading geocoded layer (map) ---------- */
 function loadGeocodeLayer(cat, preserveView){
   var prev = null;
   if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
@@ -743,11 +735,7 @@ function loadGeocodeLayer(cat, preserveView){
     if (!res.ok){ setError('Failed to load geocode: '+res.error); return; }
 
     // Handle stats message (if "basic_mosaic" missing)
-    if (res.stats && res.stats.message){
-      setError(res.stats.message);
-    } else {
-      setError('');
-    }
+    if (res.stats && res.stats.message){ setError(res.stats.message); } else { setError(''); }
 
     var geoVisible = document.getElementById('geoToggle').checked;
     if (geoVisible){
@@ -765,7 +753,7 @@ function loadGeocodeLayer(cat, preserveView){
       }
     }
 
-    // Render stats from "basic_mosaic"
+    // Stats from "basic_mosaic"
     renderLegend(res.stats);
     renderChart(res.stats);
   }).catch(function(err){
@@ -773,7 +761,7 @@ function loadGeocodeLayer(cat, preserveView){
   });
 }
 
-// --- Loading / reloading segments overlay (top) ---
+/* ---------- Loading / reloading segments overlay ---------- */
 function loadSegmentsLayer(segCatOrAll){
   if (!document.getElementById('segToggle').checked){
     if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; }
@@ -790,20 +778,39 @@ function loadSegmentsLayer(segCatOrAll){
   });
 }
 
-// --- Export current map view to PNG (hide zoom buttons during capture) ---
+/* ---------- Loading / toggling assets overlay (just above basemap) ---------- */
+function loadAssetsLayer(){
+  if (!document.getElementById('assetsToggle').checked){
+    if (LAYER_ASSETS){ MAP.removeLayer(LAYER_ASSETS); LAYER_ASSETS=null; }
+    return;
+  }
+  window.pywebview.api.get_assets_layer().then(function(res){
+    if (!res.ok){ setError('Failed to load assets: '+res.error); return; }
+    if (LAYER_ASSETS){ MAP.removeLayer(LAYER_ASSETS); LAYER_ASSETS = null; }
+
+    LAYER_ASSETS = L.geoJSON(res.geojson, {
+      style: styleFeatureAssets,
+      pane: 'assetsPane',
+      renderer: L.canvas(),
+      pointToLayer: function (feature, latlng) {
+        return L.circleMarker(latlng, { pane:'assetsPane', radius: 3.5, color: ASSET_COLOR, weight: 0.8, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR });
+      }
+    }).addTo(MAP);
+
+    // Keep visual stacking: assets under geocodes & segments
+    if (LAYER){ try { LAYER.bringToFront(); } catch(e){} }
+    if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+  }).catch(function(err){
+    setError('API error: '+err); logErr('API error: '+err);
+  });
+}
+
+/* ---------- Export current map to PNG ---------- */
 function exportMapPng(){
   var node = document.getElementById('map');
-
   function capture(){
-    return html2canvas(node, {
-      useCORS: true,
-      allowTaint: false,
-      backgroundColor: '#ffffff',
-      scale: 3  // ~300 dpi on 96-dpi basis
-    });
+    return html2canvas(node, { useCORS: true, allowTaint: false, backgroundColor: '#ffffff', scale: 3 });
   }
-
-  // Temporarily hide zoom buttons by adding a class
   node.classList.add('exporting');
   var baseWasOn = BASE && MAP.hasLayer(BASE);
 
@@ -814,7 +821,6 @@ function exportMapPng(){
   }).then(function(res){
     if (!res.ok){ setError('Save cancelled or failed: ' + (res.error || '')); setTimeout(function(){ setError(''); }, 4000); }
   }).catch(function(){
-    // Retry without basemap (in case of CORS tainting)
     if (baseWasOn) MAP.removeLayer(BASE);
     capture().then(function(canvas){
       node.classList.remove('exporting');
@@ -832,13 +838,14 @@ function exportMapPng(){
   });
 }
 
-// --- Boot
+/* ---------- Boot ---------- */
 function boot(){
   MAP = L.map('map', { zoomControl:true, preferCanvas:true });
+  // Panes: basemap (default tiles ~200), assets (~300), geocodes (~450), segments (~650)
+  MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 300;
   MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
   MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650;
 
-  // Global zoom guard: close any open tooltips when zoom drops below threshold
   function closeTooltipsUnderZoom(){
     if (!MAP || MAP.getZoom() >= ZOOM_THRESHOLD_JS) return;
     if (LAYER)     LAYER.eachLayer(ttCloseIfAny);
@@ -846,7 +853,6 @@ function boot(){
   }
   MAP.on('zoomend', closeTooltipsUnderZoom);
 
-  // Add a scale bar bottom-left
   L.control.scale({ position:'bottomleft', metric:true, imperial:false, maxWidth:200 }).addTo(MAP);
 
   BASE_SOURCES = buildBaseSources();
@@ -855,15 +861,30 @@ function boot(){
   MAP.setView([0,0], 2);
   setupResizeObservers();
 
-  // Load state
   window.pywebview.api.get_state().then(function(state){
     COLOR_MAP        = state.colors || {};
     DESC_MAP         = state.descriptions || {};
     BING_KEY_JS      = (state.bing_key || '').trim() || null;
     ZOOM_THRESHOLD_JS= state.zoom_threshold || 12;
 
-    renderLegend(null); // initial empty table
-    renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]}); // empty chart
+    renderLegend(null);
+    renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
+
+    // Assets controls
+    var assetsSection = document.getElementById('assetsSection');
+    var assetsToggle  = document.getElementById('assetsToggle');
+    var assetsHint    = document.getElementById('assetsHint');
+
+    if (state.assets_available){
+      assetsToggle.disabled = false;
+      assetsSection.classList.remove('disabled');
+      assetsHint.textContent = "Drawn in semi-transparent steel blue. Toggle on/off.";
+    } else {
+      assetsToggle.checked = false;
+      assetsToggle.disabled = true;
+      assetsSection.classList.add('disabled');
+      assetsHint.textContent = "Assets dataset not available.";
+    }
 
     // Geocode controls
     var geocodeSection = document.getElementById('geocodeSection');
@@ -926,19 +947,17 @@ function boot(){
       segHint.textContent = "Segments dataset not available.";
     }
 
-    // Events: Segments
+    // Events: assets
+    assetsToggle.addEventListener('change', function(){ loadAssetsLayer(); });
+
+    // Events: segments
     segToggle.addEventListener('change', function(){
       segcat.disabled = !this.checked;
-      if (this.checked){
-        loadSegmentsLayer(segcat.value || "__ALL__");
-      } else {
-        if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; }
-      }
+      if (this.checked){ loadSegmentsLayer(segcat.value || "__ALL__"); }
+      else { if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; } }
     });
     segcat.addEventListener('change', function(){
-      if (segToggle.checked){
-        loadSegmentsLayer(segcat.value || "__ALL__");
-      }
+      if (segToggle.checked){ loadSegmentsLayer(segcat.value || "__ALL__"); }
     });
 
     // Events: geocode
@@ -948,7 +967,6 @@ function boot(){
       } else {
         if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
         if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
-        // Clear stats view (we still rely on basic_mosaic; when layer hidden, show zeroed preview)
         renderLegend({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
         renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
       }
@@ -959,9 +977,7 @@ function boot(){
     });
 
     // Left-pane basemap selector
-    document.getElementById('basemapSelLeft').addEventListener('change', function(){
-      setBasemap(this.value);
-    });
+    document.getElementById('basemapSelLeft').addEventListener('change', function(){ setBasemap(this.value); });
 
     // Home (fit to current geocode bounds)
     document.getElementById('homeBtn').addEventListener('click', function(){
@@ -972,29 +988,16 @@ function boot(){
     // Export (top bar)
     document.getElementById('exportBtn').addEventListener('click', exportMapPng);
 
-    // Exit button
-    document.getElementById('exitBtn').addEventListener('click', function(){
-      if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
-        window.pywebview.api.exit_app();
-      }
-    });
-    window.addEventListener('keydown', function(e){
-      if (e.key === 'Escape'){
-        if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
-          window.pywebview.api.exit_app();
-        }
-      }
-    });
-
-    // Opacity slider (both layers)
+    // Opacity slider (affects geocodes, segments, assets)
     var slider = document.getElementById('opacity');
     var opv    = document.getElementById('opv');
     slider.addEventListener('input', function(){
       var v = parseInt(slider.value, 10);
       FILL_ALPHA = v / 100.0;
       opv.textContent = v + '%';
-      if (LAYER)     LAYER.setStyle({ fillOpacity: FILL_ALPHA });
-      if (LAYER_SEG) LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER)        LAYER.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER_SEG)    LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER_ASSETS) LAYER_ASSETS.setStyle({ fillOpacity: FILL_ALPHA, opacity: FILL_ALPHA });
       if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
     });
   }).catch(function(err){
@@ -1002,13 +1005,15 @@ function boot(){
   });
 }
 
-// Ensure API is ready
 window.addEventListener('pywebviewready', function(){ boot(); });
 document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview && window.pywebview.api) { boot(); } });
 </script>
 </body>
 </html>
 """
+
+# Inject the steel-blue color without %-formatting conflicts
+HTML = HTML_TEMPLATE.replace("__ASSET_COLOR__", STEEL_BLUE)
 
 # ===============================
 # Run
