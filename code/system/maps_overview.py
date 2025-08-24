@@ -11,18 +11,20 @@ import geopandas as gpd
 from shapely.geometry import mapping
 import webview  # pip install pywebview
 
-# -------------------------------
+# ===============================
 # Paths / constants
-# -------------------------------
-BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE   = os.path.join(BASE_DIR, "../system/config.ini")
-PARQUET_FILE  = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")
-SEGMENT_FILE  = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
-PLOT_CRS      = "EPSG:4326"
+# ===============================
+BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE      = os.path.join(BASE_DIR, "../system/config.ini")
+PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")
+SEGMENT_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
+PLOT_CRS         = "EPSG:4326"
+BASIC_GROUP_NAME = "basic_mosaic"   # <- always use this for the right-hand stats
+ZOOM_THRESHOLD   = 10               # tooltips appear when map zoom >= this
 
-# -------------------------------
+# ===============================
 # Config / colors
-# -------------------------------
+# ===============================
 def read_config(path: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg.read(path, encoding="utf-8")
@@ -45,9 +47,9 @@ def get_color_mapping(cfg: configparser.ConfigParser) -> dict:
 def get_desc_mapping(cfg: configparser.ConfigParser) -> dict:
     return {c: (cfg[c].get("description","") if c in cfg else "") for c in "ABCDE"}
 
-# -------------------------------
+# ===============================
 # Data helpers
-# -------------------------------
+# ===============================
 def load_parquet(path: str) -> gpd.GeoDataFrame:
     """Load a GeoParquet if it exists; return empty GeoDataFrame otherwise."""
     try:
@@ -72,7 +74,6 @@ def to_plot_crs(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.Ge
     if gdf.empty:
         return gdf.set_crs(PLOT_CRS, allow_override=True) if gdf.crs is None else gdf
     if gdf.crs is None:
-        # workingprojection can be set as integer like 4326
         try:
             epsg = int(cfg["DEFAULT"].get("workingprojection_epsg", "4326"))
             gdf = gdf.set_crs(epsg=epsg, allow_override=True)
@@ -103,15 +104,25 @@ def bounds_to_leaflet(b):
     return [[miny, minx],[maxy, maxx]]  # [[south, west],[north, east]]
 
 def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
+    """GeoJSON with compact, tooltip-friendly properties."""
     feats = []
     for _, row in gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
+        props = {
+            "sensitivity_code_max": row.get("sensitivity_code_max", None),
+            "area_km2": (float(row.get("area_m2", 0.0)) / 1e6) if ("area_m2" in row) else None,
+            "geocode_group": row.get("name_gis_geocodegroup", None),
+        }
+        # Optional extras (only if present in tbl_flat)
+        if "name_asset_object" in row: props["name_asset_object"] = row.get("name_asset_object", None)
+        if "id_asset_object"   in row: props["id_asset_object"]   = row.get("id_asset_object", None)
+
         feats.append({
             "type": "Feature",
             "geometry": mapping(geom),
-            "properties": {"sensitivity_code_max": row.get("sensitivity_code_max", None)}
+            "properties": props
         })
     return {"type": "FeatureCollection", "features": feats}
 
@@ -122,34 +133,47 @@ def compute_stats(gdf: gpd.GeoDataFrame) -> dict:
     vals = [float(grp.get(c, 0.0))/1e6 for c in "ABCDE"]  # km²
     return {"labels": list("ABCDE"), "values": vals}
 
-# -------------------------------
+def compute_basic_stats(all_gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
+    """
+    Always compute stats from the BASIC_GROUP_NAME subset.
+    If missing/empty, return zeros AND a short message for the UI.
+    """
+    msg = f'The geocode/partition "{BASIC_GROUP_NAME}" is missing.'
+    if all_gdf.empty or "name_gis_geocodegroup" not in all_gdf.columns:
+        return {"labels": list("ABCDE"), "values": [0,0,0,0,0], "message": msg}
+    df = all_gdf.copy()
+    df["name_gis_geocodegroup"] = df["name_gis_geocodegroup"].astype("string").str.strip().str.lower()
+    df = df[df["name_gis_geocodegroup"] == BASIC_GROUP_NAME]
+    df = only_A_to_E(df)
+    if df.empty or "area_m2" not in df.columns:
+        return {"labels": list("ABCDE"), "values": [0,0,0,0,0], "message": msg}
+    df = to_plot_crs(df, cfg)  # normalize
+    return compute_stats(df)
+
+# ===============================
 # Load datasets (robust, non-fatal)
-# -------------------------------
+# ===============================
 cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
 
-# Availability flags (no crashing)
-GEOCODE_AVAILABLE = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
-SEGMENTS_AVAILABLE = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
+GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
+SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 
-# Categories (safe)
 CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
 if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
     SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 else:
-    SEG_CATS = []  # empty means "All segments" option only, if segments exist
+    SEG_CATS = []
 
-# Optional Bing key (for aerial tiles)
 BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
 
-# -------------------------------
+# ===============================
 # API exposed to JavaScript
-# -------------------------------
+# ===============================
 class Api:
-    # Optional logger to silence JS debug calls
     def js_log(self, message: str):
         try:
             print(f"[JS] {message}")
@@ -167,27 +191,36 @@ class Api:
             "descriptions": DESC,
             "initial_geocode": (CATS[0] if (GEOCODE_AVAILABLE and CATS) else None),
             "has_segments": SEGMENTS_AVAILABLE,
-            "bing_key": BING_KEY
+            "bing_key": BING_KEY,
+            "zoom_threshold": ZOOM_THRESHOLD
         }
 
     def get_geocode_layer(self, geocode_category):
-        """Return GeoJSON + stats for selected geocode category (or empty if unavailable)."""
+        """
+        Return GeoJSON for the selected geocode category (map content),
+        but ALWAYS return stats computed from BASIC_GROUP_NAME.
+        """
         try:
+            # Map layer (honor the user's selection)
             if not GEOCODE_AVAILABLE:
-                # Empty geocode layer & stats
-                return {
-                    "ok": True,
-                    "geojson": {"type":"FeatureCollection","features":[]},
-                    "home_bounds": [[0,0],[0,0]],
-                    "stats": {"labels": list("ABCDE"), "values": [0,0,0,0,0]}
-                }
-            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
-            df = only_A_to_E(df)
-            df = to_plot_crs(df, cfg)
-            stats = compute_stats(df)
-            home  = bounds_to_leaflet(df.total_bounds) if not df.empty else [[0,0],[0,0]]
-            gj    = gdf_to_geojson_min(df)
-            return {"ok": True, "geojson": gj, "home_bounds": home, "stats": stats}
+                map_geojson = {"type":"FeatureCollection","features":[]}
+                map_bounds  = [[0,0],[0,0]]
+            else:
+                df_map = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+                df_map = only_A_to_E(df_map)
+                df_map = to_plot_crs(df_map, cfg)
+                map_bounds = bounds_to_leaflet(df_map.total_bounds) if not df_map.empty else [[0,0],[0,0]]
+                map_geojson = gdf_to_geojson_min(df_map)
+
+            # Stats (ALWAYS from "basic_mosaic")
+            stats = compute_basic_stats(GDF, cfg)
+
+            return {
+                "ok": True,
+                "geojson": map_geojson,
+                "home_bounds": map_bounds,
+                "stats": stats
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -240,9 +273,9 @@ class Api:
 
 api = Api()
 
-# -------------------------------
+# ===============================
 # HTML / JS UI
-# -------------------------------
+# ===============================
 HTML = r"""
 <!doctype html>
 <html>
@@ -295,6 +328,37 @@ HTML = r"""
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
   .hint { margin-top:6px; opacity:0.75; }
+
+  /* Styled polygon tooltips */
+  .leaflet-tooltip.poly-tip {
+    background: #0f172a;         /* slate-900 */
+    color: #e5e7eb;              /* gray-200 */
+    border: 1px solid #1f2937;   /* gray-800 */
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.25;
+    max-width: 280px;
+  }
+  .poly-tip .hdr {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .2px;
+    margin-bottom: 6px;
+    display:flex; align-items:center; gap:8px; justify-content:space-between;
+  }
+  .poly-tip .chip {
+    display: inline-block;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(255,255,255,.1);
+    border: 1px solid rgba(255,255,255,.2);
+  }
+  .poly-tip .kv { display: grid; grid-template-columns: 92px 1fr; gap: 4px 10px; }
+  .poly-tip .k  { opacity: .8; }
+  .poly-tip .v  { text-align: right; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -323,7 +387,9 @@ HTML = r"""
       <div class="indent">
         <label for="cat" class="label-sm">Category</label>
         <select id="cat"></select>
-        <div class="label-sm hint" id="geoHint">Controls the statistics on the right.</div>
+        <div class="label-sm hint" id="geoHint">
+          Map selection does not affect the statistics. The right-hand statistics always use areas from the "basic_mosaic" group.
+        </div>
 
         <!-- Basemap selector (left pane) -->
         <div style="margin-top:10px;">
@@ -367,12 +433,68 @@ var MAP=null, BASE=null, BASE_SOURCES=null, LAYER=null, LAYER_SEG=null, COLOR_MA
 var FILL_ALPHA = 0.8; // default 80%
 var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
+var ZOOM_THRESHOLD_JS = 12;
 
 function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
 function setError(msg){
   var e = document.getElementById('err');
   if (msg){ e.style.display='block'; e.textContent = msg; }
   else { e.style.display='none'; e.textContent=''; }
+}
+
+// Formatting helpers
+function fmtKm2(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:2}); }
+
+// Build tooltip HTML
+function buildTipHTML(props){
+  const code = (props && props.sensitivity_code_max) ? String(props.sensitivity_code_max).toUpperCase() : '?';
+  const desc = (DESC_MAP && DESC_MAP[code]) ? DESC_MAP[code] : '';
+  const name = props && props.name_asset_object ? String(props.name_asset_object) : null;
+  const oid  = props && props.id_asset_object   ? String(props.id_asset_object)   : null;
+  const area = props && props.area_km2 != null  ? fmtKm2(props.area_km2)          : '—';
+
+  // Optional colored chip using category color
+  const chipColor = (COLOR_MAP && COLOR_MAP[code]) ? COLOR_MAP[code] : '#bdbdbd';
+  const chipStyle = 'background:' + chipColor + '22;border-color:' + chipColor + '55;color:#fff;text-shadow:0 1px 0 #0003;';
+
+  return `
+    <div class="poly-tip">
+      <div class="hdr">
+        <span>${name ? name.replace(/</g,'&lt;') : 'Polygon'}</span>
+        <span class="chip" style="${chipStyle}">${code}</span>
+      </div>
+      <div class="kv">
+        <div class="k">Sensitivity</div><div class="v">${desc || code}</div>
+        ${oid ? `<div class="k">Object ID</div><div class="v">${oid}</div>` : ``}
+        <div class="k">Area</div><div class="v">${area} km²</div>
+      </div>
+    </div>
+  `;
+}
+
+/* ---------- Safe tooltip helpers (prevents 'isOpen' undefined errors) ---------- */
+function getTT(layer){
+  return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null;
+}
+function ttIsOpen(layer){
+  const tt = getTT(layer);
+  return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen());
+}
+function ttEnsure(layer, feature){
+  const html = buildTipHTML((feature && feature.properties) || {});
+  if (!getTT(layer)){
+    layer.bindTooltip(html, {
+      className: 'poly-tip',
+      sticky: true,
+      direction: 'auto',
+      opacity: 0.98
+    });
+  } else {
+    layer.setTooltipContent(html);
+  }
+}
+function ttCloseIfAny(layer){
+  if (ttIsOpen(layer)) layer.closeTooltip();
 }
 
 // --- Legend / totals table ---
@@ -393,7 +515,6 @@ function renderLegend(stats) {
     for (var j=0;j<codes.length;j++) values[codes[j]] = 0;
   }
 
-  function fmtKm2(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:2}); }
   function fmtPct(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:1}); }
 
   var html = '<div style="font-weight:600; margin-bottom:6px;">Totals by sensitivity</div>';
@@ -594,26 +715,57 @@ function styleFeatureSeg(f){
   return { pane:'segmentsPane', color:'#f7f7f7', weight:0.7, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
 }
 
-// --- Loading geocoded layer (controls stats) ---
+// --- Tooltip attachment for polygons (only when zoomed in) ---
+function attachPolygonTooltip(layer, feature){
+  layer.on('mouseover', function () {
+    if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
+      layer.setStyle({ weight: 1.2 });
+      ttEnsure(layer, feature);
+      layer.openTooltip();
+    }
+  });
+  layer.on('mousemove', function () {
+    if (ttIsOpen(layer) && MAP.getZoom() < ZOOM_THRESHOLD_JS) {
+      layer.closeTooltip();
+    }
+  });
+  layer.on('mouseout', function () {
+    layer.setStyle({ weight: 0.5 });
+    ttCloseIfAny(layer);
+  });
+}
+
+// --- Loading geocoded layer (controls map only; stats come from "basic_mosaic") ---
 function loadGeocodeLayer(cat, preserveView){
   var prev = null;
   if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
   window.pywebview.api.get_geocode_layer(cat).then(function(res){
     if (!res.ok){ setError('Failed to load geocode: '+res.error); return; }
-    setError('');
-    HOME_BOUNDS = res.home_bounds;
+
+    // Handle stats message (if "basic_mosaic" missing)
+    if (res.stats && res.stats.message){
+      setError(res.stats.message);
+    } else {
+      setError('');
+    }
 
     var geoVisible = document.getElementById('geoToggle').checked;
     if (geoVisible){
       if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
-      LAYER = L.geoJSON(res.geojson, { style: styleFeature, pane:'geocodePane', renderer: L.canvas() }).addTo(MAP);
+      LAYER = L.geoJSON(res.geojson, {
+        style: styleFeature, pane:'geocodePane', renderer: L.canvas(),
+        onEachFeature: function (feature, layer) { attachPolygonTooltip(layer, feature); }
+      }).addTo(MAP);
       if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
       if (preserveView && prev){
         MAP.setView(prev.center, prev.zoom, { animate:false });
       } else {
+        HOME_BOUNDS = res.home_bounds || [[0,0],[0,0]];
         MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
       }
     }
+
+    // Render stats from "basic_mosaic"
     renderLegend(res.stats);
     renderChart(res.stats);
   }).catch(function(err){
@@ -629,7 +781,7 @@ function loadSegmentsLayer(segCatOrAll){
   }
   window.pywebview.api.get_segment_layer(segCatOrAll).then(function(res){
     if (!res.ok){ setError('Failed to load segments: '+res.error); return; }
-    setError('');
+    if (!document.getElementById('err').textContent){ setError(''); }
     if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG = null; }
     LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, pane:'segmentsPane', renderer: L.canvas() }).addTo(MAP);
     try { LAYER_SEG.bringToFront(); } catch(e){}
@@ -686,6 +838,14 @@ function boot(){
   MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
   MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650;
 
+  // Global zoom guard: close any open tooltips when zoom drops below threshold
+  function closeTooltipsUnderZoom(){
+    if (!MAP || MAP.getZoom() >= ZOOM_THRESHOLD_JS) return;
+    if (LAYER)     LAYER.eachLayer(ttCloseIfAny);
+    if (LAYER_SEG) LAYER_SEG.eachLayer(ttCloseIfAny);
+  }
+  MAP.on('zoomend', closeTooltipsUnderZoom);
+
   // Add a scale bar bottom-left
   L.control.scale({ position:'bottomleft', metric:true, imperial:false, maxWidth:200 }).addTo(MAP);
 
@@ -697,9 +857,10 @@ function boot(){
 
   // Load state
   window.pywebview.api.get_state().then(function(state){
-    COLOR_MAP   = state.colors || {};
-    DESC_MAP    = state.descriptions || {};
-    BING_KEY_JS = (state.bing_key || '').trim() || null;
+    COLOR_MAP        = state.colors || {};
+    DESC_MAP         = state.descriptions || {};
+    BING_KEY_JS      = (state.bing_key || '').trim() || null;
+    ZOOM_THRESHOLD_JS= state.zoom_threshold || 12;
 
     renderLegend(null); // initial empty table
     renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]}); // empty chart
@@ -724,16 +885,13 @@ function boot(){
       geoToggle.disabled = false;
       geocat.disabled = false;
       geocodeSection.classList.remove('disabled');
-      geoHint.textContent = "Controls the statistics on the right.";
     } else {
-      // Grey out and disable entire geocode group
       geoToggle.checked = false;
       geoToggle.disabled = true;
       geocat.disabled = true;
       geocodeSection.classList.add('disabled');
       geocat.innerHTML = '';
       geoHint.textContent = "Geocoded areas are not available.";
-      // keep legend/chart empty (already rendered)
     }
 
     // Segments controls
@@ -761,7 +919,6 @@ function boot(){
       segToggle.disabled = false;
       segmentsSection.classList.remove('disabled');
     } else {
-      // Grey out and disable segments group
       segToggle.checked = false;
       segToggle.disabled = true;
       segcat.disabled = true;
@@ -791,7 +948,7 @@ function boot(){
       } else {
         if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
         if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
-        // Clear stats when layer hidden
+        // Clear stats view (we still rely on basic_mosaic; when layer hidden, show zeroed preview)
         renderLegend({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
         renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
       }
@@ -853,9 +1010,9 @@ document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview &
 </html>
 """
 
-# -------------------------------
+# ===============================
 # Run
-# -------------------------------
+# ===============================
 if __name__ == "__main__":
     window = webview.create_window(
         title="Maps overview",
