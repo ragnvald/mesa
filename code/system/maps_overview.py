@@ -7,7 +7,7 @@ import geopandas as gpd
 from shapely.geometry import mapping
 import webview  # pip install pywebview
 
-# --- new imports for accurate area on WGS84 ---
+# Accurate geodesic areas for stats
 from pyproj import Geod
 try:
     from shapely.validation import make_valid as _make_valid
@@ -27,7 +27,7 @@ except Exception:
 # ===============================
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE      = os.path.join(BASE_DIR, "../system/config.ini")
-PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")           # <- stats source (tbl_flat)
+PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")           # stats source & map polygons
 SEGMENT_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
 ASSET_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_asset_object.parquet")
 PLOT_CRS         = "EPSG:4326"
@@ -141,7 +141,7 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
             continue
         props = {
             "sensitivity_code_max": row.get("sensitivity_code_max", None),
-            # keep tooltip fast; legend uses corrected geodesic areas
+            # per-feature area if available; right panel uses geodesic totals
             "area_km2": (float(row.get("area_m2", 0.0)) / 1e6) if ("area_m2" in row) else None,
             "geocode_group": row.get("name_gis_geocodegroup", None),
         }
@@ -151,7 +151,6 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
     return {"type": "FeatureCollection", "features": feats}
 
 def assets_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
-    """Minimal GeoJSON for assets overlay (steel blue, no category colors)."""
     feats = []
     for _, row in gdf.iterrows():
         geom = row.geometry
@@ -168,7 +167,6 @@ def assets_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
 GEOD = Geod(ellps="WGS84")
 
 def _valid_geom(geom):
-    """Robust validity fix without changing area materially."""
     if geom is None or geom.is_empty:
         return geom
     try:
@@ -180,7 +178,6 @@ def _valid_geom(geom):
         return geom
 
 def geodesic_area_m2(geom) -> float:
-    """Signed geodesic area (m²) on WGS84, absolute value; supports holes."""
     if geom is None or geom.is_empty:
         return 0.0
     gt = geom.geom_type
@@ -197,16 +194,13 @@ def geodesic_area_m2(geom) -> float:
 def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
     """
     Input: tbl_flat (already loaded as GeoDataFrame with geometry).
-    Filter to BASIC_GROUP_NAME, de-duplicate, compute WGS84 geodesic area,
-    and sum km² by sensitivity_code_max.
+    Filter to BASIC_GROUP_NAME, dedupe, compute WGS84 geodesic area, sum to km² by sensitivity.
     """
     labels = list("ABCDE")
     msg = f'The geocode/partition "{BASIC_GROUP_NAME}" is missing.'
-
     if df_flat.empty or "name_gis_geocodegroup" not in df_flat.columns:
         return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
 
-    # filter to basic_mosaic
     df = df_flat.copy()
     df["name_gis_geocodegroup"] = df["name_gis_geocodegroup"].astype("string").str.strip().str.lower()
     df = df[df["name_gis_geocodegroup"] == BASIC_GROUP_NAME]
@@ -214,7 +208,7 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
     if df.empty:
         return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
 
-    # deduplicate to avoid double counting
+    # dedupe to avoid double counting overlapping rows in tbl_flat
     if "id_geocode_object" in df.columns:
         df = df.drop_duplicates(subset=["id_geocode_object"])
     else:
@@ -224,11 +218,9 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
         except Exception:
             df = df.drop_duplicates()
 
-    # ensure EPSG:4326 for geodesic measure + validity fix
     df = to_epsg4326(df, cfg)
     df["geometry"] = df["geometry"].apply(_valid_geom)
 
-    # sum by code
     out = []
     for c in labels:
         sub = df[df["sensitivity_code_max"] == c]
@@ -237,16 +229,7 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
             continue
         a_m2 = float(sub.geometry.apply(geodesic_area_m2).sum())
         out.append(a_m2 / 1e6)  # km²
-
     return {"labels": labels, "values": out}
-
-# (legacy helper kept for map layer bounds; not used for stats)
-def compute_stats(gdf: gpd.GeoDataFrame) -> dict:
-    if gdf.empty or "area_m2" not in gdf.columns:
-        return {"labels": list("ABCDE"), "values": [0,0,0,0,0]}
-    grp = gdf.groupby("sensitivity_code_max")["area_m2"].sum()
-    vals = [float(grp.get(c, 0.0))/1e6 for c in "ABCDE"]  # km²
-    return {"labels": list("ABCDE"), "values": vals}
 
 # ===============================
 # Load datasets (robust, non-fatal)
@@ -255,7 +238,7 @@ cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 
-# GDF is tbl_flat (stats & geocode map)
+# GDF is tbl_flat (stats & map polygons)
 GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
 ASSET_GDF    = load_parquet(ASSET_FILE)
@@ -283,7 +266,6 @@ class Api:
             pass
 
     def get_state(self):
-        """Return UI state, including availability and category lists."""
         return {
             "geocode_available": GEOCODE_AVAILABLE,
             "geocode_categories": CATS if GEOCODE_AVAILABLE else [],
@@ -299,10 +281,8 @@ class Api:
         }
 
     def get_geocode_layer(self, geocode_category):
-        """Return GeoJSON for the selected geocode category (map content),
-        and stats computed from tbl_flat's 'basic_mosaic' only."""
+        """Return selected geocode layer for map + stats from tbl_flat:basic_mosaic."""
         try:
-            # Map layer (honor the user's selection for display)
             if not GEOCODE_AVAILABLE:
                 map_geojson = {"type":"FeatureCollection","features":[]}
                 map_bounds  = [[0,0],[0,0]]
@@ -313,11 +293,7 @@ class Api:
                 map_bounds = bounds_to_leaflet(df_map.total_bounds) if not df_map.empty else [[0,0],[0,0]]
                 map_geojson = gdf_to_geojson_min(df_map)
 
-            # Stats: strictly from tbl_flat basic_mosaic (geodesic, deduped)
             stats = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
-            if "message" in stats:
-                # show missing-message if basic_mosaic absent
-                pass
 
             return {
                 "ok": True,
@@ -329,7 +305,7 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_segment_layer(self, seg_category_or_all):
-        """Return segments overlay; if unavailable, respond with error."""
+        """Return segments overlay (separate layer)."""
         try:
             if not SEGMENTS_AVAILABLE:
                 return {"ok": False, "error": "Segments dataset is empty or missing."}
@@ -345,7 +321,7 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_assets_layer(self):
-        """Return assets overlay (steel blue, sits just above basemap)."""
+        """Return assets overlay (steel blue, drawn just above basemap)."""
         try:
             if not ASSETS_AVAILABLE:
                 return {"ok": False, "error": "Assets dataset is empty or missing."}
@@ -366,7 +342,7 @@ class Api:
             os._exit(0)
 
     def save_png(self, data_url: str):
-        """Receive data URL from JS and save PNG via a Save dialog."""
+        """Receive data URL from JS and save PNG."""
         try:
             if "," in data_url:
                 _, b64 = data_url.split(",", 1)
@@ -411,15 +387,14 @@ HTML_TEMPLATE = r"""
   .wrap {
     height:100%;
     display:grid;
-    grid-template-columns: 320px 1fr 420px;
+    grid-template-columns: 1fr 420px;
     grid-template-rows: 48px 1fr;
     grid-template-areas:
-      "ctrl bar stats"
-      "ctrl map stats";
+      "bar stats"
+      "map stats";
     font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }
-  .ctrl   { grid-area: ctrl; border-right: 2px solid #2b3442; padding:10px; background:#f5f7fb; position:relative; overflow:auto; }
-  .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; flex-wrap:wrap; }
+  .bar    { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; flex-wrap:wrap; border-bottom: 2px solid #2b3442; }
   .map    { grid-area: map; position:relative; background:#ddd; }
   #map    { position:absolute; inset:0; }
   #map.exporting .leaflet-control-zoom { display: none !important; }
@@ -437,34 +412,27 @@ HTML_TEMPLATE = r"""
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
 
-  /* ----- Layers panel (outside map) ----- */
-  .layers {
-    background:#fff; border:1px solid #d9e0ea; border-radius:10px; padding:8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,.05);
+  /* Leaflet Layers control tweaks and tooltips */
+  .leaflet-control-layers { font-size: 12px; }
+  .leaflet-control-layers label { display:block; line-height: 1.35; }
+  .inlineSel { margin:4px 0 6px 22px; } /* under the checkbox/radio */
+  .help {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:15px; height:15px; border-radius:50%;
+    border:1px solid #96a1b4; color:#435061; font-size:10px; line-height:1;
+    cursor:default; position:relative; background:#f7fafc; margin-left:6px;
   }
-  .layers h2 {
-    margin: 6px 4px 10px; font-size:15px; letter-spacing:.2px;
+  .help::after {
+    content: attr(data-tip);
+    position:absolute; left:20px; top:50%; transform:translateY(-50%);
+    background:#0f172a; color:#e5e7eb; border:1px solid #1f2937;
+    border-radius:6px; padding:6px 8px; font-size:12px; line-height:1.25;
+    min-width:220px; max-width:320px; white-space:normal;
+    box-shadow:0 8px 24px rgba(0,0,0,.25);
+    opacity:0; pointer-events:none; transition:opacity .12s ease;
+    z-index:2000;
   }
-  details.layer-group {
-    border:1px solid #e4e9f2; border-radius:8px; margin:8px 4px; background:#fbfcfe;
-  }
-  details.layer-group[open] { background:#f8faff; }
-  details.layer-group > summary {
-    list-style:none; cursor:pointer; padding:8px 10px; font-weight:600; font-size:13px;
-    display:flex; align-items:center; justify-content:space-between;
-  }
-  details.layer-group > summary::-webkit-details-marker { display:none; }
-  .group-body { padding:6px 10px 10px; }
-  .row {
-    display:grid; grid-template-columns: 22px 1fr; align-items:center; gap:8px;
-    padding:6px 4px; border-radius:6px;
-  }
-  .row:hover { background:#eef3fb; }
-  .row.disabled { opacity:.55; }
-  .lab { font-size:13px; }
-  .select-block { margin-top:6px; }
-  .select-block select { width:100%; padding:6px; }
-  .hint { font-size:11px; opacity:.75; margin:8px 0 0; }
+  .help:hover::after { opacity:1; }
 
   /* chart/tooltip */
   #chartBox { flex:1 1 auto; padding:8px 12px; position:relative; }
@@ -484,67 +452,6 @@ HTML_TEMPLATE = r"""
 </head>
 <body>
 <div class="wrap">
-  <div class="ctrl">
-    <div class="layers">
-      <h2>Layers</h2>
-
-      <!-- Overlays FIRST -->
-      <details class="layer-group" open>
-        <summary>Overlays</summary>
-        <div class="group-body" id="overlayGroup">
-
-          <!-- Geocoded areas -->
-          <div id="rowGeo" class="row">
-            <input type="checkbox" id="geoToggle" checked>
-            <label class="lab" for="geoToggle">Geocoded areas</label>
-            <div class="select-block"><select id="cat"></select></div>
-          </div>
-
-          <!-- Segments (ON by default) -->
-          <div id="rowSeg" class="row">
-            <input type="checkbox" id="segToggle" checked>
-            <label class="lab" for="segToggle">Sensitivity segments</label>
-            <div class="select-block"><select id="segcat"></select></div>
-          </div>
-
-          <!-- Assets -->
-          <div id="rowAssets" class="row">
-            <input type="checkbox" id="assetsToggle">
-            <label class="lab" for="assetsToggle">Assets</label>
-          </div>
-
-          <!-- Overlay notes -->
-          <div class="hint" id="overlayNotes">
-            • Assets render in semi-transparent steel blue; overlap appears denser.<br>
-            • Statistics on the right always use areas from the "<b>basic_mosaic</b>" group in <b>tbl_flat</b>.
-          </div>
-        </div>
-      </details>
-
-      <!-- Basemaps LAST -->
-      <details class="layer-group" open>
-        <summary>Basemaps</summary>
-        <div class="group-body" id="basemapGroup">
-          <div class="row">
-            <input type="radio" name="basemap" id="bm_osm" value="osm" checked>
-            <label class="lab" for="bm_osm">OpenStreetMap</label>
-          </div>
-          <div class="row">
-            <input type="radio" name="basemap" id="bm_topo" value="topo">
-            <label class="lab" for="bm_topo">OSM Topography</label>
-          </div>
-          <div class="row">
-            <input type="radio" name="basemap" id="bm_sat" value="sat">
-            <label class="lab" for="bm_sat">Satellite (Bing / Esri fallback)</label>
-          </div>
-          <div id="basemapHint" class="hint"></div>
-        </div>
-      </details>
-    </div>
-
-    <button id="exitBtn" class="btn" style="margin-top:10px;">Exit</button>
-  </div>
-
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
 
@@ -555,6 +462,7 @@ HTML_TEMPLATE = r"""
     </div>
 
     <button id="exportBtn" class="btn" title="Export current map to PNG (~300 dpi)">Export PNG</button>
+    <button id="exitBtn" class="btn">Exit</button>
   </div>
 
   <div class="map"><div id="map"></div></div>
@@ -567,13 +475,17 @@ HTML_TEMPLATE = r"""
 </div>
 
 <script>
-var MAP=null, BASE=null, BASE_SOURCES=null, LAYER=null, LAYER_SEG=null, LAYER_ASSETS=null, COLOR_MAP={}, DESC_MAP={}, HOME_BOUNDS=null, CHART=null;
+var MAP=null, BASE=null, BASE_SOURCES=null, CHART=null;
+var GEO_GROUP=null, SEG_GROUP=null, ASSET_GROUP=null;
+var LAYER=null, LAYER_SEG=null, LAYER_ASSETS=null; // actual GeoJSON layers
+var HOME_BOUNDS=null, COLOR_MAP={}, DESC_MAP={};
 var FILL_ALPHA = 0.8; // default 80%
 var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
 var ZOOM_THRESHOLD_JS = 12;
 const ASSET_COLOR = "__ASSET_COLOR__";
 
+// UI helpers
 function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
 function setError(msg){
   var e = document.getElementById('err');
@@ -609,19 +521,6 @@ function buildTipHTML(props){
     </div>
   `;
 }
-
-/* ---------- Safe tooltip helpers ---------- */
-function getTT(layer){ return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null; }
-function ttIsOpen(layer){ const tt = getTT(layer); return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen()); }
-function ttEnsure(layer, feature){
-  const html = buildTipHTML((feature && feature.properties) || {});
-  if (!getTT(layer)){
-    layer.bindTooltip(html, { className: 'poly-tip', sticky: true, direction: 'auto', opacity: 0.98 });
-  } else {
-    layer.setTooltipContent(html);
-  }
-}
-function ttCloseIfAny(layer){ if (ttIsOpen(layer)) layer.closeTooltip(); }
 
 /* ---------- Legend / chart ---------- */
 function renderLegend(stats) {
@@ -800,10 +699,6 @@ function setBasemap(kind){
   else if (kind === 'topo'){ BASE = BASE_SOURCES.topo; }
   else if (kind === 'sat'){
     BASE = BING_KEY_JS ? BASE_SOURCES.sat_bing : BASE_SOURCES.sat_esri;
-    if (!BING_KEY_JS){
-      var bh = document.getElementById('basemapHint');
-      if (bh){ bh.textContent = 'Bing key not set; using Esri World Imagery as satellite fallback.'; setTimeout(function(){ bh.textContent=''; }, 4000); }
-    }
   } else { BASE = BASE_SOURCES.osm; }
 
   BASE.addTo(MAP);
@@ -824,6 +719,18 @@ function styleFeatureAssets(f){
 }
 
 /* ---------- Tooltips for polygons (geocodes) ---------- */
+function getTT(layer){ return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null; }
+function ttIsOpen(layer){ const tt = getTT(layer); return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen()); }
+function ttEnsure(layer, feature){
+  const html = buildTipHTML((feature && feature.properties) || {});
+  if (!getTT(layer)){
+    layer.bindTooltip(html, { className: 'poly-tip', sticky: true, direction: 'auto', opacity: 0.98 });
+  } else {
+    layer.setTooltipContent(html);
+  }
+}
+function ttCloseIfAny(layer){ if (ttIsOpen(layer)) layer.closeTooltip(); }
+
 function attachPolygonTooltip(layer, feature){
   layer.on('mouseover', function () {
     if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
@@ -843,32 +750,31 @@ function attachPolygonTooltip(layer, feature){
   });
 }
 
-/* ---------- Loading geocoded layer (map) ---------- */
-function loadGeocodeLayer(cat, preserveView){
+/* ---------- API-backed layer loaders (fill the groups) ---------- */
+function loadGeocodeIntoGroup(cat, preserveView){
   var prev = null;
   if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
   window.pywebview.api.get_geocode_layer(cat).then(function(res){
     if (!res.ok){ setError('Failed to load geocode: '+res.error); return; }
 
-    // Show message if basic_mosaic missing
     if (res.stats && res.stats.message){ setError(res.stats.message); } else { setError(''); }
 
-    var geoVisible = document.getElementById('geoToggle').checked;
-    if (geoVisible){
-      if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
+    // clear & refill group
+    if (GEO_GROUP){ GEO_GROUP.clearLayers(); }
+    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
       LAYER = L.geoJSON(res.geojson, {
         style: styleFeature, pane:'geocodePane', renderer: L.canvas(),
         onEachFeature: function (feature, layer) { attachPolygonTooltip(layer, feature); }
-      }).addTo(MAP);
-      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
-      if (preserveView && prev){
-        MAP.setView(prev.center, prev.zoom, { animate:false });
-      } else {
-        HOME_BOUNDS = res.home_bounds || [[0,0],[0,0]];
-        MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
-      }
+      });
+      GEO_GROUP.addLayer(LAYER);
+      try { if (SEG_GROUP) SEG_GROUP.bringToFront(); } catch(e){}
+    }
+
+    if (preserveView && prev){
+      MAP.setView(prev.center, prev.zoom, { animate:false });
     } else {
-      if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
+      HOME_BOUNDS = res.home_bounds || [[0,0],[0,0]];
+      MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
     }
 
     renderLegend(res.stats);
@@ -878,45 +784,39 @@ function loadGeocodeLayer(cat, preserveView){
   });
 }
 
-/* ---------- Loading / reloading segments overlay ---------- */
-function loadSegmentsLayer(segCatOrAll){
-  if (!document.getElementById('segToggle').checked){
-    if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; }
-    return;
-  }
+function loadSegmentsIntoGroup(segCatOrAll){
   window.pywebview.api.get_segment_layer(segCatOrAll).then(function(res){
     if (!res.ok){ setError('Failed to load segments: '+res.error); return; }
     if (!document.getElementById('err').textContent){ setError(''); }
-    if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG = null; }
-    LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, pane:'segmentsPane', renderer: L.canvas() }).addTo(MAP);
-    try { LAYER_SEG.bringToFront(); } catch(e){}
+    if (SEG_GROUP){ SEG_GROUP.clearLayers(); }
+    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
+      LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, pane:'segmentsPane', renderer: L.canvas() });
+      SEG_GROUP.addLayer(LAYER_SEG);
+      try { SEG_GROUP.bringToFront(); } catch(e){}
+    }
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
   });
 }
 
-/* ---------- Loading / toggling assets overlay (just above basemap) ---------- */
-function loadAssetsLayer(){
-  if (!document.getElementById('assetsToggle').checked){
-    if (LAYER_ASSETS){ MAP.removeLayer(LAYER_ASSETS); LAYER_ASSETS=null; }
-    return;
-  }
+function loadAssetsIntoGroup(){
   window.pywebview.api.get_assets_layer().then(function(res){
     if (!res.ok){ setError('Failed to load assets: '+res.error); return; }
-    if (LAYER_ASSETS){ MAP.removeLayer(LAYER_ASSETS); LAYER_ASSETS = null; }
-
-    LAYER_ASSETS = L.geoJSON(res.geojson, {
-      style: styleFeatureAssets,
-      pane: 'assetsPane',
-      renderer: L.canvas(),
-      pointToLayer: function (feature, latlng) {
-        return L.circleMarker(latlng, { pane:'assetsPane', radius: 3.5, color: ASSET_COLOR, weight: 0.8, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR });
-      }
-    }).addTo(MAP);
-
-    // Keep visual stacking: assets under geocodes & segments
-    if (LAYER){ try { LAYER.bringToFront(); } catch(e){} }
-    if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+    if (ASSET_GROUP){ ASSET_GROUP.clearLayers(); }
+    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
+      LAYER_ASSETS = L.geoJSON(res.geojson, {
+        style: styleFeatureAssets,
+        pane: 'assetsPane',
+        renderer: L.canvas(),
+        pointToLayer: function (feature, latlng) {
+          return L.circleMarker(latlng, { pane:'assetsPane', radius: 3.5, color: ASSET_COLOR, weight: 0.8, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR });
+        }
+      });
+      ASSET_GROUP.addLayer(LAYER_ASSETS);
+      // keep under other overlays
+      if (GEO_GROUP){ try { GEO_GROUP.bringToFront(); } catch(e){} }
+      if (SEG_GROUP){ try { SEG_GROUP.bringToFront(); } catch(e){} }
+    }
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
   });
@@ -937,7 +837,8 @@ function exportMapPng(){
     return window.pywebview.api.save_png(png);
   }).then(function(res){
     if (!res.ok){ setError('Save cancelled or failed: ' + (res.error || '')); setTimeout(function(){ setError(''); }, 4000); }
-  }).catch(function(){
+  }).catch(function(err1){
+    // try again with base toggled off/on
     if (baseWasOn) MAP.removeLayer(BASE);
     capture().then(function(canvas){
       node.classList.remove('exporting');
@@ -949,32 +850,118 @@ function exportMapPng(){
     }).catch(function(err2){
       node.classList.remove('exporting');
       if (baseWasOn) BASE.addTo(MAP);
-      setError('Export failed. Try OSM/Topography basemap.'); logErr(err2);
+      setError('Export failed. Try OSM/Topography basemap.'); logErr(err1); logErr(err2);
       setTimeout(function(){ setError(''); }, 5000);
     });
   });
 }
 
+/* ---------- Build native layers control ---------- */
+function buildLayersControl(state){
+  // base layers
+  var baseLayers = {
+    'OpenStreetMap <span class="help" data-tip="Standard OSM cartography. Good for general context.">?</span>': BASE_SOURCES.osm,
+    'OSM Topography <span class="help" data-tip="OpenTopoMap tiles. Elevation & relief shading; lower max zoom.">?</span>': BASE_SOURCES.topo,
+    'Satellite <span class="help" data-tip="Bing Aerial if key configured; otherwise Esri World Imagery fallback.">?</span>': (BING_KEY_JS ? BASE_SOURCES.sat_bing : BASE_SOURCES.sat_esri)
+  };
+
+  // overlay layer groups (empty, we fill them via API)
+  GEO_GROUP   = L.layerGroup();
+  SEG_GROUP   = L.layerGroup();
+  ASSET_GROUP = L.layerGroup();
+
+  // overlay labels (with inline help + inline selectors)
+  var geoLabel = 'Geocoded areas <span class="help" data-tip="Polygons colored by sensitivity (A–E). Choose a geocode category below. The statistics panel always aggregates areas from the ‘basic_mosaic’ group in tbl_flat.">?</span><div class="inlineSel"><select id="geoCatSel"></select></div>';
+  var segLabel = 'Sensitivity segments <span class="help" data-tip="Segment boundaries overlay (A–E styling). Filter to a specific geocode category or show all.">?</span><div class="inlineSel"><select id="segCatSel"></select></div>';
+  var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue, drawn just above the basemap. Overlap looks denser.">?</span>';
+
+  var overlays = {};
+  overlays[geoLabel] = GEO_GROUP;
+  overlays[segLabel] = SEG_GROUP;
+  overlays[assLabel] = ASSET_GROUP;
+
+  var ctrl = L.control.layers(baseLayers, overlays, { collapsed:false, position:'topright' }).addTo(MAP);
+
+  // seed basemap (OSM) + default overlays: geocodes and segments ON, assets OFF
+  BASE_SOURCES.osm.addTo(MAP);
+  GEO_GROUP.addTo(MAP);
+  SEG_GROUP.addTo(MAP);
+
+  // wire selects after control is in DOM
+  setTimeout(function(){
+    // populate geocode categories
+    var geocat = document.getElementById('geoCatSel');
+    if (geocat){
+      geocat.innerHTML = '';
+      var geocodes = (state.geocode_categories || []);
+      for (var i=0;i<geocodes.length;i++){
+        var o = document.createElement('option');
+        o.value = geocodes[i]; o.textContent = geocodes[i];
+        geocat.appendChild(o);
+      }
+      if (state.initial_geocode && geocodes.indexOf(state.initial_geocode) >= 0){
+        geocat.value = state.initial_geocode;
+      }
+      loadGeocodeIntoGroup(geocat.value || state.initial_geocode, false);
+      geocat.addEventListener('change', function(){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, true); });
+    }
+
+    // populate segments categories
+    var segcat = document.getElementById('segCatSel');
+    if (segcat){
+      segcat.innerHTML = '';
+      var segcats = state.segment_categories || [];
+      if (segcats.length === 0){
+        var s = document.createElement('option'); s.value="__ALL__"; s.textContent="All segments"; segcat.appendChild(s);
+      } else {
+        var all = document.createElement('option'); all.value="__ALL__"; all.textContent="All segments"; segcat.appendChild(all);
+        for (var j=0;j<segcats.length;j++){
+          var so = document.createElement('option'); so.value = segcats[j]; so.textContent = segcats[j];
+          segcat.appendChild(so);
+        }
+      }
+      loadSegmentsIntoGroup(segcat.value || "__ALL__");
+      segcat.addEventListener('change', function(){ loadSegmentsIntoGroup(segcat.value || "__ALL__"); });
+    }
+
+    // respond to overlay toggles
+    MAP.on('overlayadd', function(e){
+      if (e.layer === GEO_GROUP){
+        var gc = document.getElementById('geoCatSel'); loadGeocodeIntoGroup(gc ? gc.value : state.initial_geocode, true);
+      } else if (e.layer === SEG_GROUP){
+        var sc = document.getElementById('segCatSel'); loadSegmentsIntoGroup(sc ? (sc.value||"__ALL__") : "__ALL__");
+      } else if (e.layer === ASSET_GROUP){
+        loadAssetsIntoGroup();
+      }
+    });
+    MAP.on('overlayremove', function(e){
+      if (e.layer === GEO_GROUP){ GEO_GROUP.clearLayers(); }
+      if (e.layer === SEG_GROUP){ SEG_GROUP.clearLayers(); }
+      if (e.layer === ASSET_GROUP){ ASSET_GROUP.clearLayers(); }
+    });
+  }, 0);
+
+  return ctrl;
+}
+
 /* ---------- Boot ---------- */
 function boot(){
   MAP = L.map('map', { zoomControl:true, preferCanvas:true });
-  // Panes: basemap (default tiles ~200), assets (~300), geocodes (~450), segments (~650)
+  // Panes: basemap (default), assets (~300), geocodes (~450), segments (~650)
   MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 300;
   MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
   MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650;
 
   function closeTooltipsUnderZoom(){
     if (!MAP || MAP.getZoom() >= ZOOM_THRESHOLD_JS) return;
-    if (LAYER)     LAYER.eachLayer(ttCloseIfAny);
-    if (LAYER_SEG) LAYER_SEG.eachLayer(ttCloseIfAny);
+    if (LAYER && GEO_GROUP && MAP.hasLayer(GEO_GROUP)) { GEO_GROUP.eachLayer(ttCloseIfAny); }
+    if (LAYER_SEG && SEG_GROUP && MAP.hasLayer(SEG_GROUP)) { SEG_GROUP.eachLayer(ttCloseIfAny); }
   }
   MAP.on('zoomend', closeTooltipsUnderZoom);
 
   L.control.scale({ position:'bottomleft', metric:true, imperial:false, maxWidth:200 }).addTo(MAP);
 
   BASE_SOURCES = buildBaseSources();
-  BASE = BASE_SOURCES.osm.addTo(MAP);
-
   MAP.setView([0,0], 2);
   setupResizeObservers();
 
@@ -987,102 +974,17 @@ function boot(){
     renderLegend(null);
     renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
 
-    // Geocodes UI
-    var geocat  = document.getElementById('cat');
-    var rowGeo  = document.getElementById('rowGeo');
-    var geoToggle = document.getElementById('geoToggle');
-    if (state.geocode_available){
-      var geocodes = state.geocode_categories || [];
-      geocat.innerHTML = '';
-      for (var i=0;i<geocodes.length;i++){
-        var o = document.createElement('option');
-        o.value = geocodes[i]; o.textContent = geocodes[i];
-        geocat.appendChild(o);
-      }
-      if (state.initial_geocode){
-        geocat.value = state.initial_geocode;
-        loadGeocodeLayer(state.initial_geocode, false);
-      }
-      geoToggle.disabled = false; geocat.disabled = false; rowGeo.classList.remove('disabled');
-    } else {
-      geoToggle.checked = false; geoToggle.disabled = true; geocat.disabled = true; rowGeo.classList.add('disabled');
-    }
+    // Build the native layers control (merges base + overlays + inline help)
+    buildLayersControl(state);
 
-    // Segments UI (ON by default)
-    var segcat   = document.getElementById('segcat');
-    var rowSeg   = document.getElementById('rowSeg');
-    var segToggle= document.getElementById('segToggle');
-    if (state.segment_available){
-      var segcats = state.segment_categories || [];
-      segcat.innerHTML = '';
-      if (segcats.length === 0){
-        var o = document.createElement('option');
-        o.value = "__ALL__"; o.textContent = "All segments";
-        segcat.appendChild(o);
-      } else {
-        for (var i=0;i<segcats.length;i++){
-          var so = document.createElement('option');
-          so.value = segcats[i]; so.textContent = segcats[i];
-          segcat.appendChild(so);
-        }
-      }
-      segToggle.disabled = false; rowSeg.classList.remove('disabled');
-      // load immediately since default is checked
-      loadSegmentsLayer(segcat.value || "__ALL__");
-    } else {
-      segToggle.checked = false; segToggle.disabled = true; segcat.disabled = true; rowSeg.classList.add('disabled');
-    }
-
-    // Assets UI
-    var rowAssets = document.getElementById('rowAssets');
-    var assetsToggle = document.getElementById('assetsToggle');
-    if (state.assets_available){
-      assetsToggle.disabled = false; rowAssets.classList.remove('disabled');
-    } else {
-      assetsToggle.checked = false; assetsToggle.disabled = true; rowAssets.classList.add('disabled');
-    }
-
-    // Basemap radios (bottom group)
-    function onBasemapChange(e){ if (e && e.target && e.target.name === 'basemap'){ setBasemap(e.target.value); } }
-    var bm = document.getElementById('basemapGroup');
-    bm.addEventListener('change', onBasemapChange);
-
-    // Events: assets
-    assetsToggle.addEventListener('change', function(){ loadAssetsLayer(); });
-
-    // Events: segments
-    segToggle.addEventListener('change', function(){
-      segcat.disabled = !this.checked;
-      if (this.checked){ loadSegmentsLayer(segcat.value || "__ALL__"); }
-      else { if (LAYER_SEG){ MAP.removeLayer(LAYER_SEG); LAYER_SEG=null; } }
-    });
-    segcat.addEventListener('change', function(){
-      if (segToggle.checked){ loadSegmentsLayer(segcat.value || "__ALL__"); }
-    });
-
-    // Events: geocode
-    geoToggle.addEventListener('change', function(){
-      if (this.checked){
-        loadGeocodeLayer(geocat.value, true);
-      } else {
-        if (LAYER){ MAP.removeLayer(LAYER); LAYER = null; }
-      }
-    });
-    geocat.addEventListener('change', function(){
-      var geoVisible = geoToggle.checked;
-      loadGeocodeLayer(geocat.value, geoVisible);
-    });
-
-    // Home (fit to current geocode bounds)
+    // Home, Export, Exit, Opacity
     document.getElementById('homeBtn').addEventListener('click', function(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
-      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+      if (SEG_GROUP){ try { SEG_GROUP.bringToFront(); } catch(e){} }
     });
 
-    // Export (top bar)
     document.getElementById('exportBtn').addEventListener('click', exportMapPng);
 
-    // Exit
     document.getElementById('exitBtn').addEventListener('click', function(){
       if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
         window.pywebview.api.exit_app();
@@ -1096,7 +998,6 @@ function boot(){
       }
     });
 
-    // Opacity slider (affects geocodes, segments, assets)
     var slider = document.getElementById('opacity');
     var opv    = document.getElementById('opv');
     slider.addEventListener('input', function(){
@@ -1106,7 +1007,7 @@ function boot(){
       if (LAYER)        LAYER.setStyle({ fillOpacity: FILL_ALPHA });
       if (LAYER_SEG)    LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
       if (LAYER_ASSETS) LAYER_ASSETS.setStyle({ fillOpacity: FILL_ALPHA, opacity: FILL_ALPHA });
-      if (LAYER_SEG){ try { LAYER_SEG.bringToFront(); } catch(e){} }
+      if (SEG_GROUP){ try { SEG_GROUP.bringToFront(); } catch(e){} }
     });
   }).catch(function(err){
     setError('Failed to get state: '+err); logErr('get_state failed: '+err);
