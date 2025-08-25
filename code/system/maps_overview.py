@@ -401,10 +401,18 @@ HTML_TEMPLATE = r"""
   .stats  { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
   #err { color:#b00; padding:6px 12px; font-size:12px; display:none; }
   .legend { padding:8px 12px; font-size:12px; }
-  .legend table { width:100%; border-collapse:collapse; }
-  .legend th, .legend td { padding:4px 6px; vertical-align:middle; }
-  .legend thead th { border-bottom:1px solid #cdd4de; font-weight:600; }
-  .legend tfoot td { border-top:1px solid #cdd4de; font-weight:600; }
+  /* --- added info block --- */
+  .info-block {
+    padding:8px 12px;
+    font-size:12px;
+    line-height:1.35;
+    border-top:1px solid #2b344211;
+    border-bottom:1px solid #2b344211;
+    background:#0f172a08;
+    max-height:170px;
+    overflow:auto;
+  }
+  .info-block p { margin:2px 0 4px 0; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; border:1px solid #8884; }
   .num { text-align:right; white-space:nowrap; }
   .btn { padding:6px 10px; border:1px solid #ccd; background:#fff; border-radius:6px; cursor:pointer; }
@@ -470,6 +478,19 @@ HTML_TEMPLATE = r"""
   <div class="stats">
     <div id="err"></div>
     <div class="legend" id="legend"></div>
+    <!-- --- new 10 line descriptive section --- -->
+    <div id="infoText" class="info-block">
+      <p>1. Geocoded areas are colored by sensitivity A (very high) to E (very low).</p>
+      <p>2. Bar chart shows total km² per sensitivity for the baseline group 'basic_mosaic'.</p>
+      <p>3. Percentages in the legend use geodesic (WGS84) area for accuracy.</p>
+      <p>4. Change the geocode category in Layers to explore alternate partitions.</p>
+      <p>5. Enable 'Sensitivity segments' to view buffered line-based segment polygons.</p>
+      <p>6. Enable 'Assets' to overlay individual asset geometries in steel blue.</p>
+      <p>7. Adjust the Opacity slider to reveal more basemap context beneath fills.</p>
+      <p>8. Hover a polygon (zoom ≥ threshold) to see a rich tooltip with details.</p>
+      <p>9. Use Home to reset the view to the active geocode category extent.</p>
+      <p>10. Export PNG creates a high‑resolution snapshot; try different basemaps.</p>
+    </div>
     <div id="chartBox"><canvas id="chart"></canvas></div>
   </div>
 </div>
