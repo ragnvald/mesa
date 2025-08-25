@@ -24,6 +24,7 @@ import tkinter as tk
 import tkinter.scrolledtext as scrolledtext
 import ttkbootstrap as ttk
 from ttkbootstrap import Style
+from pathlib import Path
 
 # -------------------------------
 # Config helpers
@@ -67,7 +68,12 @@ def log_to_gui(log_widget, message):
     log_destination_file = os.path.join(original_working_directory, "log.txt")
     with open(log_destination_file, "a") as log_file:
         log_file.write(formatted_message + "\n")
-    root.update_idletasks()
+    # Safe root update (root may not yet exist in early calls)
+    try:
+        if 'root' in globals() and root.winfo_exists():
+            root.update_idletasks()
+    except Exception:
+        pass
 
 def update_progress(new_value):
     progress_var.set(new_value)
@@ -100,53 +106,103 @@ def increment_stat_value(config_file, stat_name, increment_value):
 # -------------------------------
 # IO helpers
 # -------------------------------
-def load_lines_table(gpkg_file):
-    if not os.path.exists(gpkg_file):
+def base_dir() -> Path:
+    bd = Path(original_working_directory or os.getcwd())
+    if bd.name.lower() == "system":
+        return bd.parent
+    return bd
+
+def gpq_dir() -> Path:
+    out = base_dir() / "output" / "geoparquet"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+def parquet_path(name: str) -> Path:
+    return gpq_dir() / f"{name}.parquet"
+
+def read_parquet_or_none(name: str):
+    p = parquet_path(name)
+    if not p.exists():
         return None
     try:
-        gdf = gpd.read_file(gpkg_file, layer='tbl_lines')
-        return None if gdf.empty else gdf
-    except ValueError:
+        return gpd.read_parquet(p)
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed reading {p.name}: {e}")
         return None
 
-def save_to_geoparquet(gdf, file_path, log_widget):
+def write_parquet(name: str, gdf: gpd.GeoDataFrame):
+    p = parquet_path(name)
     try:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        gdf.to_parquet(file_path, index=False)
-        log_to_gui(log_widget, f"Saved to geoparquet: {file_path}")
+        gdf.to_parquet(p, index=False)
+        log_to_gui(log_widget, f"Saved {p.name} (rows={len(gdf)})")
     except Exception as e:
-        log_to_gui(log_widget, f"Error saving to geoparquet: {e}")
+        log_to_gui(log_widget, f"Parquet write failed {p.name}: {e}")
+
+def optional_write_gpkg(gdf: gpd.GeoDataFrame, layer: str):
+    """
+    Best-effort legacy write if gpkg exists. Silent if not.
+    """
+    if not os.path.exists(gpkg_file):
+        return
+    try:
+        gdf.to_file(gpkg_file, layer=layer, driver="GPKG")
+    except Exception as e:
+        log_to_gui(log_widget, f"GPKG write skipped ({layer}): {e}")
+
+def load_lines_table(gpkg_file):
+    """
+    Returns GeoDataFrame of lines (tbl_lines) from Parquet first,
+    falling back to GeoPackage if it exists; otherwise None.
+    """
+    gdf = read_parquet_or_none("tbl_lines")
+    if gdf is not None and not gdf.empty:
+        return gdf
+    if os.path.exists(gpkg_file):
+        try:
+            gdf = gpd.read_file(gpkg_file, layer='tbl_lines')
+            if not gdf.empty:
+                write_parquet("tbl_lines", gdf)  # cache for future
+                return gdf
+        except Exception:
+            return None
+    return None
 
 # -------------------------------
 # Geometry building
 # -------------------------------
 def create_lines_table_and_lines(gpkg_file, log_widget):
-    gdf_geocode_group = gpd.read_file(gpkg_file, layer='tbl_geocode_group', rows=1)
-    if gdf_geocode_group.empty:
-        log_to_gui(log_widget, "The 'tbl_geocode_group' table is empty or does not exist.")
+    # Source extent from geocode group parquet (preferred)
+    geocode_group = read_parquet_or_none("tbl_geocode_group")
+    if geocode_group is None or geocode_group.empty:
+        # Fallback to gpkg if present
+        if os.path.exists(gpkg_file):
+            try:
+                geocode_group = gpd.read_file(gpkg_file, layer='tbl_geocode_group')
+            except Exception:
+                geocode_group = None
+    if geocode_group is None or geocode_group.empty:
+        log_to_gui(log_widget, "Cannot derive extent (no geocode groups).")
         return
-    log_to_gui(log_widget, "Creating table and lines")
-
-    minx, miny, maxx, maxy = gdf_geocode_group.total_bounds
+    log_to_gui(log_widget, "Creating template lines (parquet).")
+    minx, miny, maxx, maxy = geocode_group.total_bounds
     lines = []
-    for i in range(3):
-        start_x = np.random.uniform(minx, maxx)
-        start_y = np.random.uniform(miny, maxy)
-        end_x   = np.random.uniform(minx, maxx)
-        end_y   = np.random.uniform(miny, maxy)
-        lines.append(LineString([(start_x, start_y), (end_x, end_y)]))
-
+    for _ in range(3):
+        sx = np.random.uniform(minx, maxx)
+        sy = np.random.uniform(miny, maxy)
+        ex = np.random.uniform(minx, maxx)
+        ey = np.random.uniform(miny, maxy)
+        lines.append(LineString([(sx, sy), (ex, ey)]))
     gdf_lines = gpd.GeoDataFrame({
-        'name_gis': [f'line_{i:03}' for i in range(1, 4)],
-        'name_user': [f'line_{i:03}' for i in range(1, 4)],
+        'name_gis': [f'line_{i:03d}' for i in range(1, 4)],
+        'name_user': [f'line_{i:03d}' for i in range(1, 4)],
         'segment_length': [15, 30, 10],
         'segment_width': [1000, 20000, 5000],
-        'description': ['another line', 'another line', 'another line'],
+        'description': ['auto line', 'auto line', 'auto line'],
         'geometry': lines
-    }, crs=gdf_geocode_group.crs)
-
-    gdf_lines.crs = workingprojection_epsg
-    gdf_lines.to_file(gpkg_file, layer='tbl_lines', mode="w")
+    }, crs=geocode_group.crs or workingprojection_epsg)
+    gdf_lines = gdf_lines.set_crs(workingprojection_epsg, allow_override=True)
+    write_parquet("tbl_lines", gdf_lines)
+    optional_write_gpkg(gdf_lines, "tbl_lines")
 
 def process_and_buffer_lines(gpkg_file, log_widget):
     crs        = workingprojection_epsg
@@ -154,52 +210,50 @@ def process_and_buffer_lines(gpkg_file, log_widget):
     lines_df   = load_lines_table(gpkg_file)
 
     if lines_df is None:
-        log_to_gui(log_widget, "Lines do not exist. Will create three template lines.")
+        log_to_gui(log_widget, "No lines found; creating defaults.")
         create_lines_table_and_lines(gpkg_file, log_widget)
         lines_df = load_lines_table(gpkg_file)
         if lines_df is None:
-            log_to_gui(log_widget, "Failed to create lines.")
+            log_to_gui(log_widget, "Aborting: lines still missing.")
             return
 
-    buffered_lines_data = []
-    for index, row in lines_df.iterrows():
+    buffered_records = []
+    for idx, row in lines_df.iterrows():
         try:
-            geom            = row['geometry']
-            name_gis        = row['name_gis']
-            name_user       = row['name_user']
-            segment_length  = int(row['segment_length'])
-            segment_width   = int(row['segment_width'])
-            description     = row['description']
+            geom = row.geometry
+            seg_len  = int(row['segment_length'])
+            seg_w    = int(row['segment_width'])
+            name_gis = row['name_gis']
+            name_usr = row['name_user']
+            desc     = row.get('description', '')
 
-            log_to_gui(log_widget, f"Processing line {index}, Geometry type: {type(geom)}")
-
-            temp_gdf = gpd.GeoDataFrame([{'geometry': geom}], geometry='geometry', crs=crs)
-            temp_gdf_proj = temp_gdf.to_crs(target_crs)
-            temp_gdf_proj['geometry'] = temp_gdf_proj.buffer(segment_width, cap_style=2)
-            temp_gdf_buffered = temp_gdf_proj.to_crs(crs)
-
-            if not isinstance(temp_gdf_buffered.iloc[0].geometry, (Polygon, MultiPolygon)):
-                log_to_gui(log_widget, f"Buffered geometry is not a Polygon/MultiPolygon. Got: {type(temp_gdf_buffered.iloc[0].geometry)}")
-
-            buffered_lines_data.append({
-                'fid': index,
+            log_to_gui(log_widget, f"Buffering {name_gis}")
+            tmp = gpd.GeoDataFrame([{'geometry': geom}], geometry='geometry', crs=crs).to_crs(target_crs)
+            tmp['geometry'] = tmp.buffer(seg_w, cap_style=2)
+            back = tmp.to_crs(crs)
+            gbuf = back.iloc[0].geometry
+            if not isinstance(gbuf, (Polygon, MultiPolygon)):
+                log_to_gui(log_widget, f"Unexpected buffered geom type: {type(gbuf)}")
+            buffered_records.append({
+                'fid': idx,
                 'name_gis': name_gis,
-                'name_user': name_user,
-                'segment_length': segment_length,
-                'segment_width': segment_width,
-                'description': description,
-                'geometry': temp_gdf_buffered.iloc[0].geometry
+                'name_user': name_usr,
+                'segment_length': seg_len,
+                'segment_width': seg_w,
+                'description': desc,
+                'geometry': gbuf
             })
-            log_to_gui(log_widget, f"Added a buffered version of {name_gis} to GeoPackage.")
         except Exception as e:
-            log_to_gui(log_widget, f"Error processing line {index}: {e}")
+            log_to_gui(log_widget, f"Line {idx} failed: {e}")
 
-    if buffered_lines_data:
-        all_buffered_lines_df = gpd.GeoDataFrame(buffered_lines_data, geometry='geometry', crs=crs)
-        all_buffered_lines_df.to_file(gpkg_file, layer="tbl_lines_buffered", driver="GPKG")
-        log_to_gui(log_widget, "All buffered lines added to the database.")
-    else:
-        log_to_gui(log_widget, "No lines were processed.")
+    if not buffered_records:
+        log_to_gui(log_widget, "No buffered lines produced.")
+        return
+
+    buffered_gdf = gpd.GeoDataFrame(buffered_records, geometry='geometry', crs=crs)
+    write_parquet("tbl_lines_buffered", buffered_gdf)
+    optional_write_gpkg(buffered_gdf, "tbl_lines_buffered")
+    log_to_gui(log_widget, "Buffered lines ready (parquet).")
 
 def create_perpendicular_lines(line_input, segment_width, segment_length):
     if not isinstance(line_input, LineString):
@@ -255,53 +309,60 @@ def cut_into_segments(perpendicular_lines, buffered_line_geometry):
 
 def create_segments_from_buffered_lines(gpkg_file, log_widget):
     lines_df = load_lines_table(gpkg_file)
-    buffered_lines_gdf = gpd.read_file(gpkg_file, layer='tbl_lines_buffered')
+    if lines_df is None:
+        log_to_gui(log_widget, "No lines for segment creation.")
+        return
+    buffered = read_parquet_or_none("tbl_lines_buffered")
+    if (buffered is None or buffered.empty) and os.path.exists(gpkg_file):
+        try:
+            buffered = gpd.read_file(gpkg_file, layer='tbl_lines_buffered')
+        except Exception:
+            buffered = None
+    if buffered is None or buffered.empty:
+        log_to_gui(log_widget, "No buffered lines found; run buffering first.")
+        return
 
-    all_segments_gdf = gpd.GeoDataFrame(columns=['name_gis', 'name_user', 'segment_length', 'geometry'])
-    segment_id_counter = {}
-
-    for index, row in lines_df.iterrows():
-        line_input     = row.geometry
-        name_gis       = row['name_gis']
-        name_user      = row['name_user']
-        segment_width  = row['segment_width']
-        segment_length = row['segment_length']
-
-        if name_gis not in segment_id_counter:
-            segment_id_counter[name_gis] = 1
-
-        perpendicular_lines = create_perpendicular_lines(line_input, segment_width, segment_length)
-        matches = buffered_lines_gdf[buffered_lines_gdf['name_gis'] == name_gis]
-
-        log_to_gui(log_widget, f"Creating segments for: {name_gis}")
-
-        for _, match_row in matches.iterrows():
-            buffered_line_geometry = match_row.geometry
-            if not isinstance(buffered_line_geometry, Polygon):
-                log_to_gui(log_widget, "Geometry is not a Polygon. Skipping.")
+    all_segments = []
+    counter = {}
+    for _, row in lines_df.iterrows():
+        name_gis = row['name_gis']
+        seg_w    = row['segment_width']
+        seg_l    = row['segment_length']
+        geom     = row.geometry
+        if name_gis not in counter:
+            counter[name_gis] = 1
+        try:
+            perp = create_perpendicular_lines(geom, seg_w, seg_l)
+        except Exception as e:
+            log_to_gui(log_widget, f"Perpendicular gen failed {name_gis}: {e}")
+            continue
+        blines = buffered[buffered['name_gis'] == name_gis]
+        if blines.empty:
+            continue
+        log_to_gui(log_widget, f"Segmenting {name_gis}")
+        for _, brow in blines.iterrows():
+            bgeom = brow.geometry
+            if not isinstance(bgeom, Polygon):
                 continue
-
-            segments_gdf = cut_into_segments(perpendicular_lines, buffered_line_geometry)
-            valid_segments_gdf = segments_gdf[segments_gdf.is_valid]
-            if valid_segments_gdf.empty:
-                log_to_gui(log_widget, f"No valid segments created for {name_gis}. Skipping.")
+            segs = cut_into_segments(perp, bgeom)
+            segs = segs[segs.is_valid]
+            if segs.empty:
                 continue
+            segs['segment_id'] = [f"{name_gis}_{counter[name_gis]+i}" for i in range(len(segs))]
+            counter[name_gis] += len(segs)
+            segs['name_gis'] = name_gis
+            segs['name_user'] = row['name_user']
+            segs['segment_length'] = seg_l
+            all_segments.append(segs)
 
-            valid_segments_gdf['segment_id'] = [f"{name_gis}_{segment_id_counter[name_gis] + i}" for i in range(len(valid_segments_gdf))]
-            segment_id_counter[name_gis] += len(valid_segments_gdf)
-
-            valid_segments_gdf['name_gis'] = name_gis
-            valid_segments_gdf['name_user'] = name_user
-            valid_segments_gdf['segment_length'] = segment_length
-
-            all_segments_gdf = pd.concat([all_segments_gdf, valid_segments_gdf], ignore_index=True)
-
-    if not all_segments_gdf.empty:
-        all_segments_gdf.crs = lines_df.crs
-        all_segments_gdf.to_file(gpkg_file, layer="tbl_segments", driver="GPKG")
-        log_to_gui(log_widget, "All segments have been accumulated and saved to 'tbl_segments'.")
-    else:
-        log_to_gui(log_widget, "No segments were created.")
+    if not all_segments:
+        log_to_gui(log_widget, "No segments produced.")
+        return
+    seg_all = gpd.GeoDataFrame(pd.concat(all_segments, ignore_index=True),
+                               geometry='geometry', crs=lines_df.crs)
+    write_parquet("tbl_segments", seg_all)
+    optional_write_gpkg(seg_all, "tbl_segments")
+    log_to_gui(log_widget, "Segments saved (parquet).")
 
 # -------------------------------
 # Intersections & stacks
@@ -369,167 +430,124 @@ def apply_classification_to_gdf(gdf, column_name, classes_dict, code_suffix=""):
 # Build stacked & flat, with classification persisted to Parquet
 # -------------------------------
 def build_stacked_data(gpkg_file, log_widget):
-    log_to_gui(log_widget, "Building tbl_segment_stacked.")
-    update_progress(10)
+    log_to_gui(log_widget, "Building tbl_segment_stacked (parquet)…")
+    update_progress(65)
 
-    asset_data = gpd.read_file(gpkg_file, layer='tbl_asset_object')
-    update_progress(15)
+    asset_data = read_parquet_or_none("tbl_asset_object")
+    group_data = read_parquet_or_none("tbl_asset_group")
+    segments   = read_parquet_or_none("tbl_segments")
 
-    asset_group_data = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-    update_progress(25)
+    if asset_data is None or asset_data.empty or segments is None or segments.empty:
+        log_to_gui(log_widget, "Missing assets or segments; cannot build segment stacked.")
+        return
 
-    # Merge attributes (assumes these columns exist in asset_group_data)
-    asset_data = asset_data.merge(
-        asset_group_data[['id', 'name_gis_assetgroup', 'total_asset_objects',
-                          'importance', 'susceptibility', 'sensitivity',
-                          'sensitivity_code', 'sensitivity_description']],
-        left_on='ref_asset_group', right_on='id', how='left'
-    )
+    if group_data is not None and not group_data.empty:
+        merge_cols = [c for c in [
+            'id','name_gis_assetgroup','total_asset_objects',
+            'importance','susceptibility','sensitivity',
+            'sensitivity_code','sensitivity_description'
+        ] if c in group_data.columns]
+        asset_data = asset_data.merge(group_data[merge_cols],
+                                      left_on='ref_asset_group', right_on='id', how='left')
 
-    lines_data  = gpd.read_file(gpkg_file, layer='tbl_lines')
-    update_progress(29)
+    segments = segments.set_crs(workingprojection_epsg, allow_override=True)
+    asset_data = asset_data.set_crs(workingprojection_epsg, allow_override=True)
 
-    segments_data = gpd.read_file(gpkg_file, layer='tbl_segments')
-    update_progress(35)
+    # Per geometry type intersections
+    parts = []
+    for gt in asset_data.geometry.geom_type.unique():
+        parts.append(intersection_with_geocode_data(asset_data, segments, gt, log_widget))
+    stacked = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    if stacked.empty:
+        log_to_gui(log_widget, "No segment intersections.")
+        return
 
-    lines_data_renamed = lines_data.rename(columns={'name_gis': 'lines_name_gis'})
-    segments_related = segments_data.merge(
-        lines_data_renamed[['lines_name_gis']],
-        left_on='name_gis', right_on='lines_name_gis', how='left', suffixes=('_seg', '_line')
-    ).set_crs(workingprojection_epsg, allow_override=True)
+    stacked = gpd.GeoDataFrame(stacked, geometry='geometry', crs=workingprojection_epsg)
+    stacked.reset_index(drop=True, inplace=True)
+    stacked['fid'] = stacked.index
 
-    # Intersections by geometry type
-    point_intersections        = intersection_with_geocode_data(asset_data, segments_related, 'Point', log_widget);        update_progress(33)
-    multipoint_intersections   = intersection_with_geocode_data(asset_data, segments_related, 'MultiPoint', log_widget);   update_progress(36)
-    line_intersections         = intersection_with_geocode_data(asset_data, segments_related, 'LineString', log_widget);   update_progress(49)
-    multiline_intersections    = intersection_with_geocode_data(asset_data, segments_related, 'MultiLineString', log_widget); update_progress(42)
-    polygon_intersections      = intersection_with_geocode_data(asset_data, segments_related, 'Polygon', log_widget);      update_progress(45)
-    multipolygon_intersections = intersection_with_geocode_data(asset_data, segments_related, 'MultiPolygon', log_widget); update_progress(47)
-
-    intersected_data = pd.concat([
-        point_intersections, multipoint_intersections,
-        line_intersections, multiline_intersections,
-        polygon_intersections, multipolygon_intersections
-    ], ignore_index=True)
-
-    log_to_gui(log_widget, f"Total intersected data count: {len(intersected_data)}")
-    update_progress(60)
-
-    for col in ['id_x', 'id_y', 'lines_name_gis']:
-        if col in intersected_data.columns:
-            intersected_data.drop(columns=[col], inplace=True)
-
-    intersected_data.reset_index(drop=True, inplace=True)
-    intersected_data['fid'] = intersected_data.index
-    intersected_data = gpd.GeoDataFrame(intersected_data, geometry='geometry', crs=workingprojection_epsg)
-
-    # ---- Classification for stacked on 'sensitivity' ----
+    # Classification
     classes = read_config_classification(config_file)
-    if 'sensitivity' in intersected_data.columns:
-        intersected_data, codecol, desccol = apply_classification_to_gdf(intersected_data, 'sensitivity', classes)
-        # rename to match stacked convention (no suffix)
+    if 'sensitivity' in stacked.columns:
+        stacked, codecol, desccol = apply_classification_to_gdf(stacked, 'sensitivity', classes)
         if codecol != 'sensitivity_code':
-            intersected_data.rename(columns={codecol:'sensitivity_code'}, inplace=True)
+            stacked.rename(columns={codecol: 'sensitivity_code'}, inplace=True)
         if desccol != 'sensitivity_description':
-            intersected_data.rename(columns={desccol:'sensitivity_description'}, inplace=True)
-    else:
-        log_to_gui(log_widget, "Warning: 'sensitivity' column missing in intersected data; classification skipped for stacked.")
+            stacked.rename(columns={desccol: 'sensitivity_description'}, inplace=True)
 
-    # Save GPKG + Parquet
-    intersected_data.to_file(gpkg_file, layer='tbl_segment_stacked', driver='GPKG')
-    update_progress(70)
-    parquet_path = os.path.join(parquet_folder, "tbl_segment_stacked.parquet")
-    save_to_geoparquet(intersected_data, parquet_path, log_widget)
+    write_parquet("tbl_segment_stacked", stacked)
+    optional_write_gpkg(stacked, "tbl_segment_stacked")
+    update_progress(75)
+    log_to_gui(log_widget, f"tbl_segment_stacked rows: {len(stacked)}")
 
 def build_flat_data(gpkg_file, log_widget):
-    log_to_gui(log_widget, "Building tbl_segment_flat ...")
-    stacked = gpd.read_file(gpkg_file, layer='tbl_segment_stacked')
-    update_progress(60)
+    log_to_gui(log_widget, "Building tbl_segment_flat (parquet)…")
+    stacked = read_parquet_or_none("tbl_segment_stacked")
+    if stacked is None or stacked.empty:
+        log_to_gui(log_widget, "No stacked segment data.")
+        return
+    update_progress(80)
 
-    # Aggregation
-    aggregation_functions = {
-        'importance': ['min', 'max'],
-        'sensitivity': ['min', 'max'],
-        'susceptibility': ['min', 'max'],
+    agg = {
+        'importance': ['min','max'],
+        'sensitivity': ['min','max'],
+        'susceptibility': ['min','max'],
         'name_gis': 'first',
         'segment_id': 'first',
-        # If you have a name for the asset group, make sure this column exists; else comment out next line
-        # 'asset_group_name': lambda x: ', '.join(x.astype(str).unique()),
         'geometry': 'first'
     }
+    flat = stacked.groupby('segment_id').agg(agg)
+    flat.columns = ['_'.join(c).strip() for c in flat.columns]
+    rename_map = {'name_gis_first':'name_gis','geometry_first':'geometry'}
+    flat.rename(columns=rename_map, inplace=True)
+    flat.reset_index(inplace=True)
+    if 'segment_id_first' in flat.columns:
+        flat.drop(columns=['segment_id_first'], inplace=True)
 
-    tbl_segment_flat = stacked.groupby('segment_id').agg(aggregation_functions)
-    tbl_segment_flat.columns = ['_'.join(col).strip() for col in tbl_segment_flat.columns.values]
-    renamed = {
-        'name_gis_first': 'name_gis',
-        'geometry_first': 'geometry'
-    }
-    tbl_segment_flat.rename(columns=renamed, inplace=True)
+    flat = gpd.GeoDataFrame(flat, geometry='geometry', crs=stacked.crs)
 
-    # Keep index as column
-    tbl_segment_flat.reset_index(inplace=True)
-
-    # Remove duplicate segment_id if present
-    if 'segment_id_first' in tbl_segment_flat.columns:
-        tbl_segment_flat.drop(columns=['segment_id_first'], inplace=True)
-
-    # To GeoDataFrame
-    tbl_segment_flat = gpd.GeoDataFrame(tbl_segment_flat, geometry='geometry', crs=workingprojection_epsg)
-
-    # ---- Classification for flat on sensitivity_min/max ----
     classes = read_config_classification(config_file)
-    if not classes:
-        log_to_gui(log_widget, "Warning: No classification ranges found in config; codes will be 'Unknown'.")
+    if 'sensitivity_min_min' in flat.columns:
+        flat['sensitivity_min'] = flat.get('sensitivity_min', flat['sensitivity_min_min'])
+        flat.drop(columns=['sensitivity_min_min'], inplace=True)
+    if 'sensitivity_max_max' in flat.columns:
+        flat['sensitivity_max'] = flat.get('sensitivity_max', flat['sensitivity_max_max'])
+        flat.drop(columns=['sensitivity_max_max'], inplace=True)
 
-    if 'sensitivity_min_min' in tbl_segment_flat.columns:
-        # Some datasets could double-suffix after groupby; normalize: prefer 'sensitivity_min'/'sensitivity_max'
-        tbl_segment_flat['sensitivity_min'] = tbl_segment_flat.get('sensitivity_min', tbl_segment_flat['sensitivity_min_min'])
-        tbl_segment_flat.drop(columns=['sensitivity_min_min'], inplace=True)
-    if 'sensitivity_max_max' in tbl_segment_flat.columns:
-        tbl_segment_flat['sensitivity_max'] = tbl_segment_flat.get('sensitivity_max', tbl_segment_flat['sensitivity_max_max'])
-        tbl_segment_flat.drop(columns=['sensitivity_max_max'], inplace=True)
+    if 'sensitivity_min' in flat.columns:
+        flat, cmin, dmin = apply_classification_to_gdf(flat, 'sensitivity_min', classes, code_suffix='min')
+        if cmin != 'sensitivity_code_min':
+            flat.rename(columns={cmin: 'sensitivity_code_min'}, inplace=True)
+        if dmin != 'sensitivity_description_min':
+            flat.rename(columns={dmin: 'sensitivity_description_min'}, inplace=True)
+    if 'sensitivity_max' in flat.columns:
+        flat, cmax, dmax = apply_classification_to_gdf(flat, 'sensitivity_max', classes, code_suffix='max')
+        if cmax != 'sensitivity_code_max':
+            flat.rename(columns={cmax: 'sensitivity_code_max'}, inplace=True)
+        if dmax != 'sensitivity_description_max':
+            flat.rename(columns={dmax: 'sensitivity_description_max'}, inplace=True)
 
-    if 'sensitivity_min' in tbl_segment_flat.columns:
-        tbl_segment_flat, code_min_col, desc_min_col = apply_classification_to_gdf(tbl_segment_flat, 'sensitivity_min', classes, code_suffix='min')
-    else:
-        log_to_gui(log_widget, "Warning: 'sensitivity_min' missing in flat; min classification skipped.")
+    write_parquet("tbl_segment_flat", flat)
+    optional_write_gpkg(flat, "tbl_segment_flat")
+    update_progress(88)
+    log_to_gui(log_widget, f"tbl_segment_flat rows: {len(flat)}")
 
-    if 'sensitivity_max' in tbl_segment_flat.columns:
-        tbl_segment_flat, code_max_col, desc_max_col = apply_classification_to_gdf(tbl_segment_flat, 'sensitivity_max', classes, code_suffix='max')
-        # Ensure exact names expected by cartography: sensitivity_code_max, sensitivity_description_max
-        if code_max_col != 'sensitivity_code_max':
-            tbl_segment_flat.rename(columns={code_max_col:'sensitivity_code_max'}, inplace=True)
-        if desc_max_col != 'sensitivity_description_max':
-            tbl_segment_flat.rename(columns={desc_max_col:'sensitivity_description_max'}, inplace=True)
-    else:
-        log_to_gui(log_widget, "Warning: 'sensitivity_max' missing in flat; max classification skipped.")
-
-    # Save GPKG + Parquet with the new code/desc columns INCLUDED
-    tbl_segment_flat.to_file(gpkg_file, layer='tbl_segment_flat', driver='GPKG')
-    log_to_gui(log_widget, "Completed flat segments with classification.")
-
-    parquet_path = os.path.join(parquet_folder, "tbl_segment_flat.parquet")
-    save_to_geoparquet(tbl_segment_flat, parquet_path, log_widget)
-
+# --- NEW: combine stacked + flat build (referenced earlier) ---
 def build_flat_and_stacked(gpkg_file, log_widget):
     build_stacked_data(gpkg_file, log_widget)
     build_flat_data(gpkg_file, log_widget)
-    log_to_gui(log_widget, "Finalising processing.")
-    update_progress(100)
 
 # -------------------------------
 # Orchestrator
 # -------------------------------
 def process_all(gpkg_file, log_widget):
-    process_and_buffer_lines(gpkg_file, log_widget)
-    update_progress(30)
-    create_segments_from_buffered_lines(gpkg_file, log_widget)
-    update_progress(60)
-    build_flat_and_stacked(gpkg_file, log_widget)
-    update_progress(90)
-    log_to_gui(log_widget, "COMPLETED: Data processing and aggregation.")
-    update_progress(100)
+    log_to_gui(log_widget, "SEGMENT PROCESS START (Parquet first).")
+    process_and_buffer_lines(gpkg_file, log_widget); update_progress(25)
+    create_segments_from_buffered_lines(gpkg_file, log_widget); update_progress(55)
+    build_flat_and_stacked(gpkg_file, log_widget); update_progress(95)
     increment_stat_value(config_file, 'mesa_stat_process_lines', increment_value=1)
+    log_to_gui(log_widget, "COMPLETED: Segment processing (parquet).")
+    update_progress(100)
 
 # -------------------------------
 # Misc
