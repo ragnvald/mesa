@@ -89,6 +89,8 @@ H3_RES_ACROSS_FLATS_KM = {
     8: 0.922709368, 9: 0.348751336, 10: 0.131815614, 11: 0.049821122,
     12: 0.018831052, 13: 0.007119786, 14: 0.00269715, 15: 0.001019426
 }
+# Same values in meters (rounded when displaying)
+H3_RES_ACROSS_FLATS_M = {r: km * 1000.0 for r, km in H3_RES_ACROSS_FLATS_KM.items()}
 
 
 # -----------------------------------------------------------------------------
@@ -574,7 +576,6 @@ def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
 
     for i, r in enumerate(levels_sorted):
         update_progress(5 + i * (80 / steps))
-
         area_km2, approx_cells = estimate_cells_for(union_geom, r, cfg)
         if approx_cells > max_cells:
             log_to_gui(
@@ -835,9 +836,10 @@ def suggest_h3_levels_by_size(min_km: float, max_km: float) -> list[int]:
     return out
 
 def format_level_size_list(levels: list[int]) -> str:
+    """Show levels with across-flats size in **meters**."""
     if not levels:
         return "(none)"
-    return ", ".join(f"R{r} ({H3_RES_ACROSS_FLATS_KM[r]:.3f} km)" for r in levels)
+    return ", ".join(f"R{r} ({H3_RES_ACROSS_FLATS_M[r]:,.0f} m)" for r in levels)
 
 def build_gui(base: Path, cfg: configparser.ConfigParser):
     global root, log_widget, progress_var, progress_label, original_working_directory
@@ -885,7 +887,6 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
         .grid(row=1, column=1, columnspan=3, padx=4, pady=2, sticky="w")
 
     def _suggest_levels():
-        nonlocal min_var, max_var
         try:
             min_m = float(min_var.get())
             max_m = float(max_var.get())
@@ -913,7 +914,6 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
 
     # Buttons (consistent width)
     btn_w = 18
-    # Right‑align buttons via a spanning container frame (must create frame BEFORE buttons)
     size_btn_frame = tk.Frame(size_frame)
     size_btn_frame.grid(row=2, column=0, columnspan=5, sticky="e", padx=4, pady=2)
     suggest_levels_btn = (ttk.Button(size_btn_frame, text="Suggest H3", width=btn_w, bootstyle=PRIMARY,
@@ -930,11 +930,10 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
     # --- Basic mosaic frame (separate) ---
     mosaic_frame = tk.LabelFrame(root, text="Basic mosaic")
     mosaic_frame.pack(padx=10, pady=(0,6), fill=tk.X)
-    mosaic_status_var = tk.StringVar(value="")  # initialize here
+    mosaic_status_var = tk.StringVar(value="")
     tk.Label(mosaic_frame, text="Status:").grid(row=0, column=0, padx=4, pady=2, sticky="w")
     mosaic_status_label = tk.Label(mosaic_frame, textvariable=mosaic_status_var, width=18, anchor="w")
     mosaic_status_label.grid(row=0, column=1, padx=(0,10), pady=2, sticky="w")
-    # Give the status column stretch so the button is pushed to the right edge
     mosaic_frame.grid_columnconfigure(1, weight=1)
 
     def _update_mosaic_status():
@@ -942,8 +941,10 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
         if mosaic_status_var.get() not in ("Running…","Completed","No faces"):
             mosaic_status_var.set("OK" if exists else "REQUIRED")
         color = "#55aa55" if exists else "#cc5555"
-        try: mosaic_status_label.config(fg=color)
-        except Exception: pass
+        try:
+            mosaic_status_label.config(fg=color)
+        except Exception:
+            pass
 
     def _run_mosaic_inline():
         buf = float(cfg["DEFAULT"].get("mosaic_buffer_m","25"))
