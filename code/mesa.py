@@ -267,6 +267,22 @@ def get_script_paths(file_name,original_working_directory):
     return python_script, exe_file
 
 
+def geocodes_grids():
+    """Launch 03_create_geocodes with the working directory argument and refresh stats."""
+    python_script, exe_file = get_script_paths("03_create_geocodes", original_working_directory)
+    arguments = f'--original_working_directory={original_working_directory}'
+
+    # If running from a bundled executable, prefer the .exe next to the app
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+        file_path = os.path.join(base_path, "system", "03_create_geocodes.exe")
+        log_to_logfile(f"Running from a bundled executable, using {file_path}")
+        run_subprocess([file_path, arguments], [], gpkg_file)
+    else:
+        # Normal Python mode: run the .py, but fall back to the .exe if present
+        run_subprocess(["python", python_script, arguments], [exe_file, arguments], gpkg_file)
+
+
 def import_assets(gpkg_file):
     """Main function to import assets by running the appropriate script or executable."""
     python_script, exe_file,  = get_script_paths("01_import", original_working_directory)
@@ -357,11 +373,17 @@ def open_maps_overview():
         base_path = sys._MEIPASS
     else:
         base_path = original_working_directory
+
     python_script = os.path.join(base_path, "system", "maps_overview.py")
+
+    # <-- use the same interpreter that launched mesa.py (works in your venv)
+    python_exe = sys.executable or "python"
+
     try:
-        subprocess.Popen(["python", python_script])
+        subprocess.Popen([python_exe, python_script])
     except Exception as e:
         log_to_logfile(f"Failed to open maps_overview.py: {e}")
+
 
 
 def edit_assets():
@@ -765,6 +787,9 @@ if __name__ == "__main__":
     # Add buttons to left panel with spacing between buttons
     import_assets_btn       = ttk.Button(left_panel, text="Import", command=lambda: import_assets(gpkg_file), width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
+    
+    geocodes_btn           = ttk.Button(left_panel, text="Geocodes/grids", command=geocodes_grids, width=button_width)
+    geocodes_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
     setup_processing_btn    = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
     setup_processing_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
