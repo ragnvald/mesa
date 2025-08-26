@@ -4,10 +4,12 @@ import geopandas as gpd
 import pandas as pd
 import configparser
 import datetime
+import matplotlib
+# Force non-interactive backend to avoid "Starting a Matplotlib GUI outside of the main thread" warnings
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import argparse
-import sqlite3
 import os
 import contextily as ctx
 from reportlab.lib.pagesizes import A4
@@ -18,6 +20,20 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.units import cm
 from PIL import Image as PILImage
 import re
+import tkinter as tk
+from tkinter import scrolledtext
+import ttkbootstrap as tb
+from ttkbootstrap.constants import PRIMARY, WARNING
+import threading
+from pathlib import Path
+import subprocess
+
+# ---------------- GUI globals ----------------
+log_widget = None
+progress_var = None
+progress_label = None
+last_report_path = None
+link_var = None  # hyperlink label StringVar
 
 def read_config(file_name):
     config = configparser.ConfigParser()
@@ -34,24 +50,43 @@ def read_color_codes(file_name):
             color_codes[section] = color
     return color_codes
 
-def write_to_log(message):
+def write_to_log(message: str):
+    """Log to file and (if GUI active) to the GUI log window."""
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    with open("../log.txt", "a") as log_file:
-        log_file.write(formatted_message + "\n")
-
-def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
     try:
-        # Memory optimization: Only read necessary columns
-        layer = gpd.read_file(gpkg_file, layer=layer_name)
+        with open("../log.txt", "a", encoding="utf-8") as log_file:
+            log_file.write(formatted_message + "\n")
+    except Exception:
+        pass
+    try:
+        if log_widget and log_widget.winfo_exists():
+            log_widget.insert(tk.END, formatted_message + "\n")
+            log_widget.see(tk.END)
+    except Exception:
+        pass
+
+def plot_parquet_layer(parquet_path, layer_label, output_png, crs='EPSG:4326'):
+    """
+    Plot a single GeoParquet layer (polygons / lines / points mixed) with contextily basemap.
+    """
+    try:
+        if not os.path.exists(parquet_path):
+            write_to_log(f"Parquet file missing: {parquet_path}")
+            return None
+        layer = gpd.read_parquet(parquet_path)
         if layer.empty or layer.is_empty.any():
-            write_to_log(f"Layer {layer_name} empty or contains invalid geometries")
+            write_to_log(f"Layer {layer_label} empty or contains invalid geometries")
             return None
             
-        # Release memory for unused columns
-        keep_cols = ['geometry'] + [col for col in layer.columns if col in ['name', 'title', 'description']][:2]
+        # keep geometry + first two descriptive columns if present
+        keep_cols = ['geometry']
+        for c in ['name','title','description','name_gis_geocodegroup','name_gis_assetgroup']:
+            if c in layer.columns and c not in keep_cols:
+                keep_cols.append(c)
+            if len(keep_cols) >= 3:
+                break
         layer = layer[keep_cols]
-        
         fig, ax = plt.subplots(figsize=(10, 10), dpi=100)
         plt.ioff()  # Turn off interactive mode
 
@@ -86,7 +121,7 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
             ax.set_xlim(default_limits[0], default_limits[1])
             ax.set_ylim(default_limits[2], default_limits[3])
 
-        ax.set_title(layer_name, fontsize=15, fontweight='bold')
+        ax.set_title(layer_label, fontsize=15, fontweight='bold')
         plt.savefig(output_png, bbox_inches='tight')
         plt.close(fig)
         write_to_log(f"Plot saved to {output_png}")
@@ -94,30 +129,36 @@ def plot_geopackage_layer(gpkg_file, layer_name, output_png, crs='EPSG:4326'):
         return layer
 
     except Exception as e:
-        write_to_log(f"Error processing layer {layer_name}: {e}")
+        write_to_log(f"Error processing layer {layer_label}: {e}")
         plt.close('all')
         return None
 
-def fetch_asset_group_statistics(db_path):
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    
-    sql_query = """
-    SELECT a.sensitivity_code, a.sensitivity_description, COUNT(b.ref_asset_group) AS asset_objects_nr
-    FROM tbl_asset_group AS a
-    LEFT JOIN tbl_asset_object AS b ON a.id = b.ref_asset_group
-    GROUP BY a.sensitivity_code
-    ORDER BY a.sensitivity_code;
+def fetch_asset_group_statistics(asset_group_df: gpd.GeoDataFrame, asset_object_df: gpd.GeoDataFrame):
     """
-    
-    cur.execute(sql_query)
-    results = cur.fetchall()
-    column_names = ['Sensitivity Code', 'Sensitivity Description', 'Number of Asset Objects']
-    conn.close()
-    
-    df_results = pd.DataFrame(results, columns=column_names)
-    
-    return df_results
+    Rebuild asset group sensitivity statistics from parquet data.
+    """
+    if asset_group_df.empty:
+        return pd.DataFrame(columns=['Sensitivity Code','Sensitivity Description','Number of Asset Objects'])
+    # Count objects per ref group
+    if not asset_object_df.empty and 'ref_asset_group' in asset_object_df.columns:
+        cnt = asset_object_df.groupby('ref_asset_group').size().rename('asset_objects_nr')
+        merged = asset_group_df.merge(cnt, left_on='id', right_index=True, how='left')
+    else:
+        merged = asset_group_df.copy()
+        merged['asset_objects_nr'] = 0
+    merged['asset_objects_nr'] = merged['asset_objects_nr'].fillna(0).astype(int)
+    cols_map = {
+        'sensitivity_code': 'Sensitivity Code',
+        'sensitivity_description': 'Sensitivity Description',
+        'asset_objects_nr': 'Number of Asset Objects'
+    }
+    out = (merged.groupby(['sensitivity_code','sensitivity_description'], dropna=False)['asset_objects_nr']
+                 .sum()
+                 .reset_index()
+                 .rename(columns=cols_map)
+           )
+    out = out.sort_values('Sensitivity Code')
+    return out
 
 def format_area(row):
     if row['geometry_type'] in ['Polygon', 'MultiPolygon']:
@@ -128,28 +169,31 @@ def format_area(row):
     else:
         return "-"
 
-def calculate_group_statistics(gpkg_file, layer_name):
-    gdf_assets = gpd.read_file(gpkg_file, layer=layer_name)
-    tbl_asset_group = gpd.read_file(gpkg_file, layer='tbl_asset_group')
-
-    tbl_asset_group = tbl_asset_group.drop(columns=['geometry'])
-
-    gdf_assets = gdf_assets.merge(tbl_asset_group, left_on='ref_asset_group', right_on='id')
-
+def calculate_group_statistics(asset_object_df: gpd.GeoDataFrame, asset_group_df: gpd.GeoDataFrame):
+    """
+    Build per asset group statistics (area/objects) from parquet frames.
+    """
+    if asset_object_df.empty or asset_group_df.empty:
+        return pd.DataFrame(columns=['Title','Code','Description','Type','Total area','# objects'])
+    tbl_asset_group = asset_group_df.drop(columns=[c for c in ['geometry'] if c in asset_group_df.columns])
+    gdf_assets = asset_object_df.merge(tbl_asset_group, left_on='ref_asset_group', right_on='id', how='left')
     gdf_assets['geometry_type'] = gdf_assets.geometry.type
-
-    gdf_assets = gdf_assets.to_crs('ESRI:54009')
-
+    try:
+        gdf_assets = gdf_assets.to_crs('ESRI:54009')
+    except Exception:
+        pass
     polygons = gdf_assets[gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
     non_polygons = gdf_assets[~gdf_assets.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
 
     polygons.loc[:, 'area'] = polygons['geometry'].area
-
     non_polygons.loc[:, 'area'] = np.nan
 
     gdf_assets = pd.concat([polygons, non_polygons], ignore_index=True)
 
-    group_stats = gdf_assets.groupby(['title_fromuser', 'sensitivity_code', 'sensitivity_description', 'geometry_type']).agg(
+    group_stats = gdf_assets.groupby(
+        ['title_fromuser', 'sensitivity_code', 'sensitivity_description', 'geometry_type'],
+        dropna=False
+    ).agg(
         total_area=('area', 'sum'),
         object_count=('geometry', 'size')
     ).reset_index()
@@ -168,34 +212,20 @@ def export_to_excel(data_frame, file_path):
     
     data_frame.to_excel(file_path, index=False)
 
-def fetch_lines_and_segments(db_path):
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # Check if tbl_lines table exists
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tbl_lines';")
-    tbl_lines_exists = cur.fetchone()
-
-    # Check if tbl_segment_flat table exists
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tbl_segment_flat';")
-    tbl_segment_flat_exists = cur.fetchone()
-
-    lines_df = pd.DataFrame()
-    segments_df = pd.DataFrame()
-
-    if tbl_lines_exists:
-        lines_query = "SELECT * FROM tbl_lines"
-        lines_df = pd.read_sql_query(lines_query, conn)
-    else:
-        print("Table 'tbl_lines' does not exist. Skipping.")
-
-    if tbl_segment_flat_exists:
-        segments_query = "SELECT * FROM tbl_segment_flat"
-        segments_df = pd.read_sql_query(segments_query, conn)
-    else:
-        print("Table 'tbl_segment_flat' does not exist. Skipping.")
-
-    conn.close()
+def fetch_lines_and_segments(parquet_dir: str):
+    """
+    Load lines & segment flat tables from GeoParquet if present.
+    """
+    lines_pq    = os.path.join(parquet_dir, "tbl_lines.parquet")
+    segments_pq = os.path.join(parquet_dir, "tbl_segment_flat.parquet")
+    try:
+        lines_df    = gpd.read_parquet(lines_pq) if os.path.exists(lines_pq) else gpd.GeoDataFrame()
+    except Exception:
+        lines_df = gpd.GeoDataFrame()
+    try:
+        segments_df = gpd.read_parquet(segments_pq) if os.path.exists(segments_pq) else gpd.GeoDataFrame()
+    except Exception:
+        segments_df = gpd.GeoDataFrame()
     return lines_df, segments_df
 
 def get_color_from_code(code, color_codes):
@@ -407,134 +437,217 @@ def compile_pdf(output_pdf, elements):
     
     doc.build(elements, onFirstPage=add_header, onLaterPages=add_header)
 
-# Main script execution
-#####################################################################################
-#  Main
-#
+def set_progress(pct: float, message: str | None = None):
+    """Update progress bar/label and optionally log a message."""
+    try:
+        pct = max(0, min(100, int(pct)))
+        if progress_var is not None:
+            progress_var.set(pct)
+        if progress_label is not None:
+            progress_label.config(text=f"{pct}%")
+        if message:
+            write_to_log(message)
+    except Exception:
+        pass
 
-parser = argparse.ArgumentParser(description='Slave script')
-parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
-args = parser.parse_args()
-original_working_directory = args.original_working_directory
+def generate_report(original_working_directory: str,
+                    config_file: str,
+                    color_codes: dict):
+    """Run full report generation and update GUI log/progress."""
+    try:
+        set_progress(3, "Initializing report generation …")
+        gpq_dir_path  = os.path.join(original_working_directory, "output", "geoparquet")
+        cfg           = read_config(config_file)
+        output_png    = os.path.join(original_working_directory, cfg['DEFAULT']['output_png'])
+        tmp_dir       = os.path.join(original_working_directory, 'output', 'tmp')
+        os.makedirs(tmp_dir, exist_ok=True)
+        set_progress(6, "Paths prepared.")
 
-if original_working_directory is None or original_working_directory == '':
-    original_working_directory  = os.getcwd()
-    if str("system") in str(original_working_directory):
-        original_working_directory = os.path.join(os.getcwd(),'../')
+        asset_output_png       = os.path.join(tmp_dir, 'asset.png')
+        flat_output_png        = os.path.join(tmp_dir, 'flat.png')
+        asset_group_statistics = os.path.join(tmp_dir, 'asset_group_statistics.xlsx')
+        object_stats_output    = os.path.join(tmp_dir, 'asset_object_statistics.xlsx')
 
-config_file                 = os.path.join(original_working_directory, "system/config.ini")
-gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
+        write_to_log("Starting report generation (GeoParquet)...")
+        set_progress(10)
+        asset_object_pq = os.path.join(gpq_dir_path, "tbl_asset_object.parquet")
+        asset_group_pq  = os.path.join(gpq_dir_path, "tbl_asset_group.parquet")
+        flat_pq         = os.path.join(gpq_dir_path, "tbl_flat.parquet")
 
-config = read_config(config_file)
-color_codes = read_color_codes(config_file)
+        try:
+            asset_objects_df = gpd.read_parquet(asset_object_pq) if os.path.exists(asset_object_pq) else gpd.GeoDataFrame()
+        except Exception:
+            asset_objects_df = gpd.GeoDataFrame()
+        try:
+            asset_groups_df  = gpd.read_parquet(asset_group_pq)  if os.path.exists(asset_group_pq)  else gpd.GeoDataFrame()
+        except Exception:
+            asset_groups_df = gpd.GeoDataFrame()
 
-output_png              = os.path.join(original_working_directory, config['DEFAULT']['output_png'])
-tmp_dir                 = os.path.join(original_working_directory, 'output/tmp')
+        write_to_log("Plotting asset layer...")
+        _ = plot_parquet_layer(asset_object_pq, 'tbl_asset_object', asset_output_png)
+        set_progress(20, "Asset layer plotted.")
 
-asset_output_png = os.path.join(tmp_dir, 'asset.png')
-flat_output_png         = os.path.join(tmp_dir, 'flat.png')
-asset_group_statistics  = os.path.join(tmp_dir, 'asset_group_statistics.xlsx')
-object_stats_output     = os.path.join(tmp_dir, 'asset_object_statistics.xlsx')
+        write_to_log("Computing asset object statistics...")
+        set_progress(28, "Computing asset object statistics...")
+        group_statistics = calculate_group_statistics(asset_objects_df, asset_groups_df)
+        export_to_excel(group_statistics, object_stats_output)
+        set_progress(34, "Asset object statistics exported.")
 
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
+        write_to_log("Plotting flat layer...")
+        _ = plot_parquet_layer(flat_pq, 'tbl_flat', flat_output_png)
+        set_progress(42, "Flat layer plotted.")
+
+        write_to_log("Exporting asset group sensitivity statistics...")
+        set_progress(48, "Exporting asset group sensitivity statistics…")
+        df_asset_group_statistics = fetch_asset_group_statistics(asset_groups_df, asset_objects_df)
+        export_to_excel(df_asset_group_statistics, asset_group_statistics)
+        set_progress(55, "Asset group sensitivity exported.")
+
+        write_to_log("Loading lines and segments...")
+        set_progress(58, "Loading lines and segments …")
+        lines_df, segments_df = fetch_lines_and_segments(gpq_dir_path)
+        required_seg_cols = {'name_gis', 'segment_id', 'sensitivity_code_max', 'sensitivity_code_min'}
+        if (not lines_df.empty and not segments_df.empty and
+            required_seg_cols.issubset(set(segments_df.columns)) and
+            'length_m' in lines_df.columns and 'name_gis' in lines_df.columns):
+            line_statistics_pages, _ = generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir)
+            write_to_log("Line statistics generated.")
+            set_progress(70, "Line statistics generated.")
+        else:
+            line_statistics_pages = []
+            write_to_log("Skipping line statistics (missing required columns or empty datasets).")
+            set_progress(70, "Skipped line statistics.")
+
+        timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+        time_info = f"Timestamp for this report is: {timestamp}"
+        order_list = [
+            ('heading(1)', "MESA report"),
+            ('spacer', 5),
+            ('text', time_info),
+            ('new_page', None),
+            ('heading(2)', "Introduction"),
+            ('text', '../output/tmp/introduction.txt'),
+            ('spacer', 2),
+            ('heading(2)', "Asset object statistics"),
+            ('text', '../output/tmp/asset_objects_statistics_desc.txt'),
+            ('table', object_stats_output),
+            ('new_page', None),
+            ('heading(2)', "Map representation of all assets"),
+            ('text', '../output/tmp/asset_desc.txt'),
+            ('image', asset_output_png),
+            ('heading(3)', "Geographical Coordinates"),
+            ('text', '../output/tmp/geographical_coordinates.txt'),
+            ('new_page', None),
+            ('heading(2)', "Asset data table"),
+            ('text', '../output/tmp/asset_overview.txt'),
+            ('spacer', 2),
+            ('table', asset_group_statistics),
+            ('new_page', None),
+            ('heading(2)', "Detailed asset description"),
+            ('image', flat_output_png),
+            ('new_page', None),
+            ('heading(2)', "Information about lines and segments"),
+            ('text', '../output/tmp/introduction_line_data.txt')
+        ]
+        order_list.extend(line_statistics_pages)
+        set_progress(72, "Composing PDF elements …")
+        elements = line_up_to_pdf(order_list)
+        set_progress(86, "Elements ready – building PDF …")
+
+        timestamp_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+        output_pdf = os.path.join(original_working_directory, f'output/MESA-report_{timestamp_pdf}.pdf')
+        compile_pdf(output_pdf, elements)
+        set_progress(100, "Report completed.")
+        global last_report_path
+        last_report_path = output_pdf
+        write_to_log(f"PDF report created: {output_pdf}")
+        # Update link (if GUI)
+        try:
+            if link_var:
+                link_var.set("Open report folder")
+        except Exception:
+            pass
+    except Exception as e:
+        write_to_log(f"ERROR during report generation: {e}")
+        set_progress(100, "Report failed.")
+
+def _start_report_thread(base_dir, config_file, color_codes):
+    threading.Thread(target=generate_report,
+                     args=(base_dir, config_file, color_codes),
+                     daemon=True).start()
+
+def launch_gui(original_working_directory: str, config_file: str, color_codes: dict, theme: str):
+    global log_widget, progress_var, progress_label, link_var
+    root = tb.Window(themename=theme)
+    root.title("MESA – Report generator")
+    try:
+        ico = Path(original_working_directory) / "system_resources" / "mesa.ico"
+        if ico.exists():
+            root.iconbitmap(str(ico))
+    except Exception:
+        pass
+
+    frame = tb.LabelFrame(root, text="Log", bootstyle="info")
+    frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+    log_widget = scrolledtext.ScrolledText(frame, height=14)
+    log_widget.pack(fill=tk.BOTH, expand=True)
+
+    pframe = tk.Frame(root); pframe.pack(pady=6)
+    progress_var = tk.DoubleVar(value=0.0)
+    pbar = tb.Progressbar(pframe, orient="horizontal", length=300, mode="determinate",
+                          variable=progress_var, bootstyle="info")
+    pbar.pack(side=tk.LEFT, padx=6)
+    progress_label = tk.Label(pframe, text="0%", width=5, anchor="w")
+    progress_label.pack(side=tk.LEFT)
+
+    btn_frame = tk.Frame(root); btn_frame.pack(pady=4)
+    tb.Button(btn_frame, text="Generate report", bootstyle=PRIMARY,
+              command=lambda: _start_report_thread(original_working_directory, config_file, color_codes)).grid(row=0, column=0, padx=6)
+    tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).grid(row=0, column=1, padx=6)
+
+    # Live link placeholder
+    def open_report_folder(event=None):
+        if not last_report_path:
+            return
+        folder = os.path.dirname(last_report_path)
+        if os.path.isdir(folder):
+            try:
+                os.startfile(folder)  # Windows
+            except Exception:
+                try:
+                    subprocess.Popen(["explorer", folder])
+                except Exception as ee:
+                    write_to_log(f"Failed to open folder: {ee}")
+        else:
+            write_to_log("Report folder not found.")
+
+    link_var = tk.StringVar(value="")
+    link_label = tk.Label(root, textvariable=link_var, fg="#4ea3ff", cursor="hand2", font=("Segoe UI", 10, "underline"))
+    link_label.pack(pady=(2,8))
+    link_label.bind("<Button-1>", open_report_folder)
+
+    write_to_log(f"Working directory: {original_working_directory}")
+    write_to_log("Ready. Press 'Generate report' to start.")
+    root.mainloop()
 
 if __name__ == "__main__":
-    os.makedirs(tmp_dir, exist_ok=True)
-    
-    # Process one layer at a time to manage memory
-    write_to_log("Processing asset layer...")
-    asset_layer = plot_geopackage_layer(gpkg_file, 'tbl_asset_object', asset_output_png)
-    group_statistics = calculate_group_statistics(gpkg_file, 'tbl_asset_object')
-    export_to_excel(group_statistics, object_stats_output)
-    del asset_layer  # Free memory
-    
-    write_to_log("Processing flat layer...")
-    flat_layer = plot_geopackage_layer(gpkg_file, 'tbl_flat', flat_output_png)
-    del flat_layer  # Free memory
-    
-    # Export statistics
-    df_asset_group_statistics = fetch_asset_group_statistics(gpkg_file)
-    export_to_excel(df_asset_group_statistics, asset_group_statistics)
-    write_to_log("Excel table exported")
+    parser = argparse.ArgumentParser(description='Presentation report (GeoParquet only)')
+    parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+    parser.add_argument('--no-gui', action='store_true', help='Run directly without GUI')
+    args = parser.parse_args()
 
-    # Fetch lines and segments
-    lines_df, segments_df = fetch_lines_and_segments(gpkg_file)
-    line_statistics_pages, log_file_path = generate_line_statistics_pages(lines_df, segments_df, color_codes, tmp_dir)
-    write_to_log("Line statistics images created")
+    original_working_directory = args.original_working_directory
+    if not original_working_directory:
+        original_working_directory = os.getcwd()
+        if os.path.basename(original_working_directory).lower() == "system":
+            original_working_directory = os.path.abspath(os.path.join(original_working_directory, ".."))
 
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    time_info = f"Timestamp for this report is: {timestamp}"
+    config_file = os.path.join(original_working_directory, "system", "config.ini")
+    config = read_config(config_file)
+    color_codes = read_color_codes(config_file)
+    theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 
-    order_list = [
-        ('heading(1)', "MESA report"),
-        ('spacer', 5),
-        ('text', time_info),
-        ('new_page', None),
-        ('heading(2)', "Introduction"),
-        ('text', '../output/tmp/introduction.txt'),
-        ('spacer', 2),
-        ('heading(2)', "Asset object statistics"),
-        ('text', '../output/tmp/asset_objects_statistics_desc.txt'),
-        ('table', object_stats_output),
-        ('new_page', None),
-        ('heading(2)', "Map representation of all assets"),
-        ('text', '../output/tmp/asset_desc.txt'),
-        ('image', asset_output_png),
-        ('heading(3)', "Geographical Coordinates"),
-        ('text', '../output/tmp/geographical_coordinates.txt'),
-        ('new_page', None),
-        ('heading(2)', "Asset data table"),
-        ('text', '../output/tmp/asset_overview.txt'),
-        ('spacer', 2),
-        ('table', asset_group_statistics),
-        ('new_page', None),
-        ('heading(2)', "Detailed asset description"),
-        ('image', flat_output_png),
-        ('new_page', None),
-        ('heading(2)', "Information about lines and segments"),
-        ('text', '../output/tmp/introduction_line_data.txt')
-    ]
-
-    order_list.extend(line_statistics_pages)  # Add line statistics pages at the end
-    elements = line_up_to_pdf(order_list)
-
-    timestamp_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
-    output_pdf = os.path.join(original_working_directory, f'output/MESA-report_{timestamp_pdf}.pdf')
-    compile_pdf(output_pdf, elements)
-    write_to_log(f"PDF report created at {output_pdf}")
-
-    # Yes, this script stores output in both GeoPackage and GeoParquet formats,
-    # but only for tables that are already present in the GeoPackage.
-    # It reads from the GeoPackage (gpkg_file) and exports statistics and images,
-    # but does NOT write new spatial tables to GeoParquet directly.
-    # If you want to export GeoPackage tables to GeoParquet, add code like below:
-
-    def export_gpkg_to_geoparquet(gpkg_file, output_folder, layers):
-        os.makedirs(output_folder, exist_ok=True)
-        for layer in layers:
-            gdf = gpd.read_file(gpkg_file, layer=layer)
-            parquet_path = os.path.join(output_folder, f"{layer}.parquet")
-            gdf.to_parquet(parquet_path, index=False)
-
-    # After generating statistics and images, you can export tables:
-    geoparquet_folder = os.path.join(original_working_directory, "output/geoparquet")
-    export_gpkg_to_geoparquet(gpkg_file, geoparquet_folder, ["tbl_asset_object", "tbl_flat"])
-
-# Functionality summary:
-# - Reads configuration and color codes for sensitivity categories.
-# - Generates overview plots for asset and flat tables from the GeoPackage, saving as PNG images.
-# - Calculates and exports asset group statistics and asset object statistics to Excel.
-# - Fetches line and segment data from the GeoPackage and generates visual statistics for lines.
-# - Creates a multi-page PDF report using ReportLab, including images, tables, and formatted text.
-# - Handles resizing images for PDF, sorting segments, and formatting area values.
-# - Logs all major actions and errors to a log file.
-# - Main script builds the report by assembling all elements and exporting the final PDF.
-# - Exports existing GeoPackage tables to GeoParquet format if needed.
-# - Fetches line and segment data from the GeoPackage and generates visual statistics for lines.
-# - Creates a multi-page PDF report using ReportLab, including images, tables, and formatted text.
-# - Handles resizing images for PDF, sorting segments, and formatting area values.
-# - Logs all major actions and errors to a log file.
-# - Main script builds the report by assembling all elements and exporting the final PDF.
-# - Exports existing GeoPackage tables to GeoParquet format if needed.
-# - Main script builds the report by assembling all elements and exporting the final PDF.
-# - Exports existing GeoPackage tables to GeoParquet format if needed.
+    if args.no_gui:
+        generate_report(original_working_directory, config_file, color_codes)
+    else:
+        launch_gui(original_working_directory, config_file, color_codes, theme)
