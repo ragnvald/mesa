@@ -39,6 +39,7 @@ CONFIG_FILE      = os.path.join(BASE_DIR, "../system/config.ini")
 PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")           # stats source & map polygons
 SEGMENT_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
 ASSET_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_asset_object.parquet")
+LINES_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_lines.parquet")          # human-readable names + name_gis
 PLOT_CRS         = "EPSG:4326"
 BASIC_GROUP_NAME = "basic_mosaic"   # stats always from here (in tbl_flat)
 ZOOM_THRESHOLD   = 10               # tooltips appear when map zoom >= this
@@ -200,6 +201,10 @@ def geodesic_area_m2(geom) -> float:
     return 0.0
 
 def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
+    """
+    Input: tbl_flat (already loaded as GeoDataFrame with geometry).
+    Filter to BASIC_GROUP_NAME, dedupe, compute WGS84 geodesic area, sum to km² by sensitivity.
+    """
     labels = list("ABCDE")
     msg = f'The geocode/partition "{BASIC_GROUP_NAME}" is missing.'
     if df_flat.empty or "name_gis_geocodegroup" not in df_flat.columns:
@@ -212,6 +217,7 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
     if df.empty:
         return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
 
+    # dedupe to avoid double counting overlapping rows in tbl_flat
     if "id_geocode_object" in df.columns:
         df = df.drop_duplicates(subset=["id_geocode_object"])
     else:
@@ -241,9 +247,11 @@ cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 
-GDF          = load_parquet(PARQUET_FILE)  # tbl_flat
+# GDF is tbl_flat (stats & map polygons)
+GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
 ASSET_GDF    = load_parquet(ASSET_FILE)
+LINES_GDF    = load_parquet(LINES_FILE)  # names + name_gis primary key
 
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
@@ -254,6 +262,25 @@ if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
     SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 else:
     SEG_CATS = []
+
+# Build mapping from human-readable line name -> name_gis (PK)
+LINE_NAMES = []
+LINE_USER_TO_GIS = {}  # { name_user -> set(name_gis) }
+if not LINES_GDF.empty and ("name_gis" in LINES_GDF.columns):
+    name_col = "name_user" if "name_user" in LINES_GDF.columns else None
+    if name_col is None:
+        for c in ("name_line", "name"):
+            if c in LINES_GDF.columns:
+                name_col = c
+                break
+    if name_col:
+        tmp = LINES_GDF[[name_col, "name_gis"]].dropna()
+        tmp[name_col] = tmp[name_col].astype(str).str.strip()
+        tmp["name_gis"] = tmp["name_gis"].astype(str).str.strip()
+        for nm, ng in tmp.itertuples(index=False):
+            if nm and ng:
+                LINE_USER_TO_GIS.setdefault(nm, set()).add(ng)
+        LINE_NAMES = sorted(LINE_USER_TO_GIS.keys())
 
 BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
 
@@ -272,7 +299,8 @@ class Api:
             "geocode_available": GEOCODE_AVAILABLE,
             "geocode_categories": CATS if GEOCODE_AVAILABLE else [],
             "segment_available": SEGMENTS_AVAILABLE,
-            "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],
+            "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],  # fallback
+            "segment_line_names": LINE_NAMES,  # from tbl_lines.name_user
             "assets_available": ASSETS_AVAILABLE,
             "colors": COLS,
             "descriptions": DESC,
@@ -283,6 +311,7 @@ class Api:
         }
 
     def get_geocode_layer(self, geocode_category):
+        """Return selected geocode layer for map + stats from tbl_flat:basic_mosaic."""
         try:
             if not GEOCODE_AVAILABLE:
                 map_geojson = {"type":"FeatureCollection","features":[]}
@@ -296,18 +325,37 @@ class Api:
 
             stats = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
 
-            return {"ok": True, "geojson": map_geojson, "home_bounds": map_bounds, "stats": stats}
+            return {
+                "ok": True,
+                "geojson": map_geojson,
+                "home_bounds": map_bounds,
+                "stats": stats
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def get_segment_layer(self, seg_category_or_all):
+    def get_segment_layer(self, seg_line_name_or_all):
+        """
+        Filter sensitivity segments (tbl_segment_flat) using tbl_lines relation:
+        UI passes tbl_lines.name_user -> map to tbl_lines.name_gis; filter segments on name_gis.
+        '__ALL__' => return all segments.
+        """
         try:
             if not SEGMENTS_AVAILABLE:
                 return {"ok": False, "error": "Segments dataset is empty or missing."}
-            if "name_gis_geocodegroup" in SEG_GDF.columns and seg_category_or_all not in (None, "", "__ALL__"):
-                df = SEG_GDF[SEG_GDF["name_gis_geocodegroup"] == seg_category_or_all].copy()
-            else:
-                df = SEG_GDF.copy()
+
+            df = SEG_GDF.copy()
+            sel = seg_line_name_or_all
+            if sel and sel not in (None, "", "__ALL__"):
+                sel = str(sel).strip()
+                if "name_gis" in df.columns:
+                    allowed = LINE_USER_TO_GIS.get(sel, set())
+                    if not allowed:
+                        allowed = {sel}  # tolerate direct name_gis passed through
+                    df = df[df["name_gis"].astype(str).str.strip().isin(list(allowed))]
+                else:
+                    df = df.iloc[0:0]
+
             df = only_A_to_E(df)
             df = to_plot_crs(df, cfg)
             gj = gdf_to_geojson_min(df)
@@ -316,6 +364,7 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_assets_layer(self):
+        """Return assets overlay (steel blue, drawn just above basemap)."""
         try:
             if not ASSETS_AVAILABLE:
                 return {"ok": False, "error": "Assets dataset is empty or missing."}
@@ -336,9 +385,12 @@ class Api:
             os._exit(0)
 
     def save_png(self, data_url: str):
+        """Receive data URL from JS and save PNG."""
         try:
-            if "," in data_url: _, b64 = data_url.split(",", 1)
-            else: b64 = data_url
+            if "," in data_url:
+                _, b64 = data_url.split(",", 1)
+            else:
+                b64 = data_url
             data = base64.b64decode(b64)
 
             win = webview.windows[0]
@@ -349,7 +401,8 @@ class Api:
             )
             if not path:
                 return {"ok": False, "error": "User cancelled."}
-            if isinstance(path, (list, tuple)): path = path[0]
+            if isinstance(path, (list, tuple)):
+                path = path[0]
             with open(path, "wb") as f:
                 f.write(data)
             return {"ok": True, "path": path}
@@ -412,7 +465,7 @@ HTML_TEMPLATE = r"""
   /* Leaflet Layers control tweaks and tooltips */
   .leaflet-control-layers { font-size: 12px; }
   .leaflet-control-layers label { display:block; line-height: 1.35; }
-  .inlineSel { margin:4px 0 6px 22px; } /* under the checkbox/radio */
+  .inlineSel { margin:4px 0 6px 22px; }
   .help {
     display:inline-flex; align-items:center; justify-content:center;
     width:15px; height:15px; border-radius:50%;
@@ -433,7 +486,6 @@ HTML_TEMPLATE = r"""
 
   /* chart/tooltip */
   #chartBox { flex:1 1 auto; padding:8px 12px; position:relative; overflow:hidden; }
-  /* Fill inside the padded box exactly, no overflow on resize */
   #chart { position:absolute; top:8px; right:12px; bottom:8px; left:12px; display:block; }
 
   .leaflet-tooltip.poly-tip {
@@ -469,11 +521,11 @@ HTML_TEMPLATE = r"""
     <div id="err"></div>
     <div class="legend" id="legend"></div>
     <div id="infoText" class="info-block">
-      <p>1. Geocoded areas are colored by sensitivity A (very high) to E (very low).</p>
+      <p>1. Geocode areas are colored by sensitivity A (very high) to E (very low).</p>
       <p>2. Bar chart shows total km² per sensitivity for the baseline group 'basic_mosaic'.</p>
       <p>3. Percentages in the legend use geodesic (WGS84) area for accuracy.</p>
       <p>4. Change the geocode category in Layers to explore alternate partitions.</p>
-      <p>5. Enable 'Sensitivity segments' to view buffered line-based segment polygons.</p>
+      <p>5. Enable 'Sensitivity lines' to view buffered line-based segment polygons.</p>
       <p>6. Enable 'Assets' to overlay individual asset geometries in steel blue.</p>
       <p>7. Adjust the Opacity slider to reveal more basemap context beneath fills.</p>
       <p>8. Hover a polygon (zoom ≥ threshold) to see a rich tooltip with details.</p>
@@ -627,7 +679,10 @@ function renderChart(stats) {
     }
   });
 
-  resizeChartToBox();
+  // fill padded box exactly (prevents tiny stripes)
+  var canvas = document.getElementById('chart');
+  var r = canvas.getBoundingClientRect();
+  CHART.resize(Math.floor(r.width), Math.floor(r.height));
 }
 
 /* ---------- Resize handling ---------- */
@@ -636,9 +691,7 @@ function resizeChartToBox(){
   if (!CHART) return;
   var canvas = document.getElementById('chart');
   var r = canvas.getBoundingClientRect();
-  var w = Math.max(0, Math.floor(r.width));
-  var h = Math.max(0, Math.floor(r.height));
-  CHART.resize(w, h);
+  CHART.resize(Math.floor(r.width), Math.floor(r.height));
 }
 function setupResizeObservers(){
   var chartBox = document.getElementById('chartBox');
@@ -730,18 +783,7 @@ function styleFeatureAssets(f){
   return { color: ASSET_COLOR, weight: 0.6, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR };
 }
 
-/* ---------- Enforce overlay order via pane z-index ---------- */
-function enforceOverlayOrder(){
-  if (!MAP) return;
-  var ap = MAP.getPane('assetsPane');
-  var gp = MAP.getPane('geocodePane');
-  var sp = MAP.getPane('segmentsPane');
-  if (ap) ap.style.zIndex = 300;  // bottom-most overlay
-  if (gp) gp.style.zIndex = 450;  // middle
-  if (sp) sp.style.zIndex = 650;  // top
-}
-
-/* ---------- API-backed layer loaders ---------- */
+/* ---------- API-backed layer loaders (fill the groups) ---------- */
 function loadGeocodeIntoGroup(cat, preserveView){
   var prev = null;
   if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
@@ -757,7 +799,6 @@ function loadGeocodeIntoGroup(cat, preserveView){
         onEachFeature: function (feature, layer) { attachPolygonTooltip(layer, feature); }
       });
       GEO_GROUP.addLayer(LAYER);
-      enforceOverlayOrder();
     }
 
     if (preserveView && prev){ MAP.setView(prev.center, prev.zoom, { animate:false }); }
@@ -773,15 +814,14 @@ function loadGeocodeIntoGroup(cat, preserveView){
   });
 }
 
-function loadSegmentsIntoGroup(segCatOrAll){
-  window.pywebview.api.get_segment_layer(segCatOrAll).then(function(res){
+function loadSegmentsIntoGroup(lineNameOrAll){
+  window.pywebview.api.get_segment_layer(lineNameOrAll).then(function(res){
     if (!res.ok){ setError('Failed to load segments: '+res.error); return; }
     if (!document.getElementById('err').textContent){ setError(''); }
     if (SEG_GROUP){ SEG_GROUP.clearLayers(); }
     if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
       LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, renderer: RENDERERS.segments });
       SEG_GROUP.addLayer(LAYER_SEG);
-      enforceOverlayOrder();
     }
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
@@ -801,7 +841,6 @@ function loadAssetsIntoGroup(){
         }
       });
       ASSET_GROUP.addLayer(LAYER_ASSETS);
-      enforceOverlayOrder();
     }
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
@@ -844,16 +883,17 @@ function buildLayersControl(state){
   var baseLayers = {
     'OpenStreetMap <span class="help" data-tip="Standard OSM cartography. Good for general context.">?</span>': BASE_SOURCES.osm,
     'OSM Topography <span class="help" data-tip="OpenTopoMap tiles. Elevation & relief shading; lower max zoom.">?</span>': BASE_SOURCES.topo,
-    'Satellite <span class="help" data-tip="Bing Aerial if key configured; otherwise Esri World Imagery fallback.">?</span>': (BING_KEY_JS ? BASE_SOURCES.sat_bing : BASE_SOURCES.sat_esri)
+    'Satellite <span class="help" data-tip="Bing Aerial if key configured; otherwise Esri World Imagery fallback.">?</span>': (BING_KEY_JS ? BASE_SOURCES.sat_bing : SATELLITE_FALLBACK)
   };
 
   GEO_GROUP   = L.layerGroup();
   SEG_GROUP   = L.layerGroup();
   ASSET_GROUP = L.layerGroup();
 
-  var segLabel = 'Sensitivity segments <span class="help" data-tip="Segment boundaries overlay (A–E styling). Filter to a specific geocode category or show all.">?</span><div class="inlineSel"><select id="segCatSel"></select></div>';
-  var geoLabel = 'Geocoded areas <span class="help" data-tip="Polygons colored by sensitivity (A–E). Choose a geocode category below. The statistics panel always aggregates areas from the ‘basic_mosaic’ group in tbl_flat.">?</span><div class="inlineSel"><select id="geoCatSel"></select></div>';
-  var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue, drawn just above the basemap. Overlap looks denser.">?</span>';
+  // Ordered top → down: Sensitivity lines, Geocode areas, Assets
+  var segLabel = 'Sensitivity lines <span class="help" data-tip="Buffered lines (A–E) selected by line name from tbl_lines.">?</span><div class="inlineSel"><select id="segLineSel"></select></div>';
+  var geoLabel = 'Geocode areas <span class="help" data-tip="Polygons colored by sensitivity (A–E). Choose a geocode category below. Stats always from ‘basic_mosaic’.">?</span><div class="inlineSel"><select id="geoCatSel"></select></div>';
+  var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue, drawn just above the basemap.">?</span>';
 
   var overlays = {};
   overlays[segLabel] = SEG_GROUP;
@@ -862,7 +902,7 @@ function buildLayersControl(state){
 
   var ctrl = L.control.layers(baseLayers, overlays, { collapsed:false, position:'topleft' }).addTo(MAP);
 
-  // move basemaps section to bottom
+  // Move basemaps (base) section to bottom of control
   try {
     var ctn  = ctrl.getContainer();
     var form = ctn.querySelector('.leaflet-control-layers-list');
@@ -881,12 +921,13 @@ function buildLayersControl(state){
     }
   } catch(e){ logErr('Layer reorder failed (fixed path) : ' + e); }
 
+  // Seed layers: show Sensitivity lines + Geocode areas by default
   BASE_SOURCES.osm.addTo(MAP);
   GEO_GROUP.addTo(MAP);
   SEG_GROUP.addTo(MAP);
-  enforceOverlayOrder();
 
   setTimeout(function(){
+    // geocode categories
     var geocat = document.getElementById('geoCatSel');
     if (geocat){
       geocat.innerHTML = '';
@@ -900,38 +941,44 @@ function buildLayersControl(state){
       geocat.addEventListener('change', function(){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, true); });
     }
 
-    var segcat = document.getElementById('segCatSel');
-    if (segcat){
-      segcat.innerHTML = '';
-      var segcats = state.segment_categories || [];
-      if (segcats.length === 0){
-        var s = document.createElement('option'); s.value="__ALL__"; s.textContent="All segments"; segcat.appendChild(s);
+    // sensitivity line names (from tbl_lines.name_user)
+    var segsel = document.getElementById('segLineSel');
+    if (segsel){
+      segsel.innerHTML = '';
+      var names = state.segment_line_names || [];
+      if (names.length > 0){
+        var all = document.createElement('option'); all.value="__ALL__"; all.textContent="All lines"; segsel.appendChild(all);
+        for (var j=0;j<names.length;j++){
+          var so = document.createElement('option'); so.value = names[j]; so.textContent = names[j];
+          segsel.appendChild(so);
+        }
       } else {
-        var all = document.createElement('option'); all.value="__ALL__"; all.textContent="All segments"; segcat.appendChild(all);
-        for (var j=0;j<segcats.length;j++){
-          var so = document.createElement('option'); so.value = segcats[j]; so.textContent = segcats[j];
-          segcat.appendChild(so);
+        // fallback (legacy)
+        var s = document.createElement('option'); s.value="__ALL__"; s.textContent="All segments"; segsel.appendChild(s);
+        var segcats = state.segment_categories || [];
+        for (var k=0;k<segcats.length;k++){
+          var sc = document.createElement('option'); sc.value = segcats[k]; sc.textContent = segcats[k];
+          segsel.appendChild(sc);
         }
       }
-      loadSegmentsIntoGroup(segcat.value || "__ALL__");
-      segcat.addEventListener('change', function(){ loadSegmentsIntoGroup(segcat.value || "__ALL__"); });
+      loadSegmentsIntoGroup(segsel.value || "__ALL__");
+      segsel.addEventListener('change', function(){ loadSegmentsIntoGroup(segsel.value || "__ALL__"); });
     }
 
+    // overlay toggles
     MAP.on('overlayadd', function(e){
       if (e.layer === GEO_GROUP){
         var gc = document.getElementById('geoCatSel'); loadGeocodeIntoGroup(gc ? gc.value : state.initial_geocode, true);
       } else if (e.layer === SEG_GROUP){
-        var sc = document.getElementById('segCatSel'); loadSegmentsIntoGroup(sc ? (sc.value||"__ALL__") : "__ALL__");
+        var sl = document.getElementById('segLineSel'); loadSegmentsIntoGroup(sl ? (sl.value||"__ALL__") : "__ALL__");
       } else if (e.layer === ASSET_GROUP){
         loadAssetsIntoGroup();
       }
-      enforceOverlayOrder();
     });
     MAP.on('overlayremove', function(e){
       if (e.layer === GEO_GROUP){ GEO_GROUP.clearLayers(); }
       if (e.layer === SEG_GROUP){ SEG_GROUP.clearLayers(); }
       if (e.layer === ASSET_GROUP){ ASSET_GROUP.clearLayers(); }
-      enforceOverlayOrder();
     });
   }, 0);
 
@@ -943,16 +990,16 @@ function boot(){
   MAP = L.map('map', { zoomControl:false, preferCanvas:true });
   L.control.zoom({ position:'topright' }).addTo(MAP);
 
-  // Create panes in desired stacking order
-  MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 300;
-  MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
-  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650;
+  // Panes & z-indexes: TOP → BOTTOM among overlays
+  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650; // Sensitivity lines (top)
+  MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 550; // Geocode areas (middle)
+  MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 450; // Assets (lower)
 
-  // Create one Canvas renderer per pane (so layers truly render in those panes)
+  // Create one Canvas renderer per pane (this fixes stacking with Canvas)
   try {
-    RENDERERS.assets   = L.canvas({ pane: 'assetsPane' });
-    RENDERERS.geocodes = L.canvas({ pane: 'geocodePane' });
     RENDERERS.segments = L.canvas({ pane: 'segmentsPane' });
+    RENDERERS.geocodes = L.canvas({ pane: 'geocodePane'  });
+    RENDERERS.assets   = L.canvas({ pane: 'assetsPane'   });
   } catch (e) {
     logErr('Canvas renderers creation failed: ' + e);
   }
@@ -983,7 +1030,6 @@ function boot(){
 
     document.getElementById('homeBtn').addEventListener('click', function(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
-      enforceOverlayOrder();
     });
 
     document.getElementById('exportBtn').addEventListener('click', exportMapPng);
@@ -1010,7 +1056,6 @@ function boot(){
       if (LAYER)        LAYER.setStyle({ fillOpacity: FILL_ALPHA });
       if (LAYER_SEG)    LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
       if (LAYER_ASSETS) LAYER_ASSETS.setStyle({ fillOpacity: FILL_ALPHA, opacity: FILL_ALPHA });
-      enforceOverlayOrder();
     });
   }).catch(function(err){
     setError('Failed to get state: '+err); logErr('get_state failed: '+err);
