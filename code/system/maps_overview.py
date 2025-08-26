@@ -901,7 +901,28 @@ function buildLayersControl(state){
   overlays[segLabel] = SEG_GROUP;
   overlays[assLabel] = ASSET_GROUP;
 
-  var ctrl = L.control.layers(baseLayers, overlays, { collapsed:false, position:'topright' }).addTo(MAP);
+  var ctrl = L.control.layers(baseLayers, overlays, { collapsed:false, position:'topleft' }).addTo(MAP);
+
+  // --- FIXED: move basemaps section to bottom (operate on the form, not container) ---
+  try {
+    var ctn  = ctrl.getContainer();
+    var form = ctn.querySelector('.leaflet-control-layers-list');
+    if (form){
+      var base      = form.querySelector('.leaflet-control-layers-base');
+      var sep       = form.querySelector('.leaflet-control-layers-separator');
+      var overlaysN = form.querySelector('.leaflet-control-layers-overlays');
+      if (base && overlaysN){
+        // Detach from current position (must remove from parent 'form')
+        if (sep && sep.parentNode === form) form.removeChild(sep);
+        if (base.parentNode === form) form.removeChild(base);
+        // Append after overlays
+        form.appendChild(overlaysN); // ensure overlays stays (noop if already last)
+        if (sep) form.appendChild(sep);
+        form.appendChild(base);
+        base.style.marginTop = '6px';
+      }
+    }
+  } catch(e){ logErr('Layer reorder failed (fixed path) : ' + e); }
 
   // seed basemap (OSM) + default overlays: geocodes and segments ON, assets OFF
   BASE_SOURCES.osm.addTo(MAP);
@@ -967,7 +988,10 @@ function buildLayersControl(state){
 
 /* ---------- Boot ---------- */
 function boot(){
-  MAP = L.map('map', { zoomControl:true, preferCanvas:true });
+  MAP = L.map('map', { zoomControl:false, preferCanvas:true });
+  // Custom zoom control placed upper-right (swapped with layers tree)
+  L.control.zoom({ position:'topright' }).addTo(MAP);
+
   // Panes: basemap (default), assets (~300), geocodes (~450), segments (~650)
   MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 300;
   MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 450;
