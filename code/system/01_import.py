@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # 01_import.py — Import assets / geocodes / lines → GeoParquet only
 # - Inputs  : config.ini [DEFAULT] input_folder_asset|geocode|lines
+#            Accepts: Shapefile (*.shp), GeoPackage (*.gpkg), GeoParquet (*.parquet)
 # - CRS     : reproject to workingprojection_epsg
 # - Outputs : output/geoparquet/
 #             tbl_asset_object.parquet, tbl_asset_group.parquet
@@ -148,6 +149,22 @@ def read_and_reproject(filepath: str, layer: str | None, working_epsg: int) -> g
         log_to_gui(log_widget, f"Read fail {filepath} (layer={layer}): {e}", level="ERROR")
         return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{working_epsg}")
 
+def read_parquet_vector(fp: str, working_epsg: int) -> gpd.GeoDataFrame:
+    """Read a GeoParquet file and ensure CRS == working_epsg."""
+    try:
+        gdf = gpd.read_parquet(fp)
+        if gdf.crs is None:
+            gdf.set_crs(epsg=working_epsg, inplace=True)
+        elif (gdf.crs.to_epsg() or working_epsg) != int(working_epsg):
+            gdf = gdf.to_crs(epsg=int(working_epsg))
+        # ensure geometry column literally named 'geometry'
+        if gdf.geometry.name != "geometry":
+            gdf = gdf.set_geometry(gdf.geometry.name).rename_geometry("geometry")
+        return gdf
+    except Exception as e:
+        log_to_gui(log_widget, f"Read fail (parquet) {os.path.basename(fp)}: {e}", level="ERROR")
+        return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{working_epsg}")
+
 # ----------------------------
 # IMPORT: Assets
 # ----------------------------
@@ -156,7 +173,8 @@ def import_spatial_data_asset(input_folder_asset: str, working_epsg: int):
     group_id, object_id = 1, 1
 
     files = []
-    for pat in ("*.shp", "*.gpkg"):
+    # Include GeoParquet vector layers
+    for pat in ("*.shp", "*.gpkg", "*.parquet"):
         files.extend(glob.glob(os.path.join(input_folder_asset, "**", pat), recursive=True))
     log_to_gui(log_widget, f"Asset files found: {len(files)}")
 
@@ -201,8 +219,12 @@ def import_spatial_data_asset(input_folder_asset: str, working_epsg: int):
             except Exception as e:
                 log_to_gui(log_widget, f"GPKG error {fp}: {e}", level="ERROR")
         else:  # SHP
-            layer = filename
-            gdf = read_and_reproject(fp, None, working_epsg)
+            if fp.lower().endswith(".parquet"):
+                layer = filename
+                gdf = read_parquet_vector(fp, working_epsg)
+            else:
+                layer = filename
+                gdf = read_and_reproject(fp, None, working_epsg)
             if gdf.empty:
                 continue
             bbox_polygon = box(*gdf.total_bounds)
@@ -298,7 +320,7 @@ def import_spatial_data_geocode(input_folder_geocode: str, working_epsg: int):
     group_id, object_id = 1, 1
 
     files = []
-    for pat in ("*.shp", "*.gpkg"):
+    for pat in ("*.shp", "*.gpkg", "*.parquet"):
         files.extend(glob.glob(os.path.join(input_folder_geocode, "**", pat), recursive=True))
     log_to_gui(log_widget, f"Geocode files found: {len(files)}")
 
@@ -362,7 +384,7 @@ def import_spatial_data_lines(input_folder_lines: str, working_epsg: int):
     line_objects = []
     line_id = 1
     files = []
-    for pat in ("*.shp", "*.gpkg"):
+    for pat in ("*.shp", "*.gpkg", "*.parquet"):
         files.extend(glob.glob(os.path.join(input_folder_lines, "**", pat), recursive=True))
     log_to_gui(log_widget, f"Line files found: {len(files)}")
 
