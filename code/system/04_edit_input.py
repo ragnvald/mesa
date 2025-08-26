@@ -42,9 +42,9 @@ DEFAULT_ENV_PROFILE = {
 }
 EBSA_PER_ROW_DEFAULT_01 = 0.5
 
+# --- constants (GeoParquet lives alongside other parquet files) ---
 PARQUET_DIRNAME = os.path.join("output", "geoparquet")
-PARQUET_ASSET_GROUP = os.path.join(PARQUET_DIRNAME, "tbl_asset_group.parquet")  # <-- standardized
-PARQUET_SETTINGS_DIR = os.path.join(PARQUET_DIRNAME, "settings")
+PARQUET_ASSET_GROUP = os.path.join(PARQUET_DIRNAME, "tbl_asset_group.parquet")
 
 # UI grid helpers
 column_widths = [35, 13, 13, 13, 13, 30]
@@ -56,6 +56,11 @@ FALLBACK_VULN = 3
 
 EBSA_PROFILE = {}
 ENV_PROFILE  = {}
+
+def _ensure_ebsa_profile_defaults():
+    """Guarantee EBSA_PROFILE has all default keys/values for first-run UI."""
+    global EBSA_PROFILE
+    EBSA_PROFILE = {**DEFAULT_EBSA_PROFILE, **(EBSA_PROFILE or {})}
 
 # paths set in __main__
 original_working_directory = ""
@@ -258,33 +263,48 @@ def _gpkg_write_profile_table(gpkg_path: str, table_name: str, data: dict):
 # Profile storage: GeoParquet
 # -------------------------------
 def _profile_parquet_path(base_dir: str, name: str) -> str:
-    return os.path.join(base_dir, PARQUET_SETTINGS_DIR, f"{name}.parquet")
+    """New location: output/geoparquet/<name>.parquet"""
+    return os.path.join(base_dir, PARQUET_DIRNAME, f"{name}.parquet")
+
+def _legacy_profile_parquet_path(base_dir: str, name: str) -> str:
+    """Legacy location we still read from if present: output/geoparquet/settings/<name>.parquet"""
+    return os.path.join(base_dir, PARQUET_DIRNAME, "settings", f"{name}.parquet")
 
 def _parquet_read_profile(base_dir: str, name: str) -> dict | None:
-    try:
-        path = _profile_parquet_path(base_dir, name)
-        if not os.path.exists(path): return None
-        df = pd.read_parquet(path)
-        if {'key','value'}.issubset(df.columns):
-            out = {}
-            for _, r in df.iterrows():
-                try: out[str(r['key'])] = json.loads(r['value'])
-                except Exception: out[str(r['key'])] = r['value']
-            return out
-        if len(df) == 1:
-            return df.iloc[0].to_dict()
-        return None
-    except Exception as e:
-        log_to_file(f"Parquet read {name} failed: {e}")
-        return None
+    """
+    Try new flat location first, then legacy settings/ subfolder for backward compatibility.
+    """
+    for candidate in (_profile_parquet_path(base_dir, name),
+                      _legacy_profile_parquet_path(base_dir, name)):
+        try:
+            if not os.path.exists(candidate):
+                continue
+            df = pd.read_parquet(candidate)
+            if {'key','value'}.issubset(df.columns):
+                out = {}
+                for _, r in df.iterrows():
+                    try:
+                        out[str(r['key'])] = json.loads(r['value'])
+                    except Exception:
+                        out[str(r['key'])] = r['value']
+                return out
+            if len(df) == 1:
+                return df.iloc[0].to_dict()
+        except Exception as e:
+            log_to_file(f"Parquet read {name} failed at {candidate}: {e}")
+    return None
 
 def _parquet_write_profile(base_dir: str, name: str, data: dict):
+    """Always write to the new flat location under output/geoparquet/."""
     try:
         path = _profile_parquet_path(base_dir, name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        df = pd.DataFrame({'key': list(data.keys()),
-                           'value': [json.dumps(v) for v in data.values()]})
+        df = pd.DataFrame({
+            'key': list(data.keys()),
+            'value': [json.dumps(v) for v in data.values()]
+        })
         df.to_parquet(path, index=False)
+        log_to_file(f"Wrote profile {name} to GeoParquet: {path}")
     except Exception as e:
         log_to_file(f"Parquet write {name} failed: {e}")
 
@@ -961,6 +981,8 @@ if __name__ == "__main__":
 
     # Load profiles (GPKG -> Parquet -> JSON -> defaults), then mirror to all
     load_profiles(gpkg_file, original_working_directory)
+    # Ensure EBSA global UI fields are pre-populated with defaults on first run
+    _ensure_ebsa_profile_defaults()
 
     # Load asset groups and ensure EBSA row defaults are present
     gdf_asset_group = load_asset_group(gpkg_file)
@@ -997,6 +1019,8 @@ if __name__ == "__main__":
     tab_ebsa = ttkb.Frame(nb); nb.add(tab_ebsa, text="EBSA")
     # Profile
     build_ebsa_profile_section(tab_ebsa)
+    # Populate EBSA global settings UI from defaults/profile
+    set_ebsa_profile_ui()
     ttkb.Label(tab_ebsa, text="EBSA scores per asset (0–100 in UI; stored 0–1). Default 50.").pack(anchor='w', padx=10, pady=(4,0))
     # Per-row
     canvas_e, frame_e = create_scrollable_area(tab_ebsa)
