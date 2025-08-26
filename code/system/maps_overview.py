@@ -5,7 +5,16 @@ import os, sys, base64, configparser, locale
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import mapping
-import webview  # pip install pywebview
+# Require pywebview in the environment that launches this script
+
+try:
+    import webview  # pip install pywebview
+except ModuleNotFoundError:
+    sys.stderr.write(
+        "ERROR: 'pywebview' is not installed in the Python environment launching maps_overview.py.\n"
+        "Install it in that environment, e.g.:  pip install pywebview\n"
+    )
+    sys.exit(1)
 
 # Accurate geodesic areas for stats
 from pyproj import Geod
