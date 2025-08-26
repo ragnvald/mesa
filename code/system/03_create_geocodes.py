@@ -74,6 +74,7 @@ try:
     from ttkbootstrap.constants import PRIMARY, INFO, WARNING
 except Exception:
     ttk = None  # guarded
+    PRIMARY = INFO = WARNING = None  # placeholders to avoid NameErrors
 
 
 # -----------------------------------------------------------------------------
@@ -81,8 +82,7 @@ except Exception:
 # -----------------------------------------------------------------------------
 BASIC_MOSAIC_GROUP = "basic_mosaic"
 
-# --- Approx hex horizontal size (across flats) in km (derived ~ 2 * edge length from H3 docs)
-# H3 size dictionary remains expressed in kilometers (across-flats)
+# H3 across-flats (km)
 H3_RES_ACROSS_FLATS_KM = {
     0: 2215.425182, 1: 837.352011, 2: 316.489311, 3: 119.621716,
     4: 45.2127588, 5: 17.08881655, 6: 6.462555554, 7: 2.441259518,
@@ -103,18 +103,17 @@ except locale.Error:
 # -----------------------------------------------------------------------------
 # GUI globals
 # -----------------------------------------------------------------------------
-root = None
-log_widget = None
-progress_var = None
-progress_label = None
-original_working_directory = None
+root: Optional[tk.Tk] = None
+log_widget: Optional[scrolledtext.ScrolledText] = None
+progress_var: Optional[tk.DoubleVar] = None
+progress_label: Optional[tk.Label] = None
+original_working_directory: Optional[str] = None
 
-# Globals for new GUI interactions
-suggested_h3_levels = []
-mosaic_status_var = None
-size_levels_var = None
+# H3 helper state in GUI
+suggested_h3_levels: List[int] = []
+mosaic_status_var: Optional[tk.StringVar] = None
+size_levels_var: Optional[tk.StringVar] = None
 generate_size_btn = None
-mosaic_button = None
 suggest_levels_btn = None
 
 
@@ -124,6 +123,8 @@ suggest_levels_btn = None
 def read_config(file_name: Path) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg.read(file_name, encoding="utf-8")
+    if "DEFAULT" not in cfg:
+        cfg["DEFAULT"] = {}
     return cfg
 
 def resolve_base_dir(cli_root: str | None) -> Path:
@@ -353,7 +354,7 @@ def union_from_asset_groups_or_objects(base_dir: Path):
     """
     cfg = read_config(base_dir / "system" / "config.ini")
 
-    # 1) Try GeoParquet groups (bbox polygons from importer)
+    # 1) Try GeoParquet groups
     pq_groups = geoparquet_path(base_dir, "tbl_asset_group")
     g = _read_parquet_gdf(pq_groups)
     g = ensure_wgs84(g)
@@ -767,7 +768,6 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
     except Exception:
         faces = faces.reset_index(drop=True)
 
-    # Codes unique across table by prefixing group name
     prefix = group_name
     codes = [f"{prefix}_{i:06d}" for i in range(1, len(faces) + 1)]
 
@@ -839,23 +839,11 @@ def format_level_size_list(levels: list[int]) -> str:
         return "(none)"
     return ", ".join(f"R{r} ({H3_RES_ACROSS_FLATS_KM[r]:.3f} km)" for r in levels)
 
-def main_cli(args):
-    base = resolve_base_dir(args.original_working_directory)
-    if args.h3_levels:
-        levels = [int(x.strip()) for x in args.h3_levels.split(",") if x.strip().isdigit()]
-        run_h3_levels(base, levels)
-    elif args.h3:
-        run_h3_range(base, args.h3_from, args.h3_to)
-    elif args.mosaic:
-        run_mosaic(base, args.buffer_m, args.grid_size_m)
-    else:
-        log_to_gui("Nothing to do. Use --h3, --h3-levels, or --mosaic.", "WARN")
-
 def build_gui(base: Path, cfg: configparser.ConfigParser):
     global root, log_widget, progress_var, progress_label, original_working_directory
-    global mosaic_status_var, mosaic_button, size_levels_var, generate_size_btn, suggest_levels_btn, suggested_h3_levels
-    original_working_directory = str(base)
+    global mosaic_status_var, size_levels_var, generate_size_btn, suggest_levels_btn, suggested_h3_levels
 
+    original_working_directory = str(base)
     theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if ttk else None
     root = ttk.Window(themename=theme) if ttk else tk.Tk()
     root.title("Create geocodes (H3 / Mosaic)")
@@ -881,38 +869,38 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
     log_to_gui(f"Mosaic geocode group is fixed to '{BASIC_MOSAIC_GROUP}'.")
 
     # --- H3 size-based selector ---
-    size_frame = tk.LabelFrame(root, text="H3 size-based selection (across‑flats meters)")
+    size_frame = tk.LabelFrame(root, text="H3 size-based selection")
     size_frame.pack(padx=10, pady=(4,6), fill=tk.X)
     tk.Label(size_frame, text="Min m:").grid(row=0, column=0, padx=4, pady=2, sticky="e")
     tk.Label(size_frame, text="Max m:").grid(row=0, column=2, padx=4, pady=2, sticky="e")
     # Defaults: 50 m to 50 000 m
     min_var = tk.StringVar(value="50")
     max_var = tk.StringVar(value="50000")
-    min_entry = tk.Entry(size_frame, textvariable=min_var, width=10); min_entry.grid(row=0, column=1, padx=4, pady=2)
-    max_entry = tk.Entry(size_frame, textvariable=max_var, width=10); max_entry.grid(row=0, column=3, padx=4, pady=2)
+    tk.Entry(size_frame, textvariable=min_var, width=10).grid(row=0, column=1, padx=4, pady=2)
+    tk.Entry(size_frame, textvariable=max_var, width=10).grid(row=0, column=3, padx=4, pady=2)
+
     size_levels_var = tk.StringVar(value="(none)")
     tk.Label(size_frame, text="Matching levels:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
-    tk.Label(size_frame, textvariable=size_levels_var, anchor="w").grid(row=1, column=1, columnspan=3, padx=4, pady=2, sticky="w")
+    tk.Label(size_frame, textvariable=size_levels_var, anchor="w")\
+        .grid(row=1, column=1, columnspan=3, padx=4, pady=2, sticky="w")
 
     def _suggest_levels():
-        global suggested_h3_levels
+        nonlocal min_var, max_var
         try:
             min_m = float(min_var.get())
             max_m = float(max_var.get())
             if min_m <= 0 or max_m <= 0 or max_m < min_m:
-                raise ValueError("Invalid range")
+                raise ValueError
         except Exception:
             log_to_gui("Enter valid positive meter values (min <= max).", "WARN")
             return
-        # Convert meters to kilometers for matching
-        min_km = min_m / 1000.0
-        max_km = max_m / 1000.0
-        suggested = suggest_h3_levels_by_size(min_km, max_km)
-        suggested_h3_levels = suggested
-        size_levels_var.set(format_level_size_list(suggested))
-        if suggested:
+        min_km, max_km = min_m / 1000.0, max_m / 1000.0
+        levels = suggest_h3_levels_by_size(min_km, max_km)
+        suggested_h3_levels[:] = levels  # mutate in place
+        size_levels_var.set(format_level_size_list(levels))
+        if levels:
             generate_size_btn.config(state="normal")
-            log_to_gui(f"Suggested H3 levels (m range {min_m:g}–{max_m:g}): {suggested}")
+            log_to_gui(f"Suggested H3 levels (m range {min_m:g}–{max_m:g}): {levels}")
         else:
             generate_size_btn.config(state="disabled")
             log_to_gui("No H3 levels fit the specified size range (meters).", "WARN")
@@ -921,76 +909,75 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
         if not suggested_h3_levels:
             log_to_gui("No suggested levels to generate.", "WARN")
             return
-        threading.Thread(target=run_h3_levels, args=(base, suggested_h3_levels), daemon=True).start()
+        threading.Thread(target=run_h3_levels, args=(base, suggested_h3_levels.copy()), daemon=True).start()
 
-    suggest_levels_btn = (ttk.Button(size_frame, text="Suggest H3 levels", bootstyle=PRIMARY, command=_suggest_levels)
-                          if ttk else tk.Button(size_frame, text="Suggest H3 levels", command=_suggest_levels))
-    suggest_levels_btn.grid(row=0, column=4, padx=6, pady=2)
-    generate_size_btn = (ttk.Button(size_frame, text="Generate H3 (size-based)", bootstyle=PRIMARY,
+    # Buttons (consistent width)
+    btn_w = 18
+    # Right‑align buttons via a spanning container frame (must create frame BEFORE buttons)
+    size_btn_frame = tk.Frame(size_frame)
+    size_btn_frame.grid(row=2, column=0, columnspan=5, sticky="e", padx=4, pady=2)
+    suggest_levels_btn = (ttk.Button(size_btn_frame, text="Suggest H3", width=btn_w, bootstyle=PRIMARY,
+                                     command=_suggest_levels)
+                          if ttk else tk.Button(size_btn_frame, text="Suggest H3", width=btn_w,
+                                                command=_suggest_levels))
+    generate_size_btn = (ttk.Button(size_btn_frame, text="Generate H3", width=btn_w, bootstyle=PRIMARY,
                                     command=_generate_size_based, state="disabled")
-                         if ttk else tk.Button(size_frame, text="Generate H3 (size-based)", state="disabled",
+                         if ttk else tk.Button(size_btn_frame, text="Generate H3", width=btn_w, state="disabled",
                                                command=_generate_size_based))
-    generate_size_btn.grid(row=1, column=4, padx=6, pady=2)
+    suggest_levels_btn.pack(side=tk.LEFT, padx=3)
+    generate_size_btn.pack(side=tk.LEFT, padx=3)
 
-    # --- Mosaic info (no options for name)
-    mosaic_frame = tk.LabelFrame(root, text="Basic mosaic (writes to tbl_geocode_*)")
-    mosaic_frame.pack(padx=10, pady=(4,6), fill=tk.X)
-    tk.Label(mosaic_frame, text=f"Group name: {BASIC_MOSAIC_GROUP}").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    tk.Label(mosaic_frame, text="(Buffer & tiling from config.ini)").grid(row=0, column=1, padx=6, pady=4, sticky="w")
-    mosaic_status_var = tk.StringVar()
-    tk.Label(mosaic_frame, textvariable=mosaic_status_var, fg="#ffaa33").grid(row=0, column=2, padx=6, pady=4, sticky="w")
+    # --- Basic mosaic frame (separate) ---
+    mosaic_frame = tk.LabelFrame(root, text="Basic mosaic")
+    mosaic_frame.pack(padx=10, pady=(0,6), fill=tk.X)
+    mosaic_status_var = tk.StringVar(value="")  # initialize here
+    tk.Label(mosaic_frame, text="Status:").grid(row=0, column=0, padx=4, pady=2, sticky="w")
+    mosaic_status_label = tk.Label(mosaic_frame, textvariable=mosaic_status_var, width=18, anchor="w")
+    mosaic_status_label.grid(row=0, column=1, padx=(0,10), pady=2, sticky="w")
+    # Give the status column stretch so the button is pushed to the right edge
+    mosaic_frame.grid_columnconfigure(1, weight=1)
 
-    # Buttons
-    btns = tk.Frame(root); btns.pack(pady=8)
+    def _update_mosaic_status():
+        exists = mosaic_exists(base)
+        if mosaic_status_var.get() not in ("Running…","Completed","No faces"):
+            mosaic_status_var.set("OK" if exists else "REQUIRED")
+        color = "#55aa55" if exists else "#cc5555"
+        try: mosaic_status_label.config(fg=color)
+        except Exception: pass
 
-    def _run_mosaic_btn():
+    def _run_mosaic_inline():
         buf = float(cfg["DEFAULT"].get("mosaic_buffer_m","25"))
         grid = float(cfg["DEFAULT"].get("mosaic_grid_size_m","1000"))
+        mosaic_status_var.set("Running…")
         def _after(success):
             def _ui():
                 _update_mosaic_status()
+                if success:
+                    mosaic_status_var.set("Completed")
+                elif mosaic_status_var.get() == "Running…":
+                    mosaic_status_var.set("No faces")
             try: root.after(100, _ui)
             except Exception: pass
         threading.Thread(target=run_mosaic, args=(base, buf, grid, _after), daemon=True).start()
 
-    mosaic_button = (ttk.Button(btns, text="Build mosaic", bootstyle=PRIMARY, command=_run_mosaic_btn) if ttk
-                     else tk.Button(btns, text="Build mosaic", command=_run_mosaic_btn))
-    mosaic_button.grid(row=0, column=0, padx=8, pady=4)
-    (ttk.Button(btns, text="Exit", bootstyle=WARNING, command=root.destroy) if ttk
-     else tk.Button(btns, text="Exit", command=root.destroy)).grid(row=0, column=1, padx=8, pady=4)
+    mosaic_btn = (ttk.Button(mosaic_frame, text="Build mosaic", width=18, bootstyle=PRIMARY, command=_run_mosaic_inline)
+                  if ttk else tk.Button(mosaic_frame, text="Build mosaic", width=18, command=_run_mosaic_inline))
+    mosaic_btn.grid(row=0, column=2, padx=4, pady=2, sticky="e")
 
-    def _update_mosaic_status():
-        exists = mosaic_exists(base)
-        if exists:
-            mosaic_status_var.set("OK")
-            if hasattr(mosaic_button, "config"):
-                try:
-                    if ttk:
-                        mosaic_button.config(bootstyle="success")
-                    else:
-                        mosaic_button.config(bg="#55aa55")
-                except Exception:
-                    pass
-        else:
-            mosaic_status_var.set("REQUIRED (not created)")
-            if hasattr(mosaic_button, "config"):
-                try:
-                    if ttk:
-                        mosaic_button.config(bootstyle="danger")
-                    else:
-                        mosaic_button.config(bg="#cc5555")
-                except Exception:
-                    pass
+    # Exit button
+    exit_frame = tk.Frame(root); exit_frame.pack(fill=tk.X, pady=6, padx=10)
+    (ttk.Button(exit_frame, text="Exit", bootstyle=WARNING, command=root.destroy) if ttk
+     else tk.Button(exit_frame, text="Exit", command=root.destroy)).pack(side=tk.RIGHT)
 
+    # Initial status
     _update_mosaic_status()
-
     root.mainloop()
 
 
 # -----------------------------------------------------------------------------
-# Entrypoint
+# Entrypoint (single, clean)
 # -----------------------------------------------------------------------------
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Create geocodes (H3/Mosaic)")
     parser.add_argument("--nogui", action="store_true", help="Run in CLI mode")
     parser.add_argument("--original_working_directory", required=False, help="Path to running folder")
@@ -1025,3 +1012,6 @@ if __name__ == "__main__":
             log_to_gui("Nothing to do. Use --h3, --h3-levels, or --mosaic.", "WARN")
     else:
         build_gui(base, cfg)
+
+if __name__ == "__main__":
+    main()
