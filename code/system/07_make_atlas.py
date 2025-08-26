@@ -7,7 +7,14 @@
 #   bounding box as the outer limits but rather a flexible polygon
 
 import locale
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+try:
+    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+except Exception:
+    try:
+        locale.setlocale(locale.LC_ALL, '')
+    except Exception:
+        pass
+
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 import threading
@@ -20,6 +27,36 @@ import ttkbootstrap as ttk  # Import ttkbootstrap
 from ttkbootstrap.constants import *
 import glob
 import os
+from pathlib import Path
+
+
+# --- GeoParquet helpers (new) ---
+def geoparquet_dir() -> Path:
+    p = Path(original_working_directory) / "output" / "geoparquet"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def atlas_parquet_path() -> Path:
+    return geoparquet_dir() / "tbl_atlas.parquet"
+
+def read_flat_parquet() -> gpd.GeoDataFrame:
+    p = geoparquet_dir() / "tbl_flat.parquet"
+    if not p.exists():
+        log_to_gui(log_widget, f"Missing tbl_flat.parquet at {p}")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    try:
+        gdf = gpd.read_parquet(p)
+        if gdf.crs is None: gdf.set_crs("EPSG:4326", inplace=True)
+        return gdf
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed reading tbl_flat.parquet: {e}")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+def write_atlas_parquet(gdf: gpd.GeoDataFrame):
+    p = atlas_parquet_path()
+    gdf.to_parquet(p, index=False)
+    # Avoid non-ASCII arrow to keep logs safe across encodings
+    log_to_gui(log_widget, f"Saved atlas GeoParquet -> {p} (rows={len(gdf)})")
 
 
 # # # # # # # # # # # # # # 
@@ -41,11 +78,20 @@ def read_config(file_name):
 def log_to_gui(log_widget, message):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
-    log_widget.insert(tk.END, formatted_message + "\n")
-    log_widget.see(tk.END)
+    # GUI widget (unicode-safe)
+    try:
+        log_widget.insert(tk.END, formatted_message + "\n")
+        log_widget.see(tk.END)
+    except Exception:
+        pass
+    # File log — force UTF-8 so Unicode never crashes on Windows
     log_destination_file = os.path.join(original_working_directory, "log.txt")
-    with open(log_destination_file, "a") as log_file:
-        log_file.write(formatted_message + "\n")
+    try:
+        with open(log_destination_file, "a", encoding="utf-8", errors="replace") as log_file:
+            log_file.write(formatted_message + "\n")
+    except Exception:
+        # Last resort: ignore file logging errors
+        pass
 
 
 # Function to close the application
@@ -57,8 +103,8 @@ def close_application(root):
 # Core functions
     
 # Thread function to run main without freezing GUI
-def run_create_atlas(log_widget, progress_var, gpkg_file):
-    main_create_atlas(log_widget, progress_var, gpkg_file)
+def run_create_atlas(log_widget, progress_var):
+    main_create_atlas(log_widget, progress_var)
 
 
 # Function to filter and update atlas geometries
@@ -73,6 +119,8 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
         intersecting_geometries.loc[index, 'name_gis'] = f'atlas_{id_counter:03}'
         intersecting_geometries.loc[index, 'title_user'] = f'Map title for {id_counter:03}'
         id_counter += 1
+    # Rename geom -> geometry for standardized output
+    intersecting_geometries = intersecting_geometries.rename(columns={'geom':'geometry'}).set_geometry('geometry')
     return intersecting_geometries
 
 
@@ -110,12 +158,16 @@ def generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, at
 
 
 # Main function with GUI integration
-def main_create_atlas(log_widget, progress_var, gpkg_file):
-    log_to_gui(log_widget, "Starting processing...")
-    progress_var.set(10)  # Indicate start
+def main_create_atlas(log_widget, progress_var):
+    log_to_gui(log_widget, "Starting atlas generation (GeoParquet)…")
+    progress_var.set(10)
 
     # Load tbl_flat from GeoPackage
-    tbl_flat = gpd.read_file(gpkg_file, layer='tbl_flat')
+    tbl_flat = read_flat_parquet()
+    if tbl_flat.empty:
+        log_to_gui(log_widget, "tbl_flat.parquet empty or missing; aborting.")
+        progress_var.set(100)
+        return
     update_progress(30)
 
     # Generate atlas geometries
@@ -126,10 +178,14 @@ def main_create_atlas(log_widget, progress_var, gpkg_file):
     updated_atlas_geometries = filter_and_update_atlas_geometries(atlas_geometries, tbl_flat)
     update_progress(80)
 
-    # Save updated geometries to GeoPackage
-    updated_atlas_geometries.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG')
+    if not updated_atlas_geometries.empty:
+        write_atlas_parquet(updated_atlas_geometries)
+    else:
+        write_atlas_parquet(gpd.GeoDataFrame(columns=['id','name_gis','title_user','description','image_name_1','image_desc_1','image_name_2','image_desc_2','geometry'], geometry='geometry', crs=tbl_flat.crs))
+        log_to_gui(log_widget, "No intersecting atlas tiles; wrote empty atlas table.")
+
     update_progress(100)
-    log_to_gui(log_widget, "COMPLETED: Atlas creation done. Old ones deleted.")
+    log_to_gui(log_widget, "COMPLETED: Atlas creation saved to GeoParquet.")
 
     increment_stat_value(config_file, 'mesa_stat_create_atlas', increment_value=1)
 
@@ -195,9 +251,9 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
 
     # Creating a GeoDataFrame from the list of atlas objects, ensuring the 'geom' column is set as the geometry
     if atlas_objects:
-        atlas_objects_gdf = gpd.GeoDataFrame(atlas_objects, geometry='geom')
+        atlas_objects_gdf = gpd.GeoDataFrame(atlas_objects, geometry='geom').rename(columns={'geom':'geometry'}).set_geometry('geometry')
     else:
-        atlas_objects_gdf = gpd.GeoDataFrame(columns=['id', 'name_gis', 'title_user', 'description', 'image_name_1', 'image_desc_1', 'image_name_2', 'image_desc_2', 'geom'])
+        atlas_objects_gdf = gpd.GeoDataFrame(columns=['id','name_gis','title_user','description','image_name_1','image_desc_1','image_name_2','image_desc_2','geometry'], geometry='geometry')
 
     update_progress(100)
 
@@ -209,19 +265,18 @@ def import_atlas_objects(input_folder_atlas, log_widget, progress_var):
 
 
 # Thread function to run import without freezing GUI
-def run_import_atlas(input_folder_atlas, gpkg_file, log_widget, progress_var):
-    log_to_gui(log_widget, "Starting atlas import process...")
+def run_import_atlas(input_folder_atlas, log_widget, progress_var):
+    log_to_gui(log_widget, "Starting atlas import (GeoParquet)…")
 
     atlas_objects_gdf = import_atlas_objects(input_folder_atlas, log_widget, progress_var)
 
-    # Check if the GeoDataFrame is not empty before exporting
-    if not atlas_objects_gdf.empty:  # Corrected atlas
-        log_to_gui(log_widget, "Importing atlas objects to GeoPackage")
-        atlas_objects_gdf.to_file(gpkg_file, layer='tbl_atlas', driver='GPKG', if_exists='replace')
+    if not atlas_objects_gdf.empty:
+        write_atlas_parquet(atlas_objects_gdf)
     else:
-        log_to_gui(log_widget, "No atlas objects to export.")
+        write_atlas_parquet(atlas_objects_gdf)
+        log_to_gui(log_widget, "No atlas objects to export (empty table written).")
 
-    log_to_gui(log_widget, "COMPLETED: Atlas polygons imported. Old ones deleted.")
+    log_to_gui(log_widget, "COMPLETED: Atlas polygons imported (GeoParquet).")
     progress_var.set(100)
 
 
@@ -232,7 +287,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
         return
 
     # Read the entire config file to preserve the layout and comments
-    with open(config_file, 'r') as file:
+    with open(config_file, 'r', encoding='utf-8', errors='replace') as file:
         lines = file.readlines()
 
     # Initialize a flag to check if the variable was found and updated
@@ -258,7 +313,7 @@ def increment_stat_value(config_file, stat_name, increment_value):
 
     # Write the updated content back to the file if the variable was found and updated
     if updated:
-        with open(config_file, 'w') as file:
+        with open(config_file, 'w', encoding='utf-8', errors='replace') as file:
             file.writelines(lines)
 
 
@@ -285,7 +340,6 @@ if original_working_directory is None or original_working_directory == '':
 
 # Load configuration settings and data
 config_file             = os.path.join(original_working_directory, "system/config.ini")
-gpkg_file               = os.path.join(original_working_directory, "output/mesa.gpkg")
 
 # Load configuration settings
 config                  = read_config(config_file)
@@ -324,9 +378,8 @@ progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
 progress_label.pack(side=tk.LEFT, padx=5)  # Pack the label on the left side, next to the progress bar
 
 # Information text field above the buttons
-info_label_text = ("This is where you can import, generate and update atlas geometries. "
-                   "The size of an atlas frame is set in the config.ini-file. "
-                   "Earlier atlas frames and their asociated information will be deleted.")
+info_label_text = ("Import or generate atlas geometries (GeoParquet only). "
+                   "Frame size set in config.ini. Previous atlas (tbl_atlas.parquet) will be replaced.")
 info_label = tk.Label(root, text=info_label_text, wraplength=600, justify="left")
 info_label.pack(padx=10, pady=10)
 
@@ -336,12 +389,12 @@ button_frame.pack(pady=5)
 
 # Add 'Import' button to the button frame
 import_atlas_btn = ttk.Button(button_frame, text="Import", command=lambda: threading.Thread(
-    target=run_import_atlas, args=(input_folder_atlas, gpkg_file, log_widget, progress_var, ), daemon=True).start())
+    target=run_import_atlas, args=(input_folder_atlas, log_widget, progress_var), daemon=True).start())
 import_atlas_btn.grid(row=1, column=0, columnspan=1, padx=10, pady=5, sticky='ew')
 
 # Add 'Run' button to the button frame  
 create_atlas_btn = ttk.Button(button_frame, text="Create", command=lambda: threading.Thread(
-    target=run_create_atlas, args=(log_widget, progress_var, gpkg_file), daemon=True).start())
+    target=main_create_atlas, args=(log_widget, progress_var), daemon=True).start())
 create_atlas_btn.grid(row=1, column=2, columnspan=1, padx=10, pady=5, sticky='ew')
 
 # Add 'Close' button to the button frame
