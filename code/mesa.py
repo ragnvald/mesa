@@ -20,6 +20,7 @@ from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import sys
 from shapely import wkb
+import pyarrow.parquet as pq  # <-- for GeoParquet status checks
 
 
 # Read the configuration file
@@ -80,11 +81,18 @@ def create_link_icon(parent, url, row, col, padx, pady):
 
 # This function updates the stats in the labelframe. Clear labels first,
 # then write the updates.
-def update_stats(gpkg_file):
+def update_stats(_unused_gpkg_path):
+    """
+    Update the right-hand status panel based on GeoParquet files in output/geoparquet.
+    (Signature kept the same so existing calls don't need to change.)
+    """
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
-    if not os.path.exists(gpkg_file):
+    geoparquet_dir = os.path.join(original_working_directory, "output", "geoparquet")
+
+    # If the geoparquet folder doesn't exist, prompt to import
+    if not os.path.isdir(geoparquet_dir):
         status_label = ttk.Label(info_labelframe, text='\u26AB', bootstyle='danger')
         status_label.grid(row=1, column=0, padx=5, pady=5)
         message_label = ttk.Label(info_labelframe,
@@ -93,7 +101,7 @@ def update_stats(gpkg_file):
         message_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
     else:
-        my_status = get_status(gpkg_file)
+        my_status = get_status(geoparquet_dir)
         if not my_status.empty and {'Status', 'Message', 'Link'}.issubset(my_status.columns):
             for idx, row in my_status.iterrows():
                 symbol = row['Status']
@@ -118,59 +126,99 @@ def update_stats(gpkg_file):
     root.update()
 
 
-def get_status(gpkg_file):
-   
-    # Initialize an empty list to store each row of the DataFrame
+def get_status(geoparquet_dir):
+    """
+    Build the status table by inspecting GeoParquet files in `geoparquet_dir`.
+    Mirrors the old logic (counts, setup check, etc.) but for .parquet files.
+    """
     status_list = []
 
-    try:
-        # Count using an SQL-query. loading big data frames for counting them only is not
-        # very efficient.
-        def read_table_and_count(layer_name):
+    def ppath(layer_name: str) -> str:
+        return os.path.join(geoparquet_dir, f"{layer_name}.parquet")
+
+    def table_exists_nonempty(layer_name: str) -> bool:
+        """True if the parquet file exists and has >0 rows."""
+        fp = ppath(layer_name)
+        if not os.path.exists(fp):
+            return False
+        try:
+            return (pq.ParquetFile(fp).metadata.num_rows or 0) > 0
+        except Exception:
             try:
-                # Use a context manager to ensure the connection is closed automatically
-                with sqlite3.connect(gpkg_file) as conn:
-                    cur = conn.cursor()
-                    # Check if the table exists to handle non-existent tables gracefully
-                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (layer_name,))
-                    if cur.fetchone() is None:
-                        log_to_logfile(f"Table {layer_name} does not exist.")
-                        return None
-                    # Execute a SQL query to count the records in the specified layer
-                    cur.execute(f"SELECT COUNT(*) FROM {layer_name}")
+                return len(pd.read_parquet(fp)) > 0
+            except Exception:
+                return False
 
-                    returnvalue = cur.fetchone()[0]
-                    
-                    cur.close() 
-
-                    return  returnvalue # Fetch the count result
-
-            except sqlite3.Error as e:
-                log_to_logfile(f"Error counting records in {layer_name}: {e}")
-            
-                raise RuntimeError(f"Database operation failed: {str(e)}") from e
-            
+    def read_table_and_count(layer_name: str):
+        """Return row count for a GeoParquet table, or None if it doesn't exist."""
+        fp = ppath(layer_name)
+        if not os.path.exists(fp):
+            log_to_logfile(f"Parquet table {layer_name} does not exist.")
+            return None
+        try:
+            # Fast: read metadata only
+            return pq.ParquetFile(fp).metadata.num_rows
+        except Exception as e:
+            # Fallback: load and count (slower)
+            log_to_logfile(f"Parquet metadata read failed for {layer_name}: {e}; falling back to full read.")
+            try:
+                return len(pd.read_parquet(fp))
+            except Exception as e2:
+                log_to_logfile(f"Error counting rows for {layer_name}: {e2}")
                 return None
 
-        def read_table_and_check_sensitivity(layer_name):
-            try:
-                table = gpd.read_file(gpkg_file, layer=layer_name)
-                if table['sensitivity'].sum() > 0:
-                    return "+", "Set up ok. Feel free to adjust it."
+    def read_setup_status():
+        """
+        Determine whether processing 'setup' has been completed.
+
+        Criteria (both must be satisfied):
+        1) tbl_env_profile exists and is non-empty.
+        2) tbl_asset_group has assigned (non-zero) numeric values for all of:
+           'importance', 'susceptibility', and 'sensitivity'.
+        """
+        env_ok = table_exists_nonempty('tbl_env_profile')
+
+        fp = ppath('tbl_asset_group')
+        assets_ok = False
+        missing_cols_msg = ""
+        try:
+            if os.path.exists(fp):
+                # Only read the needed columns (fast if present)
+                cols = ['importance', 'susceptibility', 'sensitivity']
+                df = pd.read_parquet(fp, columns=cols)
+                have_all = all(c in df.columns for c in cols)
+                if not have_all:
+                    missing = [c for c in cols if c not in df.columns]
+                    missing_cols_msg = f" Missing columns in tbl_asset_group: {', '.join(missing)}."
+                # Convert to numeric and test for at least one > 0 value in each column
+                if have_all:
+                    num = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+                    assets_ok = all((num[c] > 0).any() for c in cols)
+        except Exception as e:
+            log_to_logfile(f"Error evaluating setup status on tbl_asset_group: {e}")
+
+        if env_ok and assets_ok:
+            return "+", "Set up ok. Feel free to adjust it."
+        else:
+            parts = []
+            if not env_ok:
+                parts.append("tbl_env_profile is missing or empty")
+            if not assets_ok:
+                if missing_cols_msg:
+                    parts.append(missing_cols_msg.strip())
                 else:
-                    return "-", "You need to set up the calculation. \nPress the 'Set up'-button to proceed."
-            except Exception:
-                return None, None
+                    parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
+            detail = "; ".join(parts) if parts else "Incomplete setup."
+            return "-", f"You need to set up the calculation. \nPress the 'Set up'-button to proceed. ({detail})"
 
-        # Function to append status and message to the list
-        def append_status(symbol, message, link):
-            status_list.append({'Status': symbol, 
-                                'Message': message,
-                                'Link':link})
+    def append_status(symbol, message, link):
+        status_list.append({'Status': symbol, 
+                            'Message': message,
+                            'Link': link})
 
+    try:
         # Check for tbl_asset_group
         asset_group_count = read_table_and_count('tbl_asset_group')
-        
         append_status("+" if asset_group_count is not None else "-", 
                       f"Asset layers: {asset_group_count}" if asset_group_count is not None else "Assets are missing.\nImport assets by pressing the Import button.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#assets")
@@ -181,25 +229,20 @@ def get_status(gpkg_file):
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else "Geocodes are missing.\nImport assets by pressing the Import button.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#geocodes")
 
-
         # Check for original lines
         lines_original_count = read_table_and_count('tbl_lines_original')
         append_status("+" if lines_original_count is not None else "/", 
                       f"Lines: {lines_original_count}" if lines_original_count is not None else "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines")
 
-        # Check for tbl_asset_group sensitivity
-        symbol, message = read_table_and_check_sensitivity('tbl_asset_group')
-        if symbol:
-            append_status(symbol, 
-                          message,
-                          "https://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
+        # Setup status — requires tbl_env_profile present and tbl_asset_group having values
+        symbol, message = read_setup_status()
+        append_status(symbol, message, "https://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
 
         # Present status for calculations on geocode objects
-        stacked_cells_count = read_table_and_count('tbl_stacked')
         flat_original_count = read_table_and_count('tbl_flat')
-        append_status("+" if stacked_cells_count is not None else "-", 
-                      f"Processing completed. You may open the QGIS-project file in the output-folder." if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
+        append_status("+" if flat_original_count is not None else "-", 
+                      "Processing completed. You may open the QGIS-project file in the output-folder." if flat_original_count is not None else "Processing incomplete. Press the \nprocessing button.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#processing")
         
         # Present status for atlas objects
@@ -217,11 +260,10 @@ def get_status(gpkg_file):
 
         # Convert the list of statuses to a DataFrame
         status_df = pd.DataFrame(status_list)
-        
         return status_df
 
     except Exception as e:
-        return pd.DataFrame({'Status': ['Error'], 'Message': [f"Error accessing statistics: {e}"]})
+        return pd.DataFrame({'Status': ['Error'], 'Message': [f"Error accessing statistics: {e}"], 'Link': [""]})
 
 
 def run_subprocess(command, fallback_command, gpkg_file):
@@ -285,7 +327,7 @@ def geocodes_grids():
 
 def import_assets(gpkg_file):
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("01_import", original_working_directory)
+    python_script, exe_file = get_script_paths("01_import", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -300,9 +342,8 @@ def import_assets(gpkg_file):
 
 
 def edit_processing_setup():
-
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("04_edit_input", original_working_directory)
+    python_script, exe_file = get_script_paths("04_edit_input", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -317,9 +358,8 @@ def edit_processing_setup():
     
 
 def process_data(gpkg_file):
-
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("06_process", original_working_directory)
+    python_script, exe_file = get_script_paths("06_process", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -334,9 +374,8 @@ def process_data(gpkg_file):
 
 
 def make_atlas():
-    
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("07_make_atlas", original_working_directory)
+    python_script, exe_file = get_script_paths("07_make_atlas", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -351,9 +390,8 @@ def make_atlas():
 
 
 def admin_lines():
-    
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("08_admin_lines", original_working_directory)
+    python_script, exe_file = get_script_paths("08_admin_lines", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -385,11 +423,25 @@ def open_maps_overview():
         log_to_logfile(f"Failed to open maps_overview.py: {e}")
 
 
+def open_present_files():
+    """Launch 02_present_files.py using the current Python interpreter."""
+    if hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = original_working_directory
+
+    python_script = os.path.join(base_path, "system", "02_present_files.py")
+    python_exe = sys.executable or "python"
+
+    try:
+        subprocess.Popen([python_exe, python_script])
+    except Exception as e:
+        log_to_logfile(f"Failed to open 02_present_files.py: {e}")
+
 
 def edit_assets():
-        
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("04_edit_asset_group", original_working_directory)
+    python_script, exe_file = get_script_paths("04_edit_asset_group", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -404,9 +456,8 @@ def edit_assets():
     
 
 def edit_geocodes():
-        
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("04_edit_geocode_group", original_working_directory)
+    python_script, exe_file = get_script_paths("04_edit_geocode_group", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -420,11 +471,9 @@ def edit_geocodes():
         run_subprocess(["python", python_script], [exe_file], gpkg_file)
     
 
-
 def edit_lines():
-    
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("08_edit_lines", original_working_directory)
+    python_script, exe_file = get_script_paths("08_edit_lines", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -439,9 +488,8 @@ def edit_lines():
     
 
 def edit_atlas():
-    
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file,  = get_script_paths("07_edit_atlas", original_working_directory)
+    python_script, exe_file = get_script_paths("07_edit_atlas", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
@@ -788,7 +836,7 @@ if __name__ == "__main__":
     import_assets_btn       = ttk.Button(left_panel, text="Import", command=lambda: import_assets(gpkg_file), width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
     
-    geocodes_btn           = ttk.Button(left_panel, text="Geocodes/grids", command=geocodes_grids, width=button_width)
+    geocodes_btn            = ttk.Button(left_panel, text="Geocodes/grids", command=geocodes_grids, width=button_width)
     geocodes_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
 
     setup_processing_btn    = ttk.Button(left_panel, text="Set up", command=edit_processing_setup, width=button_width)
@@ -803,9 +851,13 @@ if __name__ == "__main__":
     admin_lines_btn         = ttk.Button(left_panel, text="Segments", command=admin_lines, width=button_width)
     admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
-    # --- New button for Maps Overview ---
+    # --- Maps Overview button ---
     maps_overview_btn       = ttk.Button(left_panel, text="Maps overview", command=open_maps_overview, width=button_width, bootstyle=PRIMARY)
     maps_overview_btn.grid(row=6, column=0, padx=button_padx, pady=button_pady)
+
+    # --- New button for Present files (02_present_files.py) ---
+    present_files_btn       = ttk.Button(left_panel, text="Present files", command=open_present_files, width=button_width)
+    present_files_btn.grid(row=7, column=0, padx=button_padx, pady=button_pady)
 
     # Separator
     separator = ttk.Separator(main_frame, orient='vertical')
