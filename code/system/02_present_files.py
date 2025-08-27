@@ -6,14 +6,17 @@ import pandas as pd
 import configparser
 import datetime
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+from matplotlib import cm  # still used for ScalarMappable (not deprecated)
+from matplotlib import colormaps as mpl_cmaps  # NEW: modern colormap access
 import matplotlib.colors as mcolors
 import numpy as np
 import argparse
 import os
 import contextily as ctx
+from matplotlib.patches import Rectangle
+
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Image, Spacer,
@@ -42,8 +45,8 @@ last_report_path = None
 link_var = None  # hyperlink label StringVar
 
 # Primary UI color (Steel Blue by default)
-PRIMARY_HEX = "#4682B4"  # Steel blue
-LIGHT_PRIMARY_HEX = "#6fa6cf"  # slightly lighter steel blue
+PRIMARY_HEX = "#4682B4"        # Steel blue
+LIGHT_PRIMARY_HEX = "#6fa6cf"  # lighter steel-blue
 
 # ---------------- Config helpers ----------------
 def read_config(file_name):
@@ -71,7 +74,6 @@ def read_sensitivity_palette_and_desc(file_name):
 
 # ---------------- Logging ----------------
 def write_to_log(message: str):
-    """Log to file and (if GUI active) to the GUI log window."""
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted = f"{timestamp} - {message}"
     try:
@@ -88,7 +90,6 @@ def write_to_log(message: str):
 
 # ---------------- Generic plotting utils ----------------
 def _safe_to_3857(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Return a copy of gdf in EPSG:3857 (Web Mercator) for contextily."""
     if gdf.empty:
         return gdf
     g = gdf.copy()
@@ -111,7 +112,6 @@ def _plot_basemap(ax, crs_epsg=3857):
         write_to_log(f"Basemap unavailable (offline?): {e}")
 
 def _expand_bounds(bounds, pad_ratio=0.08):
-    """Expand (minx, miny, maxx, maxy) by a padding ratio."""
     minx, miny, maxx, maxy = bounds
     dx, dy = maxx - minx, maxy - miny
     if dx <= 0 or dy <= 0:
@@ -119,7 +119,7 @@ def _expand_bounds(bounds, pad_ratio=0.08):
     pad_x, pad_y = dx * pad_ratio, dy * pad_ratio
     return (minx - pad_x, miny - pad_y, maxx + pad_x, maxy + pad_y)
 
-# ---------------- Per-geocode maps from tbl_flat ----------------
+# ---------------- tbl_flat (per-geocode maps) ----------------
 def load_tbl_flat(parquet_dir: str) -> gpd.GeoDataFrame:
     fp = os.path.join(parquet_dir, "tbl_flat.parquet")
     if not os.path.exists(fp):
@@ -136,7 +136,6 @@ def load_tbl_flat(parquet_dir: str) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame()
 
 def compute_fixed_bounds_3857(flat_df: gpd.GeoDataFrame):
-    """Compute a single global extent (EPSG:3857) shared by all maps."""
     try:
         poly = flat_df[flat_df.geometry.type.isin(['Polygon','MultiPolygon'])].copy()
         if poly.empty:
@@ -145,7 +144,7 @@ def compute_fixed_bounds_3857(flat_df: gpd.GeoDataFrame):
         g3857 = _safe_to_3857(poly)
         if g3857.empty:
             return None
-        b = g3857.total_bounds  # (minx, miny, maxx, maxy)
+        b = g3857.total_bounds
         b = _expand_bounds(b, pad_ratio=0.08)
         return b
     except Exception as e:
@@ -153,7 +152,6 @@ def compute_fixed_bounds_3857(flat_df: gpd.GeoDataFrame):
         return None
 
 def _legend_for_sensitivity(ax, palette: dict, desc: dict):
-    """Render a small A–E legend on the current axes."""
     try:
         y0 = 0.02
         dy = 0.06
@@ -176,10 +174,6 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
                                desc: dict,
                                out_path: str,
                                fixed_bounds_3857=None):
-    """
-    Choropleth by sensitivity_code_max using A–E palette.
-    Uses a fixed shared extent if provided.
-    """
     try:
         g = gdf_group.copy()
         g = g[g.geometry.type.isin(['Polygon','MultiPolygon'])]
@@ -200,7 +194,6 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
         g.plot(ax=ax, facecolor=facecolors, edgecolor='white', linewidth=0.3, alpha=0.85)
 
         _plot_basemap(ax, crs_epsg=3857)
-
         ax.set_title(f"{group_name} – Sensitivity (A–E)", fontsize=14, fontweight='bold')
         _legend_for_sensitivity(ax, palette, desc)
 
@@ -217,10 +210,6 @@ def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
                             group_name: str,
                             out_path: str,
                             fixed_bounds_3857=None):
-    """
-    Continuous choropleth 0–100 for env_index using a yellow→red ramp and colorbar.
-    Uses a fixed shared extent if provided.
-    """
     try:
         if 'env_index' not in gdf_group.columns:
             write_to_log(f"[{group_name}] env_index missing; skipping env map.")
@@ -248,13 +237,13 @@ def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
             ax.set_ylim(miny, maxy)
 
         norm = mcolors.Normalize(vmin=0, vmax=100)
-        cmap = cm.get_cmap('YlOrRd')
+        # UPDATED: modern colormap access (avoids deprecation warnings)
+        cmap = mpl_cmaps.get_cmap('YlOrRd')
 
         colors_arr = cmap(norm(g['env_index'].values))
         g.plot(ax=ax, color=colors_arr, edgecolor='white', linewidth=0.25, alpha=0.95)
 
         _plot_basemap(ax, crs_epsg=3857)
-
         ax.set_title(f"{group_name} – Environment index (0–100)", fontsize=14, fontweight='bold')
 
         sm = cm.ScalarMappable(norm=norm, cmap=cmap)
@@ -271,28 +260,31 @@ def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
         plt.close('all')
         return False
 
-# ---------------- Lines: context map ----------------
-def draw_line_context_map(line_row: pd.Series, out_path: str, pad_ratio: float = 0.15):
+# ---------------- Lines: context + segments map ----------------
+def draw_line_context_map(line_row: pd.Series, out_path: str,
+                          pad_ratio: float = 1.0,
+                          rect_buffer_ratio: float = 0.03):
     """
-    Create a small context map for a single line geometry with basemap.
-    Highlights the line with a halo to stand out.
+    Draw a geographical context map for the line.
+    pad_ratio = 1.0 means a 100% buffer around the line's bounding box
+    (i.e., extent doubled in both width and height).
     """
     try:
-        if 'geometry' not in line_row or line_row['geometry'] is None:
+        geom = line_row.get('geometry', None)
+        if geom is None:
             write_to_log(f"[{line_row.get('name_gis','?')}] Missing geometry; cannot draw context map.")
             return False
 
-        g = gpd.GeoDataFrame([{'name_gis': line_row.get('name_gis','(line)'), 'geometry': line_row['geometry']}],
-                             crs=line_row.get('geometry').crs if hasattr(line_row.get('geometry'), 'crs') else None)
+        g = gpd.GeoDataFrame([{'name_gis': line_row.get('name_gis','(line)'), 'geometry': geom}], crs=None)
         g = _safe_to_3857(g)
         if g.empty or g.geometry.is_empty.all():
             write_to_log(f"[{line_row.get('name_gis','?')}] Invalid geometry after reprojection.")
             return False
 
-        fig, ax = plt.subplots(figsize=(10, 7.5), dpi=130)  # slightly landscape-ish
+        fig, ax = plt.subplots(figsize=(10, 7.5), dpi=130)
         ax.set_axis_off()
 
-        # Bounds with padding
+        # Overall view bounds with 100% padding (pad_ratio=1.0 by default)
         b = g.total_bounds
         minx, miny, maxx, maxy = _expand_bounds(b, pad_ratio)
         ax.set_xlim(minx, maxx)
@@ -300,12 +292,22 @@ def draw_line_context_map(line_row: pd.Series, out_path: str, pad_ratio: float =
 
         _plot_basemap(ax, crs_epsg=3857)
 
-        # Halo + line for visibility
+        # Draw a red rectangle around (slightly expanded) line bounding box
+        bx0, by0, bx1, by1 = b
+        bw, bh = (bx1 - bx0), (by1 - by0)
+        rx0 = bx0 - bw * rect_buffer_ratio
+        ry0 = by0 - bh * rect_buffer_ratio
+        rw  = bw + 2 * bw * rect_buffer_ratio
+        rh  = bh + 2 * bh * rect_buffer_ratio
+        rect = Rectangle((rx0, ry0), rw, rh, fill=False, edgecolor='red', linewidth=2.0, alpha=0.95, zorder=20)
+        ax.add_patch(rect)
+
+        # Halo + line on top
         try:
-            g.plot(ax=ax, color='none', edgecolor='white', linewidth=5.0, alpha=0.9)
+            g.plot(ax=ax, color='none', edgecolor='white', linewidth=5.0, alpha=0.9, zorder=21)
         except Exception:
             pass
-        g.plot(ax=ax, color='none', edgecolor=PRIMARY_HEX, linewidth=2.2, alpha=1.0)
+        g.plot(ax=ax, color='none', edgecolor=PRIMARY_HEX, linewidth=2.2, alpha=1.0, zorder=22)
 
         title_txt = f"Geographical context – {line_row.get('name_gis','(line)')}"
         ax.set_title(title_txt, fontsize=13, fontweight='bold')
@@ -319,9 +321,74 @@ def draw_line_context_map(line_row: pd.Series, out_path: str, pad_ratio: float =
         plt.close('all')
         return False
 
-# ---------------- Existing (kept / tidied) ----------------
+def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
+                           line_name: str,
+                           palette: dict,
+                           out_path: str,
+                           mode: str = 'max',
+                           pad_ratio: float = 0.20):
+    """
+    Draw segments for a given line, colored by sensitivity (max or min), with basemap.
+    Increased outer buffer (pad_ratio) around overview for better context.
+    """
+    try:
+        if segments_df.empty or 'geometry' not in segments_df.columns:
+            write_to_log(f"[{line_name}] No geometry in segments; skipping segments map.")
+            return False
+
+        col = 'sensitivity_code_max' if mode == 'max' else 'sensitivity_code_min'
+        segs = segments_df[(segments_df['name_gis'] == line_name) & (segments_df['geometry'].notna())].copy()
+        if segs.empty:
+            write_to_log(f"[{line_name}] No segments found for segments map.")
+            return False
+
+        segs = _safe_to_3857(segs)
+        if segs.empty:
+            write_to_log(f"[{line_name}] Segments reprojection failed.")
+            return False
+
+        fig, ax = plt.subplots(figsize=(10, 7.5), dpi=130)
+        ax.set_axis_off()
+
+        b = segs.total_bounds
+        minx, miny, maxx, maxy = _expand_bounds(b, pad_ratio)
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+
+        _plot_basemap(ax, crs_epsg=3857)
+
+        # Split by geom type to draw lines/polys
+        polys = segs[segs.geometry.type.isin(['Polygon','MultiPolygon'])]
+        lines = segs[segs.geometry.type.isin(['LineString','MultiLineString'])]
+
+        if not polys.empty:
+            facecolors = polys[col].astype('string').str.upper().map(lambda v: palette.get(v, '#BDBDBD'))
+            polys.plot(ax=ax, facecolor=facecolors, edgecolor='white', linewidth=0.5, alpha=0.85, zorder=12)
+
+        if not lines.empty:
+            colors_l = lines[col].astype('string').str.upper().map(lambda v: palette.get(v, '#BDBDBD'))
+            # Draw slightly thicker line with white halo
+            try:
+                lines.plot(ax=ax, color='white', linewidth=4.2, alpha=0.9, zorder=13)
+            except Exception:
+                pass
+            lines.plot(ax=ax, color=colors_l, linewidth=2.4, alpha=1.0, zorder=14)
+
+        title_txt = f"Segments map ({'max' if mode=='max' else 'min'} sensitivity) – {line_name}"
+        ax.set_title(title_txt, fontsize=13, fontweight='bold')
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        write_to_log(f"Segments map ({mode}) saved: {out_path}")
+        return True
+    except Exception as e:
+        write_to_log(f"Segments map failed for {line_name}: {e}")
+        plt.close('all')
+        return False
+
+# ---------------- Existing (kept / refined) ----------------
 def get_color_from_code(code, color_codes):
-    return color_codes.get(code, "#FFFFFF")
+    return color_codes.get(code, "#BDBDBD")
 
 def sort_segments_numerically(segments):
     def extract_number(segment_id):
@@ -332,8 +399,15 @@ def sort_segments_numerically(segments):
     return s.sort_values(by='sort_key').drop(columns=['sort_key'])
 
 def create_line_statistic_image(line_name, sensitivity_series, color_codes, length_m, output_path):
+    """
+    Generates the image file; display size (equal height 8 mm) is enforced when placing into PDF.
+    """
     segment_count = max(1, len(sensitivity_series))
-    fig, ax = plt.subplots(figsize=(10, 0.35), dpi=110)
+    # Height ~0.315 in (8 mm) at 300 dpi ≈ 95 px; width large for quality, scaled in PDF.
+    fig_h_in = 0.315
+    dpi = 300
+    fig_w_in = 12
+    fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
     length_km = (length_m or 0) / 1000.0
 
     for i, code in enumerate(sensitivity_series):
@@ -342,7 +416,7 @@ def create_line_statistic_image(line_name, sensitivity_series, color_codes, leng
 
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     ax.set_xticks([0, 0.5, 1])
-    ax.set_xticklabels([f"0 km", f"{length_km/2:.1f} km", f"{length_km:.1f} km"])
+    ax.set_xticklabels([f"0 km", f"{length_km/2:.1f} km", f"{length_km:.1f} km"], fontsize=8)
     ax.yaxis.set_visible(False)
     for sp in ['top','bottom','left','right']:
         ax.spines[sp].set_visible(False)
@@ -351,10 +425,6 @@ def create_line_statistic_image(line_name, sensitivity_series, color_codes, leng
     plt.close(fig)
 
 def resize_image(image_path, max_width, max_height):
-    """
-    NOTE: Inputs here are in ReportLab 'points' if caller passes RL_CM-based values.
-    That’s okay — we only need a reasonable downscale to fit the PDF.
-    """
     try:
         with PILImage.open(image_path) as img:
             width, height = img.size
@@ -369,20 +439,17 @@ def resize_image(image_path, max_width, max_height):
         write_to_log(f"Image resize failed for {image_path}: {e}")
 
 def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
-    # Count and ensure A–E order
     counts = sensitivity_series.value_counts().reindex(['A','B','C','D','E']).fillna(0)
     total = max(1, len(sensitivity_series))
 
     fig, (ax_text, ax_bar) = plt.subplots(2, 1, figsize=(10, 1.7), height_ratios=[0.45, 0.55])
     plt.subplots_adjust(hspace=0.15)
 
-    # Text
     parts = [f"{c}: {int(counts[c])} ({counts[c]/total*100:.1f}%)" for c in ['A','B','C','D','E']]
     summary = "Distribution: " + " | ".join(parts)
-    ax_text.text(0.5, 0.5, summary, ha='center', va='center')
+    ax_text.text(0.5, 0.5, summary, ha='center', va='center', fontsize=10)
     ax_text.axis('off')
 
-    # Bar (stacked)
     left = 0
     for c in ['A','B','C','D','E']:
         w = counts[c] / total
@@ -394,22 +461,45 @@ def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
     plt.close(fig)
 
 def fetch_asset_group_statistics(asset_group_df: gpd.GeoDataFrame, asset_object_df: gpd.GeoDataFrame):
+    """
+    Returns per sensitivity code:
+      - Number of Asset Objects
+      - Active asset groups (distinct groups having ≥1 object)
+    """
     if asset_group_df.empty:
-        return pd.DataFrame(columns=['Sensitivity Code','Sensitivity Description','Number of Asset Objects'])
+        return pd.DataFrame(columns=['Sensitivity Code','Sensitivity Description','Active asset groups','Number of Asset Objects'])
+
+    grp = asset_group_df[['id','sensitivity_code','sensitivity_description']].copy()
+
     if not asset_object_df.empty and 'ref_asset_group' in asset_object_df.columns:
         cnt = asset_object_df.groupby('ref_asset_group').size().rename('asset_objects_nr')
-        merged = asset_group_df.merge(cnt, left_on='id', right_index=True, how='left')
+        merged = grp.merge(cnt, left_on='id', right_index=True, how='left')
     else:
-        merged = asset_group_df.copy()
+        merged = grp.copy()
         merged['asset_objects_nr'] = 0
+
     merged['asset_objects_nr'] = merged['asset_objects_nr'].fillna(0).astype(int)
-    out = out = (merged.groupby(['sensitivity_code','sensitivity_description'], dropna=False)['asset_objects_nr']
-                      .sum().reset_index())
+
+    active_groups = (merged[merged['asset_objects_nr'] > 0]
+                     .groupby(['sensitivity_code','sensitivity_description'])
+                     .agg(active_groups=('id','nunique'))
+                     .reset_index())
+
+    objects_per_code = (merged.groupby(['sensitivity_code','sensitivity_description'])
+                        .agg(asset_objects=('asset_objects_nr','sum'))
+                        .reset_index())
+
+    out = objects_per_code.merge(active_groups,
+                                 on=['sensitivity_code','sensitivity_description'],
+                                 how='left').fillna({'active_groups':0})
+
     out = out.rename(columns={
-        'sensitivity_code': 'Sensitivity Code',
-        'sensitivity_description': 'Sensitivity Description',
-        'asset_objects_nr': 'Number of Asset Objects'
+        'sensitivity_code':'Sensitivity Code',
+        'sensitivity_description':'Sensitivity Description',
+        'active_groups':'Active asset groups',
+        'asset_objects':'Number of Asset Objects'
     }).sort_values('Sensitivity Code')
+
     return out
 
 def format_area(row):
@@ -478,7 +568,6 @@ def line_up_to_pdf(order_list):
     elements = []
     styles = getSampleStyleSheet()
 
-    # Build heading styles with steel blue chrome
     primary = HexColor(PRIMARY_HEX)
     light_primary = HexColor(LIGHT_PRIMARY_HEX)
     heading_styles = {
@@ -499,6 +588,8 @@ def line_up_to_pdf(order_list):
 
     max_image_width = 16 * RL_CM
     max_image_height = 24 * RL_CM
+    ribbon_height = 0.8 * RL_CM     # 8 mm
+    ribbon_width = 16.8 * RL_CM     # near-full text width
 
     def _add_heading(level, text):
         if level == 1:
@@ -514,7 +605,7 @@ def line_up_to_pdf(order_list):
         itype, ival = item
 
         if itype == 'text':
-            if os.path.isfile(ival):
+            if isinstance(ival, str) and os.path.isfile(ival):
                 with open(ival, 'r', encoding='utf-8') as f:
                     text = f.read()
             else:
@@ -524,12 +615,23 @@ def line_up_to_pdf(order_list):
             elements.append(Spacer(1, 8))
 
         elif itype == 'image':
-            # 'ival' is a tuple: (heading_str, path)
+            # ival: (heading_str, path)
             heading_str, path = ival
-            _add_heading(3, heading_str)     # heading directly above image
+            _add_heading(3, heading_str)
             resize_image(path, max_image_width, max_image_height)
             img = Image(path)
             img.hAlign = 'CENTER'
+            elements.append(img)
+            elements.append(Spacer(1, 6))
+
+        elif itype == 'image_ribbon':
+            # ival: (heading_str, path)
+            heading_str, path = ival
+            _add_heading(3, heading_str)
+            img = Image(path)
+            img.hAlign = 'CENTER'
+            img.drawWidth = ribbon_width
+            img.drawHeight = ribbon_height
             elements.append(img)
             elements.append(Spacer(1, 6))
 
@@ -537,6 +639,21 @@ def line_up_to_pdf(order_list):
             df = pd.read_excel(ival)
             data = [df.columns.tolist()] + df.values.tolist()
             table = Table(data, repeatRows=1)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), primary),
+                ('TEXTCOLOR',  (0, 0), (-1, 0), colors.whitesmoke),
+                ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('ALIGN',      (0, 0), (-1,-1), 'CENTER'),
+                ('GRID',       (0, 0), (-1,-1), 0.5, colors.HexColor("#A9A9A9")),
+                ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.97,0.97,0.97)])
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 8))
+
+        elif itype == 'table_data':
+            title, data_ll = ival
+            _add_heading(3, title)
+            table = Table(data_ll, repeatRows=1)
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), primary),
                 ('TEXTCOLOR',  (0, 0), (-1, 0), colors.whitesmoke),
@@ -571,7 +688,7 @@ def compile_pdf(output_pdf, elements):
 
     def add_header_footer(canvas, doc_obj):
         width, height = A4
-        # Top color band (steel blue)
+        # Top steel-blue band
         canvas.saveState()
         canvas.setFillColor(primary)
         canvas.rect(0, height - 16, width, 16, fill=1, stroke=0)
@@ -580,7 +697,7 @@ def compile_pdf(output_pdf, elements):
         canvas.drawString(24, height - 12, "MESA – Report")
         canvas.restoreState()
 
-        # Footer with page number and a thin rule
+        # Footer with page number
         canvas.saveState()
         canvas.setStrokeColor(primary)
         canvas.setLineWidth(0.5)
@@ -641,7 +758,7 @@ def generate_report(original_working_directory: str,
         export_to_excel(ag_stats_df, ag_stats_xlsx)
         set_progress(22, "Asset stats ready.")
 
-        # ---- Lines & segments (grouped per line with context map first) ----
+        # ---- Lines & segments (grouped per line with context & segments maps) ----
         lines_df, segments_df = fetch_lines_and_segments(gpq_dir)
         pages_lines = []
         if (not lines_df.empty and not segments_df.empty and
@@ -655,9 +772,13 @@ def generate_report(original_working_directory: str,
                 length_km = length_m / 1000.0
                 segs = sort_segments_numerically(segments_df[segments_df['name_gis']==ln])
 
-                # Context map
-                context_img = os.path.join(tmp_dir, f"{ln}_context.png")
-                draw_line_context_map(line, context_img, pad_ratio=0.15)
+                # Context & segments maps (context with 100% buffer)
+                context_img  = os.path.join(tmp_dir, f"{ln}_context.png")
+                seg_map_max  = os.path.join(tmp_dir, f"{ln}_segments_max.png")
+                seg_map_min  = os.path.join(tmp_dir, f"{ln}_segments_min.png")
+                draw_line_context_map(line, context_img, pad_ratio=1.0, rect_buffer_ratio=0.03)
+                draw_line_segments_map(segments_df, ln, palette_A2E, seg_map_max, mode='max', pad_ratio=0.20)
+                draw_line_segments_map(segments_df, ln, palette_A2E, seg_map_min, mode='min', pad_ratio=0.20)
 
                 # summaries
                 max_stats_img = os.path.join(tmp_dir, f"{ln}_max_dist.png")
@@ -671,21 +792,24 @@ def generate_report(original_working_directory: str,
                 create_line_statistic_image(ln, segs['sensitivity_code_max'], palette_A2E, length_m, max_img)
                 create_line_statistic_image(ln, segs['sensitivity_code_min'], palette_A2E, length_m, min_img)
 
-                # GROUPED presentation per line: heading + paragraph + context map, then the four visuals
+                # GROUPED presentation per line
                 pages_lines += [
                     ('heading(2)', f"Line: {ln}"),
                     ('text', f"This section summarizes sensitivity along the line <b>{ln}</b> "
                              f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segs)}</b>). "
-                             "We first provide a geographical context map, then distributions (stacked bars) "
-                             "and linear ribbons for maximum and minimum sensitivity."),
+                             "We first provide a geographical context map (red rectangle indicates the line's extent), "
+                             "then segments maps colored by sensitivity values (with cartography), followed by "
+                             "distributions and ribbons for maximum and minimum sensitivity."),
                     ('image', ("Geographical context", context_img)),
+                    ('image', ("Segments (colored by maximum sensitivity)", seg_map_max)),
                     ('image', ("Maximum sensitivity – distribution", max_stats_img)),
-                    ('image', ("Maximum sensitivity – along line", max_img)),
+                    ('image_ribbon', ("Maximum sensitivity – along line", max_img)),
                     ('new_page', None),
 
                     ('heading(2)', f"Line: {ln} (continued)"),
+                    ('image', ("Segments (colored by minimum sensitivity)", seg_map_min)),
                     ('image', ("Minimum sensitivity – distribution", min_stats_img)),
-                    ('image', ("Minimum sensitivity – along line", min_img)),
+                    ('image_ribbon', ("Minimum sensitivity – along line", min_img)),
                     ('new_page', None),
                 ]
 
@@ -704,11 +828,12 @@ def generate_report(original_working_directory: str,
                 write_to_log(f"Segments log exported to {log_xlsx}")
         else:
             write_to_log("Skipping line/segment pages (missing/empty).")
-        set_progress(36, "Lines/segments processed.")
+        set_progress(40, "Lines/segments processed.")
 
-        # ---- Per-geocode maps from tbl_flat (same scale, one page per map) ----
+        # ---- Per-geocode maps from tbl_flat (same scale, one map per page) ----
         flat_df = load_tbl_flat(gpq_dir)
         geocode_pages = []
+        geocode_intro_table = None
         if not flat_df.empty and 'name_gis_geocodegroup' in flat_df.columns:
             groups = (flat_df['name_gis_geocodegroup']
                       .astype('string')
@@ -716,22 +841,27 @@ def generate_report(original_working_directory: str,
             groups = sorted(groups)
             write_to_log(f"Found geocode categories: {groups}")
 
-            # Compute one shared extent for all maps:
+            # Counts of geocode objects per category
+            counts = (flat_df.groupby('name_gis_geocodegroup')
+                              .size().rename('count').reset_index())
+            counts = counts.sort_values('name_gis_geocodegroup')
+            geocode_intro_table = [["Geocode category","Geocode objects"]]
+            for _, r in counts.iterrows():
+                geocode_intro_table.append([str(r['name_gis_geocodegroup']), int(r['count'])])
+
             fixed_bounds_3857 = compute_fixed_bounds_3857(flat_df)
 
             done = 0
             for gname in groups:
                 sub = flat_df[flat_df['name_gis_geocodegroup'] == gname].copy()
 
-                # Sensitivity map
-                sens_png = os.path.join(tmp_dir, f"map_sensitivity_{re.sub(r'[^A-Za-z0-9_-]+','_',gname)}.png")
+                safe = re.sub(r'[^A-Za-z0-9_-]+','_',gname)
+                sens_png = os.path.join(tmp_dir, f"map_sensitivity_{safe}.png")
                 ok_sens = draw_group_map_sensitivity(sub, gname, palette_A2E, desc_A2E, sens_png, fixed_bounds_3857)
 
-                # Env index map
-                env_png  = os.path.join(tmp_dir, f"map_envindex_{re.sub(r'[^A-Za-z0-9_-]+','_',gname)}.png")
+                env_png  = os.path.join(tmp_dir, f"map_envindex_{safe}.png")
                 ok_env   = draw_group_map_envindex(sub, gname, env_png, fixed_bounds_3857)
 
-                # One map per page, heading right above
                 if ok_sens:
                     geocode_pages += [
                         ('heading(2)', f"Geocode group: {gname}"),
@@ -746,7 +876,7 @@ def generate_report(original_working_directory: str,
                     ]
 
                 done += 1
-                set_progress(36 + int(30 * done/max(1,len(groups))), f"Rendered maps for '{gname}'")
+                set_progress(40 + int(30 * done/max(1,len(groups))), f"Rendered maps for '{gname}'")
 
             if geocode_pages:
                 write_to_log("Per-geocode maps created.")
@@ -756,6 +886,14 @@ def generate_report(original_working_directory: str,
 
         # ---- Compose PDF ----
         timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+
+        # Assets explanatory text about areas for points/lines
+        assets_area_note = (
+            "Note on areas: areas are computed only for polygon geometries. "
+            "Points and lines have no surface area, therefore their 'Total area' is shown as “–”. "
+            "Line and point assets are still counted in '# objects' and can be visualized on maps."
+        )
+
         order_list = [
             ('heading(1)', "MESA report"),
             ('text', f"Timestamp: {timestamp}"),
@@ -764,14 +902,15 @@ def generate_report(original_working_directory: str,
             ('heading(2)', "Contents"),
             ('text', "- Assets overview & statistics"
                      "<br/>- Per-geocode maps (Sensitivity & Environment Index, shared scale)"
-                     "<br/>- Lines & segments (grouped by line, with context map)"),
+                     "<br/>- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)"),
             ('new_page', None),
 
             ('heading(2)', "Assets – overview"),
             ('text', "Asset objects by group (count and area, where applicable)."),
+            ('text', assets_area_note),
             ('table', os.path.join(tmp_dir, 'asset_object_statistics.xlsx')),
             ('spacer', 1),
-            ('text', "Asset groups – sensitivity distribution (count of objects)."),
+            ('text', "Asset groups – sensitivity distribution (count of objects) and number of active groups (distinct groups with ≥1 object)."),
             ('table', os.path.join(tmp_dir, 'asset_group_statistics.xlsx')),
             ('new_page', None),
 
@@ -784,18 +923,22 @@ def generate_report(original_working_directory: str,
              "H3 provides multi-resolution grids (fine to coarse) that are excellent for scalable analysis and "
              "visualization. In this report, we render each available geocode category independently. "
              "All maps below share the same cartographic scale/extent for easier visual comparison."),
-            ('spacer', 1),
-            ('rule', None),
         ]
+
+        # Insert geocode category counts (if available)
+        if geocode_intro_table is not None:
+            order_list.append(('table_data', ("Available geocode categories and object counts", geocode_intro_table)))
+            order_list.append(('rule', None))
 
         order_list.extend(geocode_pages)
 
         if pages_lines:
             order_list.append(('heading(2)', "Lines and segments"))
-            order_list.append(('text', "For each line we provide a short paragraph and a geographical context map, "
-                                       "followed by four visuals: maximum sensitivity distribution, "
-                                       "maximum sensitivity ribbon along the line, minimum sensitivity distribution, "
-                                       "and minimum sensitivity ribbon along the line."))
+            order_list.append(('text', "For each line we provide a short paragraph and a geographical context map "
+                                       "(with a red rectangle indicating the line’s extent), "
+                                       "segments maps colored by the sensitivity values (with basemap), "
+                                       "followed by four visuals: maximum sensitivity distribution, maximum sensitivity "
+                                       "ribbon along the line, minimum sensitivity distribution, and minimum sensitivity ribbon."))
             order_list.append(('rule', None))
             order_list.append(('new_page', None))
             order_list.extend(pages_lines)
@@ -888,7 +1031,7 @@ def launch_gui(original_working_directory: str, config_file: str, palette: dict,
 
 # ---------------- CLI ----------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Presentation report (GeoParquet per geocode, same-scale maps, line context)')
+    parser = argparse.ArgumentParser(description='Presentation report (GeoParquet per geocode, same-scale maps, line context + segments maps with buffers)')
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     parser.add_argument('--no-gui', action='store_true', help='Run directly without GUI')
     args = parser.parse_args()
@@ -906,11 +1049,9 @@ if __name__ == "__main__":
     # Sensitivity palette + descriptions from config (A–E)
     palette_A2E, desc_A2E = read_sensitivity_palette_and_desc(config_file)
 
-    # Allow optional override from config for brand color; default to steel blue
+    # Optional override for brand color from config
     PRIMARY_HEX = cfg['DEFAULT'].get('ui_primary_color', PRIMARY_HEX).strip() or PRIMARY_HEX
-    # Slightly lighter variant for section bars
     try:
-        # simple lighten: move 30% toward white
         def _lighten(hexcol, amt=0.30):
             hexcol = hexcol.lstrip('#')
             r = int(hexcol[0:2],16); g = int(hexcol[2:4],16); b = int(hexcol[4:6],16)
@@ -918,7 +1059,7 @@ if __name__ == "__main__":
             return f"#{r:02x}{g:02x}{b:02x}"
         LIGHT_PRIMARY_HEX = _lighten(PRIMARY_HEX, 0.30)
     except Exception:
-        LIGHT_PRIMARY_HEX = LIGHT_PRIMARY_HEX  # keep default
+        pass
 
     if args.no_gui:
         generate_report(original_working_directory, config_file, palette_A2E, desc_A2E)
