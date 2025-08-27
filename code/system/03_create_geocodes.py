@@ -9,7 +9,7 @@ Create geocodes: H3 or Basic Mosaic (polygonize-based)
 
 - GUI (ttkbootstrap) with log panel + progress bar. Also supports CLI via --nogui.
 - H3: robust across h3 v3/v4 (uses geo_to_cells with fallbacks).
-- Mosaic: buffer → per-feature boundary union → polygonize (tiling-aware).
+- Mosaic: adaptive quadtree tiling + parallel polygonize (Windows spawn-safe) with detailed logging.
 - **GeoParquet-first**: reads assets/groups from output/geoparquet; writes ONLY to:
     * output/geoparquet/tbl_geocode_group.parquet
     * output/geoparquet/tbl_geocode_object.parquet
@@ -30,6 +30,10 @@ Config (optional) in system/config.ini [DEFAULT]:
 - h3_to   = 6
 - mosaic_buffer_m   = 25
 - mosaic_grid_size_m = 1000
+- mosaic_workers = 0               # 0/absent = auto (cpu_count)
+- mosaic_quadtree_max_feats_per_tile = 800
+- mosaic_quadtree_max_depth = 8
+- mosaic_quadtree_min_tile_m = 1000
 - ttk_bootstrap_theme = flatly
 """
 
@@ -40,9 +44,10 @@ import configparser
 import datetime
 import locale
 import os
-import threading
+import time
+import multiprocessing as mp
 from pathlib import Path
-from typing import Tuple, Union, Optional, List
+from typing import Union, Optional, List, Tuple
 
 import numpy as np
 import geopandas as gpd
@@ -89,8 +94,15 @@ H3_RES_ACROSS_FLATS_KM = {
     8: 0.922709368, 9: 0.348751336, 10: 0.131815614, 11: 0.049821122,
     12: 0.018831052, 13: 0.007119786, 14: 0.00269715, 15: 0.001019426
 }
-# Same values in meters (rounded when displaying)
+# Same values in meters (for UI display)
 H3_RES_ACROSS_FLATS_M = {r: km * 1000.0 for r, km in H3_RES_ACROSS_FLATS_KM.items()}
+
+# Approx average hex areas by resolution (km^2), order-of-magnitude
+AVG_HEX_AREA_KM2 = {
+    0: 4259705, 1: 608529, 2: 86932, 3: 12419, 4: 1774,
+    5: 253, 6: 36.1, 7: 5.15, 8: 0.736, 9: 0.105,
+    10: 0.0150, 11: 0.00214, 12: 0.000305, 13: 0.0000436, 14: 0.00000623, 15: 0.00000089
+}
 
 
 # -----------------------------------------------------------------------------
@@ -412,13 +424,6 @@ def union_from_asset_groups_or_objects(base_dir: Path):
 # -----------------------------------------------------------------------------
 # Estimators to prevent runaway H3 at very high resolutions
 # -----------------------------------------------------------------------------
-# Approx average hex areas by resolution (km^2), order-of-magnitude
-AVG_HEX_AREA_KM2 = {
-    0: 4259705, 1: 608529, 2: 86932, 3: 12419, 4: 1774,
-    5: 253, 6: 36.1, 7: 5.15, 8: 0.736, 9: 0.105,
-    10: 0.0150, 11: 0.00214, 12: 0.000305, 13: 0.0000436, 14: 0.00000623, 15: 0.00000089
-}
-
 def estimate_cells_for(union_geom, res: int, cfg: configparser.ConfigParser) -> tuple[float,float]:
     """Return (area_km2, approx_cells) for given AOI at res."""
     proj = area_projection(cfg)
@@ -431,7 +436,7 @@ def estimate_cells_for(union_geom, res: int, cfg: configparser.ConfigParser) -> 
 
 
 # -----------------------------------------------------------------------------
-# Geocode (H3 & Mosaic) writers — APPEND/MERGE semantics
+# Geocode writers — APPEND/MERGE semantics (Parquet-only)
 # -----------------------------------------------------------------------------
 def _bbox_polygon_from(
     thing: Union[gpd.GeoDataFrame, gpd.GeoSeries, Polygon, MultiPolygon, GeometryCollection]
@@ -631,7 +636,7 @@ def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
 
 
 # -----------------------------------------------------------------------------
-# Mosaic (polygonize-based) — tiling-aware → publish directly into geocode tables
+# Asset loading (GeoParquet)
 # -----------------------------------------------------------------------------
 def _load_asset_objects(base_dir: Path) -> gpd.GeoDataFrame:
     pq = geoparquet_path(base_dir, "tbl_asset_object")
@@ -645,114 +650,314 @@ def _load_asset_objects(base_dir: Path) -> gpd.GeoDataFrame:
             log_to_gui(f"Parquet read failed ({pq.name}): {e}", "WARN")
     return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-def _explode_lines(geom):
-    if geom is None or geom.is_empty:
-        return []
-    if isinstance(geom, LineString):
-        return [geom]
-    if isinstance(geom, MultiLineString):
-        return list(geom.geoms)
-    if isinstance(geom, GeometryCollection):
-        out = []
-        for g in geom.geoms:
-            out.extend(_explode_lines(g))
-        return out
-    if isinstance(geom, (Polygon, MultiPolygon)):
-        return _explode_lines(geom.boundary)
-    return []
 
-def _generate_grid(bounds: tuple[float,float,float,float], size_m: float) -> List[Polygon]:
-    minx, miny, maxx, maxy = bounds
-    if size_m <= 0 or maxx <= minx or maxy <= miny:
-        return [box(minx, miny, maxx, maxy)]
-    xs = np.arange(minx, maxx, size_m)
-    ys = np.arange(miny, maxy, size_m)
-    tiles = []
-    for x in xs:
-        for y in ys:
-            xr = min(x + size_m, maxx)
-            yr = min(y + size_m, maxy)
-            tiles.append(box(x, y, xr, yr))
-    return tiles
+# -----------------------------------------------------------------------------
+# Mosaic worker (memory-safe polygonize per tile)
+# -----------------------------------------------------------------------------
+def _mosaic_tile_worker(task: Tuple[int, List[bytes]]):
+    """
+    Input: (tile_index, [WKB of buffered geometries for this tile])
+    Output: (tile_index, [WKB of polygon faces], error:str|None)
+    """
+    idx, wkb_list = task
+    try:
+        if not wkb_list:
+            return (idx, [], None)
 
-def mosaic_faces_from_assets(base_dir: Path, buffer_m: float, grid_size_m: float) -> gpd.GeoDataFrame:
-    """Return polygon faces only (no edges), WGS84."""
+        # WKB -> shapely, then boundaries
+        geoms = [shp_wkb.loads(b) for b in wkb_list if b]
+        lines = []
+        for g in geoms:
+            if g and not g.is_empty:
+                try:
+                    lb = g.boundary
+                    if lb and not lb.is_empty:
+                        lines.append(lb)
+                except Exception:
+                    continue
+        if not lines:
+            return (idx, [], None)
+
+        # Progressive (batched) union to cap peak memory
+        def batched_union(seq, max_batch):
+            out = None
+            step = max_batch
+            i = 0
+            while i < len(seq):
+                chunk = seq[i:i+step]
+                try:
+                    u = unary_union(chunk)
+                except Exception:
+                    if step <= 200:
+                        raise
+                    step = max(200, step // 2)
+                    continue
+                out = u if out is None else unary_union([out, u])
+                i += step
+            return out
+
+        edge_net = batched_union(lines, max_batch=1500)
+
+        faces = list(polygonize(edge_net))
+        res = [shp_wkb.dumps(f) for f in faces
+               if isinstance(f, (Polygon, MultiPolygon)) and not f.is_empty]
+        return (idx, res, None)
+
+    except MemoryError:
+        return (idx, [], "memory")
+    except Exception as e:
+        return (idx, [], str(e))
+
+
+# -----------------------------------------------------------------------------
+# Adaptive quadtree tiler (skips empties)
+# -----------------------------------------------------------------------------
+def _plan_tiles_quadtree(a_metric: gpd.GeoDataFrame,
+                         sidx,
+                         minx: float, miny: float, maxx: float, maxy: float,
+                         *,
+                         overlap_m: float,
+                         max_feats_per_tile: int = 800,
+                         max_depth: int = 8,
+                         min_tile_size_m: float = 0.0) -> List[Tuple[Tuple[float,float,float,float], List[int]]]:
+    """
+    Return list of (bounds, row_indices) for leaf tiles. Skips empty tiles.
+    - a_metric: assets (buffered) in a metric CRS
+    - sidx: a_metric.sindex
+    - overlap_m: used for index query window (we still send full geoms; overlap avoids seams)
+    """
+    leaves: List[Tuple[Tuple[float,float,float,float], List[int]]] = []
+    stack = [(minx, miny, maxx, maxy, 0)]
+    eps = 1e-3
+
+    while stack:
+        bx0, by0, bx1, by1, depth = stack.pop()
+        w, h = (bx1 - bx0), (by1 - by0)
+        if w <= eps or h <= eps:
+            continue
+
+        # query with overlap
+        tile_poly = box(bx0, by0, bx1, by1).buffer(overlap_m)
+        try:
+            idxs = list(sidx.query(tile_poly, predicate="intersects"))
+        except Exception:
+            idxs = list(sidx.query(tile_poly))
+        n = len(idxs)
+
+        if n == 0:
+            continue  # empty tile → drop
+
+        # stop conditions
+        stop_for_size = (min_tile_size_m > 0.0 and (w <= min_tile_size_m and h <= min_tile_size_m))
+        if n <= max_feats_per_tile or depth >= max_depth or stop_for_size:
+            leaves.append(((bx0, by0, bx1, by1), idxs))
+            continue
+
+        # split into quadrants
+        mx = (bx0 + bx1) * 0.5
+        my = (by0 + by1) * 0.5
+        stack.extend([
+            (bx0, by0, mx,  my,  depth + 1),
+            (mx,  by0, bx1, my,  depth + 1),
+            (bx0, my,  mx,  by1, depth + 1),
+            (mx,  my,  bx1, by1, depth + 1),
+        ])
+
+    return leaves
+
+
+# -----------------------------------------------------------------------------
+# Mosaic builder (adaptive + parallel + detailed logging)
+# -----------------------------------------------------------------------------
+def mosaic_faces_from_assets_parallel(base_dir: Path,
+                                      buffer_m: float,
+                                      grid_size_m: float,
+                                      workers: int) -> gpd.GeoDataFrame:
+    """
+    Build mosaic faces with an adaptive quadtree tiler (fewer, smarter tiles),
+    parallel polygonize, detailed logging, and memory-safe batching.
+    Returns WGS84 polygons.
+    """
+    t0 = time.time()
+
+    # Load assets
     assets = _load_asset_objects(base_dir)
     if assets.empty:
+        log_to_gui("[Mosaic] No asset objects found; mosaic skipped.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    log_to_gui(f"[Mosaic] Loaded assets: {len(assets):,} rows; CRS={assets.crs}")
 
+    # Config / CRS
     cfg = read_config(base_dir / "system" / "config.ini")
-    metric = working_metric_crs_for(assets, cfg)
+    metric_crs = working_metric_crs_for(assets, cfg)
 
-    a = assets.to_crs(metric)
+    # Parameters (with sensible defaults, overridable in config.ini)
+    try:
+        max_feats_per_tile = int(cfg["DEFAULT"].get("mosaic_quadtree_max_feats_per_tile", "800"))
+    except Exception:
+        max_feats_per_tile = 800
+    try:
+        max_depth = int(cfg["DEFAULT"].get("mosaic_quadtree_max_depth", "8"))
+    except Exception:
+        max_depth = 8
+    try:
+        # use grid_size_m as a minimum tile size if provided; 0 → no hard size stop
+        min_tile_size_m = float(cfg["DEFAULT"].get("mosaic_quadtree_min_tile_m", str(grid_size_m)))
+    except Exception:
+        min_tile_size_m = max(0.0, float(grid_size_m))
+
+    # Buffer & clean once in metric CRS
+    t_buf0 = time.time()
+    a = assets.to_crs(metric_crs).copy()
     buf = max(0.01, float(buffer_m))
     a["geometry"] = a.geometry.buffer(buf)
     a["geometry"] = a.geometry.apply(_fix_valid)
     a = a[a.geometry.notna() & ~a.geometry.is_empty]
+    log_to_gui(f"[Mosaic] Buffered & cleaned: {len(a):,} geoms in {metric_crs}  "
+               f"(took {time.time()-t_buf0:.2f}s, buffer={buf:g} m)")
     if a.empty:
+        log_to_gui("[Mosaic] Buffered assets empty; mosaic skipped.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Spatial index if available
+    # Spatial index (main process)
     try:
         sidx = a.sindex
+        log_to_gui(f"[Mosaic] Built spatial index on {len(a):,} geoms.")
     except Exception:
         sidx = None
-
-    bounds = a.total_bounds
-    tiles = _generate_grid(tuple(bounds), float(grid_size_m))
-    overlap = buf  # reduce seams
-
-    faces_parts: List[gpd.GeoDataFrame] = []
-
-    for i, tpoly in enumerate(tiles):
-        tpoly_ov = tpoly.buffer(overlap)
-        if sidx:
-            idx = list(sidx.query(tpoly_ov, predicate="intersects"))
-            sub = a.iloc[idx] if idx else a.iloc[[]]
-        else:
-            sub = a[a.intersects(tpoly_ov)]
-        if sub.empty:
-            continue
-
-        try:
-            boundaries = [g.boundary for g in sub.geometry if g is not None and not g.is_empty]
-            if not boundaries:
-                continue
-            edge_net = unary_union(boundaries)
-        except Exception as e:
-            log_to_gui(f"[Mosaic] Tile {i+1}/{len(tiles)} union failed: {e}", "WARN")
-            continue
-
-        try:
-            faces_list = list(polygonize(edge_net))
-        except Exception as e:
-            log_to_gui(f"[Mosaic] Tile {i+1}/{len(tiles)} polygonize failed: {e}", "WARN")
-            continue
-
-        if faces_list:
-            faces_list = [p for p in faces_list if isinstance(p, (Polygon, MultiPolygon)) and not p.is_empty]
-            if faces_list:
-                faces_parts.append(gpd.GeoDataFrame({"geometry": faces_list}, geometry="geometry", crs=a.crs))
-
-        update_progress(5 + (i + 1) * (80 / max(1, len(tiles))))
-
-    if not faces_parts:
-        log_to_gui("Polygonize produced no faces.", "WARN")
+        log_to_gui("[Mosaic] Spatial index not available; aborting (required for quadtree).", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    faces = pd.concat(faces_parts, ignore_index=True)
+    # Quadtree planning (skips empties)
+    t_plan0 = time.time()
+    minx, miny, maxx, maxy = a.total_bounds
+    leaves = _plan_tiles_quadtree(
+        a_metric=a,
+        sidx=sidx,
+        minx=minx, miny=miny, maxx=maxx, maxy=maxy,
+        overlap_m=buf,
+        max_feats_per_tile=max_feats_per_tile,
+        max_depth=max_depth,
+        min_tile_size_m=max(0.0, float(min_tile_size_m))
+    )
+    n_tiles = len(leaves)
+    log_to_gui(f"[Mosaic] Planned quadtree tiles: {n_tiles:,}  "
+               f"(max_feats_per_tile={max_feats_per_tile}, max_depth={max_depth}, "
+               f"min_tile_size_m={min_tile_size_m:g})  "
+               f"(planning took {time.time()-t_plan0:.2f}s)")
 
-    # Dedup across overlaps by WKB
+    if n_tiles == 0:
+        log_to_gui("[Mosaic] No tiles intersect data; mosaic skipped.", "WARN")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+    # Pack tasks → WKB (skip empties; already skipped in planner)
+    t_pack0 = time.time()
+    tasks: List[Tuple[int, List[bytes]]] = []
+    counts = []
+    for i, (_bounds, idxs) in enumerate(leaves):
+        if not idxs:
+            continue
+        sub = a.iloc[idxs]
+        counts.append(len(sub))
+        wkb_list = [shp_wkb.dumps(g) for g in sub.geometry]
+        tasks.append((i, wkb_list))
+
+    n_tasks = len(tasks)
+    if n_tasks == 0:
+        log_to_gui("[Mosaic] Planner produced only empty tiles; mosaic skipped.", "WARN")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+    def _pct(q):
+        return int(np.percentile(counts, q)) if counts else 0
+
+    log_to_gui(
+        f"[Mosaic] Prepared {n_tasks:,} tile tasks; features per tile "
+        f"(min/med/p95/max) = {min(counts) if counts else 0}/"
+        f"{_pct(50)}/"
+        f"{_pct(95)}/"
+        f"{max(counts) if counts else 0}.  "
+        f"(pack time {time.time()-t_pack0:.2f}s)"
+    )
+
+    # Decide workers
+    if workers is None or workers <= 0:
+        try:
+            workers = max(1, mp.cpu_count())
+        except Exception:
+            workers = 4
+    log_to_gui(f"[Mosaic] Parallel polygonize across {n_tasks:,} tiles; workers={workers}.")
+
+    # Chunk size: reduce overhead for many tiles
+    chunk = max(1, min(64, n_tasks // max(1, workers * 4)))
+
+    # Process tiles
+    t_poly0 = time.time()
+    faces_wkb_all: List[bytes] = []
+    processed = 0
+    last_log = time.time()
+    step = max(1, n_tasks // 10)  # log ~10% steps
+
+    if workers == 1 or n_tasks == 1:
+        for task in tasks:
+            idx, res, err = _mosaic_tile_worker(task)
+            processed += 1
+            if err:
+                log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
+            else:
+                faces_wkb_all.extend(res)
+            if (processed % step == 0) or (time.time() - last_log >= 5) or processed == n_tasks:
+                pct = processed * 100.0 / max(1, n_tasks)
+                log_to_gui(f"[Mosaic] {processed}/{n_tasks} tiles done (~{pct:.1f}%) — "
+                           f"faces so far: {len(faces_wkb_all):,}")
+                last_log = time.time()
+            update_progress(5 + processed * (80 / max(1, n_tasks)))
+    else:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=workers) as pool:
+            for idx, res, err in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=chunk):
+                processed += 1
+                if err:
+                    log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
+                else:
+                    faces_wkb_all.extend(res)
+                if (processed % step == 0) or (time.time() - last_log >= 5) or processed == n_tasks:
+                    pct = processed * 100.0 / max(1, n_tasks)
+                    log_to_gui(f"[Mosaic] {processed}/{n_tasks} tiles done (~{pct:.1f}%) — "
+                               f"faces so far: {len(faces_wkb_all):,}")
+                    last_log = time.time()
+                update_progress(5 + processed * (80 / max(1, n_tasks)))
+
+    log_to_gui(f"[Mosaic] Polygonize stage finished: faces (pre-dedup) = {len(faces_wkb_all):,}  "
+               f"(took {time.time()-t_poly0:.2f}s)")
+
+    if not faces_wkb_all:
+        log_to_gui("[Mosaic] Polygonize produced no faces.", "WARN")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+    # WKB→geom, dedup across overlaps by WKB hex
+    t_dedup0 = time.time()
+    faces = gpd.GeoSeries([shp_wkb.loads(b) for b in faces_wkb_all], crs=metric_crs)
+    kept_before = len(faces)
     try:
-        faces["__wkb__"] = faces.geometry.apply(_wkb_hex)
-        faces = faces.drop_duplicates(subset="__wkb__").drop(columns="__wkb__", errors="ignore")
+        wkb_hex = faces.apply(_wkb_hex)
+        keep = ~pd.Series(wkb_hex).duplicated()
+        faces = faces[keep.values]
     except Exception:
         pass
+    kept_after = len(faces)
+    log_to_gui(f"[Mosaic] Dedup: kept {kept_after:,}, dropped {kept_before - kept_after:,}  "
+               f"(took {time.time()-t_dedup0:.2f}s)")
 
-    faces = gpd.GeoDataFrame(faces, geometry="geometry", crs=a.crs)
-    faces = ensure_wgs84(faces)
+    faces = faces.to_frame(name="geometry")
+    faces = ensure_wgs84(gpd.GeoDataFrame(faces, geometry="geometry"))
+
+    log_to_gui(f"[Mosaic] Completed in {time.time()-t0:.2f}s. Final faces: {len(faces):,}.")
     return faces
 
+
+# -----------------------------------------------------------------------------
+# Publish mosaic as geocode
+# -----------------------------------------------------------------------------
 def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
     """Append a new geocode group + objects from mosaic faces directly to tbl_geocode_*."""
     if faces is None or faces.empty:
@@ -761,9 +966,11 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
 
     group_name = BASIC_MOSAIC_GROUP
 
-    # Stable ordering → stable codes
+    # Stable ordering → stable codes (use metric CRS to avoid warnings)
     try:
-        cent = faces.geometry.centroid
+        cfg = read_config(base_dir / "system" / "config.ini")
+        metric_crs = working_metric_crs_for(faces, cfg)
+        cent = faces.to_crs(metric_crs).geometry.centroid
         order_idx = np.lexsort((cent.y.values, cent.x.values))
         faces = faces.iloc[order_idx].reset_index(drop=True)
     except Exception:
@@ -799,7 +1006,7 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
 
 
 # -----------------------------------------------------------------------------
-# CLI / GUI glue
+# CLI runners
 # -----------------------------------------------------------------------------
 def run_h3_range(base_dir: Path, r_from: int, r_to: int):
     total = write_h3_levels(base_dir, list(range(r_from, r_to + 1)))
@@ -812,7 +1019,12 @@ def run_h3_levels(base_dir: Path, levels: List[int]):
     update_progress(100)
 
 def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None):
-    faces = mosaic_faces_from_assets(base_dir, buffer_m, grid_size_m)
+    cfg = read_config(base_dir / "system" / "config.ini")
+    try:
+        workers = int(cfg["DEFAULT"].get("mosaic_workers", "0"))
+    except Exception:
+        workers = 0
+    faces = mosaic_faces_from_assets_parallel(base_dir, buffer_m, grid_size_m, workers)
     if faces.empty:
         log_to_gui("Mosaic produced no faces to publish.", "WARN")
         update_progress(100)
@@ -827,6 +1039,10 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
         try: on_done(True)
         except Exception: pass
 
+
+# -----------------------------------------------------------------------------
+# H3 helpers (UI)
+# -----------------------------------------------------------------------------
 def suggest_h3_levels_by_size(min_km: float, max_km: float) -> list[int]:
     """Return list of resolutions whose across-flat size lies within [min_km, max_km]."""
     out = []
@@ -836,11 +1052,15 @@ def suggest_h3_levels_by_size(min_km: float, max_km: float) -> list[int]:
     return out
 
 def format_level_size_list(levels: list[int]) -> str:
-    """Show levels with across-flats size in **meters**."""
+    """Show levels with across-flats size in meters."""
     if not levels:
         return "(none)"
     return ", ".join(f"R{r} ({H3_RES_ACROSS_FLATS_M[r]:,.0f} m)" for r in levels)
 
+
+# -----------------------------------------------------------------------------
+# GUI
+# -----------------------------------------------------------------------------
 def build_gui(base: Path, cfg: configparser.ConfigParser):
     global root, log_widget, progress_var, progress_label, original_working_directory
     global mosaic_status_var, size_levels_var, generate_size_btn, suggest_levels_btn, suggested_h3_levels
@@ -910,7 +1130,9 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
         if not suggested_h3_levels:
             log_to_gui("No suggested levels to generate.", "WARN")
             return
-        threading.Thread(target=run_h3_levels, args=(base, suggested_h3_levels.copy()), daemon=True).start()
+        mp.get_start_method(allow_none=True)  # ensure spawn on Windows
+        from threading import Thread
+        Thread(target=run_h3_levels, args=(base, suggested_h3_levels.copy()), daemon=True).start()
 
     # Buttons (consistent width)
     btn_w = 18
@@ -947,8 +1169,14 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
             pass
 
     def _run_mosaic_inline():
-        buf = float(cfg["DEFAULT"].get("mosaic_buffer_m","25"))
-        grid = float(cfg["DEFAULT"].get("mosaic_grid_size_m","1000"))
+        try:
+            buf = float(cfg["DEFAULT"].get("mosaic_buffer_m","25"))
+        except Exception:
+            buf = 25.0
+        try:
+            grid = float(cfg["DEFAULT"].get("mosaic_grid_size_m","1000"))
+        except Exception:
+            grid = 1000.0
         mosaic_status_var.set("Running…")
         def _after(success):
             def _ui():
@@ -959,7 +1187,9 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
                     mosaic_status_var.set("No faces")
             try: root.after(100, _ui)
             except Exception: pass
-        threading.Thread(target=run_mosaic, args=(base, buf, grid, _after), daemon=True).start()
+        mp.get_start_method(allow_none=True)  # ensure spawn on Windows
+        from threading import Thread
+        Thread(target=run_mosaic, args=(base, buf, grid, _after), daemon=True).start()
 
     mosaic_btn = (ttk.Button(mosaic_frame, text="Build mosaic", width=18, bootstyle=PRIMARY, command=_run_mosaic_inline)
                   if ttk else tk.Button(mosaic_frame, text="Build mosaic", width=18, command=_run_mosaic_inline))
@@ -1001,6 +1231,10 @@ def main():
     base = resolve_base_dir(args.original_working_directory)
     cfg = read_config(base / "system" / "config.ini")
 
+    # set for logfile even in CLI mode
+    global original_working_directory
+    original_working_directory = str(base)
+
     if args.nogui:
         if args.h3_levels:
             levels = [int(x.strip()) for x in args.h3_levels.split(",") if x.strip().isdigit()]
@@ -1015,4 +1249,9 @@ def main():
         build_gui(base, cfg)
 
 if __name__ == "__main__":
+    # On Windows, prefer spawn
+    try:
+        mp.set_start_method("spawn", force=False)
+    except RuntimeError:
+        pass
     main()
