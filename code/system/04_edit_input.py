@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # MESA – Setup & Registration (3 tabs: Start, Vulnerability, Visualization)
-# - Profiles (Visualization) persisted to: GPKG tables + GeoParquet + JSON
-# - Load priority for profiles: GPKG -> Parquet -> JSON -> defaults, then mirror to all
-# - Asset-group vulnerability values (importance, susceptibility, sensitivity, A–E) are
-#   always validated, recomputed from config bins and saved to BOTH stores.
+# Persistence: GeoParquet + JSON only (GPKG removed)
+# - Asset-group vulnerability (importance, susceptibility) → sensitivity (+ A–E code/desc)
+# - Visualization profile (ENV index weights & parameters)
+# Load priority for ENV profile: GeoParquet -> JSON -> defaults; then mirrored back to both.
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
@@ -14,7 +14,6 @@ import argparse
 import configparser
 import datetime
 import json
-import sqlite3
 
 import numpy as np
 import pandas as pd
@@ -36,9 +35,10 @@ DEFAULT_ENV_PROFILE = {
     'scoring': 'linear', 'logistic_a': 8.0, 'logistic_b': 0.6,
 }
 
-# GeoParquet lives alongside other parquet files
 PARQUET_DIRNAME = os.path.join("output", "geoparquet")
 PARQUET_ASSET_GROUP = os.path.join(PARQUET_DIRNAME, "tbl_asset_group.parquet")
+PARQUET_ENV_PROFILE = os.path.join(PARQUET_DIRNAME, "tbl_env_profile.parquet")
+JSON_ENV_PROFILE = os.path.join("output", "settings", "env_index_profile.json")
 
 # UI grid helpers
 column_widths = [35, 13, 13, 13, 13, 30]
@@ -52,7 +52,6 @@ ENV_PROFILE  = {}
 # paths set in __main__
 original_working_directory = ""
 config_file = ""
-gpkg_file = ""
 workingprojection_epsg = "4326"
 
 # -------------------------------
@@ -120,10 +119,9 @@ def log_to_file(message: str) -> None:
         pass
 
 # -------------------------------
-# Type helpers (avoid FutureWarning)
+# Type & vulnerability helpers
 # -------------------------------
 def coerce_valid_int(text: str, valid_vals: list[int], fallback: int) -> int:
-    """Parse Tk entry text to an allowed int value."""
     try:
         v = int(float(str(text).strip()))
     except Exception:
@@ -132,7 +130,6 @@ def coerce_valid_int(text: str, valid_vals: list[int], fallback: int) -> int:
     return int(min(valid_vals, key=lambda vv: abs(vv - v)))
 
 def enforce_vuln_dtypes_inplace(df: pd.DataFrame) -> None:
-    """Ensure integer cols are Int64; texts are string dtype."""
     for col in ('importance', 'susceptibility', 'sensitivity'):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
@@ -140,36 +137,22 @@ def enforce_vuln_dtypes_inplace(df: pd.DataFrame) -> None:
         if c in df.columns:
             df[c] = df[c].astype('string')
 
-# -------------------------------
-# Vulnerability sanitization
-# -------------------------------
 def sanitize_vulnerability(df: pd.DataFrame,
                            valid_vals: list[int],
                            fallback: int) -> pd.DataFrame:
-    """
-    Validate importance/susceptibility -> compute sensitivity,
-    then classify to code + description using config.ini bins.
-    """
     df = df.copy()
-
-    # Ensure columns exist
     for col in ['importance', 'susceptibility']:
         if col not in df.columns:
-            df[col] = np.nan
-
-    # Snap to valid set
+            df[col] = fallback
     for col in ['importance', 'susceptibility']:
         s = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
         s = s.where(s.notna(), fallback)
         s = s.clip(min(valid_vals), max(valid_vals))
         s = s.apply(lambda x: min(valid_vals, key=lambda vv: abs(int(x) - vv)))
         df[col] = s.astype(int)
-
-    # sensitivity = product
     df['sensitivity'] = (pd.to_numeric(df['importance'], errors='coerce').fillna(fallback)
                          * pd.to_numeric(df['susceptibility'], errors='coerce').fillna(fallback)).astype(int)
 
-    # classify to A–E
     def _cls(s):
         try:
             score = int(s)
@@ -177,248 +160,134 @@ def sanitize_vulnerability(df: pd.DataFrame,
             score = fallback
         code, desc = determine_category(max(1, score))
         return pd.Series([code, desc], index=['sensitivity_code', 'sensitivity_description'])
-
     klass = df['sensitivity'].apply(_cls)
     df['sensitivity_code'] = klass['sensitivity_code']
     df['sensitivity_description'] = klass['sensitivity_description']
-
     return df
 
-def best_join_key(df: pd.DataFrame) -> str:
-    return 'id' if 'id' in df.columns else 'name_original'
+# -------------------------------
+# Profile persistence (GeoParquet + JSON)
+# -------------------------------
+def _env_profile_parquet_path(base_dir: str) -> str:
+    return os.path.join(base_dir, PARQUET_ENV_PROFILE)
 
-# -------------------------------
-# Profile storage: GPKG (ENV only)
-# -------------------------------
-def _gpkg_read_profile_table(gpkg_path: str, table_name: str) -> dict | None:
+def _env_profile_json_path(base_dir: str) -> str:
+    return os.path.join(base_dir, JSON_ENV_PROFILE)
+
+def _parquet_read_profile(base_dir: str) -> dict | None:
+    path = _env_profile_parquet_path(base_dir)
     try:
-        con = sqlite3.connect(gpkg_path)
-        cur = con.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
-        if not cur.fetchone():
-            con.close(); return None
-        cur.execute(f"SELECT key, value FROM {table_name}")
-        rows = cur.fetchall(); con.close()
-        out = {}
-        for k, v in rows:
-            try: out[k] = json.loads(v)
-            except Exception: out[k] = v
-        return out
+        if not os.path.exists(path):
+            return None
+        df = pd.read_parquet(path)
+        if {'key','value'}.issubset(df.columns):
+            out = {}
+            for _, r in df.iterrows():
+                try:
+                    out[str(r['key'])] = json.loads(r['value'])
+                except Exception:
+                    out[str(r['key'])] = r['value']
+            return out
+        if len(df) == 1:
+            return df.iloc[0].to_dict()
     except Exception as e:
-        log_to_file(f"GPKG read {table_name} failed: {e}")
-        return None
-
-def _gpkg_write_profile_table(gpkg_path: str, table_name: str, data: dict):
-    try:
-        con = sqlite3.connect(gpkg_path)
-        cur = con.cursor()
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-        """)
-        cur.execute(f"DELETE FROM {table_name};")
-        for k, v in (data or {}).items():
-            cur.execute(f"INSERT INTO {table_name}(key, value) VALUES (?, ?)", (k, json.dumps(v)))
-        con.commit(); con.close()
-    except Exception as e:
-        log_to_file(f"GPKG write {table_name} failed: {e}")
-
-# -------------------------------
-# Profile storage: GeoParquet (generic helpers)
-# -------------------------------
-def _profile_parquet_path(base_dir: str, name: str) -> str:
-    """Location: output/geoparquet/<name>.parquet"""
-    return os.path.join(base_dir, PARQUET_DIRNAME, f"{name}.parquet")
-
-def _legacy_profile_parquet_path(base_dir: str, name: str) -> str:
-    """Legacy location read-only: output/geoparquet/settings/<name>.parquet"""
-    return os.path.join(base_dir, PARQUET_DIRNAME, "settings", f"{name}.parquet")
-
-def _parquet_read_profile(base_dir: str, name: str) -> dict | None:
-    """Try flat location, then legacy settings/ for backward compatibility."""
-    for candidate in (_profile_parquet_path(base_dir, name),
-                      _legacy_profile_parquet_path(base_dir, name)):
-        try:
-            if not os.path.exists(candidate):
-                continue
-            df = pd.read_parquet(candidate)
-            if {'key','value'}.issubset(df.columns):
-                out = {}
-                for _, r in df.iterrows():
-                    try:
-                        out[str(r['key'])] = json.loads(r['value'])
-                    except Exception:
-                        out[str(r['key'])] = r['value']
-                return out
-            if len(df) == 1:
-                return df.iloc[0].to_dict()
-        except Exception as e:
-            log_to_file(f"Parquet read {name} failed at {candidate}: {e}")
+        log_to_file(f"Read env profile parquet failed: {e}")
     return None
 
-def _parquet_write_profile(base_dir: str, name: str, data: dict):
-    """Write to output/geoparquet/."""
+def _parquet_write_profile(base_dir: str, data: dict):
     try:
-        path = _profile_parquet_path(base_dir, name)
+        path = _env_profile_parquet_path(base_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        df = pd.DataFrame({
-            'key': list(data.keys()),
-            'value': [json.dumps(v) for v in data.values()]
-        })
+        df = pd.DataFrame({'key': list(data.keys()),
+                           'value': [json.dumps(v) for v in data.values()]})
         df.to_parquet(path, index=False)
-        log_to_file(f"Wrote profile {name} to GeoParquet: {path}")
+        log_to_file(f"Wrote ENV profile to GeoParquet: {path}")
     except Exception as e:
-        log_to_file(f"Parquet write {name} failed: {e}")
+        log_to_file(f"Write env profile parquet failed: {e}")
 
-# -------------------------------
-# Profile storage: JSON (ENV only)
-# -------------------------------
-def _json_read(path: str) -> dict | None:
+def _json_read_profile(base_dir: str) -> dict | None:
+    path = _env_profile_json_path(base_dir)
     try:
-        if not os.path.exists(path): return None
+        if not os.path.exists(path):
+            return None
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        log_to_file(f"JSON read {path} failed: {e}")
+        log_to_file(f"Read env profile JSON failed: {e}")
         return None
 
-def _json_write(path: str, data: dict):
+def _json_write_profile(base_dir: str, data: dict):
+    path = _env_profile_json_path(base_dir)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        log_to_file(f"JSON write {path} failed: {e}")
+        log_to_file(f"Write env profile JSON failed: {e}")
 
-# -------------------------------
-# Load & persist profiles (ENV only)
-# -------------------------------
-def load_profiles(gpkg_path: str, base_dir: str):
-    """Load ENV profile with priority: GPKG -> Parquet -> JSON -> defaults. Then mirror to all."""
+def load_profiles(base_dir: str):
     global ENV_PROFILE
-
-    env = _gpkg_read_profile_table(gpkg_path, "tbl_env_profile")
-    if not env: env = _parquet_read_profile(base_dir, "tbl_env_profile")
+    env = _parquet_read_profile(base_dir)
     if not env:
-        env_json = os.path.join(base_dir, "output", "settings", "env_index_profile.json")
-        env = _json_read(env_json)
+        env = _json_read_profile(base_dir)
     ENV_PROFILE = (DEFAULT_ENV_PROFILE | env) if env else DEFAULT_ENV_PROFILE.copy()
+    persist_profiles(base_dir)
 
-    # Mirror to all stores to keep them in sync
-    persist_profiles(gpkg_path, base_dir)
-
-def persist_profiles(gpkg_path: str, base_dir: str):
-    """Write ENV profile to GPKG, GeoParquet, and JSON."""
-    _gpkg_write_profile_table(gpkg_path, "tbl_env_profile",  ENV_PROFILE)
-    _parquet_write_profile(base_dir, "tbl_env_profile",  ENV_PROFILE)
-    settings_dir = os.path.join(base_dir, "output", "settings")
-    _json_write(os.path.join(settings_dir, "env_index_profile.json"), ENV_PROFILE)
+def persist_profiles(base_dir: str):
+    _parquet_write_profile(base_dir, ENV_PROFILE)
+    _json_write_profile(base_dir, ENV_PROFILE)
 
 # -------------------------------
-# Data I/O (GPKG / Parquet) for asset_group
+# Asset group I/O (Parquet only)
 # -------------------------------
 def _parquet_asset_group_path(base_dir: str) -> str:
     return os.path.join(base_dir, PARQUET_ASSET_GROUP)
 
-def load_asset_group(gpkg_path: str) -> gpd.GeoDataFrame | None:
-    """
-    Load tbl_asset_group; prefer GPKG, but if unavailable try the Parquet mirror.
-    After loading, validate & compute vulnerability columns.
-    """
-    gdf = None
-
-    # 1) Try GPKG
+def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
+    path = _parquet_asset_group_path(base_dir)
+    if not os.path.exists(path):
+        log_to_file("tbl_asset_group.parquet not found – starting with empty dataset.")
+        cols = ['id','name_original','importance','susceptibility','sensitivity',
+                'sensitivity_code','sensitivity_description','geometry']
+        return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
     try:
-        gdf = gpd.read_file(gpkg_path, layer="tbl_asset_group")
-    except Exception as e:
-        log_to_file(f"GPKG read tbl_asset_group failed: {e}")
-
-    # 2) Fallback to Parquet
-    if gdf is None or gdf.empty:
-        try:
-            pq = _parquet_asset_group_path(original_working_directory)
-            if os.path.exists(pq):
-                gdf = gpd.read_parquet(pq)
-                log_to_file("Loaded tbl_asset_group from GeoParquet fallback.")
-        except Exception as e:
-            log_to_file(f"Parquet read tbl_asset_group failed: {e}")
-
-    if gdf is None:
-        return None
-
-    # Geometry column normalization
-    if 'geom' in gdf.columns and getattr(gdf, "geometry", None) is not None and gdf.geometry.name != 'geom':
-        try:
-            gdf.set_geometry('geom', inplace=True)
-        except Exception:
-            pass
-
-    # Vulnerability + dtypes
-    gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
-    enforce_vuln_dtypes_inplace(gdf)
-    return gdf
-
-def _ensure_geometry_column(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Drop extra geometry cols and keep a single active one named 'geometry'."""
-    geom_cols = [c for c in gdf.columns if str(gdf.dtypes.get(c)) == 'geometry']
-    if not geom_cols:
-        return gdf
-    main = geom_cols[0]
-    if gdf.geometry.name != main:
-        gdf.set_geometry(main, inplace=True)
-    for c in geom_cols:
-        if c != main:
-            gdf.drop(columns=[c], inplace=True, errors='ignore')
-    return gdf
-
-def save_asset_group_to_gpkg(gdf: gpd.GeoDataFrame, gpkg_path: str):
-    try:
-        if gdf is None or gdf.empty:
-            log_to_file("tbl_asset_group empty – nothing to save to GPKG.")
-            return
-        gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
-        enforce_vuln_dtypes_inplace(gdf)
-        gdf = _ensure_geometry_column(gdf)
+        gdf = gpd.read_parquet(path)
         if gdf.crs is None:
             gdf.set_crs(epsg=int(workingprojection_epsg), inplace=True)
-        gdf.to_file(filename=gpkg_path, layer='tbl_asset_group', driver='GPKG')
-        log_to_file("Saved tbl_asset_group to GeoPackage.")
+        gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
+        enforce_vuln_dtypes_inplace(gdf)
+        return gdf
     except Exception as e:
-        log_to_file(f"Save to GPKG failed: {e}")
+        log_to_file(f"Failed reading asset group parquet: {e}")
+        cols = ['id','name_original','importance','susceptibility','sensitivity',
+                'sensitivity_code','sensitivity_description','geometry']
+        return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
 
 def save_asset_group_to_parquet(gdf: gpd.GeoDataFrame, base_dir: str):
     try:
-        if gdf is None or gdf.empty:
-            log_to_file("tbl_asset_group empty – nothing to save to Parquet.")
+        if gdf is None:
             return
-        gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
-        enforce_vuln_dtypes_inplace(gdf)
-        gdf = _ensure_geometry_column(gdf)
-
+        gdf2 = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
+        enforce_vuln_dtypes_inplace(gdf2)
         out = _parquet_asset_group_path(base_dir)
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        gdf.to_parquet(out, index=False)
+        gdf2.to_parquet(out, index=False)
         log_to_file(f"Saved tbl_asset_group to GeoParquet: {out}")
     except Exception as e:
-        log_to_file(f"Save to Parquet failed: {e}")
+        log_to_file(f"Save asset group parquet failed: {e}")
 
 # -------------------------------
-# Excel round-trip (2 sheets: vulnerability, env_index)
+# Excel round-trip
 # -------------------------------
 def save_all_to_excel(gdf: pd.DataFrame, excel_path: str):
     try:
         vuln_cols = ['id','name_original','susceptibility','importance','sensitivity','sensitivity_code','sensitivity_description']
         vcols = [c for c in vuln_cols if c in gdf.columns]
         vuln = gdf[vcols].copy() if vcols else pd.DataFrame(columns=vuln_cols)
-
         env_prof = pd.DataFrame([ENV_PROFILE])
-
         with pd.ExcelWriter(excel_path, engine='openpyxl') as xw:
             vuln.to_excel(xw, sheet_name='vulnerability', index=False)
             env_prof.to_excel(xw, sheet_name='env_index', index=False)
-
         messagebox.showinfo("Saved", "Saved all tabs to Excel.")
     except Exception as e:
         log_to_file(f"Excel save failed: {e}")
@@ -434,10 +303,10 @@ def _apply_vulnerability_from_df(df_x: pd.DataFrame):
             s = s.clip(min(valid_input_values), max(valid_input_values))
             s = s.apply(lambda v: min(valid_input_values, key=lambda vv: abs(int(v)-vv)))
             df_x[col] = s.astype(int)
-    key_df = best_join_key(gdf_asset_group)
-    key_x  = 'id' if 'id' in df_x.columns else 'name_original'
-    upd = df_x[[key_x]+[c for c in ['importance','susceptibility'] if c in df_x.columns]].drop_duplicates(subset=[key_x])
-    merged = gdf_asset_group.merge(upd, left_on=key_df, right_on=key_x, how='left', suffixes=('', '_xlsx'))
+    key = 'id' if 'id' in gdf_asset_group.columns else 'name_original'
+    kx = 'id' if 'id' in df_x.columns else 'name_original'
+    upd = df_x[[kx]+[c for c in ['importance','susceptibility'] if c in df_x.columns]].drop_duplicates(subset=[kx])
+    merged = gdf_asset_group.merge(upd, left_on=key, right_on=kx, how='left', suffixes=('', '_xlsx'))
     for col in ['importance','susceptibility']:
         xc = f"{col}_xlsx"
         if xc in merged.columns:
@@ -468,8 +337,7 @@ def load_all_from_excel(excel_path: str):
                 'logistic_a': float(row.get('logistic_a', ENV_PROFILE['logistic_a'])),
                 'logistic_b': float(row.get('logistic_b', ENV_PROFILE['logistic_b'])),
             })
-            persist_profiles(gpkg_file, original_working_directory)
-
+            persist_profiles(original_working_directory)
         refresh_vulnerability_grid_from_df()
         messagebox.showinfo("Loaded", "All settings and values were loaded from Excel.")
     except Exception as e:
@@ -518,19 +386,6 @@ def create_scrollable_area(parent):
     canvas.create_window((0, 0), window=inner, anchor="nw")
     return canvas, inner
 
-def setup_vulnerability_tab(parent, gdf, column_widths):
-    canvas, frame = create_scrollable_area(parent)
-    entries = []
-    setup_headers_vuln(frame, column_widths)
-    if gdf is not None and not gdf.empty:
-        for i, row in enumerate(gdf.itertuples(), start=1):
-            add_vuln_row(i, row, frame, entries, gdf)
-        frame.update_idletasks()
-        canvas.configure(scrollregion=canvas.bbox("all"))
-    else:
-        log_to_file("No data to display.")
-    return canvas, frame, entries
-
 def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries_list, gdf):
     try:
         imp = coerce_valid_int(entry_importance.get().strip(), valid_input_values, FALLBACK_VULN)
@@ -561,6 +416,24 @@ def refresh_vulnerability_grid_from_df():
             entry['sensitivity']['text'] = str(int(gdf_asset_group.at[idx, 'sensitivity']))
             entry['sensitivity_code']['text'] = str(gdf_asset_group.at[idx, 'sensitivity_code'])
             entry['sensitivity_description']['text'] = str(gdf_asset_group.at[idx, 'sensitivity_description'])
+
+def update_all_vuln_rows(entries_list, gdf):
+    """Sync all UI entry values back into dataframe before saving."""
+    name_map = {row['name'].cget("text"): row for row in entries_list}
+    for idx, row in gdf.iterrows():
+        name = row.get('name_original', '')
+        ui = name_map.get(name)
+        if not ui:
+            continue
+        imp = coerce_valid_int(ui['importance'].get().strip(), valid_input_values, FALLBACK_VULN)
+        sus = coerce_valid_int(ui['susceptibility'].get().strip(), valid_input_values, FALLBACK_VULN)
+        sens = imp * sus
+        code, desc = determine_category(sens)
+        gdf.at[idx, 'importance'] = imp
+        gdf.at[idx, 'susceptibility'] = sus
+        gdf.at[idx, 'sensitivity'] = sens
+        gdf.at[idx, 'sensitivity_code'] = code
+        gdf.at[idx, 'sensitivity_description'] = desc
 
 # -------------------------------
 # Visualization profile UI
@@ -623,14 +496,141 @@ def build_env_tab(parent):
             'logistic_a': _parse_float_entry(ENV_UI['logistic_a'], DEFAULT_ENV_PROFILE['logistic_a']),
             'logistic_b': _parse_float_entry(ENV_UI['logistic_b'], DEFAULT_ENV_PROFILE['logistic_b']),
         })
-        persist_profiles(gpkg_file, original_working_directory)
-        messagebox.showinfo("Visualization", "Visualization profile saved to GPKG, GeoParquet and JSON.")
+        persist_profiles(original_working_directory)
+        messagebox.showinfo("Visualization", "Visualization profile saved to GeoParquet & JSON.")
 
     btns = ttkb.Frame(frm); btns.grid(row=r0+6, column=0, columnspan=3, sticky='w', pady=(10,0))
     ttkb.Button(btns, text="Normalize weights", command=normalize_weights_env, bootstyle=INFO).pack(side='left', padx=5)
     ttkb.Button(btns, text="Save profile", command=save_profile, bootstyle=SUCCESS).pack(side='left', padx=5)
 
 def set_env_profile_ui():
+    for k in ('w_sensitivity','w_susceptibility','w_importance','w_pressure','gamma','pnorm_minmax','overlap_cap_q','logistic_a','logistic_b'):
+        if k in ENV_UI:
+            ENV_UI[k].delete(0, tk.END); ENV_UI[k].insert(0, str(ENV_PROFILE.get(k, DEFAULT_ENV_PROFILE[k])))
+    sc = ENV_PROFILE.get('scoring', DEFAULT_ENV_PROFILE['scoring'])
+    if sc not in SCORING_OPTIONS:
+        sc = 'linear'
+    ENV_UI['scoring'].set(sc)
+
+# -------------------------------
+# Start tab
+# -------------------------------
+def build_start_tab(parent):
+    frm = ttkb.Frame(parent); frm.pack(fill='both', expand=True, padx=12, pady=12)
+    info = (
+        "Welcome!\n\n"
+        "• Vulnerability: register importance/susceptibility per asset; sensitivity & A–E are computed.\n"
+        "• Visualization: profile for your 1–100 visualization index (choose scoring method).\n\n"
+        "Profiles stored in: GeoParquet + JSON.\n"
+        "Use buttons below for Excel round-trips and to save asset groups."
+    )
+    ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0,10))
+
+    btns = ttkb.Frame(frm); btns.pack(anchor='w', pady=6)
+
+    def do_save_all_excel():
+        input_folder = os.path.join(original_working_directory, "input")
+        os.makedirs(input_folder, exist_ok=True)
+        excel_path = filedialog.asksaveasfilename(
+            title="Save Excel File", initialdir=input_folder,
+            defaultextension=".xlsx", filetypes=[("Excel Files","*.xlsx"), ("All Files","*.*")]
+        )
+        if excel_path: save_all_to_excel(gdf_asset_group, excel_path)
+
+    def do_load_all_excel():
+        input_folder = os.path.join(original_working_directory, "input")
+        excel_path = filedialog.askopenfilename(
+            title="Select Excel File", initialdir=input_folder,
+            filetypes=[("Excel Files","*.xlsx"), ("All Files","*.*")]
+        )
+        if excel_path: load_all_from_excel(excel_path)
+
+    def do_save_parquet():
+        update_all_vuln_rows(entries_vuln, gdf_asset_group)
+        enforce_vuln_dtypes_inplace(gdf_asset_group)
+        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+        save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        persist_profiles(original_working_directory)
+        messagebox.showinfo("Saved", "Saved asset-group layer + profile to GeoParquet (and JSON).")
+
+    ttkb.Button(btns, text="Save all to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(side='left', padx=6)
+    ttkb.Button(btns, text="Load all from Excel", command=do_load_all_excel, bootstyle=INFO).pack(side='left', padx=6)
+    ttkb.Button(btns, text="Save to Parquet", command=do_save_parquet, bootstyle=PRIMARY).pack(side='left', padx=6)
+    ttkb.Button(frm, text="Exit", command=close_application, bootstyle=WARNING).pack(anchor='e', pady=(20,0))
+
+# -------------------------------
+# Misc helpers
+# -------------------------------
+def close_application():
+    try:
+        update_all_vuln_rows(entries_vuln, gdf_asset_group)
+        enforce_vuln_dtypes_inplace(gdf_asset_group)
+        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+        save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        persist_profiles(original_working_directory)
+    finally:
+        root.destroy()
+
+# -------------------------------
+# Entrypoint
+# -------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='MESA – Setup & Registration (GeoParquet)')
+    parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+    args = parser.parse_args()
+    original_working_directory = args.original_working_directory
+    if not original_working_directory:
+        original_working_directory = os.getcwd()
+        if "system" in os.path.basename(original_working_directory).lower():
+            original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
+
+    config_file = os.path.join(original_working_directory, "system", "config.ini")
+    config = read_config(config_file)
+    classification = read_config_classification(config_file)
+    valid_input_values = get_valid_values(config)
+    FALLBACK_VULN = get_fallback_value(config, valid_input_values)
+    ttk_bootstrap_theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
+    workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
+
+    # Load profiles (GeoParquet -> JSON -> defaults), then mirror to both
+    load_profiles(original_working_directory)
+
+    # Load asset groups
+    gdf_asset_group = load_asset_group(original_working_directory)
+    if gdf_asset_group is None:
+        log_to_file("Failed to load tbl_asset_group (Parquet).")
+        sys.exit(1)
+
+    # UI
+    root = tb.Window(themename=ttk_bootstrap_theme)
+    root.title("MESA – Setup & Registration (GeoParquet)")
+    try:
+        icon_path = os.path.join(original_working_directory, "system_resources", "mesa.ico")
+        if os.path.exists(icon_path): root.iconbitmap(icon_path)
+    except Exception:
+        pass
+    root.geometry("1100x860")
+
+    nb = ttkb.Notebook(root, bootstyle=PRIMARY); nb.pack(fill='both', expand=True)
+
+    # Start
+    tab_start = ttkb.Frame(nb); nb.add(tab_start, text="Start")
+    build_start_tab(tab_start)
+
+    # Vulnerability
+    tab_vuln = ttkb.Frame(nb); nb.add(tab_vuln, text="Vulnerability")
+    canvas_v, frame_v = create_scrollable_area(tab_vuln)
+    entries_vuln = []
+    setup_headers_vuln(frame_v, column_widths)
+    for i, row in enumerate(gdf_asset_group.itertuples(), start=1):
+        add_vuln_row(i, row, frame_v, entries_vuln, gdf_asset_group)
+    frame_v.update_idletasks(); canvas_v.configure(scrollregion=canvas_v.bbox("all"))
+
+    # Visualization
+    tab_env = ttkb.Frame(nb); nb.add(tab_env, text="Visualization")
+    build_env_tab(tab_env); set_env_profile_ui()
+
+    root.mainloop()
     for k in ('w_sensitivity','w_susceptibility','w_importance','w_pressure','gamma','pnorm_minmax','overlap_cap_q','logistic_a','logistic_b'):
         if k in ENV_UI:
             ENV_UI[k].delete(0, tk.END); ENV_UI[k].insert(0, str(ENV_PROFILE.get(k, DEFAULT_ENV_PROFILE[k])))
