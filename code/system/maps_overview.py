@@ -42,7 +42,7 @@ ASSET_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_asset_object
 LINES_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_lines.parquet")          # human-readable names + name_gis
 PLOT_CRS         = "EPSG:4326"
 BASIC_GROUP_NAME = "basic_mosaic"   # stats always from here (in tbl_flat)
-ZOOM_THRESHOLD   = 10               # tooltips appear when map zoom >= this
+ZOOM_THRESHOLD   = 10               # tooltips for geocode/env/segments appear when map zoom >= this
 STEEL_BLUE       = "#4682B4"        # assets color (semi-transparent via fillOpacity)
 
 # ===============================
@@ -159,15 +159,42 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
         feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
 
-def assets_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
+def assets_to_geojson(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
+    """GeoJSON for assets with tooltip props including geodesic area (for polygons)."""
+    g = to_epsg4326(gdf, cfg)
+    feats = []
+    for _, row in g.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        # Compute area_km2 for polygons; for points/lines keep None
+        try:
+            area_m2 = 0.0
+            if geom.geom_type in ("Polygon", "MultiPolygon"):
+                a, _ = GEOD.geometry_area_perimeter(geom) if geom.geom_type == "Polygon" else (sum(abs(GEOD.geometry_area_perimeter(p)[0]) for p in geom.geoms), 0)
+                area_m2 = abs(a)
+            area_km2 = (area_m2 / 1e6) if area_m2 else None
+        except Exception:
+            area_km2 = None
+        props = {
+            "id_asset_object": row.get("id_asset_object", None),
+            "name_asset_object": row.get("name_asset_object", None),
+            "area_km2": area_km2
+        }
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
+    return {"type": "FeatureCollection", "features": feats}
+
+def envindex_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
+    """GeoJSON for env_index overlay (expects column env_index in gdf)."""
     feats = []
     for _, row in gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
         props = {
-            "id_asset_object": row.get("id_asset_object", None),
-            "name_asset_object": row.get("name_asset_object", None),
+            "env_index": row.get("env_index", None),
+            "area_km2": (float(row.get("area_m2", 0.0)) / 1e6) if ("area_m2" in row) else None,
+            "geocode_group": row.get("name_gis_geocodegroup", None),
         }
         feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
@@ -256,6 +283,7 @@ LINES_GDF    = load_parquet(LINES_FILE)  # names + name_gis primary key
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 ASSETS_AVAILABLE    = (not ASSET_GDF.empty) and ("geometry" in ASSET_GDF.columns)
+ENVINDEX_AVAILABLE  = GEOCODE_AVAILABLE and ("env_index" in GDF.columns)
 
 CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
 if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
@@ -302,6 +330,7 @@ class Api:
             "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],  # fallback
             "segment_line_names": LINE_NAMES,  # from tbl_lines.name_user
             "assets_available": ASSETS_AVAILABLE,
+            "envindex_available": ENVINDEX_AVAILABLE,
             "colors": COLS,
             "descriptions": DESC,
             "initial_geocode": (CATS[0] if (GEOCODE_AVAILABLE and CATS) else None),
@@ -331,6 +360,20 @@ class Api:
                 "home_bounds": map_bounds,
                 "stats": stats
             }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_envindex_layer(self, geocode_category):
+        """Return env_index overlay (0–100) for a given geocode category from tbl_flat."""
+        try:
+            if not ENVINDEX_AVAILABLE:
+                return {"ok": False, "error": "env_index not available in tbl_flat."}
+            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            if df.empty:
+                return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]}}
+            df = to_plot_crs(df, cfg)
+            gj = envindex_to_geojson(df)
+            return {"ok": True, "geojson": gj}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -364,7 +407,7 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_assets_layer(self):
-        """Return assets overlay (steel blue, drawn just above basemap)."""
+        """Return assets overlay (steel blue, drawn just above basemap) with tooltips."""
         try:
             if not ASSETS_AVAILABLE:
                 return {"ok": False, "error": "Assets dataset is empty or missing."}
@@ -373,7 +416,7 @@ class Api:
             if df.empty:
                 return {"ok": False, "error": "No valid geometries found in assets."}
             df = to_plot_crs(df, cfg)
-            gj = assets_to_geojson(df)
+            gj = assets_to_geojson(df, cfg)
             return {"ok": True, "geojson": gj}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -524,13 +567,14 @@ HTML_TEMPLATE = r"""
       <p>1. Geocode areas are colored by sensitivity A (very high) to E (very low).</p>
       <p>2. Bar chart shows total km² per sensitivity for the baseline group 'basic_mosaic'.</p>
       <p>3. Percentages in the legend use geodesic (WGS84) area for accuracy.</p>
-      <p>4. Change the geocode category in Layers to explore alternate partitions.</p>
+      <p>4. Use the two dropdowns in the Layers box to pick geocode categories for Sensitivity and Env. index independently.</p>
       <p>5. Enable 'Sensitivity lines' to view buffered line-based segment polygons.</p>
-      <p>6. Enable 'Assets' to overlay individual asset geometries in steel blue.</p>
-      <p>7. Adjust the Opacity slider to reveal more basemap context beneath fills.</p>
-      <p>8. Hover a polygon (zoom ≥ threshold) to see a rich tooltip with details.</p>
-      <p>9. Use Home to reset the view to the active geocode category extent.</p>
-      <p>10. Export PNG creates a high-resolution snapshot; try different basemaps.</p>
+      <p>6. Enable 'Assets' to overlay individual asset geometries in steel blue (hover for details).</p>
+      <p>7. Enable 'Environment index' for a yellow→red heat style based on env_index (0–100).</p>
+      <p>8. Adjust the Opacity slider to reveal more basemap context beneath fills.</p>
+      <p>9. Hover a polygon (zoom ≥ threshold) to see a tooltip with details. Asset tooltips show at any zoom.</p>
+      <p>10. Use Home to reset the view to the active geocode category extent.</p>
+      <p>11. Export PNG creates a high-resolution snapshot; try different basemaps.</p>
     </div>
     <div id="chartBox"><canvas id="chart"></canvas></div>
   </div>
@@ -538,17 +582,17 @@ HTML_TEMPLATE = r"""
 
 <script>
 var MAP=null, BASE=null, BASE_SOURCES=null, CHART=null;
-var GEO_GROUP=null, SEG_GROUP=null, ASSET_GROUP=null;
-var LAYER=null, LAYER_SEG=null, LAYER_ASSETS=null;
+var GEO_GROUP=null, SEG_GROUP=null, ASSET_GROUP=null, ENV_GROUP=null;
+var LAYER=null, LAYER_SEG=null, LAYER_ASSETS=null, LAYER_ENV=null;
 var HOME_BOUNDS=null, COLOR_MAP={}, DESC_MAP={};
 var FILL_ALPHA = 0.8;
 var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
-var ZOOM_THRESHOLD_JS = 12;
+var ZOOM_THRESHOLD_JS = 12;  // for geocode/env/segments tooltips only
 const ASSET_COLOR = "__ASSET_COLOR__";
 
 /* Per-pane Canvas renderers (critical for correct stacking) */
-var RENDERERS = { assets:null, geocodes:null, segments:null };
+var RENDERERS = { assets:null, geocodes:null, segments:null, env:null };
 
 function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
 function setError(msg){
@@ -559,6 +603,7 @@ function setError(msg){
 
 function fmtKm2(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:2}); }
 
+/* ---------- Tooltips ---------- */
 function buildTipHTML(props){
   const code = (props && props.sensitivity_code_max) ? String(props.sensitivity_code_max).toUpperCase() : '?';
   const desc = (DESC_MAP && DESC_MAP[code]) ? DESC_MAP[code] : '';
@@ -581,23 +626,47 @@ function buildTipHTML(props){
     </div>`;
 }
 
+/* Asset-specific tooltip: always show (no zoom gating) */
+function buildAssetTipHTML(props){
+  const name = props && props.name_asset_object ? String(props.name_asset_object) : 'Asset';
+  const oid  = props && props.id_asset_object   ? String(props.id_asset_object)   : null;
+  const area = props && props.area_km2 != null  ? fmtKm2(props.area_km2)          : '—';
+  return `
+    <div class="poly-tip">
+      <div class="hdr"><span>${name.replace(/</g,'&lt;')}</span></div>
+      <div class="kv">
+        ${oid ? `<div class="k">Object ID</div><div class="v">${oid}</div>` : ``}
+        <div class="k">Area</div><div class="v">${area} km²</div>
+      </div>
+    </div>`;
+}
+
+/* Env index tooltip */
+function buildEnvTipHTML(props){
+  const gi  = props && props.geocode_group ? String(props.geocode_group) : '';
+  const ei  = (props && props.env_index != null) ? Number(props.env_index) : null;
+  const area= props && props.area_km2 != null ? fmtKm2(props.area_km2) : '—';
+  return `
+    <div class="poly-tip">
+      <div class="hdr"><span>Environment index</span><span class="chip">${(ei!=null)? ei.toFixed(1) : '—'}</span></div>
+      <div class="kv">
+        ${gi ? `<div class="k">Geocode</div><div class="v">${gi}</div>` : ``}
+        <div class="k">Area</div><div class="v">${area} km²</div>
+      </div>
+    </div>`;
+}
+
 function getTT(layer){ return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null; }
 function ttIsOpen(layer){ const tt = getTT(layer); return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen()); }
-function ttEnsure(layer, feature){
-  const html = buildTipHTML((feature && feature.properties) || {});
-  if (!getTT(layer)){
-    layer.bindTooltip(html, { className: 'poly-tip', sticky: true, direction: 'auto', opacity: 0.98 });
-  } else {
-    layer.setTooltipContent(html);
-  }
-}
 function ttCloseIfAny(layer){ if (ttIsOpen(layer)) layer.closeTooltip(); }
 
 function attachPolygonTooltip(layer, feature){
   layer.on('mouseover', function () {
     if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
       layer.setStyle({ weight: 1.2 });
-      ttEnsure(layer, feature);
+      const html = buildTipHTML((feature && feature.properties) || {});
+      if (!layer.getTooltip()){ layer.bindTooltip(html, { className:'poly-tip', sticky:true, direction:'auto', opacity:0.98 }); }
+      else { layer.setTooltipContent(html); }
       layer.openTooltip();
     }
   });
@@ -608,6 +677,32 @@ function attachPolygonTooltip(layer, feature){
     layer.setStyle({ weight: 0.5 });
     ttCloseIfAny(layer);
   });
+}
+
+/* Always-on hover tooltips for assets (points and polygons) */
+function attachAssetTooltip(layer, feature){
+  layer.on('mouseover', function () {
+    const html = buildAssetTipHTML((feature && feature.properties) || {});
+    if (!layer.getTooltip()){ layer.bindTooltip(html, { className:'poly-tip', sticky:true, direction:'auto', opacity:0.98, pane:'assetsPane' }); }
+    else { layer.setTooltipContent(html); }
+    layer.openTooltip();
+  });
+  layer.on('mouseout', function () { ttCloseIfAny(layer); });
+}
+
+function attachEnvTooltip(layer, feature){
+  layer.on('mouseover', function () {
+    if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
+      const html = buildEnvTipHTML((feature && feature.properties) || {});
+      if (!layer.getTooltip()){ layer.bindTooltip(html, { className:'poly-tip', sticky:true, direction:'auto', opacity:0.98 }); }
+      else { layer.setTooltipContent(html); }
+      layer.openTooltip();
+    }
+  });
+  layer.on('mousemove', function () {
+    if (ttIsOpen(layer) && MAP.getZoom() < ZOOM_THRESHOLD_JS) { layer.closeTooltip(); }
+  });
+  layer.on('mouseout', function () { ttCloseIfAny(layer); });
 }
 
 /* ---------- Legend / chart ---------- */
@@ -679,7 +774,6 @@ function renderChart(stats) {
     }
   });
 
-  // fill padded box exactly (prevents tiny stripes)
   var canvas = document.getElementById('chart');
   var r = canvas.getBoundingClientRect();
   CHART.resize(Math.floor(r.width), Math.floor(r.height));
@@ -770,6 +864,24 @@ function setBasemap(kind){
   MAP.setView(center, zoom, { animate:false });
 }
 
+/* ---------- Continuous color scale for env_index (0–100): yellow -> red ---------- */
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+function hexToRgb(h){
+  var s = h.replace('#',''); if (s.length===3) s = s.split('').map(x=>x+x).join('');
+  var num = parseInt(s,16); return { r:(num>>16)&255, g:(num>>8)&255, b:num&255 };
+}
+function rgbToHex(r,g,b){
+  return '#' + [r,g,b].map(v => { var h = v.toString(16); return h.length===1 ? '0'+h : h; }).join('');
+}
+function lerp(a,b,t){ return a + (b-a)*t; }
+function envIndexToColor(v){
+  if (v==null || isNaN(v)) return '#cccccc';
+  var t = clamp(Number(v)/100.0, 0, 1); // 0 -> yellow (#ffff00), 1 -> red (#ff0000)
+  var y = hexToRgb('#ffff00'), r = hexToRgb('#ff0000');
+  var rr = Math.round(lerp(y.r, r.r, t)), gg = Math.round(lerp(y.g, r.g, t)), bb = Math.round(lerp(y.b, r.b, t));
+  return rgbToHex(rr,gg,bb);
+}
+
 /* ---------- Layer styling ---------- */
 function styleFeature(f){
   var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
@@ -781,6 +893,10 @@ function styleFeatureSeg(f){
 }
 function styleFeatureAssets(f){
   return { color: ASSET_COLOR, weight: 0.6, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR };
+}
+function styleFeatureEnv(f){
+  var v = (f.properties && f.properties.env_index != null) ? Number(f.properties.env_index) : null;
+  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: envIndexToColor(v) };
 }
 
 /* ---------- API-backed layer loaders (fill the groups) ---------- */
@@ -809,6 +925,30 @@ function loadGeocodeIntoGroup(cat, preserveView){
 
     renderLegend(res.stats);
     renderChart(res.stats);
+
+    // If ENV overlay is visible, refresh it for the current ENV dropdown selection
+    if (ENV_GROUP && MAP.hasLayer(ENV_GROUP)) {
+      var envSel = document.getElementById('envCatSel');
+      var envCat = envSel ? envSel.value : (cat || null);
+      if (envCat) loadEnvIndexIntoGroup(envCat);
+    }
+  }).catch(function(err){
+    setError('API error: '+err); logErr('API error: '+err);
+  });
+}
+
+function loadEnvIndexIntoGroup(cat){
+  window.pywebview.api.get_envindex_layer(cat).then(function(res){
+    if (!res.ok){ setError('Failed to load env_index: '+res.error); return; }
+    if (ENV_GROUP){ ENV_GROUP.clearLayers(); }
+    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
+      LAYER_ENV = L.geoJSON(res.geojson, {
+        style: styleFeatureEnv,
+        renderer: RENDERERS.env,
+        onEachFeature: function (feature, layer) { attachEnvTooltip(layer, feature); }
+      });
+      ENV_GROUP.addLayer(LAYER_ENV);
+    }
   }).catch(function(err){
     setError('API error: '+err); logErr('API error: '+err);
   });
@@ -836,8 +976,25 @@ function loadAssetsIntoGroup(){
       LAYER_ASSETS = L.geoJSON(res.geojson, {
         style: styleFeatureAssets,
         renderer: RENDERERS.assets,
+        pane: 'assetsPane',
         pointToLayer: function (feature, latlng) {
-          return L.circleMarker(latlng, { radius: 3.5, color: ASSET_COLOR, weight: 0.8, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR, renderer: RENDERERS.assets });
+          // circleMarkers for point assets (explicit pane)
+          var m = L.circleMarker(latlng, {
+            pane: 'assetsPane',
+            radius: 3.5,
+            color: ASSET_COLOR,
+            weight: 0.8,
+            opacity: FILL_ALPHA,
+            fillOpacity: FILL_ALPHA,
+            fillColor: ASSET_COLOR,
+            renderer: RENDERERS.assets
+          });
+          attachAssetTooltip(m, feature);
+          return m;
+        },
+        onEachFeature: function (feature, layer) {
+          // polygons/lines assets: attach tooltip
+          attachAssetTooltip(layer, feature);
         }
       });
       ASSET_GROUP.addLayer(LAYER_ASSETS);
@@ -886,17 +1043,24 @@ function buildLayersControl(state){
     'Satellite <span class="help" data-tip="Bing Aerial if key configured; otherwise Esri World Imagery fallback.">?</span>': (BING_KEY_JS ? BASE_SOURCES.sat_bing : SATELLITE_FALLBACK)
   };
 
-  GEO_GROUP   = L.layerGroup();
-  SEG_GROUP   = L.layerGroup();
+  // Groups (stacking top→bottom among overlays):
+  // 1) Sensitivity lines (top)
+  // 2) Environment index (new)
+  // 3) Geocode areas
+  // 4) Assets (lowest overlay)
+  SEG_GROUP = L.layerGroup();
+  ENV_GROUP = L.layerGroup();
+  GEO_GROUP = L.layerGroup();
   ASSET_GROUP = L.layerGroup();
 
-  // Ordered top → down: Sensitivity lines, Geocode areas, Assets
   var segLabel = 'Sensitivity lines <span class="help" data-tip="Buffered lines (A–E) selected by line name from tbl_lines.">?</span><div class="inlineSel"><select id="segLineSel"></select></div>';
+  var envLabel = 'Environment index (yellow→red) <span class="help" data-tip="Continuous heat style per polygon using env_index (0–100). Choose category below.">?</span><div class="inlineSel"><select id="envCatSel"></select></div>';
   var geoLabel = 'Geocode areas <span class="help" data-tip="Polygons colored by sensitivity (A–E). Choose a geocode category below. Stats always from ‘basic_mosaic’.">?</span><div class="inlineSel"><select id="geoCatSel"></select></div>';
-  var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue, drawn just above the basemap.">?</span>';
+  var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue. Hover for details.">?</span>';
 
   var overlays = {};
   overlays[segLabel] = SEG_GROUP;
+  overlays[envLabel] = ENV_GROUP;
   overlays[geoLabel] = GEO_GROUP;
   overlays[assLabel] = ASSET_GROUP;
 
@@ -925,21 +1089,36 @@ function buildLayersControl(state){
   BASE_SOURCES.osm.addTo(MAP);
   GEO_GROUP.addTo(MAP);
   SEG_GROUP.addTo(MAP);
+  // ENV & ASSETS remain toggled off initially
 
   setTimeout(function(){
-    // geocode categories
+    // populate the two geocode dropdowns (they can be different)
     var geocat = document.getElementById('geoCatSel');
-    if (geocat){
-      geocat.innerHTML = '';
-      var geocodes = (state.geocode_categories || []);
+    var envcat = document.getElementById('envCatSel');
+    var geocodes = (state.geocode_categories || []);
+
+    function fillSelect(sel){
+      if (!sel) return;
+      sel.innerHTML = '';
       for (var i=0;i<geocodes.length;i++){
         var o = document.createElement('option'); o.value = geocodes[i]; o.textContent = geocodes[i];
-        geocat.appendChild(o);
+        sel.appendChild(o);
       }
-      if (state.initial_geocode && geocodes.indexOf(state.initial_geocode) >= 0){ geocat.value = state.initial_geocode; }
-      loadGeocodeIntoGroup(geocat.value || state.initial_geocode, false);
-      geocat.addEventListener('change', function(){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, true); });
     }
+
+    fillSelect(geocat);
+    fillSelect(envcat);
+
+    if (geocat && state.initial_geocode && geocodes.indexOf(state.initial_geocode) >= 0){ geocat.value = state.initial_geocode; }
+    if (envcat && state.initial_geocode && geocodes.indexOf(state.initial_geocode) >= 0){ envcat.value = state.initial_geocode; }
+
+    if (geocat){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, false); }
+    if (envcat){ /* ENV overlay is off by default; it will load when toggled on */ }
+
+    geocat && geocat.addEventListener('change', function(){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, true); });
+    envcat && envcat.addEventListener('change', function(){
+      if (ENV_GROUP && MAP.hasLayer(ENV_GROUP)) loadEnvIndexIntoGroup(envcat.value || state.initial_geocode);
+    });
 
     // sensitivity line names (from tbl_lines.name_user)
     var segsel = document.getElementById('segLineSel');
@@ -973,12 +1152,15 @@ function buildLayersControl(state){
         var sl = document.getElementById('segLineSel'); loadSegmentsIntoGroup(sl ? (sl.value||"__ALL__") : "__ALL__");
       } else if (e.layer === ASSET_GROUP){
         loadAssetsIntoGroup();
+      } else if (e.layer === ENV_GROUP){
+        var ec = document.getElementById('envCatSel'); loadEnvIndexIntoGroup(ec ? ec.value : state.initial_geocode);
       }
     });
     MAP.on('overlayremove', function(e){
       if (e.layer === GEO_GROUP){ GEO_GROUP.clearLayers(); }
       if (e.layer === SEG_GROUP){ SEG_GROUP.clearLayers(); }
       if (e.layer === ASSET_GROUP){ ASSET_GROUP.clearLayers(); }
+      if (e.layer === ENV_GROUP){ ENV_GROUP.clearLayers(); }
     });
   }, 0);
 
@@ -992,12 +1174,14 @@ function boot(){
 
   // Panes & z-indexes: TOP → BOTTOM among overlays
   MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650; // Sensitivity lines (top)
+  MAP.createPane('envPane');      MAP.getPane('envPane').style.zIndex      = 600; // Env index (between)
   MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 550; // Geocode areas (middle)
   MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 450; // Assets (lower)
 
   // Create one Canvas renderer per pane (this fixes stacking with Canvas)
   try {
     RENDERERS.segments = L.canvas({ pane: 'segmentsPane' });
+    RENDERERS.env      = L.canvas({ pane: 'envPane'      });
     RENDERERS.geocodes = L.canvas({ pane: 'geocodePane'  });
     RENDERERS.assets   = L.canvas({ pane: 'assetsPane'   });
   } catch (e) {
@@ -1008,6 +1192,9 @@ function boot(){
     if (!MAP || MAP.getZoom() >= ZOOM_THRESHOLD_JS) return;
     if (LAYER && GEO_GROUP && MAP.hasLayer(GEO_GROUP)) { GEO_GROUP.eachLayer(ttCloseIfAny); }
     if (LAYER_SEG && SEG_GROUP && MAP.hasLayer(SEG_GROUP)) { SEG_GROUP.eachLayer(ttCloseIfAny); }
+    if (LAYER_ENV && ENV_GROUP && MAP.hasLayer(ENV_GROUP)) { ENV_GROUP.eachLayer(ttCloseIfAny); }
+    // Assets are always-on tooltips; close them as well when zooming out to reduce clutter
+    if (LAYER_ASSETS && ASSET_GROUP && MAP.hasLayer(ASSET_GROUP)) { ASSET_GROUP.eachLayer(ttCloseIfAny); }
   }
   MAP.on('zoomend', closeTooltipsUnderZoom);
 
@@ -1055,6 +1242,7 @@ function boot(){
       opv.textContent = v + '%';
       if (LAYER)        LAYER.setStyle({ fillOpacity: FILL_ALPHA });
       if (LAYER_SEG)    LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
+      if (LAYER_ENV)    LAYER_ENV.setStyle({ fillOpacity: FILL_ALPHA });
       if (LAYER_ASSETS) LAYER_ASSETS.setStyle({ fillOpacity: FILL_ALPHA, opacity: FILL_ALPHA });
     });
   }).catch(function(err){
