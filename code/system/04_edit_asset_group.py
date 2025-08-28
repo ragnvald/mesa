@@ -1,196 +1,285 @@
+# -*- coding: utf-8 -*-
+# 04_edit_asset_group.py — GeoParquet-native editor for tbl_asset_group
+# - Reads/writes output/geoparquet/tbl_asset_group.parquet
+# - Edits: name_original, title_fromuser (display-only: name_gis_assetgroup)
+# - ttkbootstrap UI
+
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-import tkinter as tk
-from tkinter import ttk
-import configparser
-import pandas as pd
-import argparse
-import datetime
-from sqlalchemy import create_engine
+
 import os
 import sys
+import argparse
+import configparser
+import datetime
+import pandas as pd
 
-import ttkbootstrap as ttk  # Import ttkbootstrap
-from ttkbootstrap.constants import *
+import tkinter as tk
+from tkinter import messagebox
 
+import ttkbootstrap as tb
+from ttkbootstrap.constants import PRIMARY, SUCCESS, WARNING
 
-# # # # # # # # # # # # # # 
-# Shared/general functions
+# ---------------------------
+# Paths / config helpers
+# ---------------------------
+def resolve_base_dir(passed: str | None) -> str:
+    """
+    Determine the original working directory:
+    - If PyInstaller (_MEIPASS) is present, work relative to the parent of the 'system' folder next to the exe.
+    - If invoked with --original_working_directory, prefer that.
+    - If running from /system/, go one level up.
+    """
+    if passed:
+        base = passed
+    else:
+        base = os.getcwd()
 
-# Read the configuration file
-def read_config(file_name):
-    config = configparser.ConfigParser()
-    config.read(file_name)
-    return config
+    # If user runs directly from system/, go one level up
+    if os.path.basename(base).lower() == "system":
+        base = os.path.abspath(os.path.join(base, ".."))
+    return base
 
+def config_path(base_dir: str) -> str:
+    return os.path.join(base_dir, "system", "config.ini")
 
-# Logging function to write to the GUI log
-def write_to_log(message):
+def gpq_dir(base_dir: str) -> str:
+    d = os.path.join(base_dir, "output", "geoparquet")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def asset_group_parquet(base_dir: str) -> str:
+    return os.path.join(gpq_dir(base_dir), "tbl_asset_group.parquet")
+
+def read_config(path: str) -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    cfg.read(path, encoding="utf-8")
+    if "DEFAULT" not in cfg:
+        cfg["DEFAULT"] = {}
+    return cfg
+
+# ---------------------------
+# Logging
+# ---------------------------
+def write_to_log(base_dir: str, message: str):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    formatted_message = f"{timestamp} - {message}"
-    log_destination_file = os.path.join(original_working_directory, "log.txt")
-    with open(log_destination_file, "a") as log_file:
-        log_file.write(formatted_message + "\n")
-
-# # # # # # # # # # # # # # 
-# Core functions
-
-# Function to load data from the database
-def load_data():
-    engine = create_engine(f'sqlite:///{gpkg_file}')
-    return pd.read_sql_table('tbl_asset_group', engine)
-
-
-# Function to save data to the database
-def save_data(df):
+    line = f"{timestamp} - {message}"
     try:
-        engine = create_engine(f'sqlite:///{gpkg_file}')
-        df.to_sql('tbl_asset_group', con=engine, if_exists='replace', index=False)
-        write_to_log("Asset group data saved")
-    except Exception as e:
-        write_to_log(f"Error saving data: {e}")
-        print(f"Error saving data: {e}")
+        with open(os.path.join(base_dir, "log.txt"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
+# ---------------------------
+# Data IO (GeoParquet)
+# ---------------------------
+REQUIRED_COLUMNS = [
+    "id",
+    "name_gis_assetgroup",  # system name (display only)
+    "name_original",        # editable
+    "title_fromuser",       # editable
+    # The following may exist; we won’t edit them here but we keep them if present:
+    "importance", "susceptibility", "sensitivity",
+    "sensitivity_code", "sensitivity_description",
+    "total_asset_objects"
+]
 
-# Function to update record in the DataFrame and save to the database
-def update_record(save_message=True):
+def load_asset_group_df(base_dir: str) -> pd.DataFrame:
+    """
+    Read tbl_asset_group.parquet; if missing, return an empty frame with required columns.
+    Ensure editable columns exist as strings (no NaN in the editor).
+    """
+    pq = asset_group_parquet(base_dir)
+    if os.path.exists(pq):
+        try:
+            df = pd.read_parquet(pq)
+        except Exception as e:
+            write_to_log(base_dir, f"Error reading parquet {pq}: {e}")
+            df = pd.DataFrame(columns=REQUIRED_COLUMNS)
+    else:
+        df = pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+    # Ensure required columns exist
+    for col in REQUIRED_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # Coerce editor columns to string (avoid NaN in UI)
+    for col in ["name_original", "title_fromuser", "name_gis_assetgroup"]:
+        df[col] = df[col].astype("string").fillna("")
+
+    # If id is missing/empty, create a simple incremental id (do not overwrite if present)
+    if df["id"].isna().all():
+        df["id"] = range(1, len(df) + 1)
+
+    return df
+
+def save_asset_group_df(base_dir: str, df: pd.DataFrame) -> bool:
+    """
+    Save entire asset group table back to GeoParquet.
+    """
+    pq = asset_group_parquet(base_dir)
     try:
-        df.at[current_index, 'name_original'] = name_original_var.get()
-        df.at[current_index, 'name_gis_assetgroup'] = name_gis_var.get()
-        df.at[current_index, 'title_fromuser'] = title_fromuser_var.get()
-        save_data(df)  # Save changes to the database
-        if save_message:
-            write_to_log("Record updated and saved")
+        df.to_parquet(pq, index=False)
+        write_to_log(base_dir, f"Saved {os.path.relpath(pq, start=base_dir)} ({len(df)} rows)")
+        return True
     except Exception as e:
-        write_to_log(f"Error updating and saving record: {e}")
+        write_to_log(base_dir, f"Error writing parquet {pq}: {e}")
+        return False
+
+# ---------------------------
+# UI
+# ---------------------------
+class AssetGroupEditor:
+    def __init__(self, root: tb.Window, base_dir: str, theme: str):
+        self.root = root
+        self.base_dir = base_dir
+        self.theme = theme
+
+        # Data
+        self.df = load_asset_group_df(base_dir)
+        self.idx = 0
+
+        # Vars
+        self.var_name_gis = tk.StringVar(value="")
+        self.var_name_original = tk.StringVar(value="")
+        self.var_title_fromuser = tk.StringVar(value="")
+        self.var_counter = tk.StringVar(value="0 / 0")
+
+        # Window
+        self.root.title("Edit asset groups (GeoParquet)")
+        try:
+            icon = os.path.join(base_dir, "system_resources", "mesa.ico")
+            if os.path.exists(icon):
+                self.root.iconbitmap(icon)
+        except Exception:
+            pass
+
+        # Layout
+        self._build_ui()
+
+        # Load first record
+        if len(self.df) == 0:
+            messagebox.showinfo("No data", "No asset groups found in GeoParquet.\n"
+                                            "Import assets first (or create tbl_asset_group.parquet).")
+            self._update_counter()
+        else:
+            self._load_record()
+
+    def _build_ui(self):
+        pad = dict(padx=10, pady=8)
+
+        # Top info
+        top = tb.LabelFrame(self.root, text="About", bootstyle="info")
+        top.grid(row=0, column=0, columnspan=4, sticky="ew", **pad)
+        info = ("You can give asset groups nicer display names here.\n"
+                "‘GIS name’ is the internal, system-generated name and cannot be edited.")
+        tk.Label(top, text=info, justify="left", wraplength=640).pack(anchor="w", padx=10, pady=8)
+
+        # Form
+        tk.Label(self.root, text="GIS name").grid(row=1, column=0, sticky="w", **pad)
+        tk.Label(self.root, textvariable=self.var_name_gis, relief="sunken", anchor="w", width=60)\
+            .grid(row=1, column=1, columnspan=3, sticky="ew", **pad)
+
+        tk.Label(self.root, text="Original name").grid(row=2, column=0, sticky="w", **pad)
+        tb.Entry(self.root, textvariable=self.var_name_original, width=62)\
+            .grid(row=2, column=1, columnspan=3, sticky="ew", **pad)
+
+        tk.Label(self.root, text="Title (for presentation)").grid(row=3, column=0, sticky="w", **pad)
+        tb.Entry(self.root, textvariable=self.var_title_fromuser, width=62)\
+            .grid(row=3, column=1, columnspan=3, sticky="ew", **pad)
+
+        # Counter
+        tk.Label(self.root, textvariable=self.var_counter).grid(row=4, column=0, sticky="w", **pad)
+
+        # Buttons
+        nav = tk.Frame(self.root)
+        nav.grid(row=4, column=1, columnspan=3, sticky="e", **pad)
+
+        tb.Button(nav, text="⟵ Previous", bootstyle=PRIMARY,
+                  command=lambda: self._navigate(-1)).pack(side="left", padx=4)
+        tb.Button(nav, text="Save", bootstyle=SUCCESS,
+                  command=self._save_current).pack(side="left", padx=4)
+        tb.Button(nav, text="Save & Next ⟶", bootstyle=PRIMARY,
+                  command=self._save_and_next).pack(side="left", padx=4)
+        tb.Button(nav, text="Exit", bootstyle=WARNING,
+                  command=self.root.destroy).pack(side="left", padx=4)
+
+        # Make column 1 expandable
+        self.root.grid_columnconfigure(1, weight=1)
+
+    def _update_counter(self):
+        total = len(self.df)
+        idx1 = (self.idx + 1) if total else 0
+        self.var_counter.set(f"{idx1} / {total}")
+
+    def _load_record(self):
+        # Clamp index
+        self.idx = max(0, min(self.idx, max(0, len(self.df) - 1)))
+        self._update_counter()
+        if len(self.df) == 0:
+            self.var_name_gis.set("")
+            self.var_name_original.set("")
+            self.var_title_fromuser.set("")
+            return
+        row = self.df.iloc[self.idx]
+        self.var_name_gis.set(str(row.get("name_gis_assetgroup", "") or ""))
+        self.var_name_original.set(str(row.get("name_original", "") or ""))
+        self.var_title_fromuser.set(str(row.get("title_fromuser", "") or ""))
+
+    def _write_back_to_df(self):
+        if len(self.df) == 0:
+            return
+        # Basic sanitation: strip whitespace
+        name_original = (self.var_name_original.get() or "").strip()
+        title_user = (self.var_title_fromuser.get() or "").strip()
+
+        self.df.at[self.idx, "name_original"] = name_original
+        self.df.at[self.idx, "title_fromuser"] = title_user
+
+    def _save_current(self) -> bool:
+        try:
+            if len(self.df) == 0:
+                messagebox.showinfo("Nothing to save", "There are no rows to save.")
+                return False
+            self._write_back_to_df()
+            ok = save_asset_group_df(self.base_dir, self.df)
+            if ok:
+                write_to_log(self.base_dir, "Asset group record saved.")
+            else:
+                messagebox.showerror("Save failed", "Could not write the GeoParquet file.")
+            return ok
+        except Exception as e:
+            write_to_log(self.base_dir, f"Error during save: {e}")
+            messagebox.showerror("Save failed", str(e))
+            return False
+
+    def _save_and_next(self):
+        if self._save_current():
+            self._navigate(+1)
+
+    def _navigate(self, step: int):
+        if len(self.df) == 0:
+            return
+        # Save silently before leaving the record
+        self._write_back_to_df()
+        # move
+        self.idx = max(0, min(self.idx + step, len(self.df) - 1))
+        self._load_record()
 
 
-# Navigate through records
-def navigate(direction):
-    global current_index
-    update_record(save_message=False)  # Save current edits without showing a message
-    if direction == 'next' and current_index < len(df) - 1:
-        current_index += 1
-    elif direction == 'previous' and current_index > 0:
-        current_index -= 1
-    load_record()
-
-
-# Load a record into the form
-def load_record():
-    record = df.iloc[current_index]
-    name_original_var.set(record['name_original'])
-    name_gis_var.set(record['name_gis_assetgroup'])
-    title_fromuser_var.set(record['title_fromuser'])
-
-
-# Function to close the application
-def exit_application():
-    write_to_log("Closing edit assets")
-    root.destroy()
-
-def get_current_directory_and_file():
-    # Get the current working directory
-    current_directory = os.getcwd()
-    
-    # Get the name of the current file
-    current_file = os.path.basename(sys.argv[0])
-    
-    return current_directory, current_file
-
-
-#####################################################################################
-#  Main
-#
-
-
-# original folder for the system is sent from the master executable. If the script is
-# invked this way we are fetching the adress here.
-parser = argparse.ArgumentParser(description='Slave script')
-parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
-args = parser.parse_args()
-original_working_directory = args.original_working_directory
-
-# However - if this is not the case we will have to establish the root folder in 
-# one of two different ways.
-if original_working_directory is None or original_working_directory == '':
-    
-    #if it is running as a python subprocess we need to get the originating folder.
-    original_working_directory  = os.getcwd()
-
-    # When running directly separate script we need to find out and go up one level.
-    if str("system") in str(original_working_directory):
-        original_working_directory = os.path.join(os.getcwd(),'../')
-
-# Load configuration settings
-config_file             = os.path.join(original_working_directory, "system/config.ini")
-gpkg_file               = os.path.join(original_working_directory, "output/mesa.gpkg")
-
-# Load configuration settings
-config                  = read_config(config_file)
-
-input_folder_asset      = os.path.join(original_working_directory, config['DEFAULT']['input_folder_asset'])
-input_folder_geocode    = os.path.join(original_working_directory, config['DEFAULT']['input_folder_geocode'])
-input_folder_lines      = os.path.join(original_working_directory, config['DEFAULT']['input_folder_lines'])
-
-ttk_bootstrap_theme     = config['DEFAULT']['ttk_bootstrap_theme']
-workingprojection_epsg  = config['DEFAULT']['workingprojection_epsg']
-
+# ---------------------------
+# Entrypoint
+# ---------------------------
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Edit asset-group titles (GeoParquet)")
+    parser.add_argument("--original_working_directory", required=False, help="Path to running folder")
+    args = parser.parse_args()
 
-    # directory, file_name = get_current_directory_and_file()
+    base_dir = resolve_base_dir(args.original_working_directory)
+    cfg = read_config(config_path(base_dir))
+    theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly")
 
-    # Create the user interface
-    root = ttk.Window(themename=ttk_bootstrap_theme)  # Use ttkbootstrap Window
-    root.title("Edit assets")
-    root.iconbitmap(os.path.join(original_working_directory,"system_resources/mesa.ico"))
-
-    # Configure column widths
-    root.columnconfigure(0, minsize=200)  # Configure the size of the first column
-    root.columnconfigure(1, weight=1)     # Make the second column expandable
-
-    df = load_data()
-    current_index = 0
-
-    # Variables for form fields
-    name_original_var   = tk.StringVar()
-    name_gis_var        = tk.StringVar()
-    title_fromuser_var  = tk.StringVar()
-
-    # GIS name is internal to the system. Can not be edited.
-    tk.Label(root, text="GIS name").grid(row=0, column=0, sticky='w')
-    name_gis_label = tk.Label(root, textvariable=name_gis_var, width=50, relief="sunken", anchor="w")
-    name_gis_label.grid(row=0, column=1, sticky='w')
-
-    # Original Name Entry
-    tk.Label(root, text="Original name").grid(row=1, column=0, sticky='w')
-    name_original_entry = tk.Entry(root, textvariable=name_original_var, width=50)
-    name_original_entry.grid(row=1, column=1, sticky='w')
-
-    # Title Entry
-    tk.Label(root, text="Title").grid(row=2, column=0, sticky='w')
-    title_fromuser_entry = tk.Entry(root, textvariable=title_fromuser_var, width=50)
-    title_fromuser_entry.grid(row=2, column=1, sticky='w')
-
-    # Information text field above the "Update and Save Record" button
-    info_label_text = ("All assets that are imported are associated with a file "
-                       "or table name. This table name is the original name. If "
-                       "you want to use a different name in presenting the analysis "
-                       "we suggest that you add that name here.")
-    info_label = tk.Label(root, text=info_label_text, wraplength=400, justify="left")
-    info_label.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
-
-    # Navigation buttons
-    ttk.Button(root, text="Previous", command=lambda: navigate('previous'), bootstyle=PRIMARY).grid(row=4, column=0, padx=10, pady=10)
-    ttk.Button(root, text="Next", command=lambda: navigate('next'), bootstyle=PRIMARY).grid(row=4, column=2, padx=10, pady=10)
-
-    # Save button
-    ttk.Button(root, text="Save", command=update_record, bootstyle=SUCCESS).grid(row=5, column=2, padx=10, pady=10)
-
-    # Exit button
-    ttk.Button(root, text="Exit", command=exit_application, bootstyle='warning').grid(row=5, column=3, padx=10, pady=10)
-
-    # Load the first record
-    load_record()
-
-    root.mainloop()
+    app = tb.Window(themename=theme)
+    editor = AssetGroupEditor(app, base_dir, theme)
+    app.mainloop()
