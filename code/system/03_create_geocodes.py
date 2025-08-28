@@ -25,7 +25,7 @@ Config (optional) in system/config.ini [DEFAULT]:
 - workingprojection_epsg = 5973
 - area_projection_epsg   = 3035
 - h3_union_buffer_m      = 50
-- h3_max_cells           = 1200000
+- h3_max_cells           = 4000000
 - h3_from = 3
 - h3_to   = 6
 - mosaic_buffer_m   = 25
