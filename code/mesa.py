@@ -856,7 +856,7 @@ if __name__ == "__main__":
     maps_overview_btn.grid(row=6, column=0, padx=button_padx, pady=button_pady)
 
     # --- New button for Present files (02_present_files.py) ---
-    present_files_btn       = ttk.Button(left_panel, text="Present files", command=open_present_files, width=button_width)
+    present_files_btn       = ttk.Button(left_panel, text="Report engine", command=open_present_files, width=button_width)
     present_files_btn.grid(row=7, column=0, padx=button_padx, pady=button_pady)
 
     # Separator
