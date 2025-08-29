@@ -179,10 +179,15 @@ def cleanup_outputs():
         _rm_rf(_dataset_dir(d))
 
 # ----------------------------
-# Spatial utilities for intersections
+# Spatial utilities for intersections (robust, spill-to-disk; Windows-safe)
 # ----------------------------
+from uuid import uuid4
+
 def create_grid(geodata: gpd.GeoDataFrame, cell_size_deg: float):
     xmin, ymin, xmax, ymax = geodata.total_bounds
+    # guard against empty/degenerate bounds
+    if not np.isfinite([xmin, ymin, xmax, ymax]).all() or xmax <= xmin or ymax <= ymin:
+        return []
     x_edges = np.arange(xmin, xmax + cell_size_deg, cell_size_deg)
     y_edges = np.arange(ymin, ymax + cell_size_deg, cell_size_deg)
     cells = []
@@ -191,80 +196,173 @@ def create_grid(geodata: gpd.GeoDataFrame, cell_size_deg: float):
             cells.append((x, y, x + cell_size_deg, y + cell_size_deg))
     return cells
 
-_GLOBAL_GRID_GDF = None
-def _grid_pool_init(grid_gdf):
-    global _GLOBAL_GRID_GDF
-    _GLOBAL_GRID_GDF = grid_gdf
-    # Lower priority for workers (keeps desktop responsive)
+# --- grid-tagging workers (write parts, return file paths only) ---
+_GRID_OUT_DIR = None
+_GRID_GDF     = None
+
+def _grid_pool_init2(grid_gdf, out_dir_str: str):
+    """Initializer for grid-tag workers. Avoids sending big frames back to parent."""
+    global _GRID_OUT_DIR, _GRID_GDF
+    _GRID_OUT_DIR = Path(out_dir_str)
+    _GRID_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    _GRID_GDF = grid_gdf
+    # warm up spatial index to avoid races
+    try:
+        _ = _GRID_GDF.sindex
+    except Exception:
+        pass
+    # lower worker priority to keep desktop responsive
     try:
         if psutil is not None:
             p = psutil.Process()
             if os.name == "nt":
                 p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
             else:
-                os.nice(5)  # POSIX niceness
+                os.nice(5)
     except Exception:
         pass
 
-def _process_chunk_indexed(geodata_chunk: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    _ = geodata_chunk.sindex
-    _ = _GLOBAL_GRID_GDF.sindex
-    return gpd.sjoin(geodata_chunk, _GLOBAL_GRID_GDF, how="left", predicate="intersects")
+def _grid_worker(input_path: str) -> str:
+    """Read one geocode chunk parquet, tag to grid, write tagged parquet, return its path."""
+    g = gpd.read_parquet(input_path)
+    # build sindex to force spatial index creation inside worker
+    try:
+        _ = g.sindex
+    except Exception:
+        pass
+    j = gpd.sjoin(g, _GRID_GDF, how="left", predicate="intersects")
+    j.drop(columns=["index_right"], inplace=True, errors="ignore")
+    # simple clean
+    try:
+        j = j[j.geometry.notna() & ~j.geometry.is_empty]
+    except Exception:
+        pass
+    out = _GRID_OUT_DIR / f"grid_tag_{os.getpid()}_{uuid4().hex}.parquet"
+    j.to_parquet(out, index=False)
+    # free memory early
+    del g, j
+    gc.collect()
+    return str(out)
 
-def calculate_rows_per_chunk(n: int, max_memory_mb: int = 512) -> int:
-    # crude estimate ~1 KB/row
-    rows_per_chunk = int(max_memory_mb / 0.001)
-    return max(1, min(rows_per_chunk, n))
+def _rmrf_dir(p: Path):
+    try:
+        if p.exists():
+            shutil.rmtree(p)
+    except Exception:
+        pass
+
+def _mk_empty_gdf_like(crs) -> gpd.GeoDataFrame:
+    return gpd.GeoDataFrame(geometry=[], crs=crs)
+
+def calculate_rows_per_chunk(n: int,
+                             max_memory_mb: int = 256,
+                             est_bytes_per_row: int = 1800,
+                             hard_cap_rows: int = 100_000) -> int:
+    """Heuristic: ~1.8KB/row default, cap chunks to keep IPC small."""
+    try:
+        rows = int((max_memory_mb * 1024 * 1024) / max(256, est_bytes_per_row))
+    except Exception:
+        rows = 50_000
+    rows = max(5_000, min(rows, hard_cap_rows))
+    return max(1, min(rows, n))
 
 def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_workers: int) -> gpd.GeoDataFrame:
-    # meters→degrees approx for WGS84 geocodes
+    """
+    Tag every geocode with a coarse grid cell id, using spill-to-disk to avoid
+    sending large GeoDataFrames over multiprocessing pipes (Windows-safe).
+    """
+    if geodata is None or geodata.empty:
+        return _mk_empty_gdf_like(geodata.crs if geodata is not None else None)
+
+    # meters→degrees (approx) for WGS84
     meters_per_degree = 111_320.0
-    deg = meters_cell / meters_per_degree
-    grid_cells = create_grid(geodata, deg)
+    cell_deg = meters_cell / meters_per_degree
+
+    # build grid
+    grid_cells = create_grid(geodata, cell_deg)
+    if not grid_cells:
+        log_to_gui(log_widget, "Grid creation produced no cells; skipping tagging.")
+        return geodata.assign(grid_cell=pd.Series([0] * len(geodata), index=geodata.index))
+
     grid_gdf = gpd.GeoDataFrame(
-        {'grid_cell': range(len(grid_cells)),
-         'geometry': [box(xmin, ymin, xmax, ymax) for xmin, ymin, xmax, ymax in grid_cells]},
-        geometry='geometry', crs=geodata.crs
+        {"grid_cell": range(len(grid_cells)),
+         "geometry": [box(x0, y0, x1, y1) for (x0, y0, x1, y1) in grid_cells]},
+        geometry="geometry", crs=geodata.crs
     )
-    _ = grid_gdf.sindex
+    # kick sindex
+    try:
+        _ = grid_gdf.sindex
+    except Exception:
+        pass
     log_to_gui(log_widget, f"Assigning geocodes to {len(grid_cells):,} grid cells…")
 
+    # temporary folders (input chunks, output parts)
+    tmp_in  = _dataset_dir("__grid_assign_in")
+    tmp_out = _dataset_dir("__grid_assign_out")
+    _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
+    tmp_in.mkdir(parents=True, exist_ok=True)
+    tmp_out.mkdir(parents=True, exist_ok=True)
+
+    # chunk & write geocodes to input parts
     rows_per_chunk = calculate_rows_per_chunk(len(geodata))
-    total_chunks = math.ceil(len(geodata)/rows_per_chunk)
-    results = []
-    with multiprocessing.get_context("spawn").Pool(processes=max_workers,
-                                                   initializer=_grid_pool_init,
-                                                   initargs=(grid_gdf,)) as pool:
-        futures = []
-        for i in range(0, len(geodata), rows_per_chunk):
-            chunk = geodata.iloc[i:i+rows_per_chunk]
-            futures.append(pool.apply_async(_process_chunk_indexed, (chunk,)))
+    total_chunks = int(math.ceil(len(geodata) / rows_per_chunk))
+    input_parts = []
+    for i in range(0, len(geodata), rows_per_chunk):
+        part = geodata.iloc[i:i+rows_per_chunk]
+        p = tmp_in / f"geo_{i:09d}.parquet"
+        part.to_parquet(p, index=False)
+        input_parts.append(str(p))
 
-        started_at = time.time()
-        last_ping  = started_at
-        done_count = 0
+    # process with pool; workers only exchange small strings (paths)
+    started_at = time.time()
+    last_ping = started_at
+    done = 0
+    out_files = []
 
-        for f in futures:
-            part = f.get()
-            results.append(part)
-            done_count += 1
-
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=max(1, max_workers),
+                  initializer=_grid_pool_init2,
+                  initargs=(grid_gdf, str(tmp_out))) as pool:
+        for out_path in pool.imap_unordered(_grid_worker, input_parts, chunksize=1):
+            out_files.append(out_path)
+            done += 1
             now = time.time()
-            if (now - last_ping) >= HEARTBEAT_SECS or done_count == total_chunks:
+            if (now - last_ping) >= HEARTBEAT_SECS or done == total_chunks:
+                pct = (done / total_chunks) * 100 if total_chunks else 100.0
                 elapsed = now - started_at
-                pct = (done_count / total_chunks) * 100 if total_chunks else 100.0
                 eta = "?"
-                if done_count:
-                    est_total = elapsed / done_count * total_chunks
+                if done:
+                    est_total = elapsed / done * total_chunks
                     eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
                     eta = eta_ts.strftime("%H:%M:%S")
                     dd = (eta_ts.date() - datetime.now().date()).days
-                    if dd > 0: eta += f" (+{dd}d)"
-                log_to_gui(log_widget, f"[grid-assign] {done_count}/{total_chunks} chunks (~{pct:.2f}%) … ETA {eta}")
+                    if dd > 0:
+                        eta += f" (+{dd}d)"
+                log_to_gui(log_widget, f"[grid-assign] {done}/{total_chunks} chunks (~{pct:.2f}%) • ETA {eta}")
                 last_ping = now
 
-    j = gpd.GeoDataFrame(pd.concat(results, ignore_index=True), crs=geodata.crs)
-    return j.drop(columns='index_right', errors='ignore')
+    # assemble output
+    if not out_files:
+        log_to_gui(log_widget, "Grid-assign produced no parts; continuing without grid_cell.")
+        _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
+        return geodata
+
+    parts = []
+    for p in out_files:
+        try:
+            parts.append(gpd.read_parquet(p))
+        except Exception as e:
+            log_to_gui(log_widget, f"[grid-assign] Skipping part {Path(p).name}: {e}")
+
+    if not parts:
+        _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
+        return geodata
+
+    tagged = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=geodata.crs)
+    # cleanup temp dirs
+    _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
+    return tagged
+
 
 def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, multiplier: int = 18):
     # finer chunking → smaller per-chunk memory footprint (grid size unchanged)
