@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 # 06_process.py — memory-aware, CPU-optimized (Windows spawn-safe) intersections + robust flattening to GeoParquet
-# - Intersect tbl_asset_object × tbl_geocode_object -> tbl_stacked (folder dataset of Parquet parts)
-# - Flatten by geocode code -> tbl_flat.parquet with min/max + A..E codes from config.ini
-# - Compute area once per tile (equal-area CRS), then backfill to tbl_stacked (streaming over parts)
-# - Compute visualization ENV index (1–100) + optional components: env_imp, env_sens, env_susc, env_press
-# - Heartbeat logs (progress + memory) + adaptive splitting to avoid OOM + lower process priority
-#
-# Inputs  (GeoParquet): output/geoparquet/{tbl_asset_object,tbl_geocode_object,tbl_asset_group}.parquet
-# Outputs (GeoParquet): output/geoparquet/{tbl_stacked/ (dataset), tbl_flat.parquet}
+# See notes: safe config parsing (inline comments), robust logging, temp cleanup at start and on success.
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
@@ -22,29 +15,27 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import box
 
-# Optional system introspection (recommended)
 try:
     import psutil  # type: ignore
 except Exception:
     psutil = None
 
-# --- GUI
+# GUI
 import tkinter as tk
 from tkinter import scrolledtext
 import ttkbootstrap as tb
 from ttkbootstrap.constants import PRIMARY, WARNING
 
 # ----------------------------
-# Globals (initialized in __main__)
+# Globals
 # ----------------------------
 original_working_directory = None
 log_widget = None
 progress_var = None
 progress_label = None
-HEARTBEAT_SECS = 30
+HEARTBEAT_SECS = 60
 
-# spill-to-disk for intersections
-_PARTS_DIR = None  # folder where workers write chunk parquet parts
+_PARTS_DIR = None  # worker output folder
 
 # ----------------------------
 # Paths
@@ -61,7 +52,6 @@ def gpq_dir() -> Path:
     return out
 
 def _dataset_dir(name: str) -> Path:
-    # e.g. .../geoparquet/tbl_stacked  (folder dataset)
     return gpq_dir() / name
 
 # ----------------------------
@@ -95,18 +85,45 @@ def log_to_gui(widget, message: str):
     if widget is None:
         print(formatted, flush=True)
 
+# --- SAFE CONFIG PARSING ---
 def read_config(path: Path) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
+    # Accept inline comments like "; note" or "# note"
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(path, encoding="utf-8")
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
     return cfg
 
+def _strip_inline_comments(s: str) -> str:
+    if s is None:
+        return ""
+    # Defensive: remove inline ;/# if present even with inline_comment_prefixes off
+    for sep in (';', '#'):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    return s.strip()
+
+def cfg_get_int(cfg: configparser.ConfigParser, key: str, default: int) -> int:
+    try:
+        raw = cfg['DEFAULT'].get(key, str(default))
+        raw = _strip_inline_comments(raw)
+        return int(raw)
+    except Exception:
+        return int(default)
+
+def cfg_get_float(cfg: configparser.ConfigParser, key: str, default: float) -> float:
+    try:
+        raw = cfg['DEFAULT'].get(key, str(default))
+        raw = _strip_inline_comments(raw)
+        return float(raw)
+    except Exception:
+        return float(default)
+
 # ----------------------------
-# Config-driven A..E classification
+# A..E classification helpers
 # ----------------------------
 def read_class_ranges(cfg_path: Path):
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(cfg_path, encoding="utf-8")
     ranges = {}
     desc   = {}
@@ -121,7 +138,6 @@ def read_class_ranges(cfg_path: Path):
             except Exception:
                 pass
         desc[code] = (cfg[code].get("description","") or "").strip()
-    # Priority: A highest … E lowest
     order = {"A":5,"B":4,"C":3,"D":2,"E":1}
     return ranges, desc, order
 
@@ -137,17 +153,15 @@ def map_num_to_code(val, ranges_map: dict) -> str | None:
     return None
 
 # ----------------------------
-# IO helpers (GeoParquet + dataset support)
+# IO helpers
 # ----------------------------
 def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
-    """Read a single GeoParquet file OR a partitioned dataset folder; return empty GDF if missing."""
     file_path = gpq_dir() / f"{name}.parquet"
     dir_path  = _dataset_dir(name)
     try:
         if file_path.exists():
             return gpd.read_parquet(file_path)
         if dir_path.exists() and dir_path.is_dir():
-            # read dataset folder (pyarrow dataset)
             return gpd.read_parquet(str(dir_path))
         return gpd.GeoDataFrame(geometry=[], crs=None)
     except Exception as e:
@@ -155,7 +169,6 @@ def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame(geometry=[], crs=None)
 
 def write_parquet(name: str, gdf: gpd.GeoDataFrame):
-    """Write a single GeoParquet file."""
     path = gpq_dir() / f"{name}.parquet"
     gdf.to_parquet(path, index=False)
     log_to_gui(log_widget, f"Wrote {path}")
@@ -171,21 +184,18 @@ def _rm_rf(path: Path):
         log_to_gui(log_widget, f"Error removing {path.name}: {e}")
 
 def cleanup_outputs():
-    # remove single-file outputs
     for fn in ["tbl_stacked.parquet","tbl_flat.parquet"]:
         _rm_rf(gpq_dir() / fn)
-    # remove datasets / temp parts
-    for d in ["tbl_stacked", "__stacked_parts"]:
+    for d in ["tbl_stacked", "__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
         _rm_rf(_dataset_dir(d))
 
 # ----------------------------
-# Spatial utilities for intersections (robust, spill-to-disk; Windows-safe)
+# Grid & chunking
 # ----------------------------
 from uuid import uuid4
 
 def create_grid(geodata: gpd.GeoDataFrame, cell_size_deg: float):
     xmin, ymin, xmax, ymax = geodata.total_bounds
-    # guard against empty/degenerate bounds
     if not np.isfinite([xmin, ymin, xmax, ymax]).all() or xmax <= xmin or ymax <= ymin:
         return []
     x_edges = np.arange(xmin, xmax + cell_size_deg, cell_size_deg)
@@ -196,22 +206,18 @@ def create_grid(geodata: gpd.GeoDataFrame, cell_size_deg: float):
             cells.append((x, y, x + cell_size_deg, y + cell_size_deg))
     return cells
 
-# --- grid-tagging workers (write parts, return file paths only) ---
 _GRID_OUT_DIR = None
 _GRID_GDF     = None
 
 def _grid_pool_init2(grid_gdf, out_dir_str: str):
-    """Initializer for grid-tag workers. Avoids sending big frames back to parent."""
     global _GRID_OUT_DIR, _GRID_GDF
     _GRID_OUT_DIR = Path(out_dir_str)
     _GRID_OUT_DIR.mkdir(parents=True, exist_ok=True)
     _GRID_GDF = grid_gdf
-    # warm up spatial index to avoid races
     try:
         _ = _GRID_GDF.sindex
     except Exception:
         pass
-    # lower worker priority to keep desktop responsive
     try:
         if psutil is not None:
             p = psutil.Process()
@@ -223,23 +229,19 @@ def _grid_pool_init2(grid_gdf, out_dir_str: str):
         pass
 
 def _grid_worker(input_path: str) -> str:
-    """Read one geocode chunk parquet, tag to grid, write tagged parquet, return its path."""
     g = gpd.read_parquet(input_path)
-    # build sindex to force spatial index creation inside worker
     try:
         _ = g.sindex
     except Exception:
         pass
     j = gpd.sjoin(g, _GRID_GDF, how="left", predicate="intersects")
     j.drop(columns=["index_right"], inplace=True, errors="ignore")
-    # simple clean
     try:
         j = j[j.geometry.notna() & ~j.geometry.is_empty]
     except Exception:
         pass
-    out = _GRID_OUT_DIR / f"grid_tag_{os.getpid()}_{uuid4().hex}.parquet"
+    out = _GRID_OUT_DIR / f"grid_tag_{os.getpid()}_{uuid.uuid4().hex}.parquet"
     j.to_parquet(out, index=False)
-    # free memory early
     del g, j
     gc.collect()
     return str(out)
@@ -254,11 +256,7 @@ def _rmrf_dir(p: Path):
 def _mk_empty_gdf_like(crs) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(geometry=[], crs=crs)
 
-def calculate_rows_per_chunk(n: int,
-                             max_memory_mb: int = 256,
-                             est_bytes_per_row: int = 1800,
-                             hard_cap_rows: int = 100_000) -> int:
-    """Heuristic: ~1.8KB/row default, cap chunks to keep IPC small."""
+def calculate_rows_per_chunk(n: int, max_memory_mb: int = 256, est_bytes_per_row: int = 1800, hard_cap_rows: int = 100_000) -> int:
     try:
         rows = int((max_memory_mb * 1024 * 1024) / max(256, est_bytes_per_row))
     except Exception:
@@ -267,18 +265,12 @@ def calculate_rows_per_chunk(n: int,
     return max(1, min(rows, n))
 
 def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_workers: int) -> gpd.GeoDataFrame:
-    """
-    Tag every geocode with a coarse grid cell id, using spill-to-disk to avoid
-    sending large GeoDataFrames over multiprocessing pipes (Windows-safe).
-    """
     if geodata is None or geodata.empty:
         return _mk_empty_gdf_like(geodata.crs if geodata is not None else None)
 
-    # meters→degrees (approx) for WGS84
     meters_per_degree = 111_320.0
     cell_deg = meters_cell / meters_per_degree
 
-    # build grid
     grid_cells = create_grid(geodata, cell_deg)
     if not grid_cells:
         log_to_gui(log_widget, "Grid creation produced no cells; skipping tagging.")
@@ -289,21 +281,18 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
          "geometry": [box(x0, y0, x1, y1) for (x0, y0, x1, y1) in grid_cells]},
         geometry="geometry", crs=geodata.crs
     )
-    # kick sindex
     try:
         _ = grid_gdf.sindex
     except Exception:
         pass
     log_to_gui(log_widget, f"Assigning geocodes to {len(grid_cells):,} grid cells…")
 
-    # temporary folders (input chunks, output parts)
     tmp_in  = _dataset_dir("__grid_assign_in")
     tmp_out = _dataset_dir("__grid_assign_out")
     _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
     tmp_in.mkdir(parents=True, exist_ok=True)
     tmp_out.mkdir(parents=True, exist_ok=True)
 
-    # chunk & write geocodes to input parts
     rows_per_chunk = calculate_rows_per_chunk(len(geodata))
     total_chunks = int(math.ceil(len(geodata) / rows_per_chunk))
     input_parts = []
@@ -313,7 +302,6 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
         part.to_parquet(p, index=False)
         input_parts.append(str(p))
 
-    # process with pool; workers only exchange small strings (paths)
     started_at = time.time()
     last_ping = started_at
     done = 0
@@ -336,12 +324,10 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
                     eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
                     eta = eta_ts.strftime("%H:%M:%S")
                     dd = (eta_ts.date() - datetime.now().date()).days
-                    if dd > 0:
-                        eta += f" (+{dd}d)"
+                    if dd > 0: eta += f" (+{dd}d)"
                 log_to_gui(log_widget, f"[grid-assign] {done}/{total_chunks} chunks (~{pct:.2f}%) • ETA {eta}")
                 last_ping = now
 
-    # assemble output
     if not out_files:
         log_to_gui(log_widget, "Grid-assign produced no parts; continuing without grid_cell.")
         _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
@@ -359,13 +345,10 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
         return geodata
 
     tagged = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=geodata.crs)
-    # cleanup temp dirs
     _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
     return tagged
 
-
 def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, multiplier: int = 18):
-    # finer chunking → smaller per-chunk memory footprint (grid size unchanged)
     cell_ids = geocode_tagged['grid_cell'].unique().tolist()
     random.shuffle(cell_ids)
     target_chunks = max(1, min(len(cell_ids), max_workers * multiplier))
@@ -377,22 +360,20 @@ def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, mult
     return chunks
 
 # ----------------------------
-# Adaptive intersection helpers (workers)
+# Intersection workers
 # ----------------------------
 _POOL_ASSETS = None
 _POOL_TYPES  = None
-_ASSET_SOFT_LIMIT = 200_000   # can be overridden from config via env in initializer
+_ASSET_SOFT_LIMIT = 200_000
 _GEOCODE_SOFT_LIMIT = 160
 
 def _intersect_pool_init(asset_df, geom_types, parts_dir, asset_soft_limit, geocode_soft_limit):
-    """Worker initializer: capture shared data and init per-process state."""
     global _POOL_ASSETS, _POOL_TYPES, _PARTS_DIR, _ASSET_SOFT_LIMIT, _GEOCODE_SOFT_LIMIT
     _POOL_ASSETS = asset_df
     _POOL_TYPES  = geom_types
     _PARTS_DIR   = Path(parts_dir)
     _ASSET_SOFT_LIMIT = int(asset_soft_limit)
     _GEOCODE_SOFT_LIMIT = int(geocode_soft_limit)
-    # Lower priority for workers (keeps desktop responsive)
     try:
         if psutil is not None:
             p = psutil.Process()
@@ -404,15 +385,12 @@ def _intersect_pool_init(asset_df, geom_types, parts_dir, asset_soft_limit, geoc
         pass
 
 def _intersection_worker(args):
-    """Adaptive worker: spatially filters assets to chunk bbox, then joins per geometry type with recursive splitting on failure/pre-checks."""
     idx, geocode_chunk = args
     logs = []
 
     def write_parts(gdf):
-        """Write (possibly very large) results by splitting if write fails."""
         nonlocal logs
         try:
-            # sanitize geometries that might be empty/invalid
             if 'geometry' in gdf.columns:
                 try:
                     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
@@ -433,7 +411,6 @@ def _intersection_worker(args):
             return write_parts(gdf1) + write_parts(gdf2)
 
     def join_with_asset_subset(geocode_gdf, asset_df, predicate):
-        """Join a single geocode subset with a subset of assets; split assets recursively on failure."""
         try:
             res = gpd.sjoin(geocode_gdf, asset_df, how='inner', predicate=predicate)
             res.drop(columns=[c for c in ['index_right','geometry_wkb','geometry_wkb_1','process'] if c in res.columns],
@@ -465,16 +442,13 @@ def _intersection_worker(args):
                 raise
 
     def join_geocode_assets(geocode_gdf):
-        """Perform joins for a subset of geocodes; split geocode subset on failure or pre-empt if too many candidate assets."""
         if geocode_gdf.empty:
             return gpd.GeoDataFrame(geometry=[], crs=_POOL_ASSETS.crs)
 
-        # Spatially filter global assets to the bbox of this geocode subset
         minx, miny, maxx, maxy = geocode_gdf.total_bounds
         candidate_idx = list(_POOL_ASSETS.sindex.intersection((minx, miny, maxx, maxy)))
         asset_subset = _POOL_ASSETS.iloc[candidate_idx] if candidate_idx else _POOL_ASSETS.iloc[:0]
 
-        # PRE-EMPTIVE split if candidate set obviously too big
         if len(asset_subset) > _ASSET_SOFT_LIMIT and len(geocode_gdf) > 1:
             logs.append(f"Chunk {idx}: {len(asset_subset):,} candidate assets for {len(geocode_gdf)} geocodes — splitting geocodes pre-emptively.")
             mid = len(geocode_gdf) // 2
@@ -493,7 +467,6 @@ def _intersection_worker(args):
             gc.collect()
             return gpd.GeoDataFrame(out, geometry='geometry', crs=_POOL_ASSETS.crs)
 
-        # Also keep geocode subset sizes reasonable
         if len(geocode_gdf) > _GEOCODE_SOFT_LIMIT:
             logs.append(f"Chunk {idx}: geocode subset size {len(geocode_gdf)} > {_GEOCODE_SOFT_LIMIT}; splitting.")
             mid = len(geocode_gdf) // 2
@@ -531,7 +504,6 @@ def _intersection_worker(args):
             except Exception as e:
                 msg = str(e).lower()
                 if any(w in msg for w in ["realloc", "memory", "failed", "bad_alloc", "invalid argument"]):
-                    # 1) Split geocode subset if multiple rows
                     if len(geocode_gdf) > 1:
                         logs.append(f"Chunk {idx}: join failed for {len(geocode_gdf)} geocodes; splitting geocodes.")
                         mid = len(geocode_gdf) // 2
@@ -544,7 +516,6 @@ def _intersection_worker(args):
                         if res_right is not None and not res_right.empty:
                             results_list.append(res_right)
                         continue
-                    # 2) If one geocode row, split assets
                     elif len(af) > 1:
                         logs.append(f"Chunk {idx}: join failed for 1 geocode with {len(af)} assets; splitting assets.")
                         mid = len(af) // 2
@@ -559,6 +530,8 @@ def _intersection_worker(args):
                         continue
                     else:
                         raise
+                else:
+                    raise
 
         if not results_list:
             return gpd.GeoDataFrame(geometry=[], crs=_POOL_ASSETS.crs)
@@ -588,11 +561,9 @@ def _intersection_worker(args):
 
 def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers,
                               asset_soft_limit, geocode_soft_limit):
-    # tag geocodes with coarse grid to improve locality / chunking (grid size unchanged)
     log_to_gui(log_widget, "Creating analysis grid + tagging geocodes.")
     geocode_tagged = assign_geocodes_to_grid(geocode_data, cell_size_m, max_workers)
 
-    # chunks
     chunks = make_spatial_chunks(geocode_tagged, max_workers, multiplier=18)
     total_chunks = len(chunks)
     log_to_gui(log_widget, f"Intersecting in {total_chunks} chunks with {max_workers} workers. Heartbeat every {HEARTBEAT_SECS}s.")
@@ -600,9 +571,8 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
 
     geom_types = asset_data.geometry.geom_type.unique().tolist()
 
-    # spill directory (temporary)
     tmp_parts = _dataset_dir("__stacked_parts")
-    _rm_rf(tmp_parts)  # in case of previous crash
+    _rm_rf(tmp_parts)
     tmp_parts.mkdir(parents=True, exist_ok=True)
 
     written = 0
@@ -612,7 +582,6 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
     last_ping  = started_at
     done_count = 0
 
-    # Heartbeat thread (parent)
     hb_stop = threading.Event()
     progress_state = {'done': 0, 'total': total_chunks, 'rows': 0, 'started_at': started_at}
     def heartbeat():
@@ -649,7 +618,6 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
             done_count += 1
             progress_state['done'] = done_count
 
-            # Propagate worker-side informative logs (splits, etc.)
             if logs:
                 for line in logs:
                     log_to_gui(log_widget, line)
@@ -657,7 +625,7 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
             if err:
                 log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
                 error_msg = err
-                pool.terminate()  # stop other workers immediately
+                pool.terminate()
                 break
 
             written += nrows
@@ -684,7 +652,6 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
                 update_progress(35.0 + (done_count / max(total_chunks, 1)) * 15.0)
                 last_ping = now
 
-            # Help GC in parent loop
             if done_count % 8 == 0:
                 gc.collect()
 
@@ -692,14 +659,12 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
     hb_thread.join(timeout=1.5)
 
     if error_msg:
-        # Abort processing on first failure (no partial finalize)
         raise RuntimeError(error_msg)
 
     if not files:
         log_to_gui(log_widget, "No intersections; tbl_stacked is empty.")
         return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
 
-    # Finalize: move temp parts to dataset folder "tbl_stacked"
     final_ds = _dataset_dir("tbl_stacked")
     _rm_rf(final_ds)
     tmp_parts.rename(final_ds)
@@ -721,7 +686,6 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     log_to_gui(log_widget, "Building analysis table (tbl_stacked)…")
     update_progress(10)
 
-    # Read inputs
     assets   = read_parquet_or_empty("tbl_asset_object")
     geocodes = read_parquet_or_empty("tbl_geocode_object")
     groups   = read_parquet_or_empty("tbl_asset_group")
@@ -733,13 +697,11 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         log_to_gui(log_widget, "ERROR: Missing or empty tbl_geocode_object.parquet; aborting stacked build.")
         return
 
-    # Ensure CRS
     if assets.crs is None:
         assets.set_crs(f"EPSG:{working_epsg}", inplace=True)
     if geocodes.crs is None:
         geocodes.set_crs(f"EPSG:{working_epsg}", inplace=True)
 
-    # Merge asset-group attributes (keep only present columns)
     if not groups.empty:
         cols = ['id','name_gis_assetgroup','total_asset_objects','importance',
                 'susceptibility','sensitivity','sensitivity_code','sensitivity_description']
@@ -750,7 +712,6 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     update_progress(20)
     _ = assets.sindex; _ = geocodes.sindex
 
-    # Workers (memory-aware)
     if max_workers == 0:
         try:
             max_workers = multiprocessing.cpu_count()
@@ -764,7 +725,7 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         if psutil is not None:
             vm = psutil.virtual_memory()
             avail_gb = vm.available / (1024**3)
-            budget_gb = max(1.0, avail_gb * mem_target_frac)  # keep some headroom
+            budget_gb = max(1.0, avail_gb * mem_target_frac)
             allowed = max(1, int(budget_gb // max(0.5, approx_gb_per_worker)))
             if allowed < max_workers:
                 log_to_gui(log_widget, f"Reducing workers from {max_workers} to {allowed} based on RAM (avail≈{avail_gb:.1f} GB, budget≈{budget_gb:.1f} GB, ~{approx_gb_per_worker:.1f} GB/worker).")
@@ -772,11 +733,9 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     except Exception:
         pass
 
-    # Intersections → dataset folder
     _ = intersect_assets_geocodes(assets, geocodes, cell_size_m, max_workers,
                                   asset_soft_limit, geocode_soft_limit)
 
-    # Sanity read
     try:
         sample = read_parquet_or_empty("tbl_stacked")
         log_to_gui(log_widget, f"tbl_stacked rows (sample read): {len(sample):,}")
@@ -786,7 +745,7 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     update_progress(50)
 
 # ----------------------------
-# PROCESS: flatten to tbl_flat (min/max + codes + area + env_index)
+# PROCESS: flatten to tbl_flat
 # ----------------------------
 def normalize_area_epsg(raw: str) -> str:
     v = (raw or "").strip().upper()
@@ -794,7 +753,7 @@ def normalize_area_epsg(raw: str) -> str:
         v = v.split(":",1)[1]
     try:
         code = int(v)
-        if code in (4326, 4258):  # geographic -> not for area
+        if code in (4326, 4258):
             return "EPSG:3035"
         return f"EPSG:{code}"
     except Exception:
@@ -820,11 +779,9 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         write_parquet("tbl_flat", gdf_empty)
         return
 
-    # Ensure CRS
     if stacked.crs is None:
         stacked.set_crs(f"EPSG:{working_epsg}", inplace=True)
 
-    # Numeric prep (no coercion to 0)
     bases = ["importance","sensitivity","susceptibility"]
     for b in bases:
         if b in stacked.columns:
@@ -832,9 +789,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         else:
             stacked[b] = pd.Series(pd.NA, index=stacked.index, dtype="Float64")
 
-    # --- groupby code ---
     keys = ["code"]
-    # numeric min/max
     gnum = stacked.groupby(keys, dropna=False).agg({
         "importance": ["min","max"],
         "sensitivity": ["min","max"],
@@ -842,7 +797,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     })
     gnum.columns = [f"{c}_{s}" for c,s in gnum.columns]
 
-    # meta
     gmeta = stacked.groupby(keys, dropna=False).agg({
         "ref_geocodegroup": "first",
         "name_gis_geocodegroup": "first",
@@ -851,15 +805,12 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         "name_gis_assetgroup": (lambda s: ", ".join(pd.Series(s).dropna().astype(str).unique()))
     }).rename(columns={"ref_asset_group":"asset_groups_total", "name_gis_assetgroup":"asset_group_names"})
 
-    # overlap count
     goverlap = stacked.groupby(keys, dropna=False).size().to_frame("assets_overlap_total")
 
     tbl_flat = pd.concat([gnum, gmeta, goverlap], axis=1).reset_index()
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=stacked.crs)
 
-    # --- derive A..E codes + descriptions from config ---
     ranges_map, desc_map, _order = read_class_ranges(config_file)
-
     def add_code_desc(df: pd.DataFrame, base: str) -> pd.DataFrame:
         cmin = df[f"{base}_min"].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string")
         cmax = df[f"{base}_max"].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string")
@@ -868,11 +819,9 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         df[f"{base}_description_min"] = df[f"{base}_code_min"].apply(lambda k: desc_map.get(k, None))
         df[f"{base}_description_max"] = df[f"{base}_code_max"].apply(lambda k: desc_map.get(k, None))
         return df
-
     for b in bases:
         tbl_flat = add_code_desc(tbl_flat, b)
 
-    # --- area once per tile ---
     try:
         cfg = read_config(base_dir() / "system" / "config.ini")
         area_epsg = normalize_area_epsg(cfg["DEFAULT"].get("area_projection_epsg","3035"))
@@ -887,7 +836,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         metric = tbl_flat.to_crs("EPSG:3035")
         tbl_flat["area_m2"] = metric.geometry.area.astype("float64").round().astype("Int64")
 
-    # ---- ENV index (visualization) -------------------------------------------------
     DEFAULT_ENV_PROFILE = {
         'w_sensitivity': 0.35, 'w_susceptibility': 0.25, 'w_importance': 0.20, 'w_pressure': 0.20,
         'gamma': 0.0, 'pnorm_minmax': 4.0, 'overlap_cap_q': 0.95,
@@ -895,7 +843,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     }
 
     def _load_env_profile():
-        # 1) GeoParquet profile (preferred)
         p = gpq_dir() / "tbl_env_profile.parquet"
         try:
             if p.exists():
@@ -910,7 +857,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
                     return {**DEFAULT_ENV_PROFILE, **prof}
         except Exception as e:
             log_to_gui(log_widget, f"ENV profile parquet read failed: {e}")
-        # 2) JSON fallback
         j = base_dir() / "output" / "settings" / "env_index_profile.json"
         try:
             if j.exists():
@@ -933,15 +879,15 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 
     def _logistic01(x01: pd.Series, a: float, b: float) -> pd.Series:
         y = 1.0 / (1.0 + np.exp(-a * (x01.astype(float) - b)))
-        return _minmax01(pd.Series(y, index=x01.index))  # re-stretch til [0,1]
+        return _minmax01(pd.Series(y, index=x01.index))
 
     def _score01(s: pd.Series, method: str, a: float, b: float) -> pd.Series:
         if method == "percentile":
             return _percentile01(s)
-        x01 = _minmax01(s)  # linear/logistic use min–max first
+        x01 = _minmax01(s)
         if method == "logistic":
             return _logistic01(x01, a, b)
-        return x01  # linear
+        return x01
 
     def _pnorm_pair(s_min: pd.Series, s_max: pd.Series, p: float) -> pd.Series:
         a = pd.to_numeric(s_min, errors="coerce")
@@ -956,18 +902,17 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         w = np.array([float(weights.get(k, 0.0)) for k in keys], dtype=float)
         sw = np.nansum(w)
         if not np.isfinite(sw) or sw <= 0:
-            w[:] = 1.0 / max(1, len(keys))   # equal weights
+            w[:] = 1.0 / max(1, len(keys))
         else:
             w /= sw
         X = np.vstack([components[k].astype(float).values for k in keys])
-        if abs(gamma) < 1e-9:  # geometric mean
+        if abs(gamma) < 1e-9:
             Xc = np.clip(X, 1e-12, 1.0)
             y = np.exp(np.nansum(np.log(Xc) * w[:, None], axis=0))
         else:
             y = (np.nansum((w[:, None]) * (X ** gamma), axis=0)) ** (1.0 / gamma)
         return pd.Series(y, index=next(iter(components.values())).index)
 
-    # ---- build components ----
     prof = _load_env_profile()
     p = float(prof.get("pnorm_minmax", 4.0))
     scoring = str(prof.get("scoring","linear")).lower()
@@ -981,17 +926,18 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     susc_raw = _pnorm_pair(tbl_flat.get("susceptibility_min", pd.Series(index=tbl_flat.index)),
                            tbl_flat.get("susceptibility_max", pd.Series(index=tbl_flat.index)), p)
 
-    # pressure = overlaps per km², capped at quantile
     eps = 1e-9
     dens = tbl_flat["assets_overlap_total"].astype(float) / (tbl_flat["area_m2"].astype(float) / 1_000_000.0 + eps)
-    cap_q = float(prof.get("overlap_cap_q", 0.95))
+    try:
+        cap_q = float(prof.get("overlap_cap_q", 0.95))
+    except Exception:
+        cap_q = 0.95
     try:
         cap = np.nanquantile(dens.values, min(max(cap_q, 0.0), 1.0)) if len(dens) else np.nan
     except Exception:
         cap = np.nan
     press_raw = np.minimum(dens, cap) if np.isfinite(cap) else dens
 
-    # normalize to [0,1]
     imp_n   = _score01(imp_raw,  scoring, a, b)
     sens_n  = _score01(sens_raw, scoring, a, b)
     susc_n  = _score01(susc_raw, scoring, a, b)
@@ -1003,13 +949,11 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     env01 = _power_mean(components, weights, gamma).fillna(0.0)
     tbl_flat["env_index"] = (env01 * 100.0).round(2)
 
-    # optional components
     tbl_flat["env_imp"]   = (imp_n * 100).round(1)
     tbl_flat["env_sens"]  = (sens_n * 100).round(1)
     tbl_flat["env_susc"]  = (susc_n * 100).round(1)
     tbl_flat["env_press"] = (press_n * 100).round(1)
 
-    # stable column order
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
         'importance_min','importance_max','importance_code_min','importance_description_min','importance_code_max','importance_description_max',
@@ -1027,7 +971,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     write_parquet("tbl_flat", tbl_flat)
     log_to_gui(log_widget, f"tbl_flat saved with {len(tbl_flat):,} rows.")
 
-    # --- streaming backfill of area_m2 to tbl_stacked parts (no big reads) ---
+    # Stream backfill of area to stacked parts
     try:
         area_map = tbl_flat[['code','area_m2']].dropna().drop_duplicates(subset=['code'])
         area_map['code'] = area_map['code'].astype(str)
@@ -1065,16 +1009,25 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 def process_all(config_file: Path):
     try:
         cfg = read_config(config_file)
+
+        # Heartbeat from config (optional)
+        try:
+            global HEARTBEAT_SECS
+            HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
+        except Exception:
+            pass
+
         working_epsg = str(cfg["DEFAULT"].get("workingprojection_epsg","4326")).strip()
-        max_workers = int(cfg["DEFAULT"].get("max_workers","0"))
-        cell_size   = int(cfg["DEFAULT"].get("cell_size","18000"))
+        max_workers = cfg_get_int(cfg, "max_workers", 0)
+        cell_size   = cfg_get_int(cfg, "cell_size", 18000)
 
         # memory guard knobs (configurable)
-        approx_gb_per_worker = float(cfg["DEFAULT"].get("approx_gb_per_worker","8"))   # bigger -> fewer workers
-        mem_target_frac      = float(cfg["DEFAULT"].get("mem_target_frac","0.75"))     # use up to 75% of available
-        asset_soft_limit     = int(cfg["DEFAULT"].get("asset_soft_limit","200000"))    # pre-emptive split threshold
-        geocode_soft_limit   = int(cfg["DEFAULT"].get("geocode_soft_limit","160"))
+        approx_gb_per_worker = cfg_get_float(cfg, "approx_gb_per_worker", 8.0)
+        mem_target_frac      = cfg_get_float(cfg, "mem_target_frac", 0.75)
+        asset_soft_limit     = cfg_get_int(cfg, "asset_soft_limit", 200000)
+        geocode_soft_limit   = cfg_get_int(cfg, "geocode_soft_limit", 160)
 
+        # Clean outputs & temps at startup (user wants to keep temps on crash)
         cleanup_outputs(); update_progress(5)
 
         process_tbl_stacked(cfg, working_epsg, cell_size, max_workers,
@@ -1082,17 +1035,23 @@ def process_all(config_file: Path):
                             asset_soft_limit, geocode_soft_limit)
         flatten_tbl_stacked(config_file, working_epsg); update_progress(95)
 
+        # Success: remove any remaining temp directories, but keep final outputs
+        for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
+            _rm_rf(_dataset_dir(temp_dir))
+        
         log_to_gui(log_widget, "COMPLETED."); update_progress(100)
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
+        # Do NOT cleanup temps here (user wants to inspect them)
         raise
 
 # ----------------------------
-# Entrypoint (GUI)
+# Entrypoint (GUI default; headless optional)
 # ----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process stacked/flat GeoParquet with A..E categorisation + ENV index")
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+    parser.add_argument('--headless', action='store_true', help='Run without GUI (CLI mode)')
     args = parser.parse_args()
     original_working_directory = args.original_working_directory or os.getcwd()
     if "system" in os.path.basename(original_working_directory).lower():
@@ -1101,11 +1060,17 @@ if __name__ == "__main__":
     cfg_path = Path(original_working_directory) / "system" / "config.ini"
     cfg = read_config(cfg_path)
 
-    # Heartbeat from config
     try:
-        HEARTBEAT_SECS = int(cfg['DEFAULT'].get('heartbeat_secs', str(HEARTBEAT_SECS)))
+        HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
     except Exception:
         pass
+
+    if args.headless:
+        try:
+            process_all(cfg_path)
+        except Exception:
+            sys.exit(1)
+        sys.exit(0)
 
     ttk_theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 
