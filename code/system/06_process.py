@@ -264,10 +264,12 @@ def calculate_rows_per_chunk(n: int, max_memory_mb: int = 256, est_bytes_per_row
     rows = max(5_000, min(rows, hard_cap_rows))
     return max(1, min(rows, n))
 
+
 def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_workers: int) -> gpd.GeoDataFrame:
     if geodata is None or geodata.empty:
         return _mk_empty_gdf_like(geodata.crs if geodata is not None else None)
 
+    # meters → degrees (grovt, holder for grid-partisjonering i WGS84/arbeids-CRS)
     meters_per_degree = 111_320.0
     cell_deg = meters_cell / meters_per_degree
 
@@ -345,8 +347,25 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
         return geodata
 
     tagged = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=geodata.crs)
+
+    # ⬇️ Kritisk del: sørg for at hver geokode bare prosesseres én gang (hindrer moiré/overlagring)
+    try:
+        if 'id_geocode_object' in tagged.columns:
+            tagged = tagged.drop_duplicates(subset=['id_geocode_object'], keep='first')
+        elif 'code' in tagged.columns and 'name_gis_geocodegroup' in tagged.columns:
+            tagged = tagged.drop_duplicates(subset=['code','name_gis_geocodegroup'], keep='first')
+        elif 'code' in tagged.columns:
+            tagged = tagged.drop_duplicates(subset=['code'], keep='first')
+        else:
+            # Fallback via geometri (tregere, men trygt)
+            tagged = tagged.assign(__wkb__=tagged.geometry.apply(lambda g: g.wkb if g is not None else None))
+            tagged = tagged.drop_duplicates(subset=['__wkb__']).drop(columns=['__wkb__'])
+    except Exception:
+        pass
+
     _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
     return tagged
+
 
 def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, multiplier: int = 18):
     cell_ids = geocode_tagged['grid_cell'].unique().tolist()
