@@ -134,6 +134,49 @@ STATS = Stats()
 # -----------------------------------------------------------------------------
 # Config & paths
 # -----------------------------------------------------------------------------
+# Robust base dir resolution (copied from 01_import.py)
+def _exists(p: Path) -> bool:
+    try:
+        return p.exists()
+    except Exception:
+        return False
+
+def _has_config_at(root: Path) -> bool:
+    return _exists(root / "system" / "config.ini")
+
+def find_base_dir(cli_workdir: str | None = None) -> Path:
+    """Choose a canonical project base folder that contains system/config.ini.
+    Priority order:
+      1) env MESA_BASE_DIR
+      2) --original_working_directory (CLI)
+      3) this script's folder and parents
+      4) CWD and CWD/code
+    """
+    candidates = []
+    env_base = os.environ.get("MESA_BASE_DIR")
+    if env_base:
+        candidates.append(Path(env_base))
+    if cli_workdir:
+        candidates.append(Path(cli_workdir))
+    here = Path(__file__).resolve()
+    candidates += [here.parent, here.parent.parent, here.parent.parent.parent]
+    cwd = Path(os.getcwd())
+    candidates += [cwd, cwd / "code"]
+    seen = set(); uniq = []
+    for c in candidates:
+        try:
+            r = c.resolve()
+        except Exception:
+            r = c
+        if r not in seen:
+            seen.add(r); uniq.append(r)
+    for c in uniq:
+        if _has_config_at(c):
+            return c
+    if here.parent.name.lower() == "system":
+        return here.parent.parent
+    return here.parent
+
 def read_config(file_name: Path) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg.read(file_name, encoding="utf-8")
@@ -142,13 +185,7 @@ def read_config(file_name: Path) -> configparser.ConfigParser:
     return cfg
 
 def resolve_base_dir(cli_root: str | None) -> Path:
-    if cli_root:
-        return Path(cli_root)
-    base = Path(os.getcwd())
-    if base.name.lower() == "system":
-        return base.parent
-    return base
-
+    return find_base_dir(cli_root)
 def gpq_dir(base_dir: Path) -> Path:
     p = base_dir / "output" / "geoparquet"
     p.mkdir(parents=True, exist_ok=True)
@@ -1106,6 +1143,9 @@ def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
     log_to_gui(
         f"Merged GeoParquet geocodes → {gpq_dir(base_dir)}  "
         f"(added groups: {added_g}, added objects: {added_o:,}; totals => groups: {tot_g}, objects: {tot_o:,})"
+    )
+    log_to_gui(
+       "Completed H3 generation"
     )
     return added_o
 
