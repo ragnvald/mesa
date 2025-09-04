@@ -2,18 +2,17 @@
 """
 08_edit_line.py — Leaflet line editor (selective edit & delete) with Save/Discard + dropdown picker
 
-Tweaks in this version (per request):
-- Keep a visible Save button in the top bar (persists staged changes to disk).
-- Add explicit "Apply edit" and "Cancel edit" buttons that appear during geometry Edit mode.
-- Hide all other lines while editing the selected line; restore them when done.
-- Non-critical green debug/info messages are suppressed by default.
-- Left pane typography slightly smaller.
+Behavior:
+- Save/Discard in top bar (changes staged until saved).
+- Apply edit / Cancel edit buttons during geometry editing.
+- After Apply edit and after Save, the selected line is reloaded.
+- Selecting a line in the dropdown shows only that line until "Show all".
+- Non-critical green messages hidden; left pane text slightly smaller.
 """
 
 import os, sys, uuid, threading, locale, configparser, argparse, warnings
 from typing import Any, Dict, Optional
 
-# Prefer Edge backend to avoid console spam on Windows
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
 os.environ.setdefault('PYWEBVIEW_LOG', 'error')
 
@@ -169,7 +168,6 @@ class Api:
         except Exception:
             self._storage_epsg = 4326
 
-    # ---- helpers ----
     def _home_bounds(self):
         g = to_epsg4326(self._gdf)
         g = g[g.geometry.notna()]
@@ -213,7 +211,6 @@ class Api:
             feats.append({"type":"Feature","geometry": shp_to_geojson(geom),"properties": props})
         return {"type":"FeatureCollection","features": feats}
 
-    # ---- persistence ----
     def commit(self):
         with self._lock:
             ok = save_lines_gdf(self._pq_path, self._gdf)
@@ -231,7 +228,6 @@ class Api:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
-    # ---- API methods ----
     def get_state(self):
         with self._lock:
             try:
@@ -398,7 +394,6 @@ HTML = r"""<!doctype html>
       <button id="newBtn" class="btn" title="Start drawing a new line (N)">New line</button>
       <button id="editBtn" class="btn" title="Edit selected (E)" disabled>Edit</button>
       <button id="delBtn" class="btn" title="Delete selected (Del)" disabled>Delete</button>
-      <!-- These appear only while in edit mode -->
       <button id="editApplyBtn" class="btn" style="display:none;" title="Apply geometry changes">Apply edit</button>
       <button id="editCancelBtn" class="btn" style="display:none;" title="Cancel geometry changes">Cancel edit</button>
       <button id="helpToggle" class="btn" title="Explain map/edit icons">?</button>
@@ -407,9 +402,9 @@ HTML = r"""<!doctype html>
 
     <div id="helpBox" class="help">
       <strong>Map & edit</strong><br>
-      • <em>Draw Polyline</em> (pencil): start a new line (or use <span class="kbd">N</span>).<br>
-      • <em>Edit</em>: only the selected line is visible. Use <strong>Apply edit</strong> or <strong>Cancel edit</strong> when done.<br>
-      • Keyboard: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel edit.
+      • Draw (pencil) to add a new line (or <span class="kbd">N</span>).<br>
+      • Edit: only the selected line is visible until you choose “Show all”. Use <strong>Apply edit</strong> or <strong>Cancel edit</strong>.<br>
+      • Keys: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel edit.
     </div>
 
     <div class="row"><label>GIS name</label><input id="f_name_gis" type="text" readonly></div>
@@ -431,7 +426,7 @@ window.onerror = function(message, source, lineno, colno, error){
   if (el){ el.textContent = 'JS error: ' + message + ' @' + lineno + ':' + colno; el.className = 'status-err'; }
 };
 
-const QUIET_INFO = true; // hide non-critical green messages
+const QUIET_INFO = true;
 
 let MAP=null, BASE_OSM=null, BASE_SAT=null, LINES_GROUP=null, DRAW_CONTROL=null;
 let HOME_BOUNDS = null;
@@ -443,7 +438,8 @@ let SINGLE_DELETE_HANDLER = null;
 let DRAW_HANDLER = null;
 let DIAG = null;
 let DIRTY = false;
-let HIDDEN_LAYERS = {}; // id -> layer (temporarily removed while editing)
+let HIDDEN_LAYERS = {};
+let SHOW_ONLY_CURRENT = false;
 
 function showStatus(m, cls){ const el = document.getElementById('status'); el.textContent = m || ''; el.className = cls || ''; }
 function setFootLeft(m){ document.getElementById('foot-left').textContent = m || ''; }
@@ -466,6 +462,7 @@ function enableEditButtons(enabled){
 
 function setSelected(id, fly=false){
   SELECTED_ID = id || null;
+  SHOW_ONLY_CURRENT = !!id;
   const props = (() => {
     if (!id) return {};
     const layer = LAYER_BY_ID[id];
@@ -475,6 +472,7 @@ function setSelected(id, fly=false){
   enableEditButtons(!!id);
   const pickerSel = document.getElementById('pickerSel');
   if (pickerSel && pickerSel.value !== (id||"")) pickerSel.value = (id||"");
+  enforceVisibility();
   if (fly && id && LAYER_BY_ID[id]){
     try { MAP.fitBounds(LAYER_BY_ID[id].getBounds(), {padding:[20,20]}); } catch(e){}
   }
@@ -568,10 +566,9 @@ function initMapOnce(){
       setDirty(true);
 
       enableEditButtons(true);
-      setFootLeft('New line staged: ' + res.record.name_gis + ' (remember to Save)');
-      showStatus('New line staged.','status-ok');
       setSelected(res.record.name_gis, true);
       updateCountBadge();
+      showStatus('New line staged.','status-ok');
     }).catch(err => { showStatus('API error: '+err, 'status-err'); LINES_GROUP.removeLayer(tmp); });
   });
 
@@ -637,7 +634,7 @@ function cleanupSingleHandlers(){
   if (SINGLE_DELETE_HANDLER){ try{ SINGLE_DELETE_HANDLER.disable(); }catch(e){} SINGLE_DELETE_HANDLER = null; }
   if (SELECT_GROUP){ try{ MAP.removeLayer(SELECT_GROUP); }catch(e){} SELECT_GROUP = null; }
   setEditActionButtons(false);
-  showOthers();
+  enforceVisibility();
 }
 
 function hideOthers(){
@@ -659,6 +656,10 @@ function showOthers(){
     try{ LINES_GROUP.addLayer(lyr); }catch(e){}
   });
   HIDDEN_LAYERS = {};
+}
+
+function enforceVisibility(){
+  if (SHOW_ONLY_CURRENT && SELECTED_ID){ hideOthers(); } else { showOthers(); }
 }
 
 function setEditActionButtons(visible){
@@ -688,12 +689,12 @@ function toggleSingleEdit(){
 
 function applyEdit(){
   if (!SINGLE_EDIT_HANDLER) return;
-  // Leaflet.draw's toolbar uses private _save(); try public fallbacks just in case
   try{
     if (typeof SINGLE_EDIT_HANDLER._save === 'function') SINGLE_EDIT_HANDLER._save();
     else if (typeof SINGLE_EDIT_HANDLER.save === 'function') SINGLE_EDIT_HANDLER.save();
   }catch(e){}
   cleanupSingleHandlers();
+  reloadSelected();
 }
 
 function cancelEdit(){
@@ -718,20 +719,37 @@ function toggleSingleDelete(){
   setFootLeft('Delete mode (selected only): click ✓ to stage delete, or ✕ to cancel.');
 }
 
+async function reloadSelected(){
+  if (!SELECTED_ID) return;
+  try{
+    const res = await window.pywebview.api.get_all_lines();
+    if (!res.ok){ showStatus(res.error || 'Reload failed','status-err'); return; }
+    const feats = (res.geojson && res.geojson.features) ? res.geojson.features : [];
+    const f = feats.find(x => x.properties && x.properties.name_gis === SELECTED_ID);
+    if (!f){ showStatus('Selected line not found after reload','status-err'); return; }
+    const old = LAYER_BY_ID[SELECTED_ID];
+    if (old){ try{ LINES_GROUP.removeLayer(old); }catch(e){} }
+    delete LAYER_BY_ID[SELECTED_ID];
+    addFeature(f, false);
+    enforceVisibility();
+    fillForm(f.properties || {});
+    setFootLeft('Line reloaded.');
+  } catch(err){
+    showStatus('API error: '+err, 'status-err');
+  }
+}
+
 async function loadAll(){
   try{
     const st = await window.pywebview.api.get_state();
     if (!st.ok){ showStatus(st.error || 'State failed', 'status-err'); return; }
     DIAG = st.diag || null;
-    if (!QUIET_INFO) showStatus('Connected. Reading '+(DIAG?DIAG.path:'?'), 'status-ok');
 
     initMapOnce();
     cleanupSingleHandlers();
     clearLayers();
 
     updatePicker(st.records || []);
-    setFootLeft('Loaded '+ (DIAG ? DIAG.rows : '?') +' row(s) from '+ (DIAG ? DIAG.path : '?'));
-
     const res = await window.pywebview.api.get_all_lines();
     if (!res.ok){ showStatus(res.error || 'Load failed', 'status-err'); return; }
     const feats = res.geojson && res.geojson.features ? res.geojson.features : [];
@@ -742,6 +760,8 @@ async function loadAll(){
       if (feats.length > 0 && HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]});
       else MAP.setView([59.9139,10.7522], 5);
     }, 80);
+
+    enforceVisibility();
   } catch(err){
     showStatus('API error: '+err, 'status-err');
   }
@@ -749,7 +769,7 @@ async function loadAll(){
 
 function boot(){
   document.getElementById('homeBtn').addEventListener('click', ()=> { if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); });
-  document.getElementById('reloadBtn').addEventListener('click', ()=> { loadAll(); if (!QUIET_INFO) showStatus('Reloaded.','status-ok'); });
+  document.getElementById('reloadBtn').addEventListener('click', ()=> { loadAll(); });
   document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
   document.getElementById('newBtn').addEventListener('click', startNewLine);
   document.getElementById('editBtn').addEventListener('click', toggleSingleEdit);
@@ -771,6 +791,7 @@ function boot(){
       if (!res.ok){ showStatus('Save failed','status-err'); return; }
       setDirty(false);
       showStatus('All changes saved.','status-ok');
+      if (SELECTED_ID) { reloadSelected(); }
     } catch(err){ showStatus('API error: '+err,'status-err'); }
   });
 
@@ -782,7 +803,8 @@ function boot(){
       if (!res.ok){ showStatus(res.error || 'Discard failed','status-err'); return; }
       setDirty(false);
       await loadAll();
-      setSelected('');
+      const pickerSel = document.getElementById('pickerSel');
+      setSelected(pickerSel.value || '');
       showStatus('Reverted to last saved state.','status-ok');
     } catch(err){ showStatus('API error: '+err,'status-err'); }
   });
@@ -796,19 +818,18 @@ function boot(){
     if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
     else if (e.key === 'E' || e.key === 'e'){ if (!document.getElementById('editBtn').disabled) toggleSingleEdit(); }
     else if (e.key === 'Delete'){ if (!document.getElementById('delBtn').disabled) toggleSingleDelete(); }
-    else if (e.key === 'Escape'){ cancelEdit(); } // explicit cancel
+    else if (e.key === 'Escape'){ cancelEdit(); }
   });
 
   if (window.pywebview && window.pywebview.api) {
     loadAll();
   } else {
     showStatus('Waiting for backend…', 'status-warn');
-    window.addEventListener('pywebviewready', () => { if (!QUIET_INFO) showStatus('Backend ready. Loading…', 'status-ok'); loadAll(); });
+    window.addEventListener('pywebviewready', () => { loadAll(); });
     let tries = 0;
     const tic = setInterval(()=>{
       if (window.pywebview && window.pywebview.api){
         clearInterval(tic);
-        if (!QUIET_INFO) showStatus('Backend ready. Loading…', 'status-ok');
         loadAll();
       } else if (++tries > 50) {
         clearInterval(tic);
