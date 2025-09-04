@@ -16,6 +16,9 @@ from typing import Any, Dict, Optional
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
 os.environ.setdefault('PYWEBVIEW_LOG', 'error')
 
+# Quiet Chromium/WebView2 console noise
+os.environ.setdefault('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', '--disable-logging --log-level=3')
+
 try:
     locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 except Exception:
