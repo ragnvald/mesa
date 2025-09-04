@@ -1,16 +1,19 @@
-
 # -*- coding: utf-8 -*-
 """
-08_edit_lines_web_v8.py — Leaflet editor (UI polish)
-- Removed the Diagnostics button (as requested)
-- Footer no longer prints verbose CRS JSON; shows short CRS label (e.g., "EPSG:4326")
-- Adds CSS to prevent footer text wrapping into multiple lines
+08_edit_line.py — Leaflet line editor (selective edit & delete) with Save/Discard + dropdown picker
+
+Tweaks in this version (per request):
+- Keep a visible Save button in the top bar (persists staged changes to disk).
+- Add explicit "Apply edit" and "Cancel edit" buttons that appear during geometry Edit mode.
+- Hide all other lines while editing the selected line; restore them when done.
+- Non-critical green debug/info messages are suppressed by default.
+- Left pane typography slightly smaller.
 """
 
 import os, sys, uuid, threading, locale, configparser, argparse, warnings
 from typing import Any, Dict, Optional
 
-# Force Edge backend (avoid WinForms noise)
+# Prefer Edge backend to avoid console spam on Windows
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
 os.environ.setdefault('PYWEBVIEW_LOG', 'error')
 
@@ -88,7 +91,7 @@ def _from_wkb_df(pdf: pd.DataFrame) -> Optional[gpd.GeoDataFrame]:
     cand_names = [c for c in pdf.columns if "geom" in c.lower() or "geo" in c.lower() or c.lower()=="geometry"]
     for name in cand_names:
         s = pdf[name].dropna()
-        if s.empty: 
+        if s.empty:
             continue
         v = s.iloc[0]
         if isinstance(v, (bytes, bytearray, memoryview)):
@@ -102,7 +105,7 @@ def _from_wkb_df(pdf: pd.DataFrame) -> Optional[gpd.GeoDataFrame]:
 
 def load_lines_gdf_any(pq: str, default_epsg: int) -> gpd.GeoDataFrame:
     try:
-        gdf = gpd.read_parquet(pq)  # pyarrow
+        gdf = gpd.read_parquet(pq)
         if not _geometry_valid(gdf):
             raise ValueError("GeoParquet loaded but geometry column invalid")
     except Exception:
@@ -140,28 +143,6 @@ def from_epsg4326_to_storage(geom: BaseGeometry, storage_epsg: int) -> BaseGeome
     except Exception:
         return geom
 
-def crs_short_label(crs_obj) -> str:
-    try:
-        # GeoPandas/pyproj CRS
-        to_epsg = getattr(crs_obj, "to_epsg", None)
-        if callable(to_epsg):
-            epsg = to_epsg()
-            if epsg:
-                return f"EPSG:{epsg}"
-        to_string = getattr(crs_obj, "to_string", None)
-        if callable(to_string):
-            s = to_string()
-        else:
-            s = str(crs_obj)
-        if "EPSG:" in s.upper():
-            # Extract first occurrence
-            idx = s.upper().find("EPSG:")
-            return s[idx:idx+10].split()[0].strip(",;")
-        # Fallback compact
-        return "CRS set"
-    except Exception:
-        return "CRS set"
-
 # ---------------- Parse helpers ----------------
 def _parse_int_or_na(text: str):
     s = (text or "").strip()
@@ -182,13 +163,13 @@ class Api:
         self._base_dir = base_dir
         self._pq_path = lines_parquet_path(base_dir)
         self._lock = threading.Lock()
-
         self._gdf = load_lines_gdf_any(self._pq_path, 4326)
         try:
             self._storage_epsg = int(str(self._gdf.crs).split(":")[-1]) if "EPSG" in str(self._gdf.crs).upper() else 4326
         except Exception:
             self._storage_epsg = 4326
 
+    # ---- helpers ----
     def _home_bounds(self):
         g = to_epsg4326(self._gdf)
         g = g[g.geometry.notna()]
@@ -232,9 +213,23 @@ class Api:
             feats.append({"type":"Feature","geometry": shp_to_geojson(geom),"properties": props})
         return {"type":"FeatureCollection","features": feats}
 
-    def _save(self):
-        ok = save_lines_gdf(self._pq_path, self._gdf)
-        return {"ok": bool(ok), "count": int(len(self._gdf))}
+    # ---- persistence ----
+    def commit(self):
+        with self._lock:
+            ok = save_lines_gdf(self._pq_path, self._gdf)
+            return {"ok": bool(ok), "path": self._pq_path, "rows": int(len(self._gdf))}
+
+    def discard(self):
+        with self._lock:
+            try:
+                self._gdf = load_lines_gdf_any(self._pq_path, 4326)
+                try:
+                    self._storage_epsg = int(str(self._gdf.crs).split(":")[-1]) if "EPSG" in str(self._gdf.crs).upper() else 4326
+                except Exception:
+                    self._storage_epsg = 4326
+                return {"ok": True, "rows": int(len(self._gdf))}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
     # ---- API methods ----
     def get_state(self):
@@ -244,7 +239,7 @@ class Api:
                         for _, r in self._gdf[["name_gis","name_user"]].iterrows()]
                 diag = {
                     "rows": int(len(self._gdf)),
-                    "crs": crs_short_label(self._gdf.crs),
+                    "crs": str(self._gdf.crs),
                     "path": self._pq_path
                 }
                 return {"ok": True, "records": recs, "diag": diag}
@@ -277,7 +272,7 @@ class Api:
                 else:
                     self._gdf.loc[sel, field] = ("" if value is None else str(value)).strip()
                 self._gdf = _ensure_schema_types(self._gdf)
-                return self._save()
+                return {"ok": True, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -297,9 +292,6 @@ class Api:
                     "description":"", "geometry": geom_s
                 }
                 self._gdf = pd.concat([self._gdf, gpd.GeoDataFrame([row], geometry="geometry", crs=self._gdf.crs)], ignore_index=True)
-                save_res = self._save()
-                if not save_res.get("ok", False):
-                    return save_res
 
                 g = gpd.GeoDataFrame([row], geometry="geometry", crs=self._gdf.crs)
                 g_ll = to_epsg4326(g)
@@ -308,7 +300,7 @@ class Api:
                     "geometry": shp_to_geojson(g_ll.geometry.iloc[0]),
                     "properties": {"name_gis": new_id, "name_user":"", "segment_length": None, "segment_width": None, "description": ""}
                 }
-                return {"ok": True, "feature": feat, "record": {"name_gis": new_id, "name_user": ""}}
+                return {"ok": True, "feature": feat, "record": {"name_gis": new_id, "name_user": ""}, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -323,7 +315,7 @@ class Api:
                 if not sel.any():
                     return {"ok": False, "error": f"Line '{name_gis}' not found."}
                 self._gdf.loc[sel, "geometry"] = [geom_s] * sel.sum()
-                return self._save()
+                return {"ok": True, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -334,7 +326,7 @@ class Api:
                 self._gdf = self._gdf[self._gdf["name_gis"].astype(str).str.strip() != str(name_gis).strip()].reset_index(drop=True)
                 if len(self._gdf) == before:
                     return {"ok": False, "error": f"Line '{name_gis}' not found."}
-                return self._save()
+                return {"ok": True, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -347,7 +339,7 @@ HTML = r"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Edit Lines / Segments (GeoParquet)</title>
+<title>Edit Line (GeoParquet)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -358,15 +350,16 @@ HTML = r"""<!doctype html>
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
   .wrap { height:100vh; display:grid; grid-template-columns: 1fr 2fr; grid-template-rows: 56px 1fr 26px; grid-template-areas: "bar bar" "form map" "foot foot"; }
   .bar { grid-area: bar; display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:2px solid #2b3442; }
-  .form { grid-area: form; border-right:2px solid #2b3442; padding:10px 12px; overflow:auto; }
+  .form { grid-area: form; border-right:2px solid #2b3442; padding:10px 12px; overflow:auto; font-size:14px; } /* smaller text */
   .map { grid-area: map; position:relative; }
   #map { position:absolute; inset:0; }
   .foot { grid-area: foot; font-size:12px; color:#475569; padding:4px 10px; border-top:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .btn { padding:6px 10px; border:1px solid #ccd; background:#fff; border-radius:6px; cursor:pointer; }
+  .btn:disabled { opacity:0.5; cursor:not-allowed; }
   .btn:active { transform:translateY(1px); }
   .row { margin-bottom:10px; }
-  label { display:block; font-weight:600; margin-bottom:4px; }
-  input[type=text], input[type=number], textarea { width:100%; box-sizing:border-box; padding:8px; border:1px solid #cbd5e1; border-radius:6px; }
+  label { display:block; font-weight:600; margin-bottom:4px; font-size:13px; } /* smaller label */
+  input[type=text], input[type=number], textarea, select { width:100%; box-sizing:border-box; padding:8px; border:1px solid #cbd5e1; border-radius:6px; font-size:14px; } /* smaller inputs */
   input[readonly] { background:#f8fafc; color:#64748b; }
   textarea { resize: vertical; min-height: 64px; }
   #status { min-height: 18px; margin-top:4px; }
@@ -374,15 +367,11 @@ HTML = r"""<!doctype html>
   .status-warn { color:#b45309; }
   .status-err { color:#b91c1c; }
   .hint { font-size:12px; color:#475569; margin-left:8px; }
-  .picker { margin-bottom:12px; border-bottom:1px dashed #cbd5e1; padding-bottom:10px; }
-  .picker h3 { margin:0 0 6px 0; font-size:14px; }
-  .picker input { width:100%; margin-bottom:6px; }
-  .list { max-height:220px; overflow:auto; border:1px solid #e2e8f0; border-radius:6px; }
-  .item { padding:6px 8px; border-bottom:1px solid #eef2f7; cursor:pointer; }
-  .item:hover { background:#f8fafc; }
-  .item.active { background:#e6f3ff; }
-  .toolbar { display:flex; gap:6px; margin:6px 0 10px; }
+  .toolbar { display:flex; gap:6px; margin:6px 0 10px; align-items:center; flex-wrap: wrap; }
   .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px; border:1px solid #cbd5e1; padding:1px 4px; border-radius:4px; background:#f8fafc; }
+  .help { font-size:12px; color:#334155; border:1px dashed #cbd5e1; padding:6px 8px; border-radius:6px; display:none; background:#f8fafc; }
+  .help strong { font-weight:600; }
+  .badge { font-size:11px; border:1px solid #cbd5e1; border-radius:10px; padding:1px 6px; background:#f8fafc; }
 </style>
 </head>
 <body>
@@ -390,20 +379,37 @@ HTML = r"""<!doctype html>
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
     <button id="reloadBtn" class="btn">Reload</button>
+    <button id="saveBtn" class="btn">Save</button>
+    <button id="discardBtn" class="btn">Discard</button>
     <button id="exitBtn" class="btn">Exit</button>
-    <div class="hint">New: <span class="kbd">N</span> • Finish: <span class="kbd">Enter</span> or double-click • Cancel: <span class="kbd">Esc</span> • Edit: <span class="kbd">E</span> • Delete: <span class="kbd">Del</span></div>
+    <span id="dirtyBadge" class="badge" style="display:none;">Unsaved changes</span>
+    <div class="hint">New: <span class="kbd">N</span> • Finish: <span class="kbd">Enter</span> or double-click • Cancel edit: <span class="kbd">Esc</span> • Edit: <span class="kbd">E</span> • Delete: <span class="kbd">Del</span></div>
   </div>
 
   <div class="form">
-    <div class="picker">
-      <h3>Lines</h3>
-      <input id="filter" type="text" placeholder="Filter by title or GIS id…">
-      <div class="toolbar">
-        <button id="newBtn" class="btn" title="Start drawing a new line (N)">New line</button>
-        <button id="editBtn" class="btn" title="Toggle edit vertices (E)">Edit</button>
-        <button id="delBtn" class="btn" title="Toggle delete mode (Del)">Delete</button>
-      </div>
-      <div id="list" class="list"></div>
+    <div class="row">
+      <label>Line</label>
+      <select id="pickerSel">
+        <option value="">Show all</option>
+      </select>
+    </div>
+
+    <div class="toolbar">
+      <button id="newBtn" class="btn" title="Start drawing a new line (N)">New line</button>
+      <button id="editBtn" class="btn" title="Edit selected (E)" disabled>Edit</button>
+      <button id="delBtn" class="btn" title="Delete selected (Del)" disabled>Delete</button>
+      <!-- These appear only while in edit mode -->
+      <button id="editApplyBtn" class="btn" style="display:none;" title="Apply geometry changes">Apply edit</button>
+      <button id="editCancelBtn" class="btn" style="display:none;" title="Cancel geometry changes">Cancel edit</button>
+      <button id="helpToggle" class="btn" title="Explain map/edit icons">?</button>
+      <span id="countInfo" class="hint"></span>
+    </div>
+
+    <div id="helpBox" class="help">
+      <strong>Map & edit</strong><br>
+      • <em>Draw Polyline</em> (pencil): start a new line (or use <span class="kbd">N</span>).<br>
+      • <em>Edit</em>: only the selected line is visible. Use <strong>Apply edit</strong> or <strong>Cancel edit</strong> when done.<br>
+      • Keyboard: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel edit.
     </div>
 
     <div class="row"><label>GIS name</label><input id="f_name_gis" type="text" readonly></div>
@@ -420,25 +426,30 @@ HTML = r"""<!doctype html>
 </div>
 
 <script>
-// Report JS errors to the UI
 window.onerror = function(message, source, lineno, colno, error){
-  const txt = 'JS error: ' + message + ' @' + lineno + ':' + colno;
   const el = document.getElementById('status');
-  if (el){ el.textContent = txt; el.className = 'status-err'; }
+  if (el){ el.textContent = 'JS error: ' + message + ' @' + lineno + ':' + colno; el.className = 'status-err'; }
 };
 
-let MAP, BASE_OSM, BASE_SAT, LINES_GROUP, DRAW_CONTROL;
+const QUIET_INFO = true; // hide non-critical green messages
+
+let MAP=null, BASE_OSM=null, BASE_SAT=null, LINES_GROUP=null, DRAW_CONTROL=null;
 let HOME_BOUNDS = null;
 let SELECTED_ID = null;
 let LAYER_BY_ID = {};
+let SELECT_GROUP = null;
+let SINGLE_EDIT_HANDLER = null;
+let SINGLE_DELETE_HANDLER = null;
 let DRAW_HANDLER = null;
-let EDIT_ACTIVE = false, DELETE_ACTIVE = false;
 let DIAG = null;
+let DIRTY = false;
+let HIDDEN_LAYERS = {}; // id -> layer (temporarily removed while editing)
 
 function showStatus(m, cls){ const el = document.getElementById('status'); el.textContent = m || ''; el.className = cls || ''; }
 function setFootLeft(m){ document.getElementById('foot-left').textContent = m || ''; }
 function setFootRight(m){ document.getElementById('foot-right').textContent = m || ''; }
-function clearStatus(){ showStatus('',''); }
+function dirtyBadge(show){ document.getElementById('dirtyBadge').style.display = show ? '' : 'none'; }
+function setDirty(v){ DIRTY = !!v; dirtyBadge(DIRTY); }
 
 function fillForm(p){
   document.getElementById('f_name_gis').value = p?.name_gis || '';
@@ -448,60 +459,73 @@ function fillForm(p){
   document.getElementById('f_desc').value     = p?.description || '';
 }
 
+function enableEditButtons(enabled){
+  document.getElementById('editBtn').disabled = !enabled;
+  document.getElementById('delBtn').disabled  = !enabled;
+}
+
 function setSelected(id, fly=false){
   SELECTED_ID = id || null;
-  document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.dataset.id === (id||'')));
-  const layer = id ? LAYER_BY_ID[id] : null;
-  const props = (layer && layer.feature) ? layer.feature.properties : {};
+  const props = (() => {
+    if (!id) return {};
+    const layer = LAYER_BY_ID[id];
+    return (layer && layer.feature) ? layer.feature.properties : {};
+  })();
   fillForm(props||{});
-  if (fly && layer){
-    try { MAP.fitBounds(layer.getBounds(), {padding:[20,20]}); } catch(e){}
+  enableEditButtons(!!id);
+  const pickerSel = document.getElementById('pickerSel');
+  if (pickerSel && pickerSel.value !== (id||"")) pickerSel.value = (id||"");
+  if (fly && id && LAYER_BY_ID[id]){
+    try { MAP.fitBounds(LAYER_BY_ID[id].getBounds(), {padding:[20,20]}); } catch(e){}
   }
 }
 
-function updateList(records){
-  const list = document.getElementById('list');
-  list.innerHTML = '';
-  records.forEach(rec => {
-    const div = document.createElement('div');
-    div.className = 'item';
-    div.dataset.id = rec.name_gis;
+function updatePicker(records){
+  const sel = document.getElementById('pickerSel');
+  const keep = sel.value;
+  sel.innerHTML = '';
+  const optAll = document.createElement('option'); optAll.value=''; optAll.textContent='Show all';
+  sel.appendChild(optAll);
+  records.forEach(rec=>{
+    const opt = document.createElement('option');
+    opt.value = rec.name_gis;
     const title = (rec.name_user && rec.name_user.trim().length>0) ? rec.name_user : '(untitled)';
-    div.textContent = `${title} — ${rec.name_gis}`;
-    div.addEventListener('click', () => setSelected(rec.name_gis, true));
-    list.appendChild(div);
+    opt.textContent = `${title} — ${rec.name_gis}`;
+    sel.appendChild(opt);
   });
-  if (SELECTED_ID){
-    document.querySelectorAll('.item').forEach(el => el.classList.toggle('active', el.dataset.id === SELECTED_ID));
-  }
-  // Only show compact CRS label
-  setFootRight(records.length + ' line(s)');
+  sel.value = keep && (Array.from(sel.options).some(o=>o.value===keep)) ? keep : '';
+  enableEditButtons(!!sel.value);
+  document.getElementById('countInfo').textContent = records.length + ' line(s)';
 }
 
 function bindAuto(fieldId, fieldName){
   const el = document.getElementById(fieldId);
   el.addEventListener('change', function(){
     if (!SELECTED_ID) return;
-    clearStatus();
+    showStatus('Staging…','status-warn');
     window.pywebview.api.update_attribute(SELECTED_ID, fieldName, el.value).then(function(res){
-      if (!res.ok){ showStatus(res.error || 'Save failed', 'status-err'); }
+      if (!res.ok){ showStatus(res.error || 'Update failed', 'status-err'); }
       else {
         const layer = LAYER_BY_ID[SELECTED_ID];
-        if (layer && layer.feature){ layer.feature.properties[fieldName] = (fieldName==='segment_length'||fieldName==='segment_width') ? (el.value===''?null:Number(el.value)) : el.value; }
+        if (layer && layer.feature){ layer.feature.properties[fieldName] =
+          (fieldName==='segment_length'||fieldName==='segment_width') ? (el.value===''?null:Number(el.value)) : el.value; }
         if (fieldName === 'name_user'){
-          const item = document.querySelector(`.item[data-id="${SELECTED_ID}"]`);
-          if (item){
+          const picker = document.getElementById('pickerSel');
+          const opt = Array.from(picker.options).find(o=>o.value===SELECTED_ID);
+          if (opt){
             const title = (el.value && el.value.trim().length>0) ? el.value : '(untitled)';
-            item.textContent = `${title} — ${SELECTED_ID}`;
+            opt.textContent = `${title} — ${SELECTED_ID}`;
           }
         }
-        showStatus('Saved', 'status-ok');
+        setDirty(true);
+        showStatus('Staged (not saved). Click Save to commit.','status-ok');
       }
     }).catch(function(err){ showStatus('API error: '+err, 'status-err'); });
   });
 }
 
-function initMap(){
+function initMapOnce(){
+  if (MAP) return;
   MAP = L.map('map');
   BASE_OSM = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, crossOrigin:true, attribution:'© OpenStreetMap'}).addTo(MAP);
   BASE_SAT = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19, crossOrigin:true, attribution:'Esri, Maxar'});
@@ -511,58 +535,84 @@ function initMap(){
   LINES_GROUP = L.featureGroup().addTo(MAP);
 
   DRAW_CONTROL = new L.Control.Draw({
-    edit: { featureGroup: LINES_GROUP, poly: { allowIntersection:false } },
+    edit: { featureGroup: L.featureGroup() }, // dummy
     draw: { polygon:false, circle:false, rectangle:false, marker:false, circlemarker:false, polyline:{ shapeOptions:{ color:'#ff7f50', weight:4 } } }
   });
   MAP.addControl(DRAW_CONTROL);
 
-  MAP.on('draw:drawstart', function(e){ if (e.layerType === 'polyline'){ DRAW_HANDLER = e.handler || (DRAW_CONTROL && DRAW_CONTROL._toolbars.draw && DRAW_CONTROL._toolbars.draw._modes.polyline && DRAW_CONTROL._toolbars.draw._modes.polyline.handler) || null; } });
+  MAP.on('draw:drawstart', function(e){
+    if (e.layerType === 'polyline'){
+      DRAW_HANDLER = e.handler || (DRAW_CONTROL && DRAW_CONTROL._toolbars.draw && DRAW_CONTROL._toolbars.draw._modes.polyline && DRAW_CONTROL._toolbars.draw._modes.polyline.handler) || null;
+    }
+  });
   MAP.on('draw:drawstop', function(e){ DRAW_HANDLER = null; });
 
   MAP.on(L.Draw.Event.CREATED, function(e){
-    clearStatus();
+    showStatus('Staging new line…','status-warn');
     const tmp = e.layer; LINES_GROUP.addLayer(tmp);
     const gj = tmp.toGeoJSON();
     window.pywebview.api.add_line(gj).then(function(res){
       if (!res.ok){ showStatus(res.error || 'Add failed','status-err'); LINES_GROUP.removeLayer(tmp); return; }
       LINES_GROUP.removeLayer(tmp); addFeature(res.feature, true);
-      if (res.record){ const items = Array.from(document.querySelectorAll('.item')).map(x => ({name_gis:x.dataset.id, name_user:x.textContent.split(' — ')[0]})); items.push(res.record); updateList(items); }
-      setFootLeft('Added new line: ' + res.record.name_gis);
+      const picker = document.getElementById('pickerSel');
+      const opt = document.createElement('option');
+      opt.value = res.record.name_gis;
+      opt.textContent = `(untitled) — ${res.record.name_gis}`;
+      picker.appendChild(opt);
+      picker.value = res.record.name_gis;
+
+      document.getElementById('f_seg_len').value = 1000;
+      document.getElementById('f_seg_wid').value = 600;
+      window.pywebview.api.update_attribute(res.record.name_gis, 'segment_length', 1000);
+      window.pywebview.api.update_attribute(res.record.name_gis, 'segment_width', 600);
+      setDirty(true);
+
+      enableEditButtons(true);
+      setFootLeft('New line staged: ' + res.record.name_gis + ' (remember to Save)');
+      showStatus('New line staged.','status-ok');
+      setSelected(res.record.name_gis, true);
+      updateCountBadge();
     }).catch(err => { showStatus('API error: '+err, 'status-err'); LINES_GROUP.removeLayer(tmp); });
   });
 
   MAP.on(L.Draw.Event.EDITED, function(e){
-    clearStatus();
     e.layers.eachLayer(function(layer){
       const f = layer.feature; if (!f || !f.properties || !f.properties.name_gis) return;
       window.pywebview.api.update_geometry(f.properties.name_gis, layer.toGeoJSON().geometry).then(function(res){
-        if (!res.ok){ showStatus(res.error || 'Geometry save failed','status-err'); }
-        else setFootLeft('Geometry saved for ' + f.properties.name_gis);
+        if (!res.ok){ showStatus(res.error || 'Geometry update failed','status-err'); }
+        else { setDirty(true); setFootLeft('Geometry staged for ' + f.properties.name_gis); showStatus('Geometry staged.','status-ok'); }
       }).catch(err => showStatus('API error: '+err,'status-err'));
     });
   });
 
   MAP.on(L.Draw.Event.DELETED, function(e){
-    clearStatus();
     const ids = [];
     e.layers.eachLayer(function(layer){ const f = layer.feature; if (f && f.properties && f.properties.name_gis) ids.push(f.properties.name_gis); });
     (async function(){
       for (let i=0;i<ids.length;i++){
         try{
           const res = await window.pywebview.api.delete_line(ids[i]);
-          if (!res.ok){ showStatus(res.error || 'Delete failed','status-err'); }
-          delete LAYER_BY_ID[ids[i]];
-          const node = document.querySelector(`.item[data-id="${ids[i]}"]`);
-          if (node) node.remove();
-          if (SELECTED_ID===ids[i]) setSelected(null);
-          setFootLeft('Deleted ' + ids[i]);
+          if (!res.ok){ showStatus(res.error || 'Delete failed','status-err'); continue; }
+          const l = LAYER_BY_ID[ids[i]];
+          if (l){ LINES_GROUP.removeLayer(l); delete LAYER_BY_ID[ids[i]]; }
+          const picker = document.getElementById('pickerSel');
+          Array.from(picker.options).forEach(o=>{ if (o.value===ids[i]) o.remove(); });
+          if (SELECTED_ID===ids[i]) setSelected('');
+          setDirty(true);
+          setFootLeft('Deleted (staged) ' + ids[i]);
         } catch(err){ showStatus('API error: '+err,'status-err'); }
       }
-      setFootRight(document.querySelectorAll('.item').length + ' line(s)');
+      updateCountBadge();
     })();
   });
 
   setTimeout(()=> MAP.invalidateSize(), 120);
+}
+
+function clearLayers(){
+  if (!LINES_GROUP) return;
+  LINES_GROUP.clearLayers();
+  LAYER_BY_ID = {};
 }
 
 function addFeature(feature, selectAfter=false){
@@ -577,26 +627,95 @@ function addFeature(feature, selectAfter=false){
   });
 }
 
+function updateCountBadge(){
+  document.getElementById('countInfo').textContent =
+    Object.keys(LAYER_BY_ID).length + ' line(s)';
+}
+
+function cleanupSingleHandlers(){
+  if (SINGLE_EDIT_HANDLER){ try{ SINGLE_EDIT_HANDLER.disable(); }catch(e){} SINGLE_EDIT_HANDLER = null; }
+  if (SINGLE_DELETE_HANDLER){ try{ SINGLE_DELETE_HANDLER.disable(); }catch(e){} SINGLE_DELETE_HANDLER = null; }
+  if (SELECT_GROUP){ try{ MAP.removeLayer(SELECT_GROUP); }catch(e){} SELECT_GROUP = null; }
+  setEditActionButtons(false);
+  showOthers();
+}
+
+function hideOthers(){
+  HIDDEN_LAYERS = {};
+  Object.keys(LAYER_BY_ID).forEach(id=>{
+    if (id !== SELECTED_ID){
+      const lyr = LAYER_BY_ID[id];
+      if (lyr && MAP.hasLayer(lyr)){
+        LINES_GROUP.removeLayer(lyr);
+        HIDDEN_LAYERS[id] = lyr;
+      }
+    }
+  });
+}
+
+function showOthers(){
+  Object.keys(HIDDEN_LAYERS).forEach(id=>{
+    const lyr = HIDDEN_LAYERS[id];
+    try{ LINES_GROUP.addLayer(lyr); }catch(e){}
+  });
+  HIDDEN_LAYERS = {};
+}
+
+function setEditActionButtons(visible){
+  document.getElementById('editApplyBtn').style.display  = visible ? '' : 'none';
+  document.getElementById('editCancelBtn').style.display = visible ? '' : 'none';
+}
+
 function startNewLine(){
-  clearStatus();
+  cleanupSingleHandlers();
   const h = DRAW_CONTROL && DRAW_CONTROL._toolbars.draw && DRAW_CONTROL._toolbars.draw._modes.polyline && DRAW_CONTROL._toolbars.draw._modes.polyline.handler;
   if (h){ h.enable(); setFootLeft('Drawing: click to add points, double-click or Enter to finish.'); }
 }
-function toggleEdit(){
-  clearStatus();
-  if (!DRAW_CONTROL || !DRAW_CONTROL._toolbars || !DRAW_CONTROL._toolbars.edit) return;
-  const h = DRAW_CONTROL._toolbars.edit._modes.edit && DRAW_CONTROL._toolbars.edit._modes.edit.handler;
-  if (!h) return;
-  if (EDIT_ACTIVE){ h.disable(); EDIT_ACTIVE=false; setFootLeft(''); }
-  else { h.enable(); EDIT_ACTIVE=true; DELETE_ACTIVE=false; const r = DRAW_CONTROL._toolbars.edit._modes.remove && DRAW_CONTROL._toolbars.edit._modes.remove.handler; if (r) r.disable(); setFootLeft('Edit mode: drag vertices, then click Save.'); }
+
+function toggleSingleEdit(){
+  if (!SELECTED_ID){ showStatus('Select a line first', 'status-warn'); return; }
+  if (SINGLE_EDIT_HANDLER){ cleanupSingleHandlers(); setFootLeft(''); return; }
+  if (SINGLE_DELETE_HANDLER){ cleanupSingleHandlers(); }
+  const layer = LAYER_BY_ID[SELECTED_ID];
+  if (!layer){ showStatus('Selected line not found in map', 'status-err'); return; }
+  hideOthers();
+  SELECT_GROUP = L.featureGroup([layer]).addTo(MAP);
+  SINGLE_EDIT_HANDLER = new L.EditToolbar.Edit(MAP, { featureGroup: SELECT_GROUP, poly:{ allowIntersection:false } });
+  SINGLE_EDIT_HANDLER.enable();
+  setEditActionButtons(true);
+  setFootLeft('Edit mode: adjust vertices, then “Apply edit” or “Cancel edit”.');
 }
-function toggleDelete(){
-  clearStatus();
-  if (!DRAW_CONTROL || !DRAW_CONTROL._toolbars || !DRAW_CONTROL._toolbars.edit) return;
-  const r = DRAW_CONTROL._toolbars.edit._modes.remove && DRAW_CONTROL._toolbars.edit._modes.remove.handler;
-  if (!r) return;
-  if (DELETE_ACTIVE){ r.disable(); DELETE_ACTIVE=false; setFootLeft(''); }
-  else { r.enable(); DELETE_ACTIVE=true; EDIT_ACTIVE=false; const h = DRAW_CONTROL._toolbars.edit._modes.edit && DRAW_CONTROL._toolbars.edit._modes.edit.handler; if (h) h.disable(); setFootLeft('Delete mode: click lines to remove, then Save.'); }
+
+function applyEdit(){
+  if (!SINGLE_EDIT_HANDLER) return;
+  // Leaflet.draw's toolbar uses private _save(); try public fallbacks just in case
+  try{
+    if (typeof SINGLE_EDIT_HANDLER._save === 'function') SINGLE_EDIT_HANDLER._save();
+    else if (typeof SINGLE_EDIT_HANDLER.save === 'function') SINGLE_EDIT_HANDLER.save();
+  }catch(e){}
+  cleanupSingleHandlers();
+}
+
+function cancelEdit(){
+  if (!SINGLE_EDIT_HANDLER) return;
+  try{
+    if (typeof SINGLE_EDIT_HANDLER.revertLayers === 'function') SINGLE_EDIT_HANDLER.revertLayers();
+    else if (typeof SINGLE_EDIT_HANDLER._revertLayers === 'function') SINGLE_EDIT_HANDLER._revertLayers();
+  }catch(e){}
+  cleanupSingleHandlers();
+  showStatus('Edit canceled.','status-warn');
+}
+
+function toggleSingleDelete(){
+  if (!SELECTED_ID){ showStatus('Select a line first', 'status-warn'); return; }
+  if (SINGLE_DELETE_HANDLER){ cleanupSingleHandlers(); setFootLeft(''); return; }
+  if (SINGLE_EDIT_HANDLER){ cleanupSingleHandlers(); }
+  const layer = LAYER_BY_ID[SELECTED_ID];
+  if (!layer){ showStatus('Selected line not found in map', 'status-err'); return; }
+  SELECT_GROUP = L.featureGroup([layer]).addTo(MAP);
+  SINGLE_DELETE_HANDLER = new L.EditToolbar.Delete(MAP, { featureGroup: SELECT_GROUP });
+  SINGLE_DELETE_HANDLER.enable();
+  setFootLeft('Delete mode (selected only): click ✓ to stage delete, or ✕ to cancel.');
 }
 
 async function loadAll(){
@@ -604,9 +723,13 @@ async function loadAll(){
     const st = await window.pywebview.api.get_state();
     if (!st.ok){ showStatus(st.error || 'State failed', 'status-err'); return; }
     DIAG = st.diag || null;
-    showStatus('Connected. Reading '+(DIAG?DIAG.path:'?'), 'status-ok');
-    initMap();
-    updateList(st.records || []);
+    if (!QUIET_INFO) showStatus('Connected. Reading '+(DIAG?DIAG.path:'?'), 'status-ok');
+
+    initMapOnce();
+    cleanupSingleHandlers();
+    clearLayers();
+
+    updatePicker(st.records || []);
     setFootLeft('Loaded '+ (DIAG ? DIAG.rows : '?') +' row(s) from '+ (DIAG ? DIAG.path : '?'));
 
     const res = await window.pywebview.api.get_all_lines();
@@ -614,6 +737,7 @@ async function loadAll(){
     const feats = res.geojson && res.geojson.features ? res.geojson.features : [];
     feats.forEach(f => addFeature(f, false));
     HOME_BOUNDS = res.home_bounds || null;
+    updateCountBadge();
     setTimeout(function(){
       if (feats.length > 0 && HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]});
       else MAP.setView([59.9139,10.7522], 5);
@@ -623,51 +747,74 @@ async function loadAll(){
   }
 }
 
-function applyFilter(){
-  const q = (document.getElementById('filter').value || '').toLowerCase();
-  document.querySelectorAll('.item').forEach(el => {
-    const t = el.textContent.toLowerCase();
-    el.style.display = t.includes(q) ? '' : 'none';
-  });
-}
-
 function boot(){
-  try{
-    document.getElementById('homeBtn').addEventListener('click', ()=> { if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); });
-    document.getElementById('reloadBtn').addEventListener('click', ()=> { if (window.pywebview && window.pywebview.api) loadAll(); });
-    document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
-    document.getElementById('newBtn').addEventListener('click', startNewLine);
-    document.getElementById('editBtn').addEventListener('click', toggleEdit);
-    document.getElementById('delBtn').addEventListener('click', toggleDelete);
-    document.getElementById('filter').addEventListener('input', applyFilter);
+  document.getElementById('homeBtn').addEventListener('click', ()=> { if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); });
+  document.getElementById('reloadBtn').addEventListener('click', ()=> { loadAll(); if (!QUIET_INFO) showStatus('Reloaded.','status-ok'); });
+  document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
+  document.getElementById('newBtn').addEventListener('click', startNewLine);
+  document.getElementById('editBtn').addEventListener('click', toggleSingleEdit);
+  document.getElementById('delBtn').addEventListener('click', toggleSingleDelete);
+  document.getElementById('editApplyBtn').addEventListener('click', applyEdit);
+  document.getElementById('editCancelBtn').addEventListener('click', cancelEdit);
+  document.getElementById('helpToggle').addEventListener('click', ()=>{
+    const box = document.getElementById('helpBox'); box.style.display = (box.style.display==='none'||box.style.display==='') ? 'block' : 'none';
+  });
+  document.getElementById('pickerSel').addEventListener('change', (e)=>{
+    const id = e.target.value || '';
+    setSelected(id, !!id);
+  });
 
-    bindAuto('f_name_user','name_user');
-    bindAuto('f_seg_len','segment_length');
-    bindAuto('f_seg_wid','segment_width');
-    bindAuto('f_desc','description');
+  document.getElementById('saveBtn').addEventListener('click', async ()=>{
+    showStatus('Saving…','status-warn');
+    try{
+      const res = await window.pywebview.api.commit();
+      if (!res.ok){ showStatus('Save failed','status-err'); return; }
+      setDirty(false);
+      showStatus('All changes saved.','status-ok');
+    } catch(err){ showStatus('API error: '+err,'status-err'); }
+  });
 
-    if (window.pywebview && window.pywebview.api) {
-      loadAll();
-    } else {
-      showStatus('Waiting for backend…', 'status-warn');
-      window.addEventListener('pywebviewready', () => {
-        showStatus('Backend ready. Loading…', 'status-ok');
+  document.getElementById('discardBtn').addEventListener('click', async ()=>{
+    if (!confirm('Discard all unsaved changes and reload from disk?')) return;
+    showStatus('Discarding…','status-warn');
+    try{
+      const res = await window.pywebview.api.discard();
+      if (!res.ok){ showStatus(res.error || 'Discard failed','status-err'); return; }
+      setDirty(false);
+      await loadAll();
+      setSelected('');
+      showStatus('Reverted to last saved state.','status-ok');
+    } catch(err){ showStatus('API error: '+err,'status-err'); }
+  });
+
+  bindAuto('f_name_user','name_user');
+  bindAuto('f_seg_len','segment_length');
+  bindAuto('f_seg_wid','segment_width');
+  bindAuto('f_desc','description');
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
+    else if (e.key === 'E' || e.key === 'e'){ if (!document.getElementById('editBtn').disabled) toggleSingleEdit(); }
+    else if (e.key === 'Delete'){ if (!document.getElementById('delBtn').disabled) toggleSingleDelete(); }
+    else if (e.key === 'Escape'){ cancelEdit(); } // explicit cancel
+  });
+
+  if (window.pywebview && window.pywebview.api) {
+    loadAll();
+  } else {
+    showStatus('Waiting for backend…', 'status-warn');
+    window.addEventListener('pywebviewready', () => { if (!QUIET_INFO) showStatus('Backend ready. Loading…', 'status-ok'); loadAll(); });
+    let tries = 0;
+    const tic = setInterval(()=>{
+      if (window.pywebview && window.pywebview.api){
+        clearInterval(tic);
+        if (!QUIET_INFO) showStatus('Backend ready. Loading…', 'status-ok');
         loadAll();
-      });
-      let tries = 0;
-      const tic = setInterval(()=>{
-        if (window.pywebview && window.pywebview.api){
-          clearInterval(tic);
-          showStatus('Backend ready. Loading…', 'status-ok');
-          loadAll();
-        } else if (++tries > 50) {
-          clearInterval(tic);
-          showStatus('Backend did not initialize. Are you opening the HTML directly?', 'status-err');
-        }
-      }, 100);
-    }
-  } catch(e){
-    showStatus('Boot error: '+e, 'status-err');
+      } else if (++tries > 50) {
+        clearInterval(tic);
+        showStatus('Backend did not initialize. Are you opening the HTML directly?', 'status-err');
+      }
+    }, 100);
   }
 }
 
@@ -687,14 +834,14 @@ def main():
     cfg = read_config(config_path(base_dir))
 
     api = Api(base_dir, cfg)
-    window = webview.create_window(title="Edit lines / segments (GeoParquet)", html=HTML, js_api=api, width=1280, height=860)
+    window = webview.create_window(title="Edit line (GeoParquet)", html=HTML, js_api=api, width=1280, height=860)
 
     try:
         webview.start(gui='edgechromium', debug=False)
     except Exception as e:
         sys.stderr.write(
-            "This app requires Microsoft Edge WebView2 runtime to avoid console spam.\n"
-            "Install 'Evergreen WebView2 Runtime' from Microsoft and retry.\n"
+            "This app prefers Microsoft Edge WebView2 runtime to avoid console spam.\n"
+            "Install 'Evergreen WebView2 Runtime' from Microsoft and retry if needed.\n"
             f"Underlying error: {e}\n"
         )
         sys.exit(1)
