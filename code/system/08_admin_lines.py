@@ -330,8 +330,11 @@ class Api:
                 return {"ok": False, "error": str(e)}
 
     def exit_app(self):
-        try: webview.destroy_window()
-        except Exception: os._exit(0)
+        try:
+            # Defer destroy to the GUI loop to avoid shutdown races on Windows
+            threading.Timer(0.05, webview.destroy_window).start()
+        except Exception:
+            os._exit(0)
 
 # ---------------- HTML/JS ----------------
 HTML = r"""<!doctype html>
