@@ -16,7 +16,7 @@ import os
 import argparse
 from pathlib import Path
 import tempfile
-import ttkbootstrap as ttk  # Import ttkbootstrap
+import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
 # -----------------------------
@@ -29,7 +29,6 @@ def read_config(file_name):
 
 def increment_stat_value(config_file, stat_name, increment_value):
     if not os.path.isfile(config_file):
-        print(f"Configuration file {config_file} not found.")
         return
     try:
         with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
@@ -46,51 +45,55 @@ def increment_stat_value(config_file, stat_name, increment_value):
                         updated = True
                         break
                     except ValueError:
-                        print(f"Error: Current value of {stat_name} is not an integer.")
                         return
         if updated:
             with open(config_file, 'w', encoding='utf-8', errors='replace') as f:
                 f.writelines(lines)
-    except Exception as e:
-        print(f"Config update failed: {e}")
+    except Exception:
+        pass
 
 # -----------------------------
 # GeoParquet I/O
 # -----------------------------
-LAYER_FILE = "tbl_atlas.parquet"  # file name under output/geoparquet/
+def geoparquet_dir(base_dir):
+    return os.path.join(base_dir, "output", "geoparquet")
 
-def atlas_parquet_path(base_dir):
-    return os.path.join(base_dir, "output", "geoparquet", LAYER_FILE)
+def atlas_parquet_path(base_dir, layer_file):
+    return os.path.join(geoparquet_dir(base_dir), layer_file)
 
-def load_data():
+def _empty_gdf():
+    cols = [
+        'name_gis','title_user','description',
+        'image_name_1','image_desc_1','image_name_2','image_desc_2','geometry'
+    ]
+    return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs="EPSG:4326")
+
+def load_data(original_working_directory: str, layer_file: str):
     """
     Read the GeoParquet feature table (incl. geometry).
-    Returns (gdf, df_no_geom).
+    Returns (gdf, df_no_geom, loaded_path).
     """
-    gpq_path = atlas_parquet_path(original_working_directory)
+    gpq_path = atlas_parquet_path(original_working_directory, layer_file)
     if not os.path.exists(gpq_path):
-        messagebox.showerror("Missing file", f"GeoParquet not found:\n{gpq_path}")
-        # Return empty frames so UI can still start
-        empty = gpd.GeoDataFrame(columns=[
-            'name_gis','title_user','description',
-            'image_name_1','image_desc_1','image_name_2','image_desc_2','geometry'
-        ], geometry='geometry', crs="EPSG:4326")
-        return empty, pd.DataFrame(empty.drop(columns=['geometry']))
+        # Generic user message; no file paths.
+        messagebox.showerror("Missing data", "Required atlas data is missing.")
+        empty = _empty_gdf()
+        return empty, pd.DataFrame(empty.drop(columns=['geometry'])), gpq_path
     try:
         gdf = gpd.read_parquet(gpq_path)
+        if gdf.geometry.name not in gdf.columns:
+            if 'geom' in gdf.columns:
+                gdf = gdf.set_geometry('geom')
+            else:
+                raise ValueError("No geometry column present in GeoParquet.")
         if gdf.crs is None:
-            # keep whatever was written, but default if missing
             gdf.set_crs("EPSG:4326", inplace=True)
         df_no_geom = pd.DataFrame(gdf.drop(columns=[gdf.geometry.name], errors='ignore'))
-        return gdf, df_no_geom
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed reading GeoParquet:\n{e}")
-        # fallback empty
-        empty = gpd.GeoDataFrame(columns=[
-            'name_gis','title_user','description',
-            'image_name_1','image_desc_1','image_name_2','image_desc_2','geometry'
-        ], geometry='geometry', crs="EPSG:4326")
-        return empty, pd.DataFrame(empty.drop(columns=['geometry']))
+        return gdf, df_no_geom, gpq_path
+    except Exception:
+        messagebox.showerror("Error", "Could not read atlas data.")
+        empty = _empty_gdf()
+        return empty, pd.DataFrame(empty.drop(columns=['geometry'])), gpq_path
 
 def atomic_write_geoparquet(gdf: gpd.GeoDataFrame, path: str):
     """
@@ -103,16 +106,16 @@ def atomic_write_geoparquet(gdf: gpd.GeoDataFrame, path: str):
         tmp_path = tmp.name
     try:
         gdf.to_parquet(tmp_path, index=False)
-        os.replace(tmp_path, path)  # atomic on Windows & POSIX
-    except Exception as e:
+        os.replace(tmp_path, path)
+    except Exception:
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except Exception:
             pass
-        raise e
+        raise
 
-def save_row_to_parquet(row_dict):
+def save_row_to_parquet(original_working_directory: str, layer_file: str, row_dict):
     """
     Update a single row in the GeoParquet by key (name_gis).
     Read → modify attributes in-memory → write back atomically.
@@ -123,14 +126,13 @@ def save_row_to_parquet(row_dict):
         messagebox.showerror("Error", "Missing name_gis for row update.")
         return
 
-    gpq_path = atlas_parquet_path(original_working_directory)
+    gpq_path = atlas_parquet_path(original_working_directory, layer_file)
     gdf = gpd.read_parquet(gpq_path)
 
     if 'name_gis' not in gdf.columns:
         messagebox.showerror("Error", "GeoParquet does not contain a 'name_gis' column.")
         return
 
-    # Find the row(s) with this key
     idx = gdf.index[gdf['name_gis'].astype(str) == key]
     if len(idx) == 0:
         messagebox.showerror("Error", f"No record with name_gis='{key}' found.")
@@ -145,7 +147,6 @@ def save_row_to_parquet(row_dict):
         if c in gdf.columns and c in row_dict:
             gdf.loc[idx, c] = row_dict[c]
 
-    # Write back atomically
     atomic_write_geoparquet(gdf, gpq_path)
 
 # -----------------------------
@@ -155,7 +156,7 @@ def browse_image_1():
     initial_dir = os.path.join(original_working_directory, "input", "images")
     file_path = filedialog.askopenfilename(
         initialdir=initial_dir, title="Select file",
-        filetypes=(("JPEG files", "*.jpg"), ("PNG files", "*.png"), ("All files", "*.*"))
+        filetypes=(("JPEG files", "*.jpg;*.jpeg"), ("PNG files", "*.png"), ("All files", "*.*"))
     )
     if file_path:
         image_name_1_var.set(file_path)
@@ -164,7 +165,7 @@ def browse_image_2():
     initial_dir = os.path.join(original_working_directory, "input", "images")
     file_path = filedialog.askopenfilename(
         initialdir=initial_dir, title="Select file",
-        filetypes=(("JPEG files", "*.jpg"), ("PNG files", "*.png"), ("All files", "*.*"))
+        filetypes=(("JPEG files", "*.jpg;*.jpeg"), ("PNG files", "*.png"), ("All files", "*.*"))
     )
     if file_path:
         image_name_2_var.set(file_path)
@@ -180,7 +181,6 @@ def _get(df, idx, col):
 # -----------------------------
 def load_record():
     if len(df) == 0:
-        # clear form
         name_gis_var.set(""); title_user_var.set(""); description_var.set("")
         image_name_1_var.set(""); image_desc_1_var.set("")
         image_name_2_var.set(""); image_desc_2_var.set("")
@@ -200,7 +200,6 @@ def update_record(save_message=False):
     if len(df) == 0:
         return
     try:
-        # Update the UI-facing DataFrame
         df.at[current_index, 'name_gis']      = name_gis_var.get()
         df.at[current_index, 'title_user']    = title_user_var.get()
         df.at[current_index, 'description']   = description_var.get()
@@ -209,9 +208,8 @@ def update_record(save_message=False):
         df.at[current_index, 'image_name_2']  = image_name_2_var.get()
         df.at[current_index, 'image_desc_2']  = image_desc_2_var.get()
 
-        # Persist only attributes, by key, keeping geometry intact
         row_dict = df.iloc[current_index].to_dict()
-        save_row_to_parquet(row_dict)
+        save_row_to_parquet(original_working_directory, atlas_file_name, row_dict)
 
         if save_message:
             messagebox.showinfo("Info", "Record updated and saved to GeoParquet.")
@@ -232,12 +230,12 @@ def navigate(direction):
 # -----------------------------
 parser = argparse.ArgumentParser(description='Edit atlas (attributes in GeoParquet)')
 parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+parser.add_argument('--atlas_parquet_file', required=False, help='Override GeoParquet file name (default from config or tbl_atlas.parquet)')
 args = parser.parse_args()
-original_working_directory = args.original_working_directory
 
+original_working_directory = args.original_working_directory
 if not original_working_directory:
     original_working_directory = os.getcwd()
-    # When running from /system subfolder, go up one level
     if Path(original_working_directory).name.lower() == "system":
         original_working_directory = str(Path(original_working_directory).parent)
 
@@ -246,6 +244,7 @@ config = read_config(config_file)
 
 ttk_bootstrap_theme    = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
+atlas_file_name        = args.atlas_parquet_file or config['DEFAULT'].get('atlas_parquet_file', 'tbl_atlas.parquet')
 
 increment_stat_value(config_file, 'mesa_stat_edit_atlas', increment_value=1)
 
@@ -261,11 +260,34 @@ if __name__ == "__main__":
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
 
+    # ---------- Early data check: if the file does NOT exist, show Exit-only UI ----------
+    expected_path = atlas_parquet_path(original_working_directory, atlas_file_name)
+    if not os.path.isfile(expected_path):
+        warn_frame = ttk.Frame(root, padding="16")
+        warn_frame.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(
+            warn_frame,
+            text="Data is missing.",
+            font=("", 14, "bold")
+        ).grid(row=0, column=0, sticky="w", pady=(0,6))
+
+        ttk.Label(
+            warn_frame,
+            text="Please close this window and try again after the atlas data has been generated.",
+            justify="left",
+        ).grid(row=1, column=0, sticky="w")
+
+        ttk.Button(warn_frame, text="Exit", command=root.destroy, bootstyle=WARNING)\
+            .grid(row=2, column=0, sticky="e", pady=(16,0))
+        root.mainloop()
+        raise SystemExit(0)
+
+    # ---------- Full editor UI (file exists) ----------
     main_frame = ttk.Frame(root, padding="10")
     main_frame.grid(row=0, column=0, sticky="nsew")
 
-    # Load data from GeoParquet feature table
-    gdf, df = load_data()
+    gdf, df, loaded_path = load_data(original_working_directory, atlas_file_name)
     current_index = 0
 
     # Tk variables
@@ -277,36 +299,36 @@ if __name__ == "__main__":
     image_name_2_var = tk.StringVar()
     image_desc_2_var = tk.StringVar()
 
-    # Form
-    tk.Label(main_frame, text="GIS Name").grid(row=0, column=0, sticky='w')
+    ttk.Label(main_frame, text=f"Editing file: {loaded_path}").grid(row=0, column=0, columnspan=3, sticky='w', pady=(0,8))
+
+    tk.Label(main_frame, text="GIS Name").grid(row=1, column=0, sticky='w')
     tk.Label(main_frame, textvariable=name_gis_var, width=40, relief="sunken", anchor="w")\
-        .grid(row=0, column=1, sticky='w', padx=10, pady=10)
+        .grid(row=1, column=1, sticky='w', padx=10, pady=6)
 
-    tk.Label(main_frame, text="Title").grid(row=1, column=0, sticky='w')
-    tk.Entry(main_frame, textvariable=title_user_var, width=40).grid(row=1, column=1, sticky='w', padx=10, pady=10)
+    tk.Label(main_frame, text="Title").grid(row=2, column=0, sticky='w')
+    tk.Entry(main_frame, textvariable=title_user_var, width=40).grid(row=2, column=1, sticky='w', padx=10, pady=6)
 
-    tk.Label(main_frame, text="Image Name 1").grid(row=2, column=0, sticky='w')
-    tk.Entry(main_frame, textvariable=image_name_1_var, width=40).grid(row=2, column=1, sticky='w', padx=10, pady=10)
-    ttk.Button(main_frame, text="Browse", command=browse_image_1).grid(row=2, column=2, padx=10, pady=10)
+    tk.Label(main_frame, text="Image Name 1").grid(row=3, column=0, sticky='w')
+    tk.Entry(main_frame, textvariable=image_name_1_var, width=40).grid(row=3, column=1, sticky='w', padx=10, pady=6)
+    ttk.Button(main_frame, text="Browse", command=browse_image_1).grid(row=3, column=2, padx=10, pady=6)
 
-    tk.Label(main_frame, text="Image 1 description").grid(row=3, column=0, sticky='w')
-    tk.Entry(main_frame, textvariable=image_desc_1_var, width=40).grid(row=3, column=1, sticky='w', padx=10, pady=10)
+    tk.Label(main_frame, text="Image 1 description").grid(row=4, column=0, sticky='w')
+    tk.Entry(main_frame, textvariable=image_desc_1_var, width=40).grid(row=4, column=1, sticky='w', padx=10, pady=6)
 
-    tk.Label(main_frame, text="Image Name 2").grid(row=4, column=0, sticky='w')
-    tk.Entry(main_frame, textvariable=image_name_2_var, width=40).grid(row=4, column=1, sticky='w', padx=10, pady=10)
-    ttk.Button(main_frame, text="Browse", command=browse_image_2).grid(row=4, column=2, padx=10, pady=10)
+    tk.Label(main_frame, text="Image Name 2").grid(row=5, column=0, sticky='w')
+    tk.Entry(main_frame, textvariable=image_name_2_var, width=40).grid(row=5, column=1, sticky='w', padx=10, pady=6)
+    ttk.Button(main_frame, text="Browse", command=browse_image_2).grid(row=5, column=2, padx=10, pady=6)
 
-    tk.Label(main_frame, text="Image 2 description").grid(row=5, column=0, sticky='w')
-    tk.Entry(main_frame, textvariable=image_desc_2_var, width=40).grid(row=5, column=1, sticky='w', padx=10, pady=10)
+    tk.Label(main_frame, text="Image 2 description").grid(row=6, column=0, sticky='w')
+    tk.Entry(main_frame, textvariable=image_desc_2_var, width=40).grid(row=6, column=1, sticky='w', padx=10, pady=6)
 
-    tk.Label(main_frame, text="Description").grid(row=6, column=0, sticky='w')
-    tk.Entry(main_frame, textvariable=description_var, width=40).grid(row=6, column=1, sticky='w', padx=10, pady=10)
+    tk.Label(main_frame, text="Description").grid(row=7, column=0, sticky='w')
+    tk.Entry(main_frame, textvariable=description_var, width=40).grid(row=7, column=1, sticky='w', padx=10, pady=6)
 
-    ttk.Button(main_frame, text="Previous", command=lambda: navigate('previous')).grid(row=7, column=0, sticky='w')
-    ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=7, column=2, padx=10, pady=10, sticky='e')
-    ttk.Button(main_frame, text="Save", command=lambda: update_record(True), bootstyle=SUCCESS).grid(row=8, column=2, sticky='e', padx=10, pady=10)
-    ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=8, column=3, sticky='e', padx=10, pady=10)
+    ttk.Button(main_frame, text="Previous", command=lambda: navigate('previous')).grid(row=8, column=0, sticky='w')
+    ttk.Button(main_frame, text="Next", command=lambda: navigate('next')).grid(row=8, column=2, padx=10, pady=10, sticky='e')
+    ttk.Button(main_frame, text="Save", command=lambda: update_record(True), bootstyle=SUCCESS).grid(row=9, column=2, sticky='e', padx=10, pady=6)
+    ttk.Button(main_frame, text="Exit", command=root.destroy, bootstyle=WARNING).grid(row=9, column=3, sticky='e', padx=10, pady=6)
 
-    # First record
     load_record()
     root.mainloop()
