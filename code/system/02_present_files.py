@@ -1,5 +1,9 @@
 import locale
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+try:
+    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+except Exception:
+    # Fall back silently if locale isn't available on this system
+    pass
 
 import geopandas as gpd
 import pandas as pd
@@ -87,6 +91,17 @@ def write_to_log(message: str):
             log_widget.see(tk.END)
     except Exception:
         pass
+
+# ---------------- Small utilities ----------------
+def _file_ok(path: str) -> bool:
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except Exception:
+        return False
+
+def _safe_name(name: str) -> str:
+    # Windows-safe file name (keep visible name unchanged in titles)
+    return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name))
 
 # ---------------- Generic plotting utils ----------------
 def _safe_to_3857(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -237,7 +252,6 @@ def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
             ax.set_ylim(miny, maxy)
 
         norm = mcolors.Normalize(vmin=0, vmax=100)
-        # UPDATED: modern colormap access (avoids deprecation warnings)
         cmap = mpl_cmaps.get_cmap('YlOrRd')
 
         colors_arr = cmap(norm(g['env_index'].values))
@@ -617,8 +631,18 @@ def line_up_to_pdf(order_list):
         elif itype == 'image':
             # ival: (heading_str, path)
             heading_str, path = ival
+            if not _file_ok(path):
+                write_to_log(f"Image missing, skipped: {path}")
+                elements.append(Paragraph(f"<i>(image missing: {os.path.basename(path)})</i>", heading_styles['Body']))
+                elements.append(Spacer(1, 6))
+                continue
             _add_heading(3, heading_str)
             resize_image(path, max_image_width, max_image_height)
+            if not _file_ok(path):
+                write_to_log(f"After resize, image missing/corrupt, skipped: {path}")
+                elements.append(Paragraph(f"<i>(image missing after resize: {os.path.basename(path)})</i>", heading_styles['Body']))
+                elements.append(Spacer(1, 6))
+                continue
             img = Image(path)
             img.hAlign = 'CENTER'
             elements.append(img)
@@ -627,6 +651,11 @@ def line_up_to_pdf(order_list):
         elif itype == 'image_ribbon':
             # ival: (heading_str, path)
             heading_str, path = ival
+            if not _file_ok(path):
+                write_to_log(f"Ribbon image missing, skipped: {path}")
+                elements.append(Paragraph(f"<i>(image missing: {os.path.basename(path)})</i>", heading_styles['Body']))
+                elements.append(Spacer(1, 6))
+                continue
             _add_heading(3, heading_str)
             img = Image(path)
             img.hAlign = 'CENTER'
@@ -767,55 +796,61 @@ def generate_report(original_working_directory: str,
 
             log_data = []
             for _, line in lines_df.iterrows():
-                ln = line['name_gis']
+                ln_visible = line['name_gis']
+                ln_safe = _safe_name(ln_visible)
                 length_m = float(line.get('length_m', 0) or 0)
                 length_km = length_m / 1000.0
-                segs = sort_segments_numerically(segments_df[segments_df['name_gis']==ln])
+                segs = sort_segments_numerically(segments_df[segments_df['name_gis']==ln_visible])
 
                 # Context & segments maps (context with 100% buffer)
-                context_img  = os.path.join(tmp_dir, f"{ln}_context.png")
-                seg_map_max  = os.path.join(tmp_dir, f"{ln}_segments_max.png")
-                seg_map_min  = os.path.join(tmp_dir, f"{ln}_segments_min.png")
-                draw_line_context_map(line, context_img, pad_ratio=1.0, rect_buffer_ratio=0.03)
-                draw_line_segments_map(segments_df, ln, palette_A2E, seg_map_max, mode='max', pad_ratio=0.20)
-                draw_line_segments_map(segments_df, ln, palette_A2E, seg_map_min, mode='min', pad_ratio=0.20)
+                context_img  = os.path.join(tmp_dir, f"{ln_safe}_context.png")
+                seg_map_max  = os.path.join(tmp_dir, f"{ln_safe}_segments_max.png")
+                seg_map_min  = os.path.join(tmp_dir, f"{ln_safe}_segments_min.png")
+
+                ok_context = draw_line_context_map(line, context_img, pad_ratio=1.0, rect_buffer_ratio=0.03)
+                ok_max     = draw_line_segments_map(segments_df, ln_visible, palette_A2E, seg_map_max, mode='max', pad_ratio=0.20)
+                ok_min     = draw_line_segments_map(segments_df, ln_visible, palette_A2E, seg_map_min, mode='min', pad_ratio=0.20)
 
                 # summaries
-                max_stats_img = os.path.join(tmp_dir, f"{ln}_max_dist.png")
-                min_stats_img = os.path.join(tmp_dir, f"{ln}_min_dist.png")
+                max_stats_img = os.path.join(tmp_dir, f"{ln_safe}_max_dist.png")
+                min_stats_img = os.path.join(tmp_dir, f"{ln_safe}_min_dist.png")
                 create_sensitivity_summary(segs['sensitivity_code_max'], palette_A2E, max_stats_img)
                 create_sensitivity_summary(segs['sensitivity_code_min'], palette_A2E, min_stats_img)
 
                 # ribbons
-                max_img = os.path.join(tmp_dir, f"{ln}_max_ribbon.png")
-                min_img = os.path.join(tmp_dir, f"{ln}_min_ribbon.png")
-                create_line_statistic_image(ln, segs['sensitivity_code_max'], palette_A2E, length_m, max_img)
-                create_line_statistic_image(ln, segs['sensitivity_code_min'], palette_A2E, length_m, min_img)
+                max_img = os.path.join(tmp_dir, f"{ln_safe}_max_ribbon.png")
+                min_img = os.path.join(tmp_dir, f"{ln_safe}_min_ribbon.png")
+                create_line_statistic_image(ln_visible, segs['sensitivity_code_max'], palette_A2E, length_m, max_img)
+                create_line_statistic_image(ln_visible, segs['sensitivity_code_min'], palette_A2E, length_m, min_img)
 
-                # GROUPED presentation per line
-                pages_lines += [
-                    ('heading(2)', f"Line: {ln}"),
-                    ('text', f"This section summarizes sensitivity along the line <b>{ln}</b> "
-                             f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segs)}</b>). "
-                             "We first provide a geographical context map (red rectangle indicates the line's extent), "
-                             "then segments maps colored by sensitivity values (with cartography), followed by "
-                             "distributions and ribbons for maximum and minimum sensitivity."),
-                    ('image', ("Geographical context", context_img)),
-                    ('image', ("Segments (colored by maximum sensitivity)", seg_map_max)),
-                    ('image', ("Maximum sensitivity – distribution", max_stats_img)),
-                    ('image_ribbon', ("Maximum sensitivity – along line", max_img)),
-                    ('new_page', None),
+                # GROUPED presentation per line (add images only if they exist)
+                first_page = [('heading(2)', f"Line: {ln_visible}"),
+                              ('text', f"This section summarizes sensitivity along the line <b>{ln_visible}</b> "
+                                       f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segs)}</b>). "
+                                       "We first provide a geographical context map (red rectangle indicates the line's extent), "
+                                       "then segments maps colored by sensitivity values (with cartography), followed by "
+                                       "distributions and ribbons for maximum and minimum sensitivity.")]
 
-                    ('heading(2)', f"Line: {ln} (continued)"),
-                    ('image', ("Segments (colored by minimum sensitivity)", seg_map_min)),
-                    ('image', ("Minimum sensitivity – distribution", min_stats_img)),
-                    ('image_ribbon', ("Minimum sensitivity – along line", min_img)),
-                    ('new_page', None),
-                ]
+                if ok_context and _file_ok(context_img):
+                    first_page.append(('image', ("Geographical context", context_img)))
+                if ok_max and _file_ok(seg_map_max):
+                    first_page.append(('image', ("Segments (colored by maximum sensitivity)", seg_map_max)))
+                first_page.append(('image', ("Maximum sensitivity – distribution", max_stats_img)))
+                first_page.append(('image_ribbon', ("Maximum sensitivity – along line", max_img)))
+                first_page.append(('new_page', None))
+
+                second_page = [('heading(2)', f"Line: {ln_visible} (continued)")]
+                if ok_min and _file_ok(seg_map_min):
+                    second_page.append(('image', ("Segments (colored by minimum sensitivity)", seg_map_min)))
+                second_page.append(('image', ("Minimum sensitivity – distribution", min_stats_img)))
+                second_page.append(('image_ribbon', ("Minimum sensitivity – along line", min_img)))
+                second_page.append(('new_page', None))
+
+                pages_lines += first_page + second_page
 
                 for _, seg in segs.iterrows():
                     log_data.append({
-                        'line_name': ln,
+                        'line_name': ln_visible,
                         'segment_id': seg['segment_id'],
                         'sensitivity_code_max': seg['sensitivity_code_max'],
                         'sensitivity_code_min': seg['sensitivity_code_min']
@@ -855,20 +890,20 @@ def generate_report(original_working_directory: str,
             for gname in groups:
                 sub = flat_df[flat_df['name_gis_geocodegroup'] == gname].copy()
 
-                safe = re.sub(r'[^A-Za-z0-9_-]+','_',gname)
+                safe = _safe_name(gname)
                 sens_png = os.path.join(tmp_dir, f"map_sensitivity_{safe}.png")
                 ok_sens = draw_group_map_sensitivity(sub, gname, palette_A2E, desc_A2E, sens_png, fixed_bounds_3857)
 
                 env_png  = os.path.join(tmp_dir, f"map_envindex_{safe}.png")
                 ok_env   = draw_group_map_envindex(sub, gname, env_png, fixed_bounds_3857)
 
-                if ok_sens:
+                if ok_sens and _file_ok(sens_png):
                     geocode_pages += [
                         ('heading(2)', f"Geocode group: {gname}"),
                         ('image', (f"Sensitivity (A–E palette): {gname}", sens_png)),
                         ('new_page', None),
                     ]
-                if ok_env:
+                if ok_env and _file_ok(env_png):
                     geocode_pages += [
                         ('heading(2)', f"Geocode group: {gname}"),
                         ('image', (f"Environment index (0–100): {gname}", env_png)),
