@@ -725,8 +725,8 @@ function renderLegend(stats) {
 
   function fmtPct(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:1}); }
 
-  var html = '<div style="font-weight:600; margin-bottom:6px;">Totals by sensitivity</div>';
-  html += '<table><thead><tr><th></th><th>Code</th><th>Description</th><th class="num">Area (km²)</th><th class="num">Share</th></tr></thead><tbody>';
+  var html = '<div style="font-weight:600; margin-bottom:6px;">Totals by sensitivity from basic mosaic</div>';
+  html += '<table width=100%><thead><tr><th></th><th>Code</th><th>Description</th><th class="num">Area (km²)</th><th class="num">Share</th></tr></thead><tbody>';
 
   for (var k=0;k<codes.length;k++){
     var c = codes[k];
@@ -1054,7 +1054,7 @@ function buildLayersControl(state){
   ASSET_GROUP = L.layerGroup();
 
   var segLabel = 'Sensitivity lines <span class="help" data-tip="Buffered lines (A–E) selected by line name from tbl_lines.">?</span><div class="inlineSel"><select id="segLineSel"></select></div>';
-  var envLabel = 'Environment index (yellow→red) <span class="help" data-tip="Continuous heat style per polygon using env_index (0–100). Choose category below.">?</span><div class="inlineSel"><select id="envCatSel"></select></div>';
+  var envLabel = 'Environment index) <span class="help" data-tip="Continuous heat style per polygon using env_index (0–100). Choose category below.">?</span><div class="inlineSel"><select id="envCatSel"></select></div>';
   var geoLabel = 'Geocode areas <span class="help" data-tip="Polygons colored by sensitivity (A–E). Choose a geocode category below. Stats always from ‘basic_mosaic’.">?</span><div class="inlineSel"><select id="geoCatSel"></select></div>';
   var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue. Hover for details.">?</span>';
 
