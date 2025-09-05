@@ -2,12 +2,12 @@
 """
 08_edit_line.py — Leaflet line editor (selective edit & delete) with Save/Discard + dropdown picker
 
-Behavior:
-- Save/Discard in top bar (changes staged until saved).
-- Apply edit / Cancel edit buttons during geometry editing.
-- After Apply edit and after Save, the selected line is reloaded.
-- Selecting a line in the dropdown shows only that line until "Show all".
-- Non-critical green messages hidden; left pane text slightly smaller.
+Updates:
+- Top bar "Save" renamed to **Save all** (global commit).
+- New **Save changes** button in the left form; commits just like "Save all".
+- "Apply edit" button renamed to **Apply geometry** to make its scope clear.
+- Delete button (and Delete key) deletes the **currently selected line** with a confirm dialog.
+  No need to point at the line again or enter a 'delete mode'.
 """
 
 import os, sys, uuid, threading, locale, configparser, argparse, warnings
@@ -15,8 +15,6 @@ from typing import Any, Dict, Optional
 
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
 os.environ.setdefault('PYWEBVIEW_LOG', 'error')
-
-# Quiet Chromium/WebView2 console noise
 os.environ.setdefault('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', '--disable-logging --log-level=3')
 
 try:
@@ -331,7 +329,6 @@ class Api:
 
     def exit_app(self):
         try:
-            # Defer destroy to the GUI loop to avoid shutdown races on Windows
             threading.Timer(0.05, webview.destroy_window).start()
         except Exception:
             os._exit(0)
@@ -352,7 +349,7 @@ HTML = r"""<!doctype html>
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
   .wrap { height:100vh; display:grid; grid-template-columns: 1fr 2fr; grid-template-rows: 56px 1fr 26px; grid-template-areas: "bar bar" "form map" "foot foot"; }
   .bar { grid-area: bar; display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:2px solid #2b3442; }
-  .form { grid-area: form; border-right:2px solid #2b3442; padding:10px 12px; overflow:auto; font-size:14px; } /* smaller text */
+  .form { grid-area: form; border-right:2px solid #2b3442; padding:10px 12px; overflow:auto; font-size:14px; }
   .map { grid-area: map; position:relative; }
   #map { position:absolute; inset:0; }
   .foot { grid-area: foot; font-size:12px; color:#475569; padding:4px 10px; border-top:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -360,8 +357,8 @@ HTML = r"""<!doctype html>
   .btn:disabled { opacity:0.5; cursor:not-allowed; }
   .btn:active { transform:translateY(1px); }
   .row { margin-bottom:10px; }
-  label { display:block; font-weight:600; margin-bottom:4px; font-size:13px; } /* smaller label */
-  input[type=text], input[type=number], textarea, select { width:100%; box-sizing:border-box; padding:8px; border:1px solid #cbd5e1; border-radius:6px; font-size:14px; } /* smaller inputs */
+  label { display:block; font-weight:600; margin-bottom:4px; font-size:13px; }
+  input[type=text], input[type=number], textarea, select { width:100%; box-sizing:border-box; padding:8px; border:1px solid #cbd5e1; border-radius:6px; font-size:14px; }
   input[readonly] { background:#f8fafc; color:#64748b; }
   textarea { resize: vertical; min-height: 64px; }
   #status { min-height: 18px; margin-top:4px; }
@@ -374,6 +371,7 @@ HTML = r"""<!doctype html>
   .help { font-size:12px; color:#334155; border:1px dashed #cbd5e1; padding:6px 8px; border-radius:6px; display:none; background:#f8fafc; }
   .help strong { font-weight:600; }
   .badge { font-size:11px; border:1px solid #cbd5e1; border-radius:10px; padding:1px 6px; background:#f8fafc; }
+  .form-actions { display:flex; gap:8px; align-items:center; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -381,11 +379,11 @@ HTML = r"""<!doctype html>
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
     <button id="reloadBtn" class="btn">Reload</button>
-    <button id="saveBtn" class="btn">Save</button>
+    <button id="saveBtn" class="btn" title="Commit all staged changes to disk">Save all</button>
     <button id="discardBtn" class="btn">Discard</button>
     <button id="exitBtn" class="btn">Exit</button>
     <span id="dirtyBadge" class="badge" style="display:none;">Unsaved changes</span>
-    <div class="hint">New: <span class="kbd">N</span> • Finish: <span class="kbd">Enter</span> or double-click • Cancel edit: <span class="kbd">Esc</span> • Edit: <span class="kbd">E</span> • Delete: <span class="kbd">Del</span></div>
+    <div class="hint">New: <span class="kbd">N</span> • Finish: <span class="kbd">Enter</span> or double-click • Cancel geometry: <span class="kbd">Esc</span> • Edit: <span class="kbd">E</span> • Delete selected: <span class="kbd">Del</span></div>
   </div>
 
   <div class="form">
@@ -399,9 +397,9 @@ HTML = r"""<!doctype html>
     <div class="toolbar">
       <button id="newBtn" class="btn" title="Start drawing a new line (N)">New line</button>
       <button id="editBtn" class="btn" title="Edit selected (E)" disabled>Edit</button>
-      <button id="delBtn" class="btn" title="Delete selected (Del)" disabled>Delete</button>
-      <button id="editApplyBtn" class="btn" style="display:none;" title="Apply geometry changes">Apply edit</button>
-      <button id="editCancelBtn" class="btn" style="display:none;" title="Cancel geometry changes">Cancel edit</button>
+      <button id="delBtn" class="btn" title="Delete the selected line (Del)" disabled>Delete</button>
+      <button id="editApplyBtn" class="btn" style="display:none;" title="Apply geometry changes">Apply geometry</button>
+      <button id="editCancelBtn" class="btn" style="display:none;" title="Cancel geometry changes">Cancel geometry</button>
       <button id="helpToggle" class="btn" title="Explain map/edit icons">?</button>
       <span id="countInfo" class="hint"></span>
     </div>
@@ -409,8 +407,9 @@ HTML = r"""<!doctype html>
     <div id="helpBox" class="help">
       <strong>Map & edit</strong><br>
       • Draw (pencil) to add a new line (or <span class="kbd">N</span>).<br>
-      • Edit: only the selected line is visible until you choose “Show all”. Use <strong>Apply edit</strong> or <strong>Cancel edit</strong>.<br>
-      • Keys: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel edit.
+      • Edit: only the selected line is visible until you choose “Show all”. Use <strong>Apply geometry</strong> or <strong>Cancel geometry</strong>.<br>
+      • Delete removes the currently selected line (you’ll be asked to confirm).<br>
+      • Keys: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel geometry.
     </div>
 
     <div class="row"><label>GIS name</label><input id="f_name_gis" type="text" readonly></div>
@@ -418,7 +417,11 @@ HTML = r"""<!doctype html>
     <div class="row"><label>Length of segments (m)</label><input id="f_seg_len" type="number" inputmode="numeric" placeholder="e.g., 500"></div>
     <div class="row"><label>Segments width (m)</label><input id="f_seg_wid" type="number" inputmode="numeric" placeholder="e.g., 20"></div>
     <div class="row"><label>Description</label><textarea id="f_desc" placeholder="Short description"></textarea></div>
-    <div id="status" class="status-warn">Initializing…</div>
+
+    <div class="form-actions">
+      <button id="formSaveBtn" class="btn" title="Commit all staged changes to disk from here">Save changes</button>
+      <span id="status" class="status-warn">Initializing…</span>
+    </div>
   </div>
 
   <div class="map"><div id="map"></div></div>
@@ -440,7 +443,6 @@ let SELECTED_ID = null;
 let LAYER_BY_ID = {};
 let SELECT_GROUP = null;
 let SINGLE_EDIT_HANDLER = null;
-let SINGLE_DELETE_HANDLER = null;
 let DRAW_HANDLER = null;
 let DIAG = null;
 let DIRTY = false;
@@ -539,7 +541,7 @@ function initMapOnce(){
   LINES_GROUP = L.featureGroup().addTo(MAP);
 
   DRAW_CONTROL = new L.Control.Draw({
-    edit: { featureGroup: L.featureGroup() }, // dummy
+    edit: { featureGroup: L.featureGroup() }, // dummy to satisfy control
     draw: { polygon:false, circle:false, rectangle:false, marker:false, circlemarker:false, polyline:{ shapeOptions:{ color:'#ff7f50', weight:4 } } }
   });
   MAP.addControl(DRAW_CONTROL);
@@ -578,6 +580,7 @@ function initMapOnce(){
     }).catch(err => { showStatus('API error: '+err, 'status-err'); LINES_GROUP.removeLayer(tmp); });
   });
 
+  // Keep support for edit toolbar events (geometry edits)
   MAP.on(L.Draw.Event.EDITED, function(e){
     e.layers.eachLayer(function(layer){
       const f = layer.feature; if (!f || !f.properties || !f.properties.name_gis) return;
@@ -586,27 +589,6 @@ function initMapOnce(){
         else { setDirty(true); setFootLeft('Geometry staged for ' + f.properties.name_gis); showStatus('Geometry staged.','status-ok'); }
       }).catch(err => showStatus('API error: '+err,'status-err'));
     });
-  });
-
-  MAP.on(L.Draw.Event.DELETED, function(e){
-    const ids = [];
-    e.layers.eachLayer(function(layer){ const f = layer.feature; if (f && f.properties && f.properties.name_gis) ids.push(f.properties.name_gis); });
-    (async function(){
-      for (let i=0;i<ids.length;i++){
-        try{
-          const res = await window.pywebview.api.delete_line(ids[i]);
-          if (!res.ok){ showStatus(res.error || 'Delete failed','status-err'); continue; }
-          const l = LAYER_BY_ID[ids[i]];
-          if (l){ LINES_GROUP.removeLayer(l); delete LAYER_BY_ID[ids[i]]; }
-          const picker = document.getElementById('pickerSel');
-          Array.from(picker.options).forEach(o=>{ if (o.value===ids[i]) o.remove(); });
-          if (SELECTED_ID===ids[i]) setSelected('');
-          setDirty(true);
-          setFootLeft('Deleted (staged) ' + ids[i]);
-        } catch(err){ showStatus('API error: '+err,'status-err'); }
-      }
-      updateCountBadge();
-    })();
   });
 
   setTimeout(()=> MAP.invalidateSize(), 120);
@@ -637,7 +619,6 @@ function updateCountBadge(){
 
 function cleanupSingleHandlers(){
   if (SINGLE_EDIT_HANDLER){ try{ SINGLE_EDIT_HANDLER.disable(); }catch(e){} SINGLE_EDIT_HANDLER = null; }
-  if (SINGLE_DELETE_HANDLER){ try{ SINGLE_DELETE_HANDLER.disable(); }catch(e){} SINGLE_DELETE_HANDLER = null; }
   if (SELECT_GROUP){ try{ MAP.removeLayer(SELECT_GROUP); }catch(e){} SELECT_GROUP = null; }
   setEditActionButtons(false);
   enforceVisibility();
@@ -682,7 +663,6 @@ function startNewLine(){
 function toggleSingleEdit(){
   if (!SELECTED_ID){ showStatus('Select a line first', 'status-warn'); return; }
   if (SINGLE_EDIT_HANDLER){ cleanupSingleHandlers(); setFootLeft(''); return; }
-  if (SINGLE_DELETE_HANDLER){ cleanupSingleHandlers(); }
   const layer = LAYER_BY_ID[SELECTED_ID];
   if (!layer){ showStatus('Selected line not found in map', 'status-err'); return; }
   hideOthers();
@@ -690,7 +670,7 @@ function toggleSingleEdit(){
   SINGLE_EDIT_HANDLER = new L.EditToolbar.Edit(MAP, { featureGroup: SELECT_GROUP, poly:{ allowIntersection:false } });
   SINGLE_EDIT_HANDLER.enable();
   setEditActionButtons(true);
-  setFootLeft('Edit mode: adjust vertices, then “Apply edit” or “Cancel edit”.');
+  setFootLeft('Edit mode: adjust vertices, then “Apply geometry” or “Cancel geometry”.');
 }
 
 function applyEdit(){
@@ -710,19 +690,31 @@ function cancelEdit(){
     else if (typeof SINGLE_EDIT_HANDLER._revertLayers === 'function') SINGLE_EDIT_HANDLER._revertLayers();
   }catch(e){}
   cleanupSingleHandlers();
-  showStatus('Edit canceled.','status-warn');
+  showStatus('Geometry edit canceled.','status-warn');
 }
 
-function toggleSingleDelete(){
+// NEW: straightforward delete of the currently selected line (with confirm)
+async function deleteSelected(){
   if (!SELECTED_ID){ showStatus('Select a line first', 'status-warn'); return; }
-  if (SINGLE_DELETE_HANDLER){ cleanupSingleHandlers(); setFootLeft(''); return; }
-  if (SINGLE_EDIT_HANDLER){ cleanupSingleHandlers(); }
   const layer = LAYER_BY_ID[SELECTED_ID];
-  if (!layer){ showStatus('Selected line not found in map', 'status-err'); return; }
-  SELECT_GROUP = L.featureGroup([layer]).addTo(MAP);
-  SINGLE_DELETE_HANDLER = new L.EditToolbar.Delete(MAP, { featureGroup: SELECT_GROUP });
-  SINGLE_DELETE_HANDLER.enable();
-  setFootLeft('Delete mode (selected only): click ✓ to stage delete, or ✕ to cancel.');
+  const title = (layer && layer.feature && layer.feature.properties && layer.feature.properties.name_user) || '';
+  const label = title && title.trim().length ? `${title} — ${SELECTED_ID}` : SELECTED_ID;
+  if (!confirm(`Delete the selected line:\n\n${label}\n\nThis action will be staged and applied when you Save.`)) return;
+
+  try{
+    const res = await window.pywebview.api.delete_line(SELECTED_ID);
+    if (!res.ok){ showStatus(res.error || 'Delete failed','status-err'); return; }
+    if (layer){ LINES_GROUP.removeLayer(layer); delete LAYER_BY_ID[SELECTED_ID]; }
+    const picker = document.getElementById('pickerSel');
+    Array.from(picker.options).forEach(o=>{ if (o.value===SELECTED_ID) o.remove(); });
+    setSelected('');
+    setDirty(true);
+    updateCountBadge();
+    showStatus('Line deleted (staged). Click Save to commit.','status-ok');
+    setFootLeft('Deleted (staged).');
+  }catch(err){
+    showStatus('API error: '+err,'status-err');
+  }
 }
 
 async function reloadSelected(){
@@ -779,7 +771,7 @@ function boot(){
   document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
   document.getElementById('newBtn').addEventListener('click', startNewLine);
   document.getElementById('editBtn').addEventListener('click', toggleSingleEdit);
-  document.getElementById('delBtn').addEventListener('click', toggleSingleDelete);
+  document.getElementById('delBtn').addEventListener('click', deleteSelected);  // CHANGED
   document.getElementById('editApplyBtn').addEventListener('click', applyEdit);
   document.getElementById('editCancelBtn').addEventListener('click', cancelEdit);
   document.getElementById('helpToggle').addEventListener('click', ()=>{
@@ -790,7 +782,7 @@ function boot(){
     setSelected(id, !!id);
   });
 
-  document.getElementById('saveBtn').addEventListener('click', async ()=>{
+  async function doSave(){
     showStatus('Saving…','status-warn');
     try{
       const res = await window.pywebview.api.commit();
@@ -799,7 +791,10 @@ function boot(){
       showStatus('All changes saved.','status-ok');
       if (SELECTED_ID) { reloadSelected(); }
     } catch(err){ showStatus('API error: '+err,'status-err'); }
-  });
+  }
+
+  document.getElementById('saveBtn').addEventListener('click', doSave);       // top bar "Save all"
+  document.getElementById('formSaveBtn').addEventListener('click', doSave);   // left pane "Save changes"
 
   document.getElementById('discardBtn').addEventListener('click', async ()=>{
     if (!confirm('Discard all unsaved changes and reload from disk?')) return;
@@ -823,7 +818,7 @@ function boot(){
   document.addEventListener('keydown', function(e){
     if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
     else if (e.key === 'E' || e.key === 'e'){ if (!document.getElementById('editBtn').disabled) toggleSingleEdit(); }
-    else if (e.key === 'Delete'){ if (!document.getElementById('delBtn').disabled) toggleSingleDelete(); }
+    else if (e.key === 'Delete'){ if (!document.getElementById('delBtn').disabled) deleteSelected(); }  // CHANGED
     else if (e.key === 'Escape'){ cancelEdit(); }
   });
 
