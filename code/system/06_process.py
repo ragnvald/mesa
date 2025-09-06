@@ -1260,7 +1260,7 @@ MAP_HTML = r"""<!doctype html>
 <div class="legend">
   <div><span class="swatch" style="background: rgba(34,197,94,0.22); border-color: transparent;"></span>Done</div>
   <div><span class="swatch" style="background: rgba(249,115,22,0.22); border-color: transparent;"></span>Running</div>
-  <div><span class="swatch" style="background: transparent; border-color: rgba(100,116,139,0.70);"></span>Queued</div>
+  <div><span class="swatch" style="background: transparent; border-color: #f97316;"></span>Queued</div>
 </div>
 <script>
 let MAP, GROUP;
@@ -1288,7 +1288,7 @@ function styleFor(state){
     return { stroke: false, fill: true,  fillColor: '#f97316', fillOpacity: 0.25 };
   }
   // queued
-  return { stroke: true,  color: '#94a3b8', weight: 1, opacity: 0.7, fill: false };
+  return { stroke: true,  color: '#f97316', weight: 1, opacity: 0.7, fill: false };
   // (optional dashed outline: add dashArray: '3,2')
 }
 
