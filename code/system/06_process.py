@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 # 06_process.py — memory-aware, CPU-optimized (Windows spawn-safe) intersections + robust flattening to GeoParquet
-# See notes: safe config parsing (inline comments), robust logging, temp cleanup at start and on success.
+# UI: two panes (left: logs/progress/buttons; right: minimap launcher).
+# Minimap opens in a separate, low-priority helper process (pywebview + Leaflet + OSM).
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
-import os, sys, math, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc
+import os, sys, math, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util
 import configparser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +37,16 @@ progress_label = None
 HEARTBEAT_SECS = 60
 
 _PARTS_DIR = None  # worker output folder
+
+# minimap status (tiny JSON snapshots)
+MINIMAP_STATUS_PATH = None
+MINIMAP_LOCK = threading.Lock()
+
+# minimap helper process
+_MAP_PROC = None
+
+# grid meta for minimap
+_GRID_BBOX_MAP: dict[int, list[float]] = {}   # grid_cell -> [S,W,N,E]
 
 # ----------------------------
 # Paths
@@ -87,7 +98,6 @@ def log_to_gui(widget, message: str):
 
 # --- SAFE CONFIG PARSING ---
 def read_config(path: Path) -> configparser.ConfigParser:
-    # Accept inline comments like "; note" or "# note"
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(path, encoding="utf-8")
     if "DEFAULT" not in cfg:
@@ -97,7 +107,6 @@ def read_config(path: Path) -> configparser.ConfigParser:
 def _strip_inline_comments(s: str) -> str:
     if s is None:
         return ""
-    # Defensive: remove inline ;/# if present even with inline_comment_prefixes off
     for sep in (';', '#'):
         if sep in s:
             s = s.split(sep, 1)[0]
@@ -125,8 +134,7 @@ def cfg_get_float(cfg: configparser.ConfigParser, key: str, default: float) -> f
 def read_class_ranges(cfg_path: Path):
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(cfg_path, encoding="utf-8")
-    ranges = {}
-    desc   = {}
+    ranges, desc = {}, {}
     for code in ["A","B","C","D","E"]:
         if code not in cfg:
             continue
@@ -214,10 +222,8 @@ def _grid_pool_init2(grid_gdf, out_dir_str: str):
     _GRID_OUT_DIR = Path(out_dir_str)
     _GRID_OUT_DIR.mkdir(parents=True, exist_ok=True)
     _GRID_GDF = grid_gdf
-    try:
-        _ = _GRID_GDF.sindex
-    except Exception:
-        pass
+    try: _ = _GRID_GDF.sindex
+    except Exception: pass
     try:
         if psutil is not None:
             p = psutil.Process()
@@ -230,16 +236,12 @@ def _grid_pool_init2(grid_gdf, out_dir_str: str):
 
 def _grid_worker(input_path: str) -> str:
     g = gpd.read_parquet(input_path)
-    try:
-        _ = g.sindex
-    except Exception:
-        pass
+    try: _ = g.sindex
+    except Exception: pass
     j = gpd.sjoin(g, _GRID_GDF, how="left", predicate="intersects")
     j.drop(columns=["index_right"], inplace=True, errors="ignore")
-    try:
-        j = j[j.geometry.notna() & ~j.geometry.is_empty]
-    except Exception:
-        pass
+    try: j = j[j.geometry.notna() & ~j.geometry.is_empty]
+    except Exception: pass
     out = _GRID_OUT_DIR / f"grid_tag_{os.getpid()}_{uuid.uuid4().hex}.parquet"
     j.to_parquet(out, index=False)
     del g, j
@@ -264,12 +266,51 @@ def calculate_rows_per_chunk(n: int, max_memory_mb: int = 256, est_bytes_per_row
     rows = max(5_000, min(rows, hard_cap_rows))
     return max(1, min(rows, n))
 
+# ----------------------------
+# Minimap status helpers (tiny JSON snapshots)
+# ----------------------------
+def _status_path() -> Path:
+    global MINIMAP_STATUS_PATH
+    if MINIMAP_STATUS_PATH is None:
+        MINIMAP_STATUS_PATH = gpq_dir() / "__chunk_status.json"
+    return MINIMAP_STATUS_PATH
 
+def _write_status_atomic(payload: dict):
+    p = _status_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    try:
+        with MINIMAP_LOCK:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, p)
+    except Exception:
+        try:
+            if tmp.exists(): tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def _init_idle_status():
+    now = datetime.utcnow().isoformat() + "Z"
+    payload = {
+        "phase": "idle",
+        "updated_at": now,
+        "chunks_total": 0,
+        "done": 0,
+        "running": [],
+        "cells": [],      # list of {id, state, n, bbox:[s,w,n,e]}
+        "home_bounds": None
+    }
+    _write_status_atomic(payload)
+
+# ----------------------------
+# Assign grid + tag and return tagged geocodes
+# ----------------------------
 def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_workers: int) -> gpd.GeoDataFrame:
+    global _GRID_BBOX_MAP
     if geodata is None or geodata.empty:
         return _mk_empty_gdf_like(geodata.crs if geodata is not None else None)
 
-    # meters → degrees (grovt, holder for grid-partisjonering i WGS84/arbeids-CRS)
     meters_per_degree = 111_320.0
     cell_deg = meters_cell / meters_per_degree
 
@@ -283,10 +324,10 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
          "geometry": [box(x0, y0, x1, y1) for (x0, y0, x1, y1) in grid_cells]},
         geometry="geometry", crs=geodata.crs
     )
-    try:
-        _ = grid_gdf.sindex
-    except Exception:
-        pass
+    # store bbox for minimap tiles
+    _GRID_BBOX_MAP = {i: [float(y0), float(x0), float(y1), float(x1)] for i, (x0,y0,x1,y1) in enumerate(grid_cells)}
+    try: _ = grid_gdf.sindex
+    except Exception: pass
     log_to_gui(log_widget, f"Assigning geocodes to {len(grid_cells):,} grid cells…")
 
     tmp_in  = _dataset_dir("__grid_assign_in")
@@ -304,10 +345,8 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
         part.to_parquet(p, index=False)
         input_parts.append(str(p))
 
-    started_at = time.time()
-    last_ping = started_at
-    done = 0
-    out_files = []
+    started_at = time.time(); last_ping = started_at
+    done = 0; out_files = []
 
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(processes=max(1, max_workers),
@@ -348,7 +387,6 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
 
     tagged = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=geodata.crs)
 
-    # ⬇️ Kritisk del: sørg for at hver geokode bare prosesseres én gang (hindrer moiré/overlagring)
     try:
         if 'id_geocode_object' in tagged.columns:
             tagged = tagged.drop_duplicates(subset=['id_geocode_object'], keep='first')
@@ -357,7 +395,6 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
         elif 'code' in tagged.columns:
             tagged = tagged.drop_duplicates(subset=['code'], keep='first')
         else:
-            # Fallback via geometri (tregere, men trygt)
             tagged = tagged.assign(__wkb__=tagged.geometry.apply(lambda g: g.wkb if g is not None else None))
             tagged = tagged.drop_duplicates(subset=['__wkb__']).drop(columns=['__wkb__'])
     except Exception:
@@ -366,17 +403,76 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
     _rmrf_dir(tmp_in); _rmrf_dir(tmp_out)
     return tagged
 
+# ---- space-filling curve helper (Morton / Z-order, 16-bit per axis)
+def _morton16(ix: int, iy: int) -> int:
+    def _part1by1(n: int) -> int:
+        n &= 0xFFFF
+        n = (n | (n << 8)) & 0x00FF00FF
+        n = (n | (n << 4)) & 0x0F0F0F0F
+        n = (n | (n << 2)) & 0x33333333
+        n = (n | (n << 1)) & 0x55555555
+        return n
+    return (_part1by1(ix) << 1) | _part1by1(iy)
 
 def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, multiplier: int = 18):
-    cell_ids = geocode_tagged['grid_cell'].unique().tolist()
-    random.shuffle(cell_ids)
+    """
+    Groups cells into spatially-coherent chunks using a Morton (Z-order) sort
+    of per-cell centroids. Keeps the same target chunk count and returns
+    GeoDataFrame slices exactly like before.
+    """
+    if geocode_tagged is None or geocode_tagged.empty or 'grid_cell' not in geocode_tagged.columns:
+        return [geocode_tagged]
+
+    # One representative centroid per grid_cell (fast via bounds midpoints)
+    try:
+        b = geocode_tagged.geometry.bounds  # DataFrame with minx, miny, maxx, maxy
+        cx = (b['minx'] + b['maxx']) * 0.5
+        cy = (b['miny'] + b['maxy']) * 0.5
+        centroids = pd.DataFrame({
+            'grid_cell': geocode_tagged['grid_cell'].values,
+            '__cx': cx.values,
+            '__cy': cy.values
+        })
+    except Exception:
+        # Fallback: shapely centroid (slower, but robust)
+        centroids = geocode_tagged[['grid_cell']].copy()
+        cc = geocode_tagged.geometry.centroid
+        centroids['__cx'] = cc.x.values
+        centroids['__cy'] = cc.y.values
+
+    # Deduplicate per cell
+    centroids = centroids.dropna(subset=['__cx','__cy']).drop_duplicates(subset=['grid_cell'])
+
+    if centroids.empty:
+        # Fall back to old behavior (deterministic, no shuffle)
+        cell_ids = sorted(geocode_tagged['grid_cell'].unique().tolist())
+    else:
+        # Normalize to [0..65535] and compute Morton index
+        xmin, ymin = float(centroids['__cx'].min()), float(centroids['__cy'].min())
+        xmax, ymax = float(centroids['__cx'].max()), float(centroids['__cy'].max())
+        dx = max(1e-9, xmax - xmin)
+        dy = max(1e-9, ymax - ymin)
+
+        xi = ((centroids['__cx'] - xmin) / dx * 65535.0).clip(0, 65535).astype('uint16')
+        yi = ((centroids['__cy'] - ymin) / dy * 65535.0).clip(0, 65535).astype('uint16')
+        z = [ _morton16(int(x), int(y)) for x, y in zip(xi.values, yi.values) ]
+        centroids['__z'] = z
+
+        # Spatially coherent ordering
+        cell_ids = centroids.sort_values('__z')['grid_cell'].tolist()
+
+    # Target chunking identical to before
     target_chunks = max(1, min(len(cell_ids), max_workers * multiplier))
     cells_per_chunk = max(1, math.ceil(len(cell_ids) / target_chunks))
+
     chunks = []
     for i in range(0, len(cell_ids), cells_per_chunk):
         sel = set(cell_ids[i:i + cells_per_chunk])
+        # Keep same return shape: GeoDataFrame slice per chunk
         chunks.append(geocode_tagged[geocode_tagged['grid_cell'].isin(sel)])
+
     return chunks
+
 
 # ----------------------------
 # Intersection workers
@@ -580,13 +676,45 @@ def _intersection_worker(args):
 
 def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers,
                               asset_soft_limit, geocode_soft_limit):
+    global _GRID_BBOX_MAP
     log_to_gui(log_widget, "Creating analysis grid + tagging geocodes.")
     geocode_tagged = assign_geocodes_to_grid(geocode_data, cell_size_m, max_workers)
 
+    # ---- prepare chunks
     chunks = make_spatial_chunks(geocode_tagged, max_workers, multiplier=18)
     total_chunks = len(chunks)
     log_to_gui(log_widget, f"Intersecting in {total_chunks} chunks with {max_workers} workers. Heartbeat every {HEARTBEAT_SECS}s.")
     update_progress(35)
+
+    # mapping: chunk idx -> set of grid_cell ids
+    chunk_cells = {i+1: set(ch['grid_cell'].unique().tolist()) for i, ch in enumerate(chunks)}
+    # per-cell feature count (for tooltip)
+    try:
+        cell_counts = geocode_tagged.groupby('grid_cell').size().to_dict()
+    except Exception:
+        cell_counts = {}
+
+    # ---- initial minimap status (per-cell tiles, all queued)
+    try:
+        minx, miny, maxx, maxy = geocode_tagged.total_bounds
+        home_bounds = [[float(miny), float(minx)], [float(maxy), float(maxx)]]
+    except Exception:
+        home_bounds = None
+
+    cells_meta = []
+    for cid in sorted(set().union(*chunk_cells.values())):
+        bbox = _GRID_BBOX_MAP.get(int(cid))
+        cells_meta.append({"id": int(cid), "state": "queued", "n": int(cell_counts.get(int(cid), 0)), "bbox": bbox})
+
+    _write_status_atomic({
+        "phase": "intersect",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "chunks_total": total_chunks,
+        "done": 0,
+        "running": [],
+        "cells": cells_meta,
+        "home_bounds": home_bounds
+    })
 
     geom_types = asset_data.geometry.geom_type.unique().tolist()
 
@@ -603,6 +731,7 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
 
     hb_stop = threading.Event()
     progress_state = {'done': 0, 'total': total_chunks, 'rows': 0, 'started_at': started_at}
+
     def heartbeat():
         while not hb_stop.wait(HEARTBEAT_SECS):
             mem_txt = ""
@@ -623,6 +752,34 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
                 dd = (eta_ts.date() - datetime.now().date()).days
                 if dd > 0: eta += f" (+{dd}d)"
             log_to_gui(log_widget, f"[heartbeat] {d}/{t} chunks (~{pct:.2f}%) • rows written: {r:,}{mem_txt} • ETA {eta}")
+
+            # update minimap states for cells
+            try:
+                running_chunk_ids = list(range(d+1, min(d + max_workers, t) + 1))
+                running_cells = set().union(*(chunk_cells.get(i, set()) for i in running_chunk_ids)) if running_chunk_ids else set()
+                done_cells = set().union(*(chunk_cells.get(i, set()) for i in range(1, d+1))) if d else set()
+
+                id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
+                for cid in done_cells:
+                    i = id_to_idx.get(int(cid))
+                    if i is not None: cells_meta[i]["state"] = "done"
+                for cid in running_cells:
+                    i = id_to_idx.get(int(cid))
+                    if i is not None and cells_meta[i]["state"] != "done":
+                        cells_meta[i]["state"] = "running"
+
+                status = {
+                    "phase": "intersect",
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "chunks_total": t,
+                    "done": d,
+                    "running": running_chunk_ids,
+                    "cells": cells_meta,
+                    "home_bounds": home_bounds
+                }
+                _write_status_atomic(status)
+            except Exception:
+                pass
 
     hb_thread = threading.Thread(target=heartbeat, daemon=True)
     hb_thread.start()
@@ -676,6 +833,22 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
 
     hb_stop.set()
     hb_thread.join(timeout=1.5)
+
+    # final status
+    try:
+        for c in cells_meta:
+            c["state"] = "done"
+        _write_status_atomic({
+            "phase": "flatten_pending" if error_msg is None else "error",
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "chunks_total": total_chunks,
+            "done": done_count,
+            "running": [],
+            "cells": cells_meta,
+            "home_bounds": home_bounds
+        })
+    except Exception:
+        pass
 
     if error_msg:
         raise RuntimeError(error_msg)
@@ -990,7 +1163,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     write_parquet("tbl_flat", tbl_flat)
     log_to_gui(log_widget, f"tbl_flat saved with {len(tbl_flat):,} rows.")
 
-    # Stream backfill of area to stacked parts
+    # Backfill area_m2 to stacked parts
     try:
         area_map = tbl_flat[['code','area_m2']].dropna().drop_duplicates(subset=['code'])
         area_map['code'] = area_map['code'].astype(str)
@@ -1021,6 +1194,11 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         log_to_gui(log_widget, f"Backfill to tbl_stacked failed: {e}")
 
     update_progress(90)
+    try:
+        st = {"phase": "done","updated_at": datetime.utcnow().isoformat() + "Z","chunks_total": 0,"done": 0,"running": [],"cells": [],"home_bounds": None}
+        _write_status_atomic(st)
+    except Exception:
+        pass
 
 # ----------------------------
 # Top-level process
@@ -1028,8 +1206,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 def process_all(config_file: Path):
     try:
         cfg = read_config(config_file)
-
-        # Heartbeat from config (optional)
         try:
             global HEARTBEAT_SECS
             HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
@@ -1040,29 +1216,165 @@ def process_all(config_file: Path):
         max_workers = cfg_get_int(cfg, "max_workers", 0)
         cell_size   = cfg_get_int(cfg, "cell_size", 18000)
 
-        # memory guard knobs (configurable)
         approx_gb_per_worker = cfg_get_float(cfg, "approx_gb_per_worker", 8.0)
         mem_target_frac      = cfg_get_float(cfg, "mem_target_frac", 0.75)
         asset_soft_limit     = cfg_get_int(cfg, "asset_soft_limit", 200000)
-        geocode_soft_limit   = cfg_get_int(cfg, "geocode_soft_limit", 160)
+        geocode_soft_limit   = cfg_get_int(cfg,  "geocode_soft_limit", 160)
 
-        # Clean outputs & temps at startup (user wants to keep temps on crash)
         cleanup_outputs(); update_progress(5)
+        _init_idle_status()
 
         process_tbl_stacked(cfg, working_epsg, cell_size, max_workers,
                             approx_gb_per_worker, mem_target_frac,
                             asset_soft_limit, geocode_soft_limit)
         flatten_tbl_stacked(config_file, working_epsg); update_progress(95)
 
-        # Success: remove any remaining temp directories, but keep final outputs
         for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
             _rm_rf(_dataset_dir(temp_dir))
         
         log_to_gui(log_widget, "COMPLETED."); update_progress(100)
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
-        # Do NOT cleanup temps here (user wants to inspect them)
         raise
+
+# ----------------------------
+# Minimap (Leaflet in pywebview) — helper process
+# ----------------------------
+MAP_HTML = r"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chunk minimap</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body { height:100%; margin:0; }
+  #map { height:100%; width:100%; }
+  .legend { position: absolute; bottom: 10px; left: 10px; background: rgba(255,255,255,0.9); padding:6px 8px; border-radius:6px; font: 12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; vertical-align:middle; border:1px solid #999; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="legend">
+  <div><span class="swatch" style="background: rgba(34,197,94,0.22); border-color: transparent;"></span>Done</div>
+  <div><span class="swatch" style="background: rgba(249,115,22,0.22); border-color: transparent;"></span>Running</div>
+  <div><span class="swatch" style="background: transparent; border-color: rgba(100,116,139,0.70);"></span>Queued</div>
+</div>
+<script>
+let MAP, GROUP;
+
+function init(){
+  MAP = L.map('map', { zoomSnap: 0.25 });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(MAP);
+  GROUP = L.featureGroup().addTo(MAP);
+  MAP.setView([59.9,10.75], 4); // harmless default
+  refresh(); setInterval(refresh, 60000); // 30s
+}
+
+function boundsFromSWNE(swne){
+  if (!swne || swne.length!==4) return null;
+  const [s,w,n,e] = swne;
+  return L.latLngBounds([s,w],[n,e]);
+}
+
+// Style: 'done' and 'running' use fill only; 'queued' is outline-only gray.
+function styleFor(state){
+  if (state === 'done') {
+    return { stroke: false, fill: true,  fillColor: '#22c55e', fillOpacity: 0.25 };
+  }
+  if (state === 'running') {
+    return { stroke: false, fill: true,  fillColor: '#f97316', fillOpacity: 0.25 };
+  }
+  // queued
+  return { stroke: true,  color: '#94a3b8', weight: 1, opacity: 0.7, fill: false };
+  // (optional dashed outline: add dashArray: '3,2')
+}
+
+function render(status){
+  GROUP.clearLayers();
+  const hb = status && status.home_bounds;
+
+  if (status && Array.isArray(status.cells) && status.cells.length){
+    status.cells.forEach(c=>{
+      if (!c.bbox) return;
+      const b = boundsFromSWNE(c.bbox); if (!b) return;
+
+      const r = L.rectangle(b, styleFor(c.state));
+      const tip = `Cell #${c.id}<br>State: <b>${c.state}</b>${(c.n!=null)?('<br>Rows: '+c.n):''}`;
+      r.bindTooltip(tip, {sticky:true});
+      r.addTo(GROUP);
+    });
+    try { MAP.fitBounds(GROUP.getBounds().pad(0.08)); } catch(e){}
+  } else if (hb && hb.length===2){
+    try { MAP.fitBounds(hb, {padding:[20,20]}); } catch(e){}
+  }
+}
+
+function refresh(){
+  if (!window.pywebview || !window.pywebview.api){ return; }
+  window.pywebview.api.get_status().then(function(st){ render(st || {}); })
+                              .catch(function(){ /* ignore */ });
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
+"""
+
+
+def _map_process_entry(status_path_str: str):
+    # Low priority so it never contends with workers
+    try:
+        if psutil is not None:
+            p = psutil.Process()
+            if os.name == "nt":
+                try: p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                except Exception: p.nice(psutil.IDLE_PRIORITY_CLASS)
+            else:
+                os.nice(10)
+    except Exception:
+        pass
+
+    try:
+        import webview  # type: ignore
+        try: webview.logger.disabled = True
+        except Exception: pass
+    except Exception:
+        return
+
+    class MapApi:
+        def __init__(self, status_path: Path):
+            self.status_path = str(status_path)
+        def get_status(self):
+            try:
+                with open(self.status_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {"phase":"idle","chunks_total":0,"done":0,"running":[],"cells":[],"home_bounds":None}
+
+    api = MapApi(Path(status_path_str))
+    webview.create_window(title="Minimap — chunks", html=MAP_HTML, js_api=api, width=600, height=600)
+    try:
+        webview.start(gui='edgechromium', debug=False)
+    except Exception:
+        webview.start(debug=False)
+
+def open_minimap_window():
+    """Spawn the map helper process (single instance)."""
+    global _MAP_PROC
+    if importlib.util.find_spec("webview") is None:
+        log_to_gui(log_widget, "Minimap requires 'pywebview' (Edge WebView2). Install it to use the map.")
+        return
+    if _MAP_PROC is not None and _MAP_PROC.is_alive():
+        log_to_gui(log_widget, "Minimap is already open.")
+        return
+    ctx = multiprocessing.get_context("spawn")
+    _MAP_PROC = ctx.Process(target=_map_process_entry, args=(str(_status_path()),), daemon=True)
+    _MAP_PROC.start()
+    log_to_gui(log_widget, "Opening minimap (separate process)…")
 
 # ----------------------------
 # Entrypoint (GUI default; headless optional)
@@ -1084,6 +1396,9 @@ if __name__ == "__main__":
     except Exception:
         pass
 
+    MINIMAP_STATUS_PATH = gpq_dir() / "__chunk_status.json"
+    _init_idle_status()  # tiny baseline
+
     if args.headless:
         try:
             process_all(cfg_path)
@@ -1102,10 +1417,17 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    log_widget = scrolledtext.ScrolledText(root, height=12)
+    # panes
+    paned = tk.PanedWindow(root, orient=tk.HORIZONTAL)
+    paned.pack(fill=tk.BOTH, expand=True)
+    left = tk.Frame(paned); right = tk.Frame(paned, width=660)
+    paned.add(left); paned.add(right)
+
+    # left
+    log_widget = scrolledtext.ScrolledText(left, height=14)
     log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-    progress_frame = tk.Frame(root); progress_frame.pack(pady=5)
+    progress_frame = tk.Frame(left); progress_frame.pack(pady=5)
     progress_var = tk.DoubleVar(value=0.0)
     progress_bar = tb.Progressbar(progress_frame, orient="horizontal", length=260,
                                   mode="determinate", variable=progress_var, bootstyle='info')
@@ -1114,18 +1436,27 @@ if __name__ == "__main__":
 
     info = (f"Inputs: output/geoparquet/*.parquet  •  Heartbeat: {HEARTBEAT_SECS}s\n"
             "Adaptive intersections (pre-emptive splitting) + memory-aware worker scaling.\n"
-            "Flatten = min/max + A..E from config; area once per tile (stream-backfilled to stacked).\n"
+            "Flatten = min/max + A..E from config; area once per tile (backfilled to stacked).\n"
             "ENV index (1–100) + components: env_imp, env_sens, env_susc, env_press.\n"
             "Tuning: approx_gb_per_worker, mem_target_frac, asset_soft_limit, geocode_soft_limit.")
-    tk.Label(root, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
+    tk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
 
     def _run():
         process_all(cfg_path)
 
-    btn_frame = tk.Frame(root); btn_frame.pack(pady=6)
+    btn_frame = tk.Frame(left); btn_frame.pack(pady=6)
     tb.Button(btn_frame, text="Process", bootstyle=PRIMARY,
               command=lambda: threading.Thread(target=_run, daemon=True).start()).pack(side=tk.LEFT, padx=5)
     tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.LEFT, padx=5)
+
+    # right
+    tk.Label(right, text="Minimap (grid cells)", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
+    tk.Label(right, text=("Shows grid-cell progress on an OSM basemap.\n"
+                          "• Opens in a separate helper process (low priority).\n"
+                          "• Updates about once a minute while intersections run.\n"
+                          "• Tiles are semi-transparent for clarity."),
+             justify="left").pack(padx=10, anchor="w")
+    tb.Button(right, text="Open map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
 
     log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
     root.mainloop()
