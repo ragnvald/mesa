@@ -794,6 +794,34 @@ def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers
             done_count += 1
             progress_state['done'] = done_count
 
+            try:
+                running_chunk_ids = list(range(done_count+1, min(done_count + max_workers, total_chunks) + 1))
+                running_cells = set().union(*(chunk_cells.get(i, set()) for i in running_chunk_ids)) if running_chunk_ids else set()
+                done_cells = set().union(*(chunk_cells.get(i, set()) for i in range(1, done_count+1))) if done_count else set()
+
+                id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
+                for cid in done_cells:
+                    i = id_to_idx.get(int(cid))
+                    if i is not None:
+                        cells_meta[i]["state"] = "done"
+                for cid in running_cells:
+                    i = id_to_idx.get(int(cid))
+                    if i is not None and cells_meta[i]["state"] != "done":
+                        cells_meta[i]["state"] = "running"
+
+                _write_status_atomic({
+                    "phase": "intersect",
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "chunks_total": total_chunks,
+                    "done": done_count,
+                    "running": running_chunk_ids,
+                    "cells": cells_meta,
+                    "home_bounds": home_bounds
+                })
+            except Exception:
+                pass
+
+
             if logs:
                 for line in logs:
                     log_to_gui(log_widget, line)
@@ -974,6 +1002,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     if stacked.crs is None:
         stacked.set_crs(f"EPSG:{working_epsg}", inplace=True)
 
+    # Ensure numeric bases exist
     bases = ["importance","sensitivity","susceptibility"]
     for b in bases:
         if b in stacked.columns:
@@ -981,38 +1010,93 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         else:
             stacked[b] = pd.Series(pd.NA, index=stacked.index, dtype="Float64")
 
-    keys = ["code"]
-    gnum = stacked.groupby(keys, dropna=False).agg({
-        "importance": ["min","max"],
-        "sensitivity": ["min","max"],
-        "susceptibility": ["min","max"],
-    })
-    gnum.columns = [f"{c}_{s}" for c,s in gnum.columns]
+    # --------- Category/Rank helpers for choosing winners ---------
+    ranges_map, desc_map, _order = read_class_ranges(config_file)
 
+    def _pick_base_category(df: pd.DataFrame, base: str) -> pd.Series:
+        """
+        Preferred category source (per-row):
+          1) base-specific code column: f"{base}_code"
+          2) generic 'category' column
+          3) derive from numeric via ranges map
+        """
+        if f"{base}_code" in df.columns:
+            cat = df[f"{base}_code"].astype("string").str.strip().str.upper()
+        elif "category" in df.columns:
+            cat = df["category"].astype("string").str.strip().str.upper()
+        else:
+            cat = df[base].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string").str.upper()
+        return cat
+
+    def _pick_rank(df: pd.DataFrame, base: str) -> pd.Series:
+        """
+        Tie-break rank (higher is better), only if available:
+          1) per-base rank f"{base}_category_rank"
+          2) global 'category_rank'
+        If none exist -> all zeros (so we fall back to alphabetical category).
+        """
+        if f"{base}_category_rank" in df.columns:
+            rnk = pd.to_numeric(df[f"{base}_category_rank"], errors="coerce")
+        elif "category_rank" in df.columns:
+            rnk = pd.to_numeric(df["category_rank"], errors="coerce")
+        else:
+            rnk = pd.Series(0.0, index=df.index, dtype="float64")
+        return rnk.fillna(0.0)
+
+    def _select_extreme(df: pd.DataFrame, base: str, pick: str) -> pd.DataFrame:
+        val = pd.to_numeric(df[base], errors="coerce")
+        cat = _pick_base_category(df, base)
+        rnk = _pick_rank(df, base)
+        tmp = pd.DataFrame({
+            "code": df["code"],
+            "val":  val,
+            "cat":  cat,
+            "rnk":  rnk
+        })
+        if pick == "max":
+            tmp["sv"] = tmp["val"].fillna(-np.inf)  # ignore NaNs for maxima
+            tmp = tmp.sort_values(["code","sv","rnk","cat"],
+                                  ascending=[True, False, False, True],
+                                  kind="mergesort")
+        else:  # "min"
+            tmp["sv"] = tmp["val"].fillna(np.inf)   # ignore NaNs for minima
+            tmp = tmp.sort_values(["code","sv","rnk","cat"],
+                                  ascending=[True, True, False, True],
+                                  kind="mergesort")
+        win = tmp.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].copy()
+        return win.rename(columns={"val": f"{base}_{pick}", "cat": f"{base}_code_{pick}"})
+
+    # --------- Per-tile metadata (sum/concat-like behavior stays) ---------
+    keys = ["code"]
     gmeta = stacked.groupby(keys, dropna=False).agg({
         "ref_geocodegroup": "first",
         "name_gis_geocodegroup": "first",
         "geometry": "first",
         "ref_asset_group": pd.Series.nunique,
         "name_gis_assetgroup": (lambda s: ", ".join(pd.Series(s).dropna().astype(str).unique()))
-    }).rename(columns={"ref_asset_group":"asset_groups_total", "name_gis_assetgroup":"asset_group_names"})
+    }).rename(columns={"ref_asset_group":"asset_groups_total",
+                       "name_gis_assetgroup":"asset_group_names"}).reset_index()
 
-    goverlap = stacked.groupby(keys, dropna=False).size().to_frame("assets_overlap_total")
+    goverlap = stacked.groupby(keys, dropna=False).size().to_frame("assets_overlap_total").reset_index()
 
-    tbl_flat = pd.concat([gnum, gmeta, goverlap], axis=1).reset_index()
-    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=stacked.crs)
-
-    ranges_map, desc_map, _order = read_class_ranges(config_file)
-    def add_code_desc(df: pd.DataFrame, base: str) -> pd.DataFrame:
-        cmin = df[f"{base}_min"].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string")
-        cmax = df[f"{base}_max"].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string")
-        df[f"{base}_code_min"] = cmin
-        df[f"{base}_code_max"] = cmax
-        df[f"{base}_description_min"] = df[f"{base}_code_min"].apply(lambda k: desc_map.get(k, None))
-        df[f"{base}_description_max"] = df[f"{base}_code_max"].apply(lambda k: desc_map.get(k, None))
-        return df
+    # --------- Build winners for each base and extreme ---------
+    pieces = [gmeta, goverlap]
     for b in bases:
-        tbl_flat = add_code_desc(tbl_flat, b)
+        pieces.append(_select_extreme(stacked, b, "min"))
+        pieces.append(_select_extreme(stacked, b, "max"))
+
+    # Merge to single row per tile
+    tbl_flat = pieces[0]
+    for p in pieces[1:]:
+        tbl_flat = tbl_flat.merge(p, on="code", how="left")
+
+    # Descriptions from chosen categories
+    for b in bases:
+        tbl_flat[f"{b}_description_min"] = tbl_flat[f"{b}_code_min"].map(lambda k: desc_map.get(k, None))
+        tbl_flat[f"{b}_description_max"] = tbl_flat[f"{b}_code_max"].map(lambda k: desc_map.get(k, None))
+
+    # GeoDataFrame and area
+    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=stacked.crs)
 
     try:
         cfg = read_config(base_dir() / "system" / "config.ini")
@@ -1028,6 +1112,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         metric = tbl_flat.to_crs("EPSG:3035")
         tbl_flat["area_m2"] = metric.geometry.area.astype("float64").round().astype("Int64")
 
+    # --------- ENV index (unchanged) ---------
     DEFAULT_ENV_PROFILE = {
         'w_sensitivity': 0.35, 'w_susceptibility': 0.25, 'w_importance': 0.20, 'w_pressure': 0.20,
         'gamma': 0.0, 'pnorm_minmax': 4.0, 'overlap_cap_q': 0.95,
@@ -1195,10 +1280,29 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 
     update_progress(90)
     try:
-        st = {"phase": "done","updated_at": datetime.utcnow().isoformat() + "Z","chunks_total": 0,"done": 0,"running": [],"cells": [],"home_bounds": None}
-        _write_status_atomic(st)
+        # Keep the last snapshot of cells/home_bounds so the map still shows tiles after finishing
+        prev = {}
+        try:
+            with open(_status_path(), "r", encoding="utf-8") as f:
+                prev = json.load(f) or {}
+        except Exception:
+            prev = {}
+
+        chunks_total = int(prev.get("chunks_total", 0) or 0)
+        done = int(prev.get("done", chunks_total) or 0)
+
+        _write_status_atomic({
+            "phase": "done",
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "chunks_total": chunks_total,
+            "done": done,
+            "running": [],
+            "cells": prev.get("cells", []),           # <-- preserve
+            "home_bounds": prev.get("home_bounds")    # <-- preserve
+        })
     except Exception:
         pass
+
 
 # ----------------------------
 # Top-level process
@@ -1251,71 +1355,143 @@ MAP_HTML = r"""<!doctype html>
 <style>
   html, body { height:100%; margin:0; }
   #map { height:100%; width:100%; }
-  .legend { position: absolute; bottom: 10px; left: 10px; background: rgba(255,255,255,0.9); padding:6px 8px; border-radius:6px; font: 12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  .topbar {
+    position:absolute; top:0; left:0; right:0; z-index:1000;
+    background:rgba(255,255,255,0.92);
+    border-bottom:1px solid #e5e7eb;
+    padding:6px 10px;
+    font:12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    color:#0f172a;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .legend {
+    position:absolute; bottom:10px; left:10px;
+    background:rgba(255,255,255,0.9); padding:6px 8px; border-radius:6px;
+    font:12px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  }
   .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; vertical-align:middle; border:1px solid #999; }
 </style>
 </head>
 <body>
 <div id="map"></div>
+
+<!-- Stats line -->
+<div class="topbar" id="facts">Loading…</div>
+
+<!-- Legend -->
 <div class="legend">
   <div><span class="swatch" style="background: rgba(34,197,94,0.22); border-color: transparent;"></span>Done</div>
   <div><span class="swatch" style="background: rgba(249,115,22,0.22); border-color: transparent;"></span>Running</div>
   <div><span class="swatch" style="background: transparent; border-color: #f97316;"></span>Queued</div>
 </div>
+
 <script>
 let MAP, GROUP;
 
 function init(){
-  MAP = L.map('map', { zoomSnap: 0.25 });
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(MAP);
-  GROUP = L.featureGroup().addTo(MAP);
-  MAP.setView([59.9,10.75], 4); // harmless default
-  refresh(); setInterval(refresh, 60000); // 30s
+  try {
+    MAP = L.map('map', { zoomSnap: 0.25 });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(MAP);
+    GROUP = L.featureGroup().addTo(MAP);
+    MAP.setView([59.9,10.75], 4); // harmless default
+    refresh();
+    setInterval(refresh, 5000); //
+  } catch(e){
+    safeSetFacts("Init error: " + (e && e.message ? e.message : e));
+  }
+}
+
+function safeSetFacts(text){
+  try{
+    var f = document.getElementById('facts');
+    if (f) f.textContent = String(text || "");
+  }catch(_){}
 }
 
 function boundsFromSWNE(swne){
-  if (!swne || swne.length!==4) return null;
-  const [s,w,n,e] = swne;
+  if (!Array.isArray(swne) || swne.length!==4) return null;
+  const s = Number(swne[0]); const w = Number(swne[1]); const n = Number(swne[2]); const e = Number(swne[3]);
+  if (![s,w,n,e].every(Number.isFinite)) return null;
   return L.latLngBounds([s,w],[n,e]);
 }
 
-// Style: 'done' and 'running' use fill only; 'queued' is outline-only gray.
 function styleFor(state){
   if (state === 'done') {
-    return { stroke: false, fill: true,  fillColor: '#22c55e', fillOpacity: 0.25 };
+    return { stroke:false, fill:true,  fillColor:'#22c55e', fillOpacity:0.25 };
   }
   if (state === 'running') {
-    return { stroke: false, fill: true,  fillColor: '#f97316', fillOpacity: 0.25 };
+    return { stroke:false, fill:true,  fillColor:'#f97316', fillOpacity:0.25 };
   }
-  // queued
-  return { stroke: true,  color: '#f97316', weight: 1, opacity: 0.7, fill: false };
-  // (optional dashed outline: add dashArray: '3,2')
+  return { stroke:true, color:'#f97316', weight:1, opacity:0.8, fill:false };
+}
+
+function summarize(status){
+  const cells = (status && Array.isArray(status.cells)) ? status.cells : [];
+  let queued=0, running=0, done=0;
+  for (const c of cells){
+    const st = (c && c.state) ? String(c.state) : '';
+    if (st === 'done') done++;
+    else if (st === 'running') running++;
+    else queued++;
+  }
+  const total = cells.length;
+  const tsRaw = status && status.updated_at ? status.updated_at : null;
+  let ts = tsRaw;
+  try { if (tsRaw) ts = new Date(tsRaw).toLocaleString(); } catch(_){}
+  return { total, queued, running, done, ts };
+}
+
+function updateFacts(status){
+  const s = summarize(status || {});
+  const parts = [
+    (s.ts ? `Updated: ${s.ts}` : 'Updated: —'),
+    `Cells: ${s.total}`,
+    `queued ${s.queued}`,
+    `processing ${s.running}`,
+    `done ${s.done}`
+  ];
+  safeSetFacts(parts.join('  •  '));
 }
 
 function render(status){
-  GROUP.clearLayers();
+  try{
+    GROUP.clearLayers();
+  }catch(_){}
+  updateFacts(status);
+
   const hb = status && status.home_bounds;
+  const cells = (status && Array.isArray(status.cells)) ? status.cells : [];
 
-  if (status && Array.isArray(status.cells) && status.cells.length){
-    status.cells.forEach(c=>{
-      if (!c.bbox) return;
-      const b = boundsFromSWNE(c.bbox); if (!b) return;
-
+  if (cells.length){
+    for (let i=0; i<cells.length; i++){
+      const c = cells[i] || {};
+      const b = boundsFromSWNE(c.bbox);
+      if (!b) continue;
       const r = L.rectangle(b, styleFor(c.state));
-      const tip = `Cell #${c.id}<br>State: <b>${c.state}</b>${(c.n!=null)?('<br>Rows: '+c.n):''}`;
-      r.bindTooltip(tip, {sticky:true});
-      r.addTo(GROUP);
-    });
-    try { MAP.fitBounds(GROUP.getBounds().pad(0.08)); } catch(e){}
-  } else if (hb && hb.length===2){
-    try { MAP.fitBounds(hb, {padding:[20,20]}); } catch(e){}
+      const human = (c.state === 'running') ? 'processing' : (c.state || 'queued');
+      const nrows = (c.n!=null && isFinite(Number(c.n))) ? String(c.n) : '';
+      const tip = `Cell #${String(c.id ?? '')}<br>State: <b>${human}</b>${nrows ? ('<br>Rows: '+nrows) : ''}`;
+      try { r.bindTooltip(tip, {sticky:true}); } catch(_){}
+      try { r.addTo(GROUP); } catch(_){}
+    }
+    try { MAP.fitBounds(GROUP.getBounds().pad(0.08)); } catch(_){}
+  } else if (Array.isArray(hb) && hb.length===2){
+    try { MAP.fitBounds(hb, {padding:[20,20]}); } catch(_){}
   }
 }
 
 function refresh(){
-  if (!window.pywebview || !window.pywebview.api){ return; }
-  window.pywebview.api.get_status().then(function(st){ render(st || {}); })
-                              .catch(function(){ /* ignore */ });
+  try{
+    if (!window.pywebview || !window.pywebview.api){
+      safeSetFacts("Waiting for pywebview bridge…");
+      return;
+    }
+    window.pywebview.api.get_status()
+      .then(function(st){ render(st || {}); })
+      .catch(function(e){ safeSetFacts("Status read error: " + (e && e.message ? e.message : e)); });
+  }catch(e){
+    safeSetFacts("Refresh error: " + (e && e.message ? e.message : e));
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
