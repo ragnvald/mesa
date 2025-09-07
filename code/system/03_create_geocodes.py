@@ -4,14 +4,15 @@
 """
 03_create_geocodes.py  —  H3 + Basic Mosaic (GeoParquet-first)
 
-What's new in this build (visibility + responsiveness):
-- Heartbeat now shows: stage, tiles done/total, faces count, elapsed, ETA, tiles/min,
-  and total CPU/RAM aggregated across pool children (if psutil available).
-- Task scheduling defaults to INTERLEAVE (light ↔ heavy) so first results arrive quickly;
-  configurable via config.ini (mosaic_task_order).
-- Pool chunk size is configurable (mosaic_pool_chunksize, default 1) for snappy returns.
-- Still buffers/simplifies inside workers, not in the parent → real parallel utilization.
+What's new in this build (identity-preserving speedups):
+- **Clip-before-buffer** per tile: each worker clips inputs to the tile’s envelope
+  expanded by (buffer_m + epsilon) before buffering. This is mathematically equivalent
+  inside the tile (no geometry change) and cuts vertex counts massively.
+- Optional dedup of identical input geometries (safe; does not change mosaic).
 - Kept: adaptive quadtree tiling + heavy-tile split, streaming face flush, robust H3, GUI/CLI.
+- Heartbeat still shows: stage, tiles done/total, faces count, elapsed, ETA, tiles/min,
+  and total CPU/RAM aggregated across pool children (if psutil available).
+- Task scheduling defaults to INTERLEAVE for snappy early progress.
 
 Config (system/config.ini → [DEFAULT]) knobs (defaults shown):
   mosaic_workers = 0                         # 0 -> auto
@@ -19,12 +20,17 @@ Config (system/config.ini → [DEFAULT]) knobs (defaults shown):
   mosaic_quadtree_heavy_split_multiplier = 2.0
   mosaic_quadtree_max_depth = 8
   mosaic_quadtree_min_tile_m = 1000
-  mosaic_simplify_tolerance_m = 0           # 0 disables simplify
+  mosaic_simplify_tolerance_m = 0           # keep 0 for identical output
   mosaic_faces_flush_batch = 250000
   mosaic_pool_maxtasksperchild = 8
-  mosaic_pool_chunksize = 1                 # 1 = more responsive progress
+  mosaic_pool_chunksize = 1
   mosaic_task_order = interleave            # interleave | heavy_first | light_first
   heartbeat_secs = 10
+
+  # New identity-preserving speed knobs:
+  mosaic_clip_before_buffer = true
+  mosaic_clip_margin_m = 0.05               # tiny epsilon on top of buffer distance
+  mosaic_dedup_assets = true                # drop exact duplicate geometries up-front
 """
 
 from __future__ import annotations
@@ -637,35 +643,57 @@ def _load_asset_objects(base_dir: Path) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
 # -----------------------------------------------------------------------------
-# Mosaic worker (buffer/simplify inside worker)
+# Mosaic worker (clip-before-buffer; no geometry changes)
 # -----------------------------------------------------------------------------
-def _mosaic_tile_worker(task: Tuple[int, List[bytes], float, float]):
+def _mosaic_tile_worker(task: Tuple[int, List[bytes], float, float, bytes]):
     """
-    Input: (tile_index, [WKB of original geoms (metric CRS)], buffer_m, simplify_tol)
-    Output: (tile_index, [WKB faces], error:str|None)
+    Input:
+      (tile_index, [WKB of original geoms (metric CRS)], buffer_m, simplify_tol_m, clip_wkb)
+    Output:
+      (tile_index, [WKB faces], error:str|None)
+    Notes:
+      - Clip-before-buffer is mathematically exact inside the tile’s region expanded by buffer_m.
+      - Keep simplify_tol_m = 0 for identity; nonzero only if you accept approximation.
     """
-    idx, wkb_list, buf_m, simp = task
+    idx, wkb_list, buf_m, simp, clip_wkb = task
     try:
         if not wkb_list:
             return (idx, [], None)
 
         geoms = [shp_wkb.loads(b) for b in wkb_list if b]
+        clip_poly = shp_wkb.loads(clip_wkb) if clip_wkb else None
         buf = max(0.01, float(buf_m))
+
         processed = []
         for g in geoms:
-            if g and not g.is_empty:
+            if not g or g.is_empty:
+                continue
+            g_local = g
+            if clip_poly is not None:
                 try:
-                    gb = g.buffer(buf)
-                    if shapely_make_valid:
-                        gb = shapely_make_valid(gb)
-                    else:
-                        gb = gb.buffer(0)
-                    if simp and simp > 0:
-                        gb = gb.simplify(simp, preserve_topology=True)
-                    if gb and not gb.is_empty:
-                        processed.append(gb)
+                    g_local = g.intersection(clip_poly)
+                    if not g_local or g_local.is_empty:
+                        continue
                 except Exception:
-                    continue
+                    # If intersection fails for a broken geom, fall back to original.
+                    g_local = g
+
+            try:
+                gb = g_local.buffer(buf)  # default GEOS params → identical shape to buffering the full geom
+                if shapely_make_valid:
+                    gb = shapely_make_valid(gb)
+                else:
+                    gb = gb.buffer(0)
+
+                # IMPORTANT: For identical output, simp must be 0 (default in config).
+                if simp and simp > 0:
+                    gb = gb.simplify(simp, preserve_topology=True)
+
+                if gb and not gb.is_empty:
+                    processed.append(gb)
+            except Exception:
+                continue
+
         if not processed:
             return (idx, [], None)
 
@@ -823,6 +851,8 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
 
     # Load assets
     STATS.stage = "loading assets"
+    pq_path = geoparquet_path(base_dir, "tbl_asset_object")
+    log_to_gui(f"[Mosaic] Asset source: {pq_path} {'(exists)' if pq_path.exists() else '(MISSING)'}")
     assets = _load_asset_objects(base_dir)
     log_to_gui(f"[Mosaic] Loaded assets: {len(assets):,} rows; CRS={assets.crs}")
     if assets.empty:
@@ -837,6 +867,20 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
     a = assets.to_crs(metric_crs).copy()
     log_to_gui(f"[Mosaic] Reprojected to {metric_crs} in {time.time()-t:.2f}s.")
 
+    # Optional dedup of identical geoms (safe; no output change)
+    try:
+        dedup_assets = cfg["DEFAULT"].get("mosaic_dedup_assets", "true").strip().lower() in ("1","true","yes","on")
+    except Exception:
+        dedup_assets = True
+    if dedup_assets:
+        try:
+            a["_wkb"] = a.geometry.apply(_wkb_hex)
+            before = len(a)
+            a = a.drop_duplicates(subset="_wkb").drop(columns="_wkb")
+            log_to_gui(f"[Mosaic] Dedup identical asset geometries: {before:,} → {len(a):,}")
+        except Exception:
+            pass
+
     # Spatial index
     STATS.stage = "building sindex"
     t = time.time()
@@ -848,7 +892,7 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
         log_to_gui("[Mosaic] Spatial index not available; aborting.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Tiler params
+    # Tiler & worker params
     try: max_feats_per_tile = int(cfg["DEFAULT"].get("mosaic_quadtree_max_feats_per_tile", "800"))
     except Exception: max_feats_per_tile = 800
     try: heavy_mult = float(cfg["DEFAULT"].get("mosaic_quadtree_heavy_split_multiplier", "2.0"))
@@ -869,6 +913,13 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
         chunksize = int(cfg["DEFAULT"].get("mosaic_pool_chunksize", "1"))
     except Exception:
         chunksize = 1
+
+    # NEW: clip-before-buffer flags
+    clip_before_buffer = cfg["DEFAULT"].get("mosaic_clip_before_buffer", "true").strip().lower() in ("1","true","yes","on")
+    try:
+        clip_margin = float(cfg["DEFAULT"].get("mosaic_clip_margin_m", "0.05"))
+    except Exception:
+        clip_margin = 0.05
 
     # Plan tiles
     STATS.stage = "planning tiles"
@@ -898,16 +949,24 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
     leaves = balanced
     log_to_gui(f"[Mosaic] Heavy tiles split: {heavy_count}; final tiles: {len(leaves):,}.")
 
-    # Prepare tasks (WKB of ORIGINAL geoms; workers will buffer+fix+simplify)
+    # Prepare tasks (WKB of ORIGINAL geoms; workers will clip (optional) + buffer + fix)
     STATS.stage = "packing tasks"
     counts = []
-    tasks: List[Tuple[int, List[bytes], float, float]] = []
+    tasks: List[Tuple[int, List[bytes], float, float, bytes]] = []
     tick = time.time()
-    for i, (_bounds, idxs) in enumerate(leaves, start=1):
+    for i, (bounds, idxs) in enumerate(leaves, start=1):
         sub = a.iloc[idxs]
         counts.append(len(sub))
         wkb_list = [shp_wkb.dumps(g) for g in sub.geometry]
-        tasks.append((i-1, wkb_list, float(buffer_m), float(simplify_tol)))
+
+        if clip_before_buffer:
+            x0, y0, x1, y1 = bounds
+            clip_poly = box(x0, y0, x1, y1).buffer(float(buffer_m) + float(clip_margin))
+            clip_wkb = shp_wkb.dumps(clip_poly)
+        else:
+            clip_wkb = b""
+
+        tasks.append((i-1, wkb_list, float(buffer_m), float(simplify_tol), clip_wkb))
         if i % 200 == 0 or (time.time() - tick) >= 5:
             STATS.detail = f"(packed {i}/{len(leaves)})"
             tick = time.time()
@@ -963,8 +1022,8 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
     ctx = mp.get_context("spawn")
     try:
         if workers == 1 or n_tasks == 1:
-            for (idx, wkb_list, bufm, simp) in tasks:
-                _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp))
+            for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
+                _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
                 STATS.tiles_done += 1
                 if err:
                     log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
@@ -975,7 +1034,6 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
                 update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
         else:
             with ctx.Pool(processes=workers, maxtasksperchild=maxtasks) as pool:
-                # NOTE: small chunksize -> quicker first results / better progress feedback
                 for (idx, res, err) in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=max(1, chunksize)):
                     STATS.tiles_done += 1
                     if err:
@@ -1011,7 +1069,7 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
     faces = pd.concat(parts_gdfs, ignore_index=True)
     faces = ensure_wgs84(gpd.GeoDataFrame(faces, geometry="geometry"))
 
-    # Deduplicate
+    # Deduplicate final faces by exact WKB
     STATS.stage = "deduplicating"
     t_ded = time.time()
     try:
