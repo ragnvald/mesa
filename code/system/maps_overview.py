@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, base64, configparser, locale
+import os, sys, base64, configparser, locale, sqlite3, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import mapping
+from pyproj import Geod
 
-# Require pywebview in the environment that launches this script
+# ---------- Optional shapely make_valid ----------
+try:
+    from shapely.validation import make_valid as _make_valid
+except Exception:
+    _make_valid = None
+
+# ---------- pywebview ----------
 try:
     import webview  # pip install pywebview
 except ModuleNotFoundError:
@@ -15,13 +24,6 @@ except ModuleNotFoundError:
         "Install it in that environment, e.g.:  pip install pywebview\n"
     )
     sys.exit(1)
-
-# Accurate geodesic areas for stats
-from pyproj import Geod
-try:
-    from shapely.validation import make_valid as _make_valid
-except Exception:
-    _make_valid = None
 
 # ===============================
 # Locale (safe)
@@ -36,14 +38,16 @@ except Exception:
 # ===============================
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE      = os.path.join(BASE_DIR, "../system/config.ini")
-PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")           # stats source & map polygons
+PARQUET_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_flat.parquet")           # stats + polygons
 SEGMENT_FILE     = os.path.join(BASE_DIR, "../output/geoparquet/tbl_segment_flat.parquet")
 ASSET_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_asset_object.parquet")
-LINES_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_lines.parquet")          # human-readable names + name_gis
+LINES_FILE       = os.path.join(BASE_DIR, "../output/geoparquet/tbl_lines.parquet")
+MBTILES_DIR      = os.path.join(BASE_DIR, "../output/mbtiles")
+
 PLOT_CRS         = "EPSG:4326"
-BASIC_GROUP_NAME = "basic_mosaic"   # stats always from here (in tbl_flat)
-ZOOM_THRESHOLD   = 10               # tooltips for geocode/env/segments appear when map zoom >= this
-STEEL_BLUE       = "#4682B4"        # assets color (semi-transparent via fillOpacity)
+BASIC_GROUP_NAME = "basic_mosaic"
+ZOOM_THRESHOLD   = 10
+STEEL_BLUE       = "#4682B4"
 
 # ===============================
 # Config / colors
@@ -71,10 +75,9 @@ def get_desc_mapping(cfg: configparser.ConfigParser) -> dict:
     return {c: (cfg[c].get("description","") if c in cfg else "") for c in "ABCDE"}
 
 # ===============================
-# Data helpers
+# Geo helpers & stats
 # ===============================
 def load_parquet(path: str) -> gpd.GeoDataFrame:
-    """Load a GeoParquet if it exists; return empty GeoDataFrame otherwise."""
     try:
         if not os.path.exists(path):
             return gpd.GeoDataFrame()
@@ -94,7 +97,6 @@ def only_A_to_E(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return keep
 
 def to_plot_crs(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
-    """Normalize to map CRS (EPSG:4326) for rendering/leaflet bounds."""
     if gdf.empty:
         return gdf.set_crs(PLOT_CRS, allow_override=True) if gdf.crs is None else gdf
     if gdf.crs is None:
@@ -115,7 +117,6 @@ def to_plot_crs(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.Ge
     return gdf
 
 def to_epsg4326(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
-    """Ensure EPSG:4326 (WGS84) for geodesic area computation."""
     if gdf.empty:
         return gdf.set_crs(4326, allow_override=True) if gdf.crs is None else gdf.to_crs(4326)
     g = gdf.copy()
@@ -143,7 +144,6 @@ def bounds_to_leaflet(b):
     return [[miny, minx],[maxy, maxx]]  # [[south, west],[north, east]]
 
 def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
-    """GeoJSON with compact, tooltip-friendly properties for geocodes/segments."""
     feats = []
     for _, row in gdf.iterrows():
         geom = row.geometry
@@ -160,14 +160,12 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
     return {"type": "FeatureCollection", "features": feats}
 
 def assets_to_geojson(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
-    """GeoJSON for assets with tooltip props including geodesic area (for polygons)."""
     g = to_epsg4326(gdf, cfg)
     feats = []
     for _, row in g.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
-        # Compute area_km2 for polygons; for points/lines keep None
         try:
             area_m2 = 0.0
             if geom.geom_type in ("Polygon", "MultiPolygon"):
@@ -185,7 +183,6 @@ def assets_to_geojson(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> 
     return {"type": "FeatureCollection", "features": feats}
 
 def envindex_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
-    """GeoJSON for env_index overlay (expects column env_index in gdf)."""
     feats = []
     for _, row in gdf.iterrows():
         geom = row.geometry
@@ -228,10 +225,6 @@ def geodesic_area_m2(geom) -> float:
     return 0.0
 
 def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
-    """
-    Input: tbl_flat (already loaded as GeoDataFrame with geometry).
-    Filter to BASIC_GROUP_NAME, dedupe, compute WGS84 geodesic area, sum to km² by sensitivity.
-    """
     labels = list("ABCDE")
     msg = f'The geocode/partition "{BASIC_GROUP_NAME}" is missing.'
     if df_flat.empty or "name_gis_geocodegroup" not in df_flat.columns:
@@ -244,7 +237,6 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
     if df.empty:
         return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
 
-    # dedupe to avoid double counting overlapping rows in tbl_flat
     if "id_geocode_object" in df.columns:
         df = df.drop_duplicates(subset=["id_geocode_object"])
     else:
@@ -268,24 +260,188 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
     return {"labels": labels, "values": out}
 
 # ===============================
-# Load datasets (robust, non-fatal)
+# MBTiles scanning + tiny server
+# ===============================
+def _norm_key(s: str) -> str:
+    return (s or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+def scan_mbtiles(dir_path: str):
+    idx = {}
+    rev = {}
+    if not os.path.isdir(dir_path):
+        return idx, rev
+
+    for fn in os.listdir(dir_path):
+        if not fn.lower().endswith(".mbtiles"):
+            continue
+        path = os.path.join(dir_path, fn)
+        lo   = fn.lower()
+
+        if lo.endswith("_sensitivity.mbtiles"):
+            cat = fn[:-len("_sensitivity.mbtiles")]
+            kind = "sensitivity"
+        elif lo.endswith("_envindex.mbtiles"):
+            cat = fn[:-len("_envindex.mbtiles")]
+            kind = "envindex"
+        else:
+            continue
+
+        idx.setdefault(cat, {"sensitivity": None, "envindex": None})
+        idx[cat][kind] = path
+        rev[_norm_key(cat)] = cat
+
+    return idx, rev
+
+MBTILES_INDEX, MBTILES_REV = scan_mbtiles(MBTILES_DIR)
+_MB_META_CACHE = {}
+
+def _mb_meta(path: str):
+    if path in _MB_META_CACHE:
+        return _MB_META_CACHE[path]
+    out = {"bounds": [[-85.0,-180.0],[85.0,180.0]], "minzoom": 0, "maxzoom": 19, "format": "image/png"}
+    try:
+        con = sqlite3.connect(path)
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT name, value FROM metadata")
+            meta = {k.lower(): (v if v is not None else "") for k, v in cur.fetchall()}
+            fmt = (meta.get("format","") or "").lower()
+            if fmt in ("jpg","jpeg"): out["format"] = "image/jpeg"
+            b = meta.get("bounds","")
+            if b:
+                parts = [float(x) for x in str(b).split(",")]
+                if len(parts) == 4:
+                    minx, miny, maxx, maxy = parts
+                    out["bounds"] = [[miny, minx],[maxy, maxx]]
+            try: out["minzoom"] = int(meta.get("minzoom","0"))
+            except: pass
+            try: out["maxzoom"] = int(meta.get("maxzoom","19"))
+            except: pass
+        finally:
+            con.close()
+    except Exception:
+        pass
+    _MB_META_CACHE[path] = out
+    return out
+
+def _resolve_cat(cat: str):
+    if cat in MBTILES_INDEX:
+        return cat, MBTILES_INDEX[cat]
+    key = _norm_key(cat)
+    if key in MBTILES_REV:
+        disp = MBTILES_REV[key]
+        return disp, MBTILES_INDEX.get(disp)
+    for disp in MBTILES_INDEX.keys():
+        if disp.lower() == cat.lower():
+            return disp, MBTILES_INDEX[disp]
+    return cat, None
+
+class _MBTilesHandler(BaseHTTPRequestHandler):
+    connections = {}
+
+    # --- MUTE ALL LOGGING ---
+    def log_message(self, format, *args):  # noqa: N802
+        return
+    def log_error(self, format, *args):  # noqa: N802
+        return
+
+    def do_GET(self):
+        try:
+            parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
+            if len(parts) != 6 or parts[0] != "tiles":
+                self.send_response(404); self.end_headers(); return
+            _, kind, cat_enc, z_s, x_s, y_file = parts
+            kind = (kind or "").lower()
+            cat  = unquote(cat_enc)
+
+            disp, rec = _resolve_cat(cat)
+            if kind not in ("sensitivity","envindex") or not rec:
+                self.send_response(404); self.end_headers(); return
+
+            db_path = rec.get(kind)
+            if not db_path or not os.path.exists(db_path):
+                self.send_response(404); self.end_headers(); return
+
+            z = int(z_s); x = int(x_s); y = int(y_file.rsplit(".",1)[0])
+
+            con = self.connections.get(db_path)
+            if con is None:
+                con = sqlite3.connect(db_path, check_same_thread=False)
+                self.connections[db_path] = con
+
+            tms_y = (1 << z) - 1 - y
+            cur = con.cursor()
+            cur.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, x, tms_y))
+            row = cur.fetchone()
+            if not row:
+                cur.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, x, y))
+                row = cur.fetchone()
+            if not row:
+                self.send_response(204); self.end_headers(); return
+
+            data = row[0]
+            fmt = _mb_meta(db_path)["format"]
+            self.send_response(200)
+            self.send_header("Content-Type", fmt)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception:
+            try: self.send_response(500); self.end_headers()
+            except Exception: pass
+
+def start_mbtiles_server():
+    if not MBTILES_INDEX:
+        return None
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MBTilesHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{port}"
+
+MBTILES_BASE_URL = start_mbtiles_server()
+
+def mbtiles_info(cat: str):
+    disp, rec = _resolve_cat(cat)
+    if not rec or not MBTILES_BASE_URL:
+        return {"sensitivity_url": None, "envindex_url": None, "bounds": [[-85,-180],[85,180]], "minzoom":0, "maxzoom":19}
+    src = rec.get("sensitivity") or rec.get("envindex")
+    m = _mb_meta(src) if src else {"bounds":[[-85,-180],[85,180]], "minzoom":0, "maxzoom":19}
+    def build(kind):
+        p = rec.get(kind)
+        if p and os.path.exists(p):
+            return f"{MBTILES_BASE_URL}/tiles/{kind}/{disp}/{{z}}/{{x}}/{{y}}.png"
+        return None
+    return {
+        "sensitivity_url": build("sensitivity"),
+        "envindex_url": build("envindex"),
+        "bounds": m["bounds"],
+        "minzoom": m["minzoom"],
+        "maxzoom": m["maxzoom"],
+    }
+
+# ===============================
+# Load datasets
 # ===============================
 cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 
-# GDF is tbl_flat (stats & map polygons)
 GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
 ASSET_GDF    = load_parquet(ASSET_FILE)
-LINES_GDF    = load_parquet(LINES_FILE)  # names + name_gis primary key
+LINES_GDF    = load_parquet(LINES_FILE)
 
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 ASSETS_AVAILABLE    = (not ASSET_GDF.empty) and ("geometry" in ASSET_GDF.columns)
 ENVINDEX_AVAILABLE  = GEOCODE_AVAILABLE and ("env_index" in GDF.columns)
 
-CATS = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
+# ---- categories: union of MBTiles stems and vector groups ----
+mb_cats   = list(MBTILES_INDEX.keys())
+vec_cats  = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
+CATS      = sorted(set(mb_cats) | set(vec_cats), key=lambda s: (str(s).lower()))
+
 if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
     SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
 else:
@@ -293,7 +449,7 @@ else:
 
 # Build mapping from human-readable line name -> name_gis (PK)
 LINE_NAMES = []
-LINE_USER_TO_GIS = {}  # { name_user -> set(name_gis) }
+LINE_USER_TO_GIS = {}
 if not LINES_GDF.empty and ("name_gis" in LINES_GDF.columns):
     name_col = "name_user" if "name_user" in LINES_GDF.columns else None
     if name_col is None:
@@ -317,55 +473,63 @@ BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
 # ===============================
 class Api:
     def js_log(self, message: str):
-        try:
-            print(f"[JS] {message}")
-        except Exception:
-            pass
+        try: print(f"[JS] {message}")
+        except Exception: pass
 
     def get_state(self):
         return {
-            "geocode_available": GEOCODE_AVAILABLE,
-            "geocode_categories": CATS if GEOCODE_AVAILABLE else [],
+            "geocode_available": GEOCODE_AVAILABLE or bool(MBTILES_INDEX),
+            "geocode_categories": CATS,
             "segment_available": SEGMENTS_AVAILABLE,
-            "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],  # fallback
-            "segment_line_names": LINE_NAMES,  # from tbl_lines.name_user
+            "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],
+            "segment_line_names": LINE_NAMES,
             "assets_available": ASSETS_AVAILABLE,
-            "envindex_available": ENVINDEX_AVAILABLE,
+            "envindex_available": ENVINDEX_AVAILABLE or bool(MBTILES_INDEX),
             "colors": COLS,
             "descriptions": DESC,
-            "initial_geocode": (CATS[0] if (GEOCODE_AVAILABLE and CATS) else None),
+            "initial_geocode": (CATS[0] if CATS else None),
             "has_segments": SEGMENTS_AVAILABLE,
             "bing_key": BING_KEY,
             "zoom_threshold": ZOOM_THRESHOLD
         }
 
     def get_geocode_layer(self, geocode_category):
-        """Return selected geocode layer for map + stats from tbl_flat:basic_mosaic."""
+        """Prefer MBTiles sensitivity; otherwise vector fallback. Stats always from basic_mosaic."""
         try:
+            mb = mbtiles_info(geocode_category)
+            if mb.get("sensitivity_url"):
+                stats = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
+                return {
+                    "ok": True,
+                    "geojson": {"type":"FeatureCollection","features":[]},
+                    "home_bounds": mb.get("bounds"),
+                    "stats": stats,
+                    "mbtiles": {
+                        "sensitivity_url": mb["sensitivity_url"],
+                        "minzoom": mb["minzoom"],
+                        "maxzoom": mb["maxzoom"]
+                    }
+                }
             if not GEOCODE_AVAILABLE:
-                map_geojson = {"type":"FeatureCollection","features":[]}
-                map_bounds  = [[0,0],[0,0]]
-            else:
-                df_map = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
-                df_map = only_A_to_E(df_map)
-                df_map = to_plot_crs(df_map, cfg)
-                map_bounds = bounds_to_leaflet(df_map.total_bounds) if not df_map.empty else [[0,0],[0,0]]
-                map_geojson = gdf_to_geojson_min(df_map)
-
+                return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]}, "home_bounds": [[0,0],[0,0]], "stats": {"labels": list("ABCDE"), "values":[0]*5}}
+            df_map = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            df_map = only_A_to_E(df_map)
+            df_map = to_plot_crs(df_map, cfg)
+            map_bounds  = bounds_to_leaflet(df_map.total_bounds) if not df_map.empty else [[0,0],[0,0]]
+            map_geojson = gdf_to_geojson_min(df_map)
             stats = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
-
-            return {
-                "ok": True,
-                "geojson": map_geojson,
-                "home_bounds": map_bounds,
-                "stats": stats
-            }
+            return {"ok": True, "geojson": map_geojson, "home_bounds": map_bounds, "stats": stats}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
     def get_envindex_layer(self, geocode_category):
-        """Return env_index overlay (0–100) for a given geocode category from tbl_flat."""
+        """Prefer MBTiles envindex; otherwise vector fallback."""
         try:
+            mb = mbtiles_info(geocode_category)
+            if mb.get("envindex_url"):
+                return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]},
+                        "mbtiles": {"envindex_url": mb["envindex_url"],
+                                    "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]}}
             if not ENVINDEX_AVAILABLE:
                 return {"ok": False, "error": "env_index not available in tbl_flat."}
             df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
@@ -378,15 +542,9 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_segment_layer(self, seg_line_name_or_all):
-        """
-        Filter sensitivity segments (tbl_segment_flat) using tbl_lines relation:
-        UI passes tbl_lines.name_user -> map to tbl_lines.name_gis; filter segments on name_gis.
-        '__ALL__' => return all segments.
-        """
         try:
             if not SEGMENTS_AVAILABLE:
                 return {"ok": False, "error": "Segments dataset is empty or missing."}
-
             df = SEG_GDF.copy()
             sel = seg_line_name_or_all
             if sel and sel not in (None, "", "__ALL__"):
@@ -394,11 +552,10 @@ class Api:
                 if "name_gis" in df.columns:
                     allowed = LINE_USER_TO_GIS.get(sel, set())
                     if not allowed:
-                        allowed = {sel}  # tolerate direct name_gis passed through
+                        allowed = {sel}
                     df = df[df["name_gis"].astype(str).str.strip().isin(list(allowed))]
                 else:
                     df = df.iloc[0:0]
-
             df = only_A_to_E(df)
             df = to_plot_crs(df, cfg)
             gj = gdf_to_geojson_min(df)
@@ -407,7 +564,6 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_assets_layer(self):
-        """Return assets overlay (steel blue, drawn just above basemap) with tooltips."""
         try:
             if not ASSETS_AVAILABLE:
                 return {"ok": False, "error": "Assets dataset is empty or missing."}
@@ -428,14 +584,12 @@ class Api:
             os._exit(0)
 
     def save_png(self, data_url: str):
-        """Receive data URL from JS and save PNG."""
         try:
             if "," in data_url:
                 _, b64 = data_url.split(",", 1)
             else:
                 b64 = data_url
             data = base64.b64decode(b64)
-
             win = webview.windows[0]
             path = win.create_file_dialog(
                 webview.FileDialog.SAVE,
@@ -487,16 +641,7 @@ HTML_TEMPLATE = r"""
   .stats  { grid-area: stats; border-left: 2px solid #2b3442; display:flex; flex-direction:column; overflow:hidden; }
   #err { color:#b00; padding:6px 12px; font-size:12px; display:none; }
   .legend { padding:8px 12px; font-size:12px; }
-  .info-block {
-    padding:8px 12px;
-    font-size:12px;
-    line-height:1.35;
-    border-top:1px solid #2b344211;
-    border-bottom:1px solid #2b344211;
-    background:#0f172a08;
-    max-height:170px;
-    overflow:auto;
-  }
+  .info-block { padding:8px 12px; font-size:12px; line-height:1.35; border-top:1px solid #2b344211; border-bottom:1px solid #2b344211; background:#0f172a08; max-height:170px; overflow:auto; }
   .info-block p { margin:2px 0 4px 0; }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; border:1px solid #8884; }
   .num { text-align:right; white-space:nowrap; }
@@ -505,42 +650,27 @@ HTML_TEMPLATE = r"""
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
 
-  /* Leaflet Layers control tweaks and tooltips */
+  /* Leaflet Layers control tweaks and tooltip-like help */
   .leaflet-control-layers { font-size: 12px; }
   .leaflet-control-layers label { display:block; line-height: 1.35; }
   .inlineSel { margin:4px 0 6px 22px; }
-  .help {
-    display:inline-flex; align-items:center; justify-content:center;
-    width:15px; height:15px; border-radius:50%;
-    border:1px solid #96a1b4; color:#435061; font-size:10px; line-height:1;
-    cursor:default; position:relative; background:#f7fafc; margin-left:6px;
-  }
-  .help::after {
-    content: attr(data-tip);
-    position:absolute; left:20px; top:50%; transform:translateY(-50%);
-    background:#0f172a; color:#e5e7eb; border:1px solid #1f2937;
-    border-radius:6px; padding:6px 8px; font-size:12px; line-height:1.25;
-    min-width:220px; max-width:320px; white-space:normal;
-    box-shadow:0 8px 24px rgba(0,0,0,.25);
-    opacity:0; pointer-events:none; transition:opacity .12s ease;
-    z-index:2000;
-  }
-  .help:hover::after { opacity:1; }
+  /* STACK the two checkboxes vertically: env index directly under sensitive areas */
+  .inlineChecks { margin:0 0 6px 22px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+  .inlineChecks label { display:inline-flex; gap:6px; align-items:center; font-weight:500; }
 
-  /* chart/tooltip */
   #chartBox { flex:1 1 auto; padding:8px 12px; position:relative; overflow:hidden; }
   #chart { position:absolute; top:8px; right:12px; bottom:8px; left:12px; display:block; }
 
   .leaflet-tooltip.poly-tip {
-    background: #0f172a; color: #e5e7eb; border: 1px solid #1f2937;
-    border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
-    padding: 10px 12px; font-size: 12px; line-height: 1.25; max-width: 280px;
+    background:#0f172a; color:#e5e7eb; border:1px solid #1f2937;
+    border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,.25);
+    padding:10px 12px; font-size:12px; line-height:1.25; max-width:280px;
   }
-  .poly-tip .hdr { font-size: 12px; font-weight: 700; letter-spacing: .2px; margin-bottom: 6px; display:flex; align-items:center; gap:8px; justify-content:space-between; }
-  .poly-tip .chip { display:inline-block; font-weight:700; padding:2px 6px; border-radius:6px; background: rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.2); }
-  .poly-tip .kv { display: grid; grid-template-columns: 92px 1fr; gap: 4px 10px; }
-  .poly-tip .k  { opacity: .8; }
-  .poly-tip .v  { text-align: right; white-space: nowrap; }
+  .poly-tip .hdr { font-size:12px; font-weight:700; letter-spacing:.2px; margin-bottom:6px; display:flex; align-items:center; gap:8px; justify-content:space-between; }
+  .poly-tip .chip { display:inline-block; font-weight:700; padding:2px 6px; border-radius:6px; background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.2); }
+  .poly-tip .kv { display:grid; grid-template-columns:92px 1fr; gap:4px 10px; }
+  .poly-tip .k { opacity:.8; }
+  .poly-tip .v { text-align:right; white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -564,17 +694,8 @@ HTML_TEMPLATE = r"""
     <div id="err"></div>
     <div class="legend" id="legend"></div>
     <div id="infoText" class="info-block">
-      <p>1. Geocode areas are colored by sensitivity A (very high) to E (very low).</p>
-      <p>2. Bar chart shows total km² per sensitivity for the baseline group 'basic_mosaic'.</p>
-      <p>3. Percentages in the legend use geodesic (WGS84) area for accuracy.</p>
-      <p>4. Use the two dropdowns in the Layers box to pick geocode categories for Sensitivity and Env. index independently.</p>
-      <p>5. Enable 'Sensitivity lines' to view buffered line-based segment polygons.</p>
-      <p>6. Enable 'Assets' to overlay individual asset geometries in steel blue (hover for details).</p>
-      <p>7. Enable 'Environment index' for a yellow→red heat style based on env_index (0–100).</p>
-      <p>8. Adjust the Opacity slider to reveal more basemap context beneath fills.</p>
-      <p>9. Hover a polygon (zoom ≥ threshold) to see a tooltip with details. Asset tooltips show at any zoom.</p>
-      <p>10. Use Home to reset the view to the active geocode category extent.</p>
-      <p>11. Export PNG creates a high-resolution snapshot; try different basemaps.</p>
+      <p>Use the <b>Geocode group</b> selector, then enable <b>Sensitive areas</b> and/or <b>Environment index</b> below it.</p>
+      <p>The viewer prefers raster MBTiles in <code>output/mbtiles</code>. If missing, it falls back to GeoParquet.</p>
     </div>
     <div id="chartBox"><canvas id="chart"></canvas></div>
   </div>
@@ -583,490 +704,172 @@ HTML_TEMPLATE = r"""
 <script>
 var MAP=null, BASE=null, BASE_SOURCES=null, CHART=null;
 var GEO_GROUP=null, SEG_GROUP=null, ASSET_GROUP=null, ENV_GROUP=null;
+var GEO_FOLDER=null;
 var LAYER=null, LAYER_SEG=null, LAYER_ASSETS=null, LAYER_ENV=null;
 var HOME_BOUNDS=null, COLOR_MAP={}, DESC_MAP={};
 var FILL_ALPHA = 0.8;
 var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
-var ZOOM_THRESHOLD_JS = 12;  // for geocode/env/segments tooltips only
+var ZOOM_THRESHOLD_JS = 12;
 const ASSET_COLOR = "__ASSET_COLOR__";
-
-/* Per-pane Canvas renderers (critical for correct stacking) */
 var RENDERERS = { assets:null, geocodes:null, segments:null, env:null };
 
-function logErr(m){ try { window.pywebview.api.js_log(m); } catch(e){} }
+function logErr(m){ try{ window.pywebview.api.js_log(m); }catch(e){} }
 function setError(msg){
-  var e = document.getElementById('err');
-  if (msg){ e.style.display='block'; e.textContent = msg; }
+  var e=document.getElementById('err');
+  if (msg){ e.style.display='block'; e.textContent=msg; }
   else { e.style.display='none'; e.textContent=''; }
 }
+function fmtKm2(x){ return Number(x||0).toLocaleString('en-US',{maximumFractionDigits:2}); }
 
-function fmtKm2(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:2}); }
-
-/* ---------- Tooltips ---------- */
-function buildTipHTML(props){
-  const code = (props && props.sensitivity_code_max) ? String(props.sensitivity_code_max).toUpperCase() : '?';
-  const desc = (DESC_MAP && DESC_MAP[code]) ? DESC_MAP[code] : '';
-  const name = props && props.name_asset_object ? String(props.name_asset_object) : null;
-  const oid  = props && props.id_asset_object   ? String(props.id_asset_object)   : null;
-  const area = props && props.area_km2 != null  ? fmtKm2(props.area_km2)          : '—';
-  const chipColor = (COLOR_MAP && COLOR_MAP[code]) ? COLOR_MAP[code] : '#bdbdbd';
-  const chipStyle = 'background:' + chipColor + '22;border-color:' + chipColor + '55;color:#fff;text-shadow:0 1px 0 #0003;';
-  return `
-    <div class="poly-tip">
-      <div class="hdr">
-        <span>${name ? name.replace(/</g,'&lt;') : 'Polygon'}</span>
-        <span class="chip" style="${chipStyle}">${code}</span>
-      </div>
-      <div class="kv">
-        <div class="k">Sensitivity</div><div class="v">${desc || code}</div>
-        ${oid ? `<div class="k">Object ID</div><div class="v">${oid}</div>` : ``}
-        <div class="k">Area</div><div class="v">${area} km²</div>
-      </div>
-    </div>`;
-}
-
-/* Asset-specific tooltip: always show (no zoom gating) */
-function buildAssetTipHTML(props){
-  const name = props && props.name_asset_object ? String(props.name_asset_object) : 'Asset';
-  const oid  = props && props.id_asset_object   ? String(props.id_asset_object)   : null;
-  const area = props && props.area_km2 != null  ? fmtKm2(props.area_km2)          : '—';
-  return `
-    <div class="poly-tip">
-      <div class="hdr"><span>${name.replace(/</g,'&lt;')}</span></div>
-      <div class="kv">
-        ${oid ? `<div class="k">Object ID</div><div class="v">${oid}</div>` : ``}
-        <div class="k">Area</div><div class="v">${area} km²</div>
-      </div>
-    </div>`;
-}
-
-/* Env index tooltip */
-function buildEnvTipHTML(props){
-  const gi  = props && props.geocode_group ? String(props.geocode_group) : '';
-  const ei  = (props && props.env_index != null) ? Number(props.env_index) : null;
-  const area= props && props.area_km2 != null ? fmtKm2(props.area_km2) : '—';
-  return `
-    <div class="poly-tip">
-      <div class="hdr"><span>Environment index</span><span class="chip">${(ei!=null)? ei.toFixed(1) : '—'}</span></div>
-      <div class="kv">
-        ${gi ? `<div class="k">Geocode</div><div class="v">${gi}</div>` : ``}
-        <div class="k">Area</div><div class="v">${area} km²</div>
-      </div>
-    </div>`;
-}
-
-function getTT(layer){ return (layer && typeof layer.getTooltip === 'function') ? layer.getTooltip() : null; }
-function ttIsOpen(layer){ const tt = getTT(layer); return !!(tt && typeof tt.isOpen === 'function' && tt.isOpen()); }
-function ttCloseIfAny(layer){ if (ttIsOpen(layer)) layer.closeTooltip(); }
-
-function attachPolygonTooltip(layer, feature){
-  layer.on('mouseover', function () {
-    if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
-      layer.setStyle({ weight: 1.2 });
-      const html = buildTipHTML((feature && feature.properties) || {});
-      if (!layer.getTooltip()){ layer.bindTooltip(html, { className:'poly-tip', sticky:true, direction:'auto', opacity:0.98 }); }
-      else { layer.setTooltipContent(html); }
-      layer.openTooltip();
-    }
-  });
-  layer.on('mousemove', function () {
-    if (ttIsOpen(layer) && MAP.getZoom() < ZOOM_THRESHOLD_JS) { layer.closeTooltip(); }
-  });
-  layer.on('mouseout', function () {
-    layer.setStyle({ weight: 0.5 });
-    ttCloseIfAny(layer);
-  });
-}
-
-/* Always-on hover tooltips for assets (points and polygons) */
-function attachAssetTooltip(layer, feature){
-  layer.on('mouseover', function () {
-    const html = buildAssetTipHTML((feature && feature.properties) || {});
-    if (!layer.getTooltip()){ layer.bindTooltip(html, { className:'poly-tip', sticky:true, direction:'auto', opacity:0.98, pane:'assetsPane' }); }
-    else { layer.setTooltipContent(html); }
-    layer.openTooltip();
-  });
-  layer.on('mouseout', function () { ttCloseIfAny(layer); });
-}
-
-function attachEnvTooltip(layer, feature){
-  layer.on('mouseover', function () {
-    if (MAP.getZoom() >= ZOOM_THRESHOLD_JS) {
-      const html = buildEnvTipHTML((feature && feature.properties) || {});
-      if (!layer.getTooltip()){ layer.bindTooltip(html, { className:'poly-tip', sticky:true, direction:'auto', opacity:0.98 }); }
-      else { layer.setTooltipContent(html); }
-      layer.openTooltip();
-    }
-  });
-  layer.on('mousemove', function () {
-    if (ttIsOpen(layer) && MAP.getZoom() < ZOOM_THRESHOLD_JS) { layer.closeTooltip(); }
-  });
-  layer.on('mouseout', function () { ttCloseIfAny(layer); });
-}
-
-/* ---------- Legend / chart ---------- */
-function renderLegend(stats) {
-  var container = document.getElementById('legend');
-  var codes = ['A','B','C','D','E'];
-  var values = {};
-  var total = 0;
-
-  if (stats && Array.isArray(stats.labels) && Array.isArray(stats.values)) {
+/* ---------- legend & chart ---------- */
+function renderLegend(stats){
+  var container=document.getElementById('legend');
+  var codes=['A','B','C','D','E'], values={}, total=0;
+  if (stats && Array.isArray(stats.labels) && Array.isArray(stats.values)){
     for (var i=0;i<stats.labels.length;i++){
-      var code = String(stats.labels[i] || '').toUpperCase();
-      var val  = Number(stats.values[i] || 0);
-      values[code] = val;
-      total += val;
+      var code=String(stats.labels[i]||'').toUpperCase();
+      var val =Number(stats.values[i]||0);
+      values[code]=val; total+=val;
     }
-  } else {
-    for (var j=0;j<codes.length;j++) values[codes[j]] = 0;
-  }
-
-  function fmtPct(x){ return Number(x||0).toLocaleString('en-US', {maximumFractionDigits:1}); }
-
-  var html = '<div style="font-weight:600; margin-bottom:6px;">Totals by sensitivity from basic mosaic</div>';
-  html += '<table width=100%><thead><tr><th></th><th>Code</th><th>Description</th><th class="num">Area (km²)</th><th class="num">Share</th></tr></thead><tbody>';
-
+  } else { codes.forEach(c=>values[c]=0); }
+  function pct(x){ return Number(x||0).toLocaleString('en-US',{maximumFractionDigits:1}); }
+  var html='<div style="font-weight:600;margin-bottom:6px;">Totals by sensitivity from basic mosaic</div>';
+  html+='<table width=100%><thead><tr><th></th><th>Code</th><th>Description</th><th class="num">Area (km²)</th><th class="num">Share</th></tr></thead><tbody>';
   for (var k=0;k<codes.length;k++){
-    var c = codes[k];
-    var color = COLOR_MAP[c] || '#bdbdbd';
-    var desc  = DESC_MAP[c] || '';
-    var valKm2 = values[c] || 0;
-    var pct = total > 0 ? (valKm2 / total * 100.0) : 0;
-    html += '<tr>' +
-      '<td><span class="swatch" style="background:'+color+'"></span></td>' +
-      '<td style="width:48px;">'+c+'</td>' +
-      '<td>'+desc+'</td>' +
-      '<td class="num">'+fmtKm2(valKm2)+'</td>' +
-      '<td class="num">'+fmtPct(pct)+'%</td>' +
-    '</tr>';
+    var c=codes[k], color=(COLOR_MAP[c]||'#bdbdbd'), desc=(DESC_MAP[c]||''), km2=(values[c]||0), p=(total>0?(km2/total*100):0);
+    html+='<tr><td><span class="swatch" style="background:'+color+'"></span></td><td style="width:48px;">'+c+'</td><td>'+desc+'</td><td class="num">'+fmtKm2(km2)+'</td><td class="num">'+pct(p)+'%</td></tr>';
   }
-  html += '</tbody><tfoot><tr><td></td><td></td><td>Total</td><td class="num">'+fmtKm2(total)+'</td><td class="num">100%</td></tr></tfoot></table>';
-
-  container.innerHTML = html;
+  html+='</tbody><tfoot><tr><td></td><td></td><td>Total</td><td class="num">'+fmtKm2(total)+'</td><td class="num">100%</td></tr></tfoot></table>';
+  container.innerHTML=html;
 }
-
-function renderChart(stats) {
-  var ctx = document.getElementById('chart').getContext('2d');
+function renderChart(stats){
+  var ctx=document.getElementById('chart').getContext('2d');
   if (CHART) CHART.destroy();
-
-  var labels = (stats && stats.labels) ? stats.labels : ['A','B','C','D','E'];
-  var values = (stats && stats.values) ? stats.values : [0,0,0,0,0];
-
-  var colors = [];
-  for (var i=0;i<labels.length;i++){
-    var code = labels[i];
-    colors.push(COLOR_MAP[code] || '#bdbdbd');
-  }
-
-  CHART = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [{ label: 'km²', data: values, backgroundColor: colors, borderColor: '#ffffff', borderWidth: 1 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, resizeDelay: 0, animation: false,
-      plugins: { legend: { display:false }, title: { display:true, text:'Overall area by sensitivity code (km²)' } },
-      scales: { y: { beginAtZero:true, ticks:{ padding:6 } }, x:{ ticks:{ padding:4 } } },
-      layout: { padding: { left: 0, right:0, top:0, bottom:0 } }
-    }
-  });
-
-  var canvas = document.getElementById('chart');
-  var r = canvas.getBoundingClientRect();
-  CHART.resize(Math.floor(r.width), Math.floor(r.height));
+  var labels=(stats&&stats.labels)?stats.labels:['A','B','C','D','E'];
+  var values=(stats&&stats.values)?stats.values:[0,0,0,0,0];
+  var colors=labels.map(c=>COLOR_MAP[c]||'#bdbdbd');
+  CHART=new Chart(ctx,{type:'bar',data:{labels:labels,datasets:[{label:'km²',data:values,backgroundColor:colors,borderColor:'#fff',borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false},title:{display:true,text:'Overall area by sensitivity code (km²)'}},scales:{y:{beginAtZero:true}}}});
+  var r=document.getElementById('chart').getBoundingClientRect(); CHART.resize(Math.floor(r.width),Math.floor(r.height));
 }
 
-/* ---------- Resize handling ---------- */
-function debounce(fn, ms){ var t; return function(){ var ctx=this, args=arguments; clearTimeout(t); t=setTimeout(function(){ fn.apply(ctx,args); }, ms||50); }; }
-function resizeChartToBox(){
-  if (!CHART) return;
-  var canvas = document.getElementById('chart');
-  var r = canvas.getBoundingClientRect();
-  CHART.resize(Math.floor(r.width), Math.floor(r.height));
-}
-function setupResizeObservers(){
-  var chartBox = document.getElementById('chartBox');
-  var mapBox   = document.getElementById('map');
-  var onChartResize = debounce(function(){ resizeChartToBox(); }, 25);
-  var onMapResize   = debounce(function(){ if (MAP) MAP.invalidateSize(false); }, 25);
-  if (typeof ResizeObserver !== 'undefined'){
-    try {
-      var ro1 = new ResizeObserver(onChartResize); ro1.observe(chartBox);
-      var ro2 = new ResizeObserver(onMapResize);   ro2.observe(mapBox);
-    } catch (e){ logErr('ResizeObserver failed: '+e); }
-  }
-  window.addEventListener('resize', function(){ onChartResize(); onMapResize(); });
-  var lastW = -1, lastH = -1;
-  setInterval(function(){
-    var w = chartBox.clientWidth, h = chartBox.clientHeight;
-    if (w !== lastW || h !== lastH){ lastW = w; lastH = h; onChartResize(); }
-  }, 200);
-}
-
-/* ---------- Basemaps (incl. Bing Aerial) ---------- */
-function tileXYToQuadKey(x, y, z){
-  var quadKey = '';
-  for (var i = z; i > 0; i--) {
-    var digit = 0;
-    var mask = 1 << (i - 1);
-    if ((x & mask) !== 0) digit += 1;
-    if ((y & mask) !== 0) digit += 2;
-    quadKey += digit.toString();
-  }
-  return quadKey;
-}
-var BingAerial = L.TileLayer.extend({
-  createTile: function(coords, done){
-    var tile = document.createElement('img');
-    var zoom = this._getZoomForUrl();
-    if (!BING_KEY_JS){
-      tile.onload = function(){ done(null, tile); };
-      tile.onerror = function(){ done(null, tile); };
-      tile.src = 'about:blank';
-      return tile;
-    }
-    var q = tileXYToQuadKey(coords.x, coords.y, zoom);
-    var t = (coords.x + coords.y) % 4;
-    var url = 'https://ecn.t'+t+'.tiles.virtualearth.net/tiles/a' + q + '.jpeg?g=1&n=z&key=' + encodeURIComponent(BING_KEY_JS);
-    tile.alt = ''; tile.setAttribute('role', 'presentation');
-    tile.style.width = this.options.tileSize + 'px';
-    tile.style.height = this.options.tileSize + 'px';
-    tile.crossOrigin = 'anonymous';
-    tile.onload = function(){ done(null, tile); };
-    tile.onerror = function(){ done(null, tile); };
-    tile.src = url;
-    return tile;
-  }
-});
-
+/* ---------- basemaps ---------- */
+function tileXYToQuadKey(x,y,z){ var q=''; for(var i=z;i>0;i--){ var d=0,m=1<<(i-1); if((x&m)!==0)d+=1; if((y&m)!==0)d+=2; q+=d.toString(); } return q; }
+var BingAerial = L.TileLayer.extend({ createTile: function(coords, done){ var img=document.createElement('img'); var zoom=this._getZoomForUrl(); if(!BING_KEY_JS){ img.onload=function(){done(null,img)}; img.onerror=function(){done(null,img)}; img.src='about:blank'; return img; } var q=tileXYToQuadKey(coords.x,coords.y,zoom); var t=(coords.x+coords.y)%4; var url='https://ecn.t'+t+'.tiles.virtualearth.net/tiles/a'+q+'.jpeg?g=1&n=z&key='+encodeURIComponent(BING_KEY_JS); img.crossOrigin='anonymous'; img.onload=function(){done(null,img)}; img.onerror=function(){done(null,img)}; img.src=url; return img; }});
 function buildBaseSources(){
-  var common = { maxZoom: 19, crossOrigin: true, tileSize: 256 };
-
-  var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { ...common, attribution: '© OpenStreetMap' });
-  var topo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { ...common, subdomains: ['a','b','c'], maxZoom: 17, attribution: '© OpenStreetMap, © OpenTopoMap (CC-BY-SA)' });
-  SATELLITE_FALLBACK = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { ...common, attribution: 'Esri, Maxar, Earthstar Geographics, and the GIS User Community' });
-
-  var bing = new BingAerial({ tileSize: 256 });
-  return { osm: osm, topo: topo, sat_bing: bing, sat_esri: SATELLITE_FALLBACK };
+  var common={maxZoom:19,crossOrigin:true,tileSize:256};
+  var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {...common, attribution:'© OpenStreetMap'});
+  var topo= L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {...common, subdomains:['a','b','c'], maxZoom:17, attribution:'© OpenStreetMap, © OpenTopoMap (CC-BY-SA)'});
+  SATELLITE_FALLBACK = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {...common, attribution:'Esri, Maxar, Earthstar Geographics, and the GIS User Community'});
+  var bing = new BingAerial({tileSize:256});
+  return {osm:osm, topo:topo, sat_bing:bing, sat_esri:SATELLITE_FALLBACK};
 }
 
-function setBasemap(kind){
-  var center = MAP.getCenter(), zoom = MAP.getZoom();
-  if (BASE){ MAP.removeLayer(BASE); BASE = null; }
-  if (kind === 'osm'){ BASE = BASE_SOURCES.osm; }
-  else if (kind === 'topo'){ BASE = BASE_SOURCES.topo; }
-  else if (kind === 'sat'){ BASE = BING_KEY_JS ? BASE_SOURCES.sat_bing : BASE_SOURCES.sat_esri; }
-  else { BASE = BASE_SOURCES.osm; }
-  BASE.addTo(MAP);
-  MAP.setView(center, zoom, { animate:false });
+/* ---------- Loaders (raster preferred, vector fallback) ---------- */
+function _setOpacityMaybe(layer, alpha){
+  if (!layer) return;
+  if (typeof layer.setOpacity==='function'){ try{ layer.setOpacity(alpha); }catch(e){} }
+  else if (typeof layer.setStyle==='function'){ try{ layer.setStyle({fillOpacity:alpha, opacity:alpha}); }catch(e){} }
 }
-
-/* ---------- Continuous color scale for env_index (0–100): yellow -> red ---------- */
-function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
-function hexToRgb(h){
-  var s = h.replace('#',''); if (s.length===3) s = s.split('').map(x=>x+x).join('');
-  var num = parseInt(s,16); return { r:(num>>16)&255, g:(num>>8)&255, b:num&255 };
-}
-function rgbToHex(r,g,b){
-  return '#' + [r,g,b].map(v => { var h = v.toString(16); return h.length===1 ? '0'+h : h; }).join('');
-}
-function lerp(a,b,t){ return a + (b-a)*t; }
-function envIndexToColor(v){
-  if (v==null || isNaN(v)) return '#cccccc';
-  var t = clamp(Number(v)/100.0, 0, 1); // 0 -> yellow (#ffff00), 1 -> red (#ff0000)
-  var y = hexToRgb('#ffff00'), r = hexToRgb('#ff0000');
-  var rr = Math.round(lerp(y.r, r.r, t)), gg = Math.round(lerp(y.g, r.g, t)), bb = Math.round(lerp(y.b, r.b, t));
-  return rgbToHex(rr,gg,bb);
-}
-
-/* ---------- Layer styling ---------- */
-function styleFeature(f){
-  var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
-  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
-}
-function styleFeatureSeg(f){
-  var c = (f.properties && f.properties.sensitivity_code_max) ? f.properties.sensitivity_code_max : '';
-  return { color:'#f7f7f7', weight:0.7, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: COLOR_MAP[c] || '#bdbdbd' };
-}
-function styleFeatureAssets(f){
-  return { color: ASSET_COLOR, weight: 0.6, opacity: FILL_ALPHA, fillOpacity: FILL_ALPHA, fillColor: ASSET_COLOR };
-}
-function styleFeatureEnv(f){
-  var v = (f.properties && f.properties.env_index != null) ? Number(f.properties.env_index) : null;
-  return { color:'white', weight:0.5, opacity:1.0, fillOpacity:FILL_ALPHA, fillColor: envIndexToColor(v) };
-}
-
-/* ---------- API-backed layer loaders (fill the groups) ---------- */
 function loadGeocodeIntoGroup(cat, preserveView){
-  var prev = null;
-  if (preserveView && MAP) prev = { center: MAP.getCenter(), zoom: MAP.getZoom() };
+  var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_geocode_layer(cat).then(function(res){
     if (!res.ok){ setError('Failed to load geocode: '+res.error); return; }
     if (res.stats && res.stats.message){ setError(res.stats.message); } else { setError(''); }
+    if (GEO_GROUP) GEO_GROUP.clearLayers();
 
-    if (GEO_GROUP){ GEO_GROUP.clearLayers(); }
-    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
-      LAYER = L.geoJSON(res.geojson, {
-        style: styleFeature,
-        renderer: RENDERERS.geocodes,
-        onEachFeature: function (feature, layer) { attachPolygonTooltip(layer, feature); }
-      });
+    if (res.mbtiles && res.mbtiles.sensitivity_url){
+      var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+      LAYER=L.tileLayer(res.mbtiles.sensitivity_url, opts); GEO_GROUP.addLayer(LAYER);
+    } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+      LAYER=L.geoJSON(res.geojson, { style:function(f){ var c=(f.properties&&f.properties.sensitivity_code_max)||''; return {color:'white',weight:.5,opacity:1,fillOpacity:FILL_ALPHA,fillColor:(COLOR_MAP[c]||'#bdbdbd')}; }, renderer:RENDERERS.geocodes });
       GEO_GROUP.addLayer(LAYER);
     }
 
-    if (preserveView && prev){ MAP.setView(prev.center, prev.zoom, { animate:false }); }
-    else {
-      HOME_BOUNDS = res.home_bounds || [[0,0],[0,0]];
-      MAP.fitBounds(HOME_BOUNDS, { padding: [20,20] });
-    }
+    // Always update HOME_BOUNDS for the Home button, but do NOT move the map if we are preserving view
+    HOME_BOUNDS = res.home_bounds || HOME_BOUNDS;
+    if (!prev && HOME_BOUNDS){ MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); }
+    if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
 
-    renderLegend(res.stats);
-    renderChart(res.stats);
+    renderLegend(res.stats); renderChart(res.stats);
 
-    // If ENV overlay is visible, refresh it for the current ENV dropdown selection
-    if (ENV_GROUP && MAP.hasLayer(ENV_GROUP)) {
-      var envSel = document.getElementById('envCatSel');
-      var envCat = envSel ? envSel.value : (cat || null);
-      if (envCat) loadEnvIndexIntoGroup(envCat);
-    }
-  }).catch(function(err){
-    setError('API error: '+err); logErr('API error: '+err);
-  });
+    var chkEnv=document.getElementById('chkEnvIndex');
+    var envCat=(document.getElementById('groupCatSel')||{}).value||cat||null;
+    if (chkEnv && chkEnv.checked && envCat) loadEnvIndexIntoGroup(envCat, true);
+  }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
-
-function loadEnvIndexIntoGroup(cat){
+function loadEnvIndexIntoGroup(cat, preserveView){
+  var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_envindex_layer(cat).then(function(res){
     if (!res.ok){ setError('Failed to load env_index: '+res.error); return; }
-    if (ENV_GROUP){ ENV_GROUP.clearLayers(); }
-    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
-      LAYER_ENV = L.geoJSON(res.geojson, {
-        style: styleFeatureEnv,
-        renderer: RENDERERS.env,
-        onEachFeature: function (feature, layer) { attachEnvTooltip(layer, feature); }
-      });
+    if (ENV_GROUP) ENV_GROUP.clearLayers();
+
+    if (res.mbtiles && res.mbtiles.envindex_url){
+      var opts={opacity:FILL_ALPHA, pane:'envPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+      LAYER_ENV=L.tileLayer(res.mbtiles.envindex_url, opts); ENV_GROUP.addLayer(LAYER_ENV);
+    } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+      function clamp(v,min,max){ return Math.max(min,Math.min(max,v)); }
+      function h2r(h){ var s=h.replace('#',''); if(s.length===3)s=s.split('').map(x=>x+x).join(''); var n=parseInt(s,16); return {r:(n>>16)&255,g:(n>>8)&255,b:n&255}; }
+      function r2h(r,g,b){ return '#'+[r,g,b].map(v=>{var h=v.toString(16); return h.length===1?'0'+h:h;}).join(''); }
+      function lerp(a,b,t){ return a+(b-a)*t; }
+      function envColor(x){ if(x==null||isNaN(x)) return '#cccccc'; var t=clamp(Number(x)/100,0,1), y=h2r('#ffff00'), r=h2r('#ff0000'); return r2h(Math.round(lerp(y.r,r.r,t)), Math.round(lerp(y.g,r.g,t)), Math.round(lerp(y.b,r.b,t))); }
+      LAYER_ENV=L.geoJSON(res.geojson, { style:function(f){ var v=(f.properties&&f.properties.env_index!=null)?Number(f.properties.env_index):null; return {color:'white',weight:.5,opacity:1,fillOpacity:FILL_ALPHA,fillColor:envColor(v)}; }, renderer:RENDERERS.env });
       ENV_GROUP.addLayer(LAYER_ENV);
     }
-  }).catch(function(err){
-    setError('API error: '+err); logErr('API error: '+err);
-  });
+    if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
+  }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
-
 function loadSegmentsIntoGroup(lineNameOrAll){
   window.pywebview.api.get_segment_layer(lineNameOrAll).then(function(res){
     if (!res.ok){ setError('Failed to load segments: '+res.error); return; }
     if (!document.getElementById('err').textContent){ setError(''); }
-    if (SEG_GROUP){ SEG_GROUP.clearLayers(); }
-    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
-      LAYER_SEG = L.geoJSON(res.geojson, { style: styleFeatureSeg, renderer: RENDERERS.segments });
+    if (SEG_GROUP) SEG_GROUP.clearLayers();
+    if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+      LAYER_SEG=L.geoJSON(res.geojson, { style:function(f){ var c=(f.properties&&f.properties.sensitivity_code_max)||''; return {color:'#f7f7f7',weight:.7,opacity:1,fillOpacity:FILL_ALPHA,fillColor:(COLOR_MAP[c]||'#bdbdbd')}; }, renderer:RENDERERS.segments });
       SEG_GROUP.addLayer(LAYER_SEG);
     }
-  }).catch(function(err){
-    setError('API error: '+err); logErr('API error: '+err);
-  });
+  }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
-
 function loadAssetsIntoGroup(){
   window.pywebview.api.get_assets_layer().then(function(res){
     if (!res.ok){ setError('Failed to load assets: '+res.error); return; }
-    if (ASSET_GROUP){ ASSET_GROUP.clearLayers(); }
-    if (res.geojson && res.geojson.features && res.geojson.features.length > 0){
-      LAYER_ASSETS = L.geoJSON(res.geojson, {
-        style: styleFeatureAssets,
-        renderer: RENDERERS.assets,
-        pane: 'assetsPane',
-        pointToLayer: function (feature, latlng) {
-          // circleMarkers for point assets (explicit pane)
-          var m = L.circleMarker(latlng, {
-            pane: 'assetsPane',
-            radius: 3.5,
-            color: ASSET_COLOR,
-            weight: 0.8,
-            opacity: FILL_ALPHA,
-            fillOpacity: FILL_ALPHA,
-            fillColor: ASSET_COLOR,
-            renderer: RENDERERS.assets
-          });
-          attachAssetTooltip(m, feature);
-          return m;
-        },
-        onEachFeature: function (feature, layer) {
-          // polygons/lines assets: attach tooltip
-          attachAssetTooltip(layer, feature);
-        }
-      });
+    if (ASSET_GROUP) ASSET_GROUP.clearLayers();
+    if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+      LAYER_ASSETS=L.geoJSON(res.geojson,{ style:function(){ return {color:ASSET_COLOR,weight:.6,opacity:FILL_ALPHA,fillOpacity:FILL_ALPHA,fillColor:ASSET_COLOR}; }, renderer:RENDERERS.assets, pane:'assetsPane',
+        pointToLayer:function(ft,latlng){ return L.circleMarker(latlng,{pane:'assetsPane',radius:3.5,color:ASSET_COLOR,weight:.8,opacity:FILL_ALPHA,fillOpacity:FILL_ALPHA,fillColor:ASSET_COLOR,renderer:RENDERERS.assets}); }});
       ASSET_GROUP.addLayer(LAYER_ASSETS);
     }
-  }).catch(function(err){
-    setError('API error: '+err); logErr('API error: '+err);
-  });
+  }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
 
-/* ---------- Export current map to PNG ---------- */
-function exportMapPng(){
-  var node = document.getElementById('map');
-  function capture(){ return html2canvas(node, { useCORS: true, allowTaint: false, backgroundColor: '#ffffff', scale: 3 }); }
-  node.classList.add('exporting');
-  var baseWasOn = BASE && MAP.hasLayer(BASE);
-
-  capture().then(function(canvas){
-    node.classList.remove('exporting');
-    var png = canvas.toDataURL('image/png');
-    return window.pywebview.api.save_png(png);
-  }).then(function(res){
-    if (!res.ok){ setError('Save cancelled or failed: ' + (res.error || '')); setTimeout(function(){ setError(''); }, 4000); }
-  }).catch(function(err1){
-    if (baseWasOn) MAP.removeLayer(BASE);
-    capture().then(function(canvas){
-      node.classList.remove('exporting');
-      if (baseWasOn) BASE.addTo(MAP);
-      var png = canvas.toDataURL('image/png');
-      return window.pywebview.api.save_png(png);
-    }).then(function(res){
-      if (!res.ok){ setError('Save cancelled or failed: ' + (res.error || '')); setTimeout(function(){ setError(''); }, 4000); }
-    }).catch(function(err2){
-      node.classList.remove('exporting');
-      if (baseWasOn) BASE.addTo(MAP);
-      setError('Export failed. Try OSM/Topography basemap.'); logErr(err1); logErr(err2);
-      setTimeout(function(){ setError(''); }, 5000);
-    });
-  });
-}
+/* ---------- Helpers to manage folder sub-layers ---------- */
+function ensureOnMap(g){ if (g && !MAP.hasLayer(g)) g.addTo(MAP); }
+function ensureOffMap(g){ if (g && MAP.hasLayer(g)) MAP.removeLayer(g); }
 
 /* ---------- Build native layers control ---------- */
 function buildLayersControl(state){
-  var baseLayers = {
-    'OpenStreetMap <span class="help" data-tip="Standard OSM cartography. Good for general context.">?</span>': BASE_SOURCES.osm,
-    'OSM Topography <span class="help" data-tip="OpenTopoMap tiles. Elevation & relief shading; lower max zoom.">?</span>': BASE_SOURCES.topo,
-    'Satellite <span class="help" data-tip="Bing Aerial if key configured; otherwise Esri World Imagery fallback.">?</span>': (BING_KEY_JS ? BASE_SOURCES.sat_bing : SATELLITE_FALLBACK)
+  var baseLayers={
+    'OpenStreetMap': BASE_SOURCES.osm,
+    'OSM Topography': BASE_SOURCES.topo,
+    'Satellite': (BING_KEY_JS?BASE_SOURCES.sat_bing:SATELLITE_FALLBACK)
   };
 
-  // Groups (stacking top→bottom among overlays):
-  // 1) Sensitivity lines (top)
-  // 2) Environment index (new)
-  // 3) Geocode areas
-  // 4) Assets (lowest overlay)
-  SEG_GROUP = L.layerGroup();
-  ENV_GROUP = L.layerGroup();
-  GEO_GROUP = L.layerGroup();
-  ASSET_GROUP = L.layerGroup();
+  SEG_GROUP=L.layerGroup(); ASSET_GROUP=L.layerGroup();
+  GEO_GROUP=L.layerGroup(); ENV_GROUP=L.layerGroup();
+  GEO_FOLDER=L.layerGroup();
 
-  var segLabel = 'Sensitivity lines <span class="help" data-tip="Buffered lines (A–E) selected by line name from tbl_lines.">?</span><div class="inlineSel"><select id="segLineSel"></select></div>';
-  var envLabel = 'Environment index) <span class="help" data-tip="Continuous heat style per polygon using env_index (0–100). Choose category below.">?</span><div class="inlineSel"><select id="envCatSel"></select></div>';
-  var geoLabel = 'Geocode areas <span class="help" data-tip="Polygons colored by sensitivity (A–E). Choose a geocode category below. Stats always from ‘basic_mosaic’.">?</span><div class="inlineSel"><select id="geoCatSel"></select></div>';
-  var assLabel = 'Assets <span class="help" data-tip="All assets in semi-transparent steel blue. Hover for details.">?</span>';
+  // Geocode "folder" with stacked checkboxes
+  var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div><div class="inlineChecks"><label><input type="checkbox" id="chkGeoAreas" checked> Sensitive areas</label><label><input type="checkbox" id="chkEnvIndex"> Environment index</label></div>';
 
-  var overlays = {};
-  overlays[segLabel] = SEG_GROUP;
-  overlays[envLabel] = ENV_GROUP;
-  overlays[geoLabel] = GEO_GROUP;
-  overlays[assLabel] = ASSET_GROUP;
+  // --- Overlay order requested: Sensitivity lines, Geocode groups, Assets
+  var overlays={};
+  overlays['Sensitivity lines <div class="inlineSel"><select id="segLineSel"></select></div>']=SEG_GROUP;
+  overlays[folderLabel]=GEO_FOLDER;
+  overlays['Assets']=ASSET_GROUP;
 
-  var ctrl = L.control.layers(baseLayers, overlays, { collapsed:false, position:'topleft' }).addTo(MAP);
+  var ctrl=L.control.layers(baseLayers, overlays, { collapsed:false, position:'topleft' }).addTo(MAP);
 
-  // Move basemaps (base) section to bottom of control
+  // Keep basemaps section at the very bottom
   try {
     var ctn  = ctrl.getContainer();
     var form = ctn.querySelector('.leaflet-control-layers-list');
@@ -1083,132 +886,108 @@ function buildLayersControl(state){
         base.style.marginTop = '6px';
       }
     }
-  } catch(e){ logErr('Layer reorder failed (fixed path) : ' + e); }
+  } catch(e){ logErr('Layer reorder failed: ' + e); }
 
-  // Seed layers: show Sensitivity lines + Geocode areas by default
   BASE_SOURCES.osm.addTo(MAP);
-  GEO_GROUP.addTo(MAP);
+  GEO_FOLDER.addTo(MAP);
   SEG_GROUP.addTo(MAP);
-  // ENV & ASSETS remain toggled off initially
 
   setTimeout(function(){
-    // populate the two geocode dropdowns (they can be different)
-    var geocat = document.getElementById('geoCatSel');
-    var envcat = document.getElementById('envCatSel');
-    var geocodes = (state.geocode_categories || []);
-
-    function fillSelect(sel){
-      if (!sel) return;
-      sel.innerHTML = '';
+    // Populate geocode selector with union category list
+    var geocodes=(state.geocode_categories||[]);
+    var sel=document.getElementById('groupCatSel');
+    if (sel){
+      sel.innerHTML='';
       for (var i=0;i<geocodes.length;i++){
-        var o = document.createElement('option'); o.value = geocodes[i]; o.textContent = geocodes[i];
-        sel.appendChild(o);
+        var o=document.createElement('option'); o.value=geocodes[i]; o.textContent=geocodes[i]; sel.appendChild(o);
       }
+      if (state.initial_geocode && geocodes.indexOf(state.initial_geocode)>=0){ sel.value=state.initial_geocode; }
     }
 
-    fillSelect(geocat);
-    fillSelect(envcat);
+    var initialCat=(sel && sel.value) ? sel.value : state.initial_geocode;
+    if (initialCat){ loadGeocodeIntoGroup(initialCat, false); }
 
-    if (geocat && state.initial_geocode && geocodes.indexOf(state.initial_geocode) >= 0){ geocat.value = state.initial_geocode; }
-    if (envcat && state.initial_geocode && geocodes.indexOf(state.initial_geocode) >= 0){ envcat.value = state.initial_geocode; }
+    var chkAreas=document.getElementById('chkGeoAreas');
+    var chkEnv  =document.getElementById('chkEnvIndex');
 
-    if (geocat){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, false); }
-    if (envcat){ /* ENV overlay is off by default; it will load when toggled on */ }
+    if (chkAreas && chkAreas.checked){ ensureOnMap(GEO_GROUP); } else { ensureOffMap(GEO_GROUP); }
+    if (chkEnv   && chkEnv.checked)  { ensureOnMap(ENV_GROUP); if (initialCat) loadEnvIndexIntoGroup(initialCat, true); }
+    else { ensureOffMap(ENV_GROUP); }
 
-    geocat && geocat.addEventListener('change', function(){ loadGeocodeIntoGroup(geocat.value || state.initial_geocode, true); });
-    envcat && envcat.addEventListener('change', function(){
-      if (ENV_GROUP && MAP.hasLayer(ENV_GROUP)) loadEnvIndexIntoGroup(envcat.value || state.initial_geocode);
+    // --- Do NOT reset view on category change
+    sel && sel.addEventListener('change', function(){
+      var cat=sel.value||initialCat;
+      loadGeocodeIntoGroup(cat, /*preserveView*/ true);
+      if (chkEnv && chkEnv.checked) loadEnvIndexIntoGroup(cat, /*preserveView*/ true);
     });
 
-    // sensitivity line names (from tbl_lines.name_user)
-    var segsel = document.getElementById('segLineSel');
+    // Sensitivity lines
+    var segsel=document.getElementById('segLineSel');
     if (segsel){
-      segsel.innerHTML = '';
-      var names = state.segment_line_names || [];
-      if (names.length > 0){
-        var all = document.createElement('option'); all.value="__ALL__"; all.textContent="All lines"; segsel.appendChild(all);
-        for (var j=0;j<names.length;j++){
-          var so = document.createElement('option'); so.value = names[j]; so.textContent = names[j];
-          segsel.appendChild(so);
-        }
+      segsel.innerHTML='';
+      var names=state.segment_line_names||[];
+      if (names.length>0){
+        var all=document.createElement('option'); all.value="__ALL__"; all.textContent="All lines"; segsel.appendChild(all);
+        for (var j=0;j<names.length;j++){ var so=document.createElement('option'); so.value=names[j]; so.textContent=names[j]; segsel.appendChild(so); }
       } else {
-        // fallback (legacy)
-        var s = document.createElement('option'); s.value="__ALL__"; s.textContent="All segments"; segsel.appendChild(s);
-        var segcats = state.segment_categories || [];
-        for (var k=0;k<segcats.length;k++){
-          var sc = document.createElement('option'); sc.value = segcats[k]; sc.textContent = segcats[k];
-          segsel.appendChild(sc);
-        }
+        var s=document.createElement('option'); s.value="__ALL__"; s.textContent="All segments"; segsel.appendChild(s);
+        var segcats=state.segment_categories||[]; for (var k=0;k<segcats.length;k++){ var sc=document.createElement('option'); sc.value=segcats[k]; sc.textContent=segcats[k]; segsel.appendChild(sc); }
       }
-      loadSegmentsIntoGroup(segsel.value || "__ALL__");
-      segsel.addEventListener('change', function(){ loadSegmentsIntoGroup(segsel.value || "__ALL__"); });
+      loadSegmentsIntoGroup(segsel.value||"__ALL__");
+      segsel.addEventListener('change', function(){ loadSegmentsIntoGroup(segsel.value||"__ALL__"); });
     }
 
-    // overlay toggles
-    MAP.on('overlayadd', function(e){
-      if (e.layer === GEO_GROUP){
-        var gc = document.getElementById('geoCatSel'); loadGeocodeIntoGroup(gc ? gc.value : state.initial_geocode, true);
-      } else if (e.layer === SEG_GROUP){
-        var sl = document.getElementById('segLineSel'); loadSegmentsIntoGroup(sl ? (sl.value||"__ALL__") : "__ALL__");
-      } else if (e.layer === ASSET_GROUP){
-        loadAssetsIntoGroup();
-      } else if (e.layer === ENV_GROUP){
-        var ec = document.getElementById('envCatSel'); loadEnvIndexIntoGroup(ec ? ec.value : state.initial_geocode);
-      }
-    });
-    MAP.on('overlayremove', function(e){
-      if (e.layer === GEO_GROUP){ GEO_GROUP.clearLayers(); }
-      if (e.layer === SEG_GROUP){ SEG_GROUP.clearLayers(); }
-      if (e.layer === ASSET_GROUP){ ASSET_GROUP.clearLayers(); }
-      if (e.layer === ENV_GROUP){ ENV_GROUP.clearLayers(); }
-    });
-  }, 0);
+    // Folder checkbox behavior (preserve current view)
+    if (chkAreas){
+      chkAreas.addEventListener('change', function(){
+        var cat=(document.getElementById('groupCatSel')||{}).value||initialCat;
+        if (chkAreas.checked){ ensureOnMap(GEO_GROUP); if (cat) loadGeocodeIntoGroup(cat, true); }
+        else { ensureOffMap(GEO_GROUP); GEO_GROUP.clearLayers(); }
+      });
+    }
+    if (chkEnv){
+      chkEnv.addEventListener('change', function(){
+        var cat=(document.getElementById('groupCatSel')||{}).value||initialCat;
+        if (chkEnv.checked){ ensureOnMap(ENV_GROUP); if (cat) loadEnvIndexIntoGroup(cat, true); }
+        else { ensureOffMap(ENV_GROUP); ENV_GROUP.clearLayers(); }
+      });
+    }
+  },0);
 
   return ctrl;
 }
 
 /* ---------- Boot ---------- */
 function boot(){
-  MAP = L.map('map', { zoomControl:false, preferCanvas:true });
+  MAP = L.map('map', {
+    zoomControl:false, preferCanvas:true,
+    maxBounds: L.latLngBounds([[-85,-180],[85,180]]),
+    maxBoundsViscosity: 1.0,
+    worldCopyJump: false
+  });
   L.control.zoom({ position:'topright' }).addTo(MAP);
 
-  // Panes & z-indexes: TOP → BOTTOM among overlays
-  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex = 650; // Sensitivity lines (top)
-  MAP.createPane('envPane');      MAP.getPane('envPane').style.zIndex      = 600; // Env index (between)
-  MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex  = 550; // Geocode areas (middle)
-  MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex   = 450; // Assets (lower)
+  MAP.createPane('segmentsPane'); MAP.getPane('segmentsPane').style.zIndex=650;
+  MAP.createPane('envPane');      MAP.getPane('envPane').style.zIndex=600;
+  MAP.createPane('geocodePane');  MAP.getPane('geocodePane').style.zIndex=550;
+  MAP.createPane('assetsPane');   MAP.getPane('assetsPane').style.zIndex=450;
 
-  // Create one Canvas renderer per pane (this fixes stacking with Canvas)
   try {
-    RENDERERS.segments = L.canvas({ pane: 'segmentsPane' });
-    RENDERERS.env      = L.canvas({ pane: 'envPane'      });
-    RENDERERS.geocodes = L.canvas({ pane: 'geocodePane'  });
-    RENDERERS.assets   = L.canvas({ pane: 'assetsPane'   });
-  } catch (e) {
-    logErr('Canvas renderers creation failed: ' + e);
-  }
-
-  function closeTooltipsUnderZoom(){
-    if (!MAP || MAP.getZoom() >= ZOOM_THRESHOLD_JS) return;
-    if (LAYER && GEO_GROUP && MAP.hasLayer(GEO_GROUP)) { GEO_GROUP.eachLayer(ttCloseIfAny); }
-    if (LAYER_SEG && SEG_GROUP && MAP.hasLayer(SEG_GROUP)) { SEG_GROUP.eachLayer(ttCloseIfAny); }
-    if (LAYER_ENV && ENV_GROUP && MAP.hasLayer(ENV_GROUP)) { ENV_GROUP.eachLayer(ttCloseIfAny); }
-    // Assets are always-on tooltips; close them as well when zooming out to reduce clutter
-    if (LAYER_ASSETS && ASSET_GROUP && MAP.hasLayer(ASSET_GROUP)) { ASSET_GROUP.eachLayer(ttCloseIfAny); }
-  }
-  MAP.on('zoomend', closeTooltipsUnderZoom);
+    RENDERERS.segments = L.canvas({ pane:'segmentsPane' });
+    RENDERERS.env      = L.canvas({ pane:'envPane'      });
+    RENDERERS.geocodes = L.canvas({ pane:'geocodePane'  });
+    RENDERERS.assets   = L.canvas({ pane:'assetsPane'   });
+  } catch(e){ logErr('Canvas renderers creation failed: '+e); }
 
   L.control.scale({ position:'bottomleft', metric:true, imperial:false, maxWidth:200 }).addTo(MAP);
 
   BASE_SOURCES = buildBaseSources();
+  BASE_SOURCES.osm.addTo(MAP);
   MAP.setView([0,0], 2);
-  setupResizeObservers();
 
   window.pywebview.api.get_state().then(function(state){
-    COLOR_MAP        = state.colors || {};
-    DESC_MAP         = state.descriptions || {};
-    BING_KEY_JS      = (state.bing_key || '').trim() || null;
-    ZOOM_THRESHOLD_JS= state.zoom_threshold || 12;
+    COLOR_MAP=state.colors||{}; DESC_MAP=state.descriptions||{};
+    BING_KEY_JS=(state.bing_key||'').trim()||null; ZOOM_THRESHOLD_JS=state.zoom_threshold||12;
 
     renderLegend(null);
     renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
@@ -1219,31 +998,28 @@ function boot(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, { padding:[20,20] });
     });
 
-    document.getElementById('exportBtn').addEventListener('click', exportMapPng);
+    document.getElementById('exportBtn').addEventListener('click', function(){
+      var node=document.getElementById('map');
+      node.classList.add('exporting');
+      html2canvas(node,{useCORS:true,allowTaint:false,backgroundColor:'#ffffff',scale:3})
+      .then(function(canvas){ node.classList.remove('exporting'); return window.pywebview.api.save_png(canvas.toDataURL('image/png')); })
+      .then(function(res){ if(!res.ok){ setError('Save cancelled or failed: '+(res.error||'')); setTimeout(function(){ setError(''); },4000); } })
+      .catch(function(err){ node.classList.remove('exporting'); setError('Export failed.'); logErr(err); setTimeout(function(){ setError(''); },5000); });
+    });
 
     document.getElementById('exitBtn').addEventListener('click', function(){
       if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
         window.pywebview.api.exit_app();
       }
     });
-    window.addEventListener('keydown', function(e){
-      if (e.key === 'Escape'){
-        if (window.pywebview && window.pywebview.api && window.pywebview.api.exit_app){
-            window.pywebview.api.exit_app();
-        }
-      }
-    });
 
-    var slider = document.getElementById('opacity');
-    var opv    = document.getElementById('opv');
+    var slider=document.getElementById('opacity'), opv=document.getElementById('opv');
     slider.addEventListener('input', function(){
-      var v = parseInt(slider.value, 10);
-      FILL_ALPHA = v / 100.0;
-      opv.textContent = v + '%';
-      if (LAYER)        LAYER.setStyle({ fillOpacity: FILL_ALPHA });
-      if (LAYER_SEG)    LAYER_SEG.setStyle({ fillOpacity: FILL_ALPHA });
-      if (LAYER_ENV)    LAYER_ENV.setStyle({ fillOpacity: FILL_ALPHA });
-      if (LAYER_ASSETS) LAYER_ASSETS.setStyle({ fillOpacity: FILL_ALPHA, opacity: FILL_ALPHA });
+      var v=parseInt(slider.value,10); FILL_ALPHA=v/100; opv.textContent=v+'%';
+      _setOpacityMaybe(LAYER,FILL_ALPHA);
+      _setOpacityMaybe(LAYER_ENV,FILL_ALPHA);
+      _setOpacityMaybe(LAYER_SEG,FILL_ALPHA);
+      if (LAYER_ASSETS && typeof LAYER_ASSETS.setStyle==='function'){ LAYER_ASSETS.setStyle({fillOpacity:FILL_ALPHA, opacity:FILL_ALPHA}); }
     });
   }).catch(function(err){
     setError('Failed to get state: '+err); logErr('get_state failed: '+err);
