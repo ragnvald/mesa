@@ -6,7 +6,7 @@
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
-import os, sys, math, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util
+import os, sys, math, re, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
 import configparser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -127,6 +127,140 @@ def cfg_get_float(cfg: configparser.ConfigParser, key: str, default: float) -> f
         return float(raw)
     except Exception:
         return float(default)
+
+# ----------------------------
+# Raster tiles integration helpers
+# ----------------------------
+def _tbl_flat_path() -> Path:
+    return gpq_dir() / "tbl_flat.parquet"
+
+def _has_big_polygon_group(threshold: int = 50000, group_col: str = "name_gis_geocodegroup") -> tuple[bool, dict]:
+    """
+    Returns (bool, counts_per_group) where bool indicates any polygonal group >= threshold.
+    """
+    try:
+        pq = _tbl_flat_path()
+        if not pq.exists():
+            return (False, {})
+        cols = [group_col, "geometry"]
+        try:
+            gdf = gpd.read_parquet(pq, columns=cols)
+        except TypeError:
+            gdf = gpd.read_parquet(pq)
+        try:
+            if gdf.crs is None:
+                pass
+        except Exception:
+            pass
+        try:
+            gt = gdf.geometry.geom_type
+            poly_mask = gt.isin(["Polygon", "MultiPolygon"])
+        except Exception:
+            poly_mask = gdf.geometry.notna()
+        gpoly = gdf[poly_mask & gdf.geometry.notna()]
+        if gpoly.empty:
+            return (False, {})
+        counts = gpoly.groupby(group_col).size().to_dict()
+        big = any(v >= threshold for v in counts.values())
+        return (big, counts)
+    except Exception as e:
+        log_to_gui(log_widget, f"[Tiles] Eligibility check failed: {e}")
+        return (False, {})
+    
+
+def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
+    script_path = base_dir() / "system" / "create_raster_tiles.py"
+    if not script_path.exists():
+        log_to_gui(log_widget, f"[Tiles] Missing script: {script_path}")
+        return None
+
+    args = [sys.executable, str(script_path)]
+    if isinstance(minzoom, int):
+        args += ["--minzoom", str(minzoom)]
+    if isinstance(maxzoom, int):
+        args += ["--maxzoom", str(maxzoom)]
+
+    env = dict(os.environ)
+    # ensure UTF-8 stdout/stderr inside the child process
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
+    return subprocess.Popen(
+        args,
+        cwd=str(base_dir() / "system"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",   # decode our pipe as UTF-8
+        bufsize=1,
+        env=env,
+    )
+
+
+def _run_tiles_stream_to_gui(update_btn_state_fn=None, minzoom=None, maxzoom=None):
+    """
+    Run tiles subprocess, stream its output to the GUI, and update the shared progress bar.
+    """
+    try:
+        ok, counts = _has_big_polygon_group()
+        total_groups = len([k for k,v in counts.items() if v>0])
+        total_steps = max(1, total_groups * 2)  # sensitivity + envindex per group
+        done_steps = 0
+        update_progress(0.0)
+        log_to_gui(log_widget, "[Tiles] Starting MBTiles build for all groups…")
+
+        proc = _spawn_tiles_subprocess(minzoom=minzoom, maxzoom=maxzoom)
+
+        if proc is None:
+            return
+
+        re_groups = re.compile(r"^Groups:\s*\[(.*)\]\s*$")
+        re_building = re.compile(r"\u2192\s*building|building\s+.+\.\.\.")
+        re_done = re.compile(r"All done\.")
+
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            log_to_gui(log_widget, f"[Tiles] {line}")
+
+            m = re_groups.search(line)
+            if m:
+                inside = m.group(1)
+                try:
+                    content = inside
+                    if content and not content.strip().startswith("["):
+                        content = "[" + content + "]"
+                    groups_list = ast.literal_eval(content)
+                    if isinstance(groups_list, (list, tuple)):
+                        total_groups = len(groups_list)
+                        total_steps = max(1, total_groups*2)
+                except Exception:
+                    total_groups = max(total_groups, len([s for s in inside.split(",") if s.strip()]))
+                    total_steps = max(1, total_groups*2)
+
+            if re_building.search(line):
+                done_steps += 1
+                pct = min(99.0, (done_steps/total_steps)*100.0)
+                update_progress(pct)
+
+            if re_done.search(line):
+                update_progress(100.0)
+
+        ret = proc.wait()
+        if ret != 0:
+            log_to_gui(log_widget, f"[Tiles] create_raster_tiles exited with code {ret}")
+        else:
+            log_to_gui(log_widget, "[Tiles] Completed.")
+        update_progress(100.0)
+    except Exception as e:
+        log_to_gui(log_widget, f"[Tiles] Error: {e}")
+    finally:
+        try:
+            if callable(update_btn_state_fn):
+                update_btn_state_fn()
+        except Exception:
+            pass
 
 # ----------------------------
 # A..E classification helpers
@@ -1567,6 +1701,14 @@ if __name__ == "__main__":
     cfg_path = Path(original_working_directory) / "system" / "config.ini"
     cfg = read_config(cfg_path)
 
+    # Zooms for raster tiles (from config.ini)
+    tiles_minzoom = cfg_get_int(cfg, "tiles_minzoom", 6)
+    tiles_maxzoom = cfg_get_int(cfg, "tiles_maxzoom", 12)
+
+    # Sanitize: clamp to [0, 22] and ensure min <= max
+    tiles_minzoom = max(0, min(tiles_minzoom, 22))
+    tiles_maxzoom = max(tiles_minzoom, min(tiles_maxzoom, 22))
+
     try:
         HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
     except Exception:
@@ -1610,29 +1752,70 @@ if __name__ == "__main__":
     progress_bar.pack(side=tk.LEFT)
     progress_label = tk.Label(progress_frame, text="0%", bg="light grey"); progress_label.pack(side=tk.LEFT, padx=8)
 
-    info = (f"Inputs: output/geoparquet/*.parquet  •  Heartbeat: {HEARTBEAT_SECS}s\n"
-            "Adaptive intersections (pre-emptive splitting) + memory-aware worker scaling.\n"
-            "Flatten = min/max + A..E from config; area once per tile (backfilled to stacked).\n"
-            "ENV index (1–100) + components: env_imp, env_sens, env_susc, env_press.\n"
-            "Tuning: approx_gb_per_worker, mem_target_frac, asset_soft_limit, geocode_soft_limit.")
+    info = (f"This is where all calculations are made. Iformation is provided every {HEARTBEAT_SECS}th second\n"
+            "To start the procesing press 'Process'. Then 'Open ap' to keep an eye on\n"
+            "the progress of your calculations. Many assets and/or detailed geocodes will \n"
+            "increase the processing time. All resulting data is saved in the geoparquet\n"
+            "vector data format. With many objects we advise creating a raster layer for\n)"
+            "faster viewing of your data in the map viewer.")
     tk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
 
     def _run():
         process_all(cfg_path)
+        try:
+            root.after(0, _refresh_tiles_button_state)
+        except Exception:
+            pass
 
     btn_frame = tk.Frame(left); btn_frame.pack(pady=6)
     tb.Button(btn_frame, text="Process", bootstyle=PRIMARY,
               command=lambda: threading.Thread(target=_run, daemon=True).start()).pack(side=tk.LEFT, padx=5)
+    # Raster tiles button (enabled only when eligible)
+    tiles_btn = tb.Button(btn_frame, text="Create raster tiles", bootstyle=PRIMARY)
+    tiles_btn.pack(side=tk.LEFT, padx=5)
+    tiles_btn.configure(state="disabled")
+    tiles_status = tk.Label(btn_frame, text="", fg="#555")
+    tiles_status.pack(side=tk.LEFT, padx=8)
+
+    def _refresh_tiles_button_state():
+        ok, counts = _has_big_polygon_group()
+        if ok:
+            tiles_btn.configure(state="normal")
+            tiles_status.config(text="Eligible (≥50k polygons in a group)")
+        else:
+            tiles_btn.configure(state="disabled")
+            if counts:
+                top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                tiles_status.config(text="Not eligible — top groups: " + ", ".join([f"{k}={v:,}" for k,v in top]))
+            else:
+                tiles_status.config(text="Not eligible — no tbl_flat polygons found")
+
+    def _on_tiles_click():
+        tiles_btn.configure(state="disabled")
+        tiles_status.config(text="Running…")
+        threading.Thread(
+            target=lambda: _run_tiles_stream_to_gui(
+                update_btn_state_fn=lambda: root.after(0, _refresh_tiles_button_state),
+                minzoom=tiles_minzoom,
+                maxzoom=tiles_maxzoom
+            ),
+            daemon=True
+        ).start()
+
+
+    tiles_btn.configure(command=_on_tiles_click)
+
     tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.LEFT, padx=5)
 
     # right
-    tk.Label(right, text="Minimap (grid cells)", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
-    tk.Label(right, text=("Shows grid-cell progress on an OSM basemap.\n"
-                          "• Opens in a separate helper process (low priority).\n"
-                          "• Updates about once a minute while intersections run.\n"
-                          "• Tiles are semi-transparent for clarity."),
+    tk.Label(right, text="Processing progress map", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
+    tk.Label(right, text=("For longer calculations this will give.\n"
+                          "the user an overview of when the calculation\n"
+                          "can be expected to be finished.\n"),
              justify="left").pack(padx=10, anchor="w")
     tb.Button(right, text="Open map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
 
     log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
+    # Check tiles button eligibility at startup
+    _refresh_tiles_button_state()
     root.mainloop()
