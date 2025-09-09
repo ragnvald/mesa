@@ -2,9 +2,11 @@
 """
 Raster MBTiles generator (PNG) from tbl_flat.parquet — no GDAL/Tippecanoe.
 
-Per group in name_gis_geocodegroup, produces two MBTiles:
-  <group>_sensitivity.mbtiles  (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
-  <group>_envindex.mbtiles     (yellow->red ramp from env_index 1..100)
+Per group in name_gis_geocodegroup, produces FOUR MBTiles:
+  <group>_sensitivity.mbtiles   (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
+  <group>_envindex.mbtiles      (yellow->red ramp from env_index 1..100)
+  <group>_groupstotal.mbtiles   (light->dark blue, linear ramp of asset_groups_total per group)
+  <group>_assetstotal.mbtiles   (light->dark blue, linear ramp of assets_overlap_total per group)
 
 - EPSG:4326 input expected.
 - Transparent background, polygon fill + optional stroke.
@@ -130,6 +132,20 @@ def env_index_color(v: Optional[float], alpha: float=0.70) -> Tuple[int,int,int,
     g = int(215 + t * (0   - 215))
     b = 0
     return (r, g, b, int(alpha*255))
+
+def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.70) -> Tuple[int,int,int,int]:
+    """Linear light->dark blue; missing -> transparent."""
+    if v is None or not np.isfinite(v):
+        return (0, 0, 0, 0)
+    if vmax <= vmin:
+        t = 1.0
+    else:
+        t = max(0.0, min(1.0, (float(v) - vmin) / (vmax - vmin)))
+    # light #DCEBFF (220,235,255) -> dark #08306B (8,48,107)
+    r = int(round(220 + t * (8   - 220)))
+    g = int(round(235 + t * (48  - 235)))
+    b = int(round(255 + t * (107 - 255)))
+    return (r, g, b, int(max(0.0, min(1.0, alpha))*255))
 
 def read_sensitivity_palette_from_config(cfg_path: Path) -> Dict[str, Tuple[int,int,int,int]]:
     import configparser
@@ -283,21 +299,25 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
 # ----------------------- Worker globals & worker -----------------------
 _G_GEOMS: List = []
 _G_SENS_CODES: List[Optional[str]] = []
-_G_ENV: List[Optional[float]] = []
-_G_FILL_MODE: str = "sensitivity"  # or "env"
+_G_NUMVALS: List[Optional[float]] = []   # used by env/groupstotal/assetstotal
+_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal"
 _G_PALETTE: Dict[str, Tuple[int,int,int,int]] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
+_G_NUM_MIN: float = 0.0
+_G_NUM_MAX: float = 1.0
 
-def _worker_init(geoms, sens_codes, env_vals, fill_mode, palette, stroke_rgba, stroke_w):
-    global _G_GEOMS, _G_SENS_CODES, _G_ENV, _G_FILL_MODE, _G_PALETTE, _G_STROKE_RGBA, _G_STROKE_W
+def _worker_init(geoms, sens_codes, numvals, fill_mode, palette, stroke_rgba, stroke_w, num_min, num_max):
+    global _G_GEOMS, _G_SENS_CODES, _G_NUMVALS, _G_FILL_MODE, _G_PALETTE, _G_STROKE_RGBA, _G_STROKE_W, _G_NUM_MIN, _G_NUM_MAX
     _G_GEOMS = geoms
     _G_SENS_CODES = sens_codes
-    _G_ENV = env_vals
+    _G_NUMVALS = numvals
     _G_FILL_MODE = fill_mode
     _G_PALETTE = palette
     _G_STROKE_RGBA = stroke_rgba
     _G_STROKE_W = float(stroke_w)
+    _G_NUM_MIN = float(num_min)
+    _G_NUM_MAX = float(num_max)
 
 def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
     """
@@ -318,8 +338,14 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
             if _G_FILL_MODE == "sensitivity":
                 code = _G_SENS_CODES[i]
                 fill_rgba = _G_PALETTE.get(code, (0,0,0,0)) if code is not None else (0,0,0,0)
-            else:  # env
-                fill_rgba = env_index_color(_G_ENV[i], alpha=_G_PALETTE.get("env_alpha", 0.70))
+            elif _G_FILL_MODE == "env":
+                alpha = _G_PALETTE.get("env_alpha", 0.70)
+                fill_rgba = env_index_color(_G_NUMVALS[i], alpha=alpha)
+            elif _G_FILL_MODE in ("groupstotal", "assetstotal"):
+                alpha = _G_PALETTE.get("blue_alpha", 0.70)
+                fill_rgba = blue_ramp_rgba(_G_NUMVALS[i], _G_NUM_MIN, _G_NUM_MAX, alpha=alpha)
+            else:
+                continue
 
             for ring in polygon_rings_lonlat(geom):
                 path = ring_lonlat_to_pixels(ring, z, x, y, tol=0.35 if z>=9 else 0.6)
@@ -382,7 +408,7 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
 # ----------------------- Core -----------------------
 def run_one_layer(group_name: str,
                   gdf: gpd.GeoDataFrame,
-                  layer_mode: str,      # "sensitivity" or "env"
+                  layer_mode: str,      # "sensitivity" | "env" | "groupstotal" | "assetstotal"
                   palette: Dict[str, Tuple[int,int,int,int]],
                   ranges_map: Dict[str, range],
                   out_dir: Path,
@@ -394,9 +420,8 @@ def run_one_layer(group_name: str,
     """
     Prepare MBTiles writer, enumerate tiles, use worker pool to render, stream to writer.
     """
-    # Attributes
+    # Attributes & output naming
     if layer_mode == "sensitivity":
-        # Prefer code; fallback from numeric using ranges if missing
         sens_codes = gdf.get("sensitivity_code_max", pd.Series(index=gdf.index, dtype="string")).astype("string").str.strip().str.upper()
         if sens_codes.isna().any() or (sens_codes == "<NA>").any():
             fallback = []
@@ -404,19 +429,42 @@ def run_one_layer(group_name: str,
             for i in gdf.index:
                 c = None
                 if pd.notna(sens_codes.at[i]) and sens_codes.at[i] != "<NA>":
-                    c = str(sens_codes.at[i]).strip().upper()
+                    c = str(sens_codes.at[i]).strip().str.upper()
                 else:
                     c = build_code_from_numeric_if_missing(sens_num.at[i], ranges_map)
                 fallback.append(c)
             sens_codes = pd.Series(fallback, index=gdf.index, dtype="object")
-        env_vals = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
+        numvals = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
         mbt_name = f"{group_name}_sensitivity"
         out_path = out_dir / f"{mbt_name}.mbtiles"
-    else:
-        env_vals = pd.to_numeric(gdf.get("env_index", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+
+        vmin = 0.0; vmax = 1.0  # unused for sensitivity
+    elif layer_mode == "env":
+        numvals = pd.to_numeric(gdf.get("env_index", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
         sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
         mbt_name = f"{group_name}_envindex"
         out_path = out_dir / f"{mbt_name}.mbtiles"
+        vmin = 1.0; vmax = 100.0
+    elif layer_mode == "groupstotal":
+        numvals = pd.to_numeric(gdf.get("asset_groups_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
+        mbt_name = f"{group_name}_groupstotal"
+        out_path = out_dir / f"{mbt_name}.mbtiles"
+        vmin = float(np.nanmin(numvals.values)) if len(numvals) else 0.0
+        vmax = float(np.nanmax(numvals.values)) if len(numvals) else 1.0
+        if not np.isfinite(vmin): vmin = 0.0
+        if not np.isfinite(vmax): vmax = 1.0
+    elif layer_mode == "assetstotal":
+        numvals = pd.to_numeric(gdf.get("assets_overlap_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
+        mbt_name = f"{group_name}_assetstotal"
+        out_path = out_dir / f"{mbt_name}.mbtiles"
+        vmin = float(np.nanmin(numvals.values)) if len(numvals) else 0.0
+        vmax = float(np.nanmax(numvals.values)) if len(numvals) else 1.0
+        if not np.isfinite(vmin): vmin = 0.0
+        if not np.isfinite(vmax): vmax = 1.0
+    else:
+        raise ValueError(f"Unknown layer_mode: {layer_mode}")
 
     # Geometry & bounds
     minx, miny, maxx, maxy = gdf.total_bounds
@@ -437,10 +485,10 @@ def run_one_layer(group_name: str,
     in_q.put(("__INIT__", mbt_name, int(minzoom), int(maxzoom), bounds))
 
     # Prepare worker pool globals
-    geoms = list(gdf.geometry.values)
-    sens_list = list(sens_codes.values)
-    env_list  = list(env_vals.values)
-    init_args = (geoms, sens_list, env_list, layer_mode, palette, stroke_rgba, stroke_w)
+    geoms   = list(gdf.geometry.values)
+    senslst = list(sens_codes.values)
+    numlst  = list(numvals.values)
+    init_args = (geoms, senslst, numlst, layer_mode, palette, stroke_rgba, stroke_w, vmin, vmax)
 
     # Plan tasks (also prints per-zoom schedule summary)
     tasks = plan_tile_tasks(bounds, minzoom, maxzoom, sindex, gdf)
@@ -463,7 +511,7 @@ def run_one_layer(group_name: str,
     log(f"    {mbt_name}: tiles written {written:,} / scheduled {total_tiles:,} → {out_path}")
 
 def main():
-    ap = argparse.ArgumentParser(description="Raster MBTiles (PNG) from tbl_flat.parquet per group (sensitivity & env_index).")
+    ap = argparse.ArgumentParser(description="Raster MBTiles (PNG) from tbl_flat.parquet per group (sensitivity, env_index, groupstotal, assetstotal).")
     ap.add_argument("--group-col", default="name_gis_geocodegroup", help="Grouping column (default: name_gis_geocodegroup)")
     ap.add_argument("--minzoom", type=int, default=6)
     ap.add_argument("--maxzoom", type=int, default=12)
@@ -478,8 +526,13 @@ def main():
     if not parquet.exists():
         raise SystemExit(f"Missing: {parquet}")
 
-    # Load minimal columns
-    need_cols = [args.group_col, "geometry", "sensitivity_code_max", "sensitivity_max", "env_index"]
+    # Load minimal columns (added asset_* totals)
+    need_cols = [
+        args.group_col, "geometry",
+        "sensitivity_code_max", "sensitivity_max",
+        "env_index",
+        "asset_groups_total", "assets_overlap_total"
+    ]
     try:
         gdf_all = gpd.read_parquet(parquet, columns=need_cols)
     except TypeError:
@@ -552,6 +605,39 @@ def main():
             layer_mode="env",
             palette=env_palette,
             ranges_map=ranges_map,   # unused here, harmless
+            out_dir=out_dir,
+            minzoom=args.minzoom,
+            maxzoom=args.maxzoom,
+            stroke_rgba=stroke_rgba,
+            stroke_w=args.stroke_width,
+            procs=args.procs
+        )
+
+        # ASSET GROUPS TOTAL (light->dark blue, per-group min/max)
+        log(f"  → building {slug}_groupstotal.mbtiles …")
+        blue_palette = {"blue_alpha": 0.70}
+        run_one_layer(
+            group_name=slug,
+            gdf=gdf,
+            layer_mode="groupstotal",
+            palette=blue_palette,
+            ranges_map=ranges_map,  # unused
+            out_dir=out_dir,
+            minzoom=args.minzoom,
+            maxzoom=args.maxzoom,
+            stroke_rgba=stroke_rgba,
+            stroke_w=args.stroke_width,
+            procs=args.procs
+        )
+
+        # ASSETS OVERLAP TOTAL (light->dark blue, per-group min/max)
+        log(f"  → building {slug}_assetstotal.mbtiles …")
+        run_one_layer(
+            group_name=slug,
+            gdf=gdf,
+            layer_mode="assetstotal",
+            palette=blue_palette,
+            ranges_map=ranges_map,  # unused
             out_dir=out_dir,
             minzoom=args.minzoom,
             maxzoom=args.maxzoom,
