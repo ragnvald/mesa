@@ -367,56 +367,56 @@ def get_script_paths(file_name: str):
 # Button handlers (now pass args as separate tokens; always set cwd/env)
 # ---------------------------------------------------------------------
 def geocodes_grids():
-    python_script, exe_file = get_script_paths("03_create_geocodes")
+    python_script, exe_file = get_script_paths("geocodes_create")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "03_create_geocodes.exe"))
+        file_path = resolve_path(os.path.join("system", "geocodes_create.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def import_assets(gpkg_file):
-    python_script, exe_file = get_script_paths("01_import")
+    python_script, exe_file = get_script_paths("data_import")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "01_import.exe"))
+        file_path = resolve_path(os.path.join("system", "data_import.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_processing_setup():
-    python_script, exe_file = get_script_paths("04_edit_input")
+    python_script, exe_file = get_script_paths("params_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "04_edit_input.exe"))
+        file_path = resolve_path(os.path.join("system", "params_edit.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def process_data(gpkg_file):
-    python_script, exe_file = get_script_paths("06_process")
+    python_script, exe_file = get_script_paths("data_process")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "06_process.exe"))
+        file_path = resolve_path(os.path.join("system", "data_process.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def make_atlas():
-    python_script, exe_file = get_script_paths("07_make_atlas")
+    python_script, exe_file = get_script_paths("atlas_create")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "07_make_atlas.exe"))
+        file_path = resolve_path(os.path.join("system", "atlas_create.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def admin_lines():
-    python_script, exe_file = get_script_paths("08_admin_lines")
+    python_script, exe_file = get_script_paths("lines_admin")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "08_admin_lines.exe"))
+        file_path = resolve_path(os.path.join("system", "lines_admin.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
@@ -431,44 +431,44 @@ def open_maps_overview():
         log_to_logfile(f"Failed to open maps_overview.py: {e}")
 
 def open_present_files():
-    python_script = resolve_path(os.path.join("system", "02_present_files.py"))
+    python_script = resolve_path(os.path.join("system", "data_report.py"))
     python_exe = sys.executable or "python"
     try:
         subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
     except Exception as e:
-        log_to_logfile(f"Failed to open 02_present_files.py: {e}")
+        log_to_logfile(f"Failed to open data_report.py: {e}")
 
 def edit_assets():
-    python_script, exe_file = get_script_paths("04_edit_asset_group")
+    python_script, exe_file = get_script_paths("assetgroup_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "04_edit_asset_group.exe"))
+        file_path = resolve_path(os.path.join("system", "assetgroup_edit.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_geocodes():
-    python_script, exe_file = get_script_paths("04_edit_geocode_group")
+    python_script, exe_file = get_script_paths("geocodegroup_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "04_edit_geocode_group.exe"))
+        file_path = resolve_path(os.path.join("system", "geocodegroup_edit.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_lines():
-    python_script, exe_file = get_script_paths("08_edit_lines")
+    python_script, exe_file = get_script_paths("lines_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "08_edit_lines.exe"))
+        file_path = resolve_path(os.path.join("system", "lines_edit.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_atlas():
-    python_script, exe_file = get_script_paths("07_edit_atlas")
+    python_script, exe_file = get_script_paths("atlas_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "07_edit_atlas.exe"))
+        file_path = resolve_path(os.path.join("system", "atlas_edit.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
