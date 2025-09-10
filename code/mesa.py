@@ -22,6 +22,8 @@ import sys
 from shapely import wkb
 import pyarrow.parquet as pq  # <-- for GeoParquet status checks
 
+PYTHON_EXE = sys.executable or "python"
+
 
 # Read the configuration file
 def read_config(file_name):
@@ -268,6 +270,18 @@ def get_status(geoparquet_dir):
 
 def run_subprocess(command, fallback_command, gpkg_file):
     """Utility function to run a subprocess with a fallback option."""
+    # normalize interpreter
+    try:
+        if command and command[0] == "python":
+            command[0] = PYTHON_EXE
+    except Exception:
+        pass
+    try:
+        if fallback_command and fallback_command[0] == "python":
+            fallback_command[0] = PYTHON_EXE
+    except Exception:
+        pass
+
     try:
         log_to_logfile(f"Attempting to run command: {command}")
         result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -277,18 +291,17 @@ def run_subprocess(command, fallback_command, gpkg_file):
     except subprocess.CalledProcessError as e:
         log_to_logfile(f"Primary command failed with error: {e}")
         log_to_logfile(f"Failed to execute command: {command}, error: {e.stderr}")
-        try:
-            log_to_logfile(f"Attempting to run fallback command: {fallback_command}")
-            result = subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            log_to_logfile("Fallback command executed successfully")
-            log_to_logfile(f"stdout: {result.stdout}")
-            update_stats(gpkg_file)
-        except subprocess.CalledProcessError as e:
-            log_to_logfile(f"Failed to execute fallback command: {fallback_command}, error: {e.stderr}")
-        except FileNotFoundError as e:
-            log_to_logfile(f"File not found for fallback command: {fallback_command}, error: {e}")
-    except FileNotFoundError as e:
-        log_to_logfile(f"File not found for command: {command}, error: {e}")
+        if fallback_command:
+            try:
+                log_to_logfile(f"Attempting to run fallback command: {fallback_command}")
+                result = subprocess.run(fallback_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                log_to_logfile("Fallback command executed successfully")
+                log_to_logfile(f"stdout: {result.stdout}")
+                update_stats(gpkg_file)
+            except subprocess.CalledProcessError as e2:
+                log_to_logfile(f"Fallback command failed with error: {e2}")
+                log_to_logfile(f"Failed to execute fallback command: {fallback_command}, error: {e2.stderr}")
+                raise
 
 
 def get_script_paths(file_name,original_working_directory):
@@ -322,7 +335,7 @@ def geocodes_grids():
         run_subprocess([file_path, arguments], [], gpkg_file)
     else:
         # Normal Python mode: run the .py, but fall back to the .exe if present
-        run_subprocess(["python", python_script, arguments], [exe_file, arguments], gpkg_file)
+        run_subprocess([sys.executable, python_script, arguments], [exe_file, arguments], gpkg_file)
 
 
 def import_assets(gpkg_file):
