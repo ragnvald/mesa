@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, base64, configparser, locale, sqlite3, threading
+import os, sys, base64, configparser, locale, sqlite3, threading, json, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 import pandas as pd
@@ -45,8 +45,10 @@ APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path
 os.chdir(APP_DIR)
 
 CONFIG_FILE   = APP_DIR / "config.ini"
-PARQUET_DIR   = APP_DIR / "output" / "geoparquet"
-MBTILES_DIR   = APP_DIR / "output" / "mbtiles"
+OUTPUT_DIR    = APP_DIR / "output"
+PARQUET_DIR   = OUTPUT_DIR / "geoparquet"
+MBTILES_DIR   = OUTPUT_DIR / "mbtiles"
+AREA_JSON     = OUTPUT_DIR / "area_stats.json"
 
 PARQUET_FILE  = PARQUET_DIR / "tbl_flat.parquet"
 SEGMENT_FILE  = PARQUET_DIR / "tbl_segment_flat.parquet"
@@ -280,6 +282,172 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
         a_m2 = float(sub.geometry.apply(geodesic_area_m2).sum())
         out.append(a_m2 / 1e6)  # km²
     return {"labels": labels, "values": out}
+
+# ===============================
+# Area JSON reader (robust)
+# ===============================
+def _norm_key_local(s: str) -> str:
+    return (s or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+def _to_float_safe(v) -> float:
+    """Convert a value to float or return 0.0 if not numeric; tolerate '1,234.5' strings."""
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+    try:
+        s = str(v).strip()
+        if s == "" or s.lower() in ("nan", "null", "none"):
+            return 0.0
+        s = s.replace(",", "")
+        return float(s)
+    except Exception:
+        return 0.0
+
+def _extract_labels_values(obj, default_units="km2"):
+    """
+    Accepts multiple shapes:
+      { "labels":["A","B",...], "values":[...], "units":"km2" }
+      { "labels":["A","B",...], "values": {"A":..., "B":...}, "units":"km2" }
+      { "A": 12.3, "B": 4.2, ..., "units":"m2" }
+      { "area_m2": {"A":..., ...} } or { "area_km2": {...} }
+      [vA, vB, vC, vD, vE]  (assumed order A..E)
+    Returns (labels, values_in_km2)
+    """
+    labels_out = list("ABCDE")
+    units = (default_units or "km2").lower()
+
+    if isinstance(obj, dict):
+        # Explicit labels + values
+        if "labels" in obj and "values" in obj:
+            labs = [str(x).upper() for x in (obj.get("labels") or [])]
+            vals = obj.get("values")
+            if isinstance(vals, (list, tuple)):
+                # Only pair up if list looks numeric-ish
+                numbers = []
+                for v in vals:
+                    numbers.append(_to_float_safe(v))
+                mapping = {k: numbers[i] for i, k in enumerate(labs) if k in labels_out and i < len(numbers)}
+            elif isinstance(vals, dict):
+                mapping = {}
+                for k, v in vals.items():
+                    ku = str(k).upper()
+                    if ku in labels_out:
+                        mapping[ku] = _to_float_safe(v)
+            else:
+                mapping = {}
+            units = (obj.get("units") or obj.get("unit") or units).lower()
+            valsA = [_to_float_safe(mapping.get(c, 0.0)) for c in labels_out]
+            if units in ("m2","sqm","square_meters"):
+                valsA = [v/1e6 for v in valsA]
+            return labels_out, valsA
+
+        # Nested area dicts
+        for key, is_m2 in (("area_km2", False), ("km2", False), ("area_m2", True), ("m2", True)):
+            if key in obj and isinstance(obj[key], dict):
+                m = {str(k).upper(): _to_float_safe(v) for k, v in obj[key].items()}
+                valsA = [_to_float_safe(m.get(c, 0.0)) for c in labels_out]
+                if is_m2:
+                    valsA = [v/1e6 for v in valsA]
+                return labels_out, valsA
+
+        # Plain dict with A..E keys (ignore extra metadata)
+        use = {}
+        for k, v in obj.items():
+            ku = str(k).upper()
+            if ku in labels_out:
+                use[ku] = _to_float_safe(v)
+        if use:
+            units = (obj.get("units") or obj.get("unit") or units).lower()
+            valsA = [_to_float_safe(use.get(c, 0.0)) for c in labels_out]
+            if units in ("m2","sqm","square_meters"):
+                valsA = [v/1e6 for v in valsA]
+            return labels_out, valsA
+
+    if isinstance(obj, (list, tuple)) and len(obj) >= 5:
+        valsA = [_to_float_safe(obj[i]) for i in range(5)]
+        return labels_out, valsA
+
+    # Fallback
+    return labels_out, [0.0]*5
+
+def _read_area_json(path: Path, group_name: str) -> dict | None:
+    """
+    Returns {"labels":[A..E],"values":[km2,...]} or None if not found/invalid.
+    Does not throw.
+    """
+    try:
+        if not path.exists():
+            return None
+        # tolerate transient writes by reading once; if it fails JSON-decode, return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        # JSON busy/invalid
+        sys.stderr.write(f"[area_stats.json] Read/parse failed: {e}\n")
+        return None
+
+    # Where is the group?
+    cand = None
+    if isinstance(data, dict):
+        # Preferred: nested "groups"
+        groups = data.get("groups")
+        if isinstance(groups, dict):
+            # try exact, then normalized
+            cand = groups.get(group_name)
+            if cand is None:
+                nk = _norm_key_local(group_name)
+                for k in groups.keys():
+                    if _norm_key_local(str(k)) == nk:
+                        cand = groups[k]
+                        break
+        if cand is None:
+            # maybe group sits at root
+            cand = data.get(group_name)
+            if cand is None:
+                nk = _norm_key_local(group_name)
+                for k in data.keys():
+                    if _norm_key_local(str(k)) == nk:
+                        cand = data[k]
+                        break
+        # or the root itself is the A..E dict
+        if cand is None:
+            cand = data
+
+    try:
+        labels, values = _extract_labels_values(cand if cand is not None else {})
+        # sanity: values must be numeric list length 5
+        if not (isinstance(values, list) and len(values) >= 5):
+            return None
+        if any(not isinstance(v, (int, float)) for v in values):
+            # coerce once more, safely
+            values = [_to_float_safe(v) for v in values[:5]]
+        return { "labels": list("ABCDE"), "values": [float(v) for v in values[:5]] }
+    except Exception as e:
+        sys.stderr.write(f"[area_stats.json] Extraction failed: {e}\n")
+        return None
+
+def get_area_stats() -> dict:
+    """
+    Try JSON first (output/area_stats.json). If missing/invalid, fall back to GeoParquet computation.
+    Always returns {"labels":[...], "values":[...]} and optionally {"message": "..."}.
+    """
+    # JSON attempt
+    js = _read_area_json(AREA_JSON, BASIC_GROUP_NAME)
+    if js is not None:
+        return js
+    # Fallback to parquet computation
+    msg = ("Area statistics JSON not available yet; using live computation from GeoParquet. "
+           f"Expected at {AREA_JSON.name}.")
+    fallback = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
+    if "message" in fallback:
+        # carry their message if basic_mosaic missing
+        return fallback
+    fallback["message"] = msg
+    return fallback
 
 # ===============================
 # MBTiles scanning + tiny server
@@ -530,11 +698,12 @@ class Api:
         }
 
     def get_geocode_layer(self, geocode_category):
-        """Prefer MBTiles sensitivity; otherwise vector fallback. Stats always from basic_mosaic."""
+        """Prefer MBTiles sensitivity; otherwise vector fallback. Stats from JSON if available; else parquet."""
         try:
             mb = mbtiles_info(geocode_category)
+            stats = get_area_stats()  # <-- JSON first, then parquet fallback
+
             if mb.get("sensitivity_url"):
-                stats = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
                 return {
                     "ok": True,
                     "geojson": {"type":"FeatureCollection","features":[]},
@@ -547,13 +716,12 @@ class Api:
                     }
                 }
             if not GEOCODE_AVAILABLE:
-                return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]}, "home_bounds": [[0,0],[0,0]], "stats": {"labels": list("ABCDE"), "values":[0]*5}}
+                return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]}, "home_bounds": [[0,0],[0,0]], "stats": stats}
             df_map = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
             df_map = only_A_to_E(df_map)
             df_map = to_plot_crs(df_map, cfg)
             map_bounds  = bounds_to_leaflet(df_map.total_bounds) if not df_map.empty else [[0,0],[0,0]]
             map_geojson = gdf_to_geojson_min(df_map)
-            stats = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
             return {"ok": True, "geojson": map_geojson, "home_bounds": map_bounds, "stats": stats}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -584,7 +752,6 @@ class Api:
         if total_col not in df.columns:
             return {"ok": False, "error": f"Column '{total_col}' not found in tbl_flat."}
         df = to_plot_crs(df, cfg)
-        # Clean range
         vals = pd.to_numeric(df[total_col], errors="coerce")
         vmin = float(vals.min()) if len(vals) else 0.0
         vmax = float(vals.max()) if len(vals) else 0.0
