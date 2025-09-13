@@ -313,8 +313,8 @@ def get_script_paths(file_name,original_working_directory):
         base_path = original_working_directory
         log_to_logfile(f"Using __file__: {base_path}")
 
-    python_script = os.path.join(base_path,"system", f"{file_name}.py")
-    exe_file = os.path.join(base_path,"system", f"{file_name}.exe")
+    python_script = os.path.join(base_path, f"{file_name}.py")
+    exe_file = os.path.join(base_path, f"{file_name}.exe")
     
     log_to_logfile(f"Python script path: {python_script}")
     log_to_logfile(f"Executable file path: {exe_file}")
@@ -323,14 +323,14 @@ def get_script_paths(file_name,original_working_directory):
 
 
 def geocodes_grids():
-    """Launch 03_create_geocodes with the working directory argument and refresh stats."""
-    python_script, exe_file = get_script_paths("03_create_geocodes", original_working_directory)
+    """Launch geocodes_create with the working directory argument and refresh stats."""
+    python_script, exe_file = get_script_paths("geocodes_create", original_working_directory)
     arguments = f'--original_working_directory={original_working_directory}'
 
     # If running from a bundled executable, prefer the .exe next to the app
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path, "system", "03_create_geocodes.exe")
+        file_path = os.path.join(base_path, "geocodes_create.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path, arguments], [], gpkg_file)
     else:
@@ -340,14 +340,14 @@ def geocodes_grids():
 
 def import_assets(gpkg_file):
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file = get_script_paths("01_import", original_working_directory)
+    python_script, exe_file = get_script_paths("data_import", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "01_import.exe")
+        file_path = os.path.join(base_path, "data_import.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -356,14 +356,14 @@ def import_assets(gpkg_file):
 
 def edit_processing_setup():
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file = get_script_paths("04_edit_input", original_working_directory)
+    python_script, exe_file = get_script_paths("parametres_setup", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "04_edit_input.exe")
+        file_path = os.path.join(base_path, "parametres_setup.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -372,14 +372,14 @@ def edit_processing_setup():
 
 def process_data(gpkg_file):
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file = get_script_paths("06_process", original_working_directory)
+    python_script, exe_file = get_script_paths("data_process", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "06_process.exe")
+        file_path = os.path.join(base_path, "data_process.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -395,7 +395,7 @@ def make_atlas():
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "07_make_atlas.exe")
+        file_path = os.path.join(base_path, "07_make_atlas.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -404,14 +404,14 @@ def make_atlas():
 
 def admin_lines():
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file = get_script_paths("08_admin_lines", original_working_directory)
+    python_script, exe_file = get_script_paths("lines_process", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "08_admin_lines.exe")
+        file_path = os.path.join(base_path, "lines_process.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -425,7 +425,7 @@ def open_maps_overview():
     else:
         base_path = original_working_directory
 
-    python_script = os.path.join(base_path, "system", "maps_overview.py")
+    python_script = ("maps_overview.py")
 
     # <-- use the same interpreter that launched mesa.py (works in your venv)
     python_exe = sys.executable or "python"
@@ -437,19 +437,19 @@ def open_maps_overview():
 
 
 def open_present_files():
-    """Launch 02_present_files.py using the current Python interpreter."""
+    """Launch data_report.py using the current Python interpreter."""
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
     else:
         base_path = original_working_directory
 
-    python_script = os.path.join(base_path, "system", "02_present_files.py")
+    python_script = os.path.join(base_path, "data_report.py")
     python_exe = sys.executable or "python"
 
     try:
         subprocess.Popen([python_exe, python_script])
     except Exception as e:
-        log_to_logfile(f"Failed to open 02_present_files.py: {e}")
+        log_to_logfile(f"Failed to open data_report.py: {e}")
 
 
 def edit_assets():
@@ -461,7 +461,7 @@ def edit_assets():
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "04_edit_asset_group.exe")
+        file_path = os.path.join(base_path, "04_edit_asset_group.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -470,14 +470,14 @@ def edit_assets():
 
 def edit_geocodes():
     """Main function to import assets by running the appropriate script or executable."""
-    python_script, exe_file = get_script_paths("04_edit_geocode_group", original_working_directory)
+    python_script, exe_file = get_script_paths("geocodes_create", original_working_directory)
 
     arguments = f'--original_working_directory={original_working_directory}'
 
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "04_edit_geocode_group.exe")
+        file_path = os.path.join(base_path, "geocodes_create.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -493,7 +493,7 @@ def edit_lines():
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "08_edit_lines.exe")
+        file_path = os.path.join(base_path,"08_edit_lines.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -509,7 +509,7 @@ def edit_atlas():
     # Check if running from a bundled executable
     if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-        file_path = os.path.join(base_path,"system", "07_edit_atlas.exe")
+        file_path = os.path.join(base_path, "07_edit_atlas.exe")
         log_to_logfile(f"Running from a bundled executable, using {file_path}")
         run_subprocess([file_path,arguments], [], gpkg_file)
     else:
@@ -733,7 +733,7 @@ def store_userinfo_online(
 original_working_directory  = os.getcwd()
 
 # Load configuration settings
-config_file                 = os.path.join(original_working_directory, "system/config.ini")
+config_file                 = os.path.join(original_working_directory, "config.ini")
 gpkg_file                   = os.path.join(original_working_directory, "output/mesa.gpkg")
 
 # Setting variables
@@ -820,7 +820,7 @@ if __name__ == "__main__":
 
     # Setup the main Tkinter window
     root = ttk.Window(themename=ttk_bootstrap_theme)
-    root.title("MESA 4")
+    root.title("MESA 5")
     root.iconbitmap("system_resources/mesa.ico")
     root.geometry("850x540")
 
