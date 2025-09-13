@@ -44,6 +44,7 @@ import datetime
 import locale
 import os
 import time
+import shutil
 import multiprocessing as mp
 from pathlib import Path
 from typing import Union, Optional, List, Tuple
@@ -195,6 +196,14 @@ def read_config(file_name: Path) -> configparser.ConfigParser:
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
     return cfg
+
+def _safe_rmtree(p: Path):
+    """Best-effort recursive delete; ignore if already gone or busy."""
+    try:
+        if p and p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+    except Exception:
+        pass
 
 def resolve_base_dir(cli_root: str | None) -> Path:
     return find_base_dir(cli_root)
@@ -999,17 +1008,109 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
         except Exception: workers = 4
     log_to_gui(f"[Mosaic] Parallel polygonize; workers={workers}, maxtasksperchild={maxtasks}.")
 
-    # Streaming parts dir
+    # Streaming parts dir (always cleaned up in finally)
     tmp_dir = gpq_dir(base_dir) / "__mosaic_faces_tmp"
     try:
-        if tmp_dir.exists():
-            for p in tmp_dir.glob("*.parquet"):
-                try: p.unlink()
-                except Exception: pass
-        else:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+        try:
+            if tmp_dir.exists():
+                for p in tmp_dir.glob("*.parquet"):
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            else:
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        face_batches: List[bytes] = []
+        part_files: List[Path] = []
+
+        def _flush_batch_to_parquet(metric_crs: str):
+            nonlocal face_batches, part_files
+            if not face_batches:
+                return
+            gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_batches], crs=metric_crs)
+            gdf = gpd.GeoDataFrame(geometry=gseries).to_crs("EPSG:4326")
+            part = tmp_dir / f"faces_part_{len(part_files):05d}.parquet"
+            gdf.to_parquet(part, index=False)
+            part_files.append(part)
+            STATS.faces_total += len(gdf)
+            face_batches = []
+
+        # Process tasks
+        STATS.stage = "polygonize (workers)"
+        STATS.worker_started_at = time.time()
+        ctx = mp.get_context("spawn")
+        try:
+            if workers == 1 or n_tasks == 1:
+                for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
+                    _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
+                    STATS.tiles_done += 1
+                    if err:
+                        log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
+                    else:
+                        face_batches.extend(res)
+                        if len(face_batches) >= flush_batch:
+                            _flush_batch_to_parquet(metric_crs)
+                    update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
+            else:
+                with ctx.Pool(processes=workers, maxtasksperchild=maxtasks) as pool:
+                    for (idx, res, err) in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=max(1, chunksize)):
+                        STATS.tiles_done += 1
+                        if err:
+                            log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
+                        else:
+                            face_batches.extend(res)
+                            if len(face_batches) >= flush_batch:
+                                _flush_batch_to_parquet(metric_crs)
+                        update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
+        finally:
+            # final flush
+            _flush_batch_to_parquet(metric_crs)
+            log_to_gui(f"[Mosaic] Worker stage done: tiles {STATS.tiles_done}/{STATS.tiles_total}, faces so far {STATS.faces_total:,}.")
+
+        # Assemble faces from parts
+        STATS.stage = "assembling parts"
+        parts_gdfs = []
+        for pf in part_files:
+            try:
+                parts_gdfs.append(gpd.read_parquet(pf))
+            except Exception as e:
+                log_to_gui(f"[Mosaic] Skipping part {pf.name}: {e}", "WARN")
+        if face_batches:
+            gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_batches], crs=metric_crs)
+            parts_gdfs.append(gpd.GeoDataFrame(geometry=gseries).to_crs("EPSG:4326"))
+            STATS.faces_total += len(gseries)
+
+        if not parts_gdfs:
+            stop_heartbeat()
+            log_to_gui("[Mosaic] No valid face parts to assemble.", "WARN")
+            return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+        faces = pd.concat(parts_gdfs, ignore_index=True)
+        faces = ensure_wgs84(gpd.GeoDataFrame(faces, geometry="geometry"))
+
+        # Deduplicate final faces by exact WKB
+        STATS.stage = "deduplicating"
+        t_ded = time.time()
+        try:
+            wkb_hex = faces.geometry.apply(_wkb_hex)
+            keep = ~pd.Series(wkb_hex).duplicated()
+            faces = faces.loc[keep.values].reset_index(drop=True)
+        except Exception:
+            pass
+        log_to_gui(f"[Mosaic] Dedup complete in {time.time()-t_ded:.2f}s; faces={len(faces):,}.")
+        STATS.faces_total = len(faces)
+
+        stop_heartbeat()
+        log_to_gui(f"[Mosaic] Completed in {time.time()-t0:.2f}s. Final faces: {len(faces):,}.")
+        return faces
+
+    finally:
+        # Always remove the temp directory when we’re done (success or failure)
+        _safe_rmtree(tmp_dir)
+        log_to_gui(f"[Mosaic] Cleaned temporary directory: {tmp_dir}")
 
     face_batches: List[bytes] = []
     part_files: List[Path] = []
