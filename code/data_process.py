@@ -19,6 +19,13 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import box
 
+# NEW: geodesic area + validity helpers
+from pyproj import Geod
+try:
+    from shapely.validation import make_valid as _make_valid  # type: ignore
+except Exception:
+    _make_valid = None
+
 try:
     import psutil  # type: ignore
 except Exception:
@@ -54,6 +61,12 @@ _GRID_BBOX_MAP: dict[int, list[float]] = {}   # grid_cell -> [S,W,N,E]
 # Config cache (flat config at <base>/config.ini)
 _CFG: configparser.ConfigParser | None = None
 
+# Geodesic engine (WGS84) for area stats
+_GEOD = Geod(ellps="WGS84")
+
+# Default basic mosaic group name (can be overridden in config.ini [DEFAULT] basic_group_name)
+_DEFAULT_BASIC_GROUP_NAME = "basic_mosaic"
+
 # ----------------------------
 # Paths & config helpers
 # ----------------------------
@@ -81,6 +94,14 @@ def _ensure_cfg() -> configparser.ConfigParser:
         _CFG["DEFAULT"]["parquet_folder"] = "output/geoparquet"
     return _CFG
 
+def _basic_group_name() -> str:
+    try:
+        cfg = _ensure_cfg()
+        name = (cfg["DEFAULT"].get("basic_group_name", _DEFAULT_BASIC_GROUP_NAME) or "").strip()
+        return name if name else _DEFAULT_BASIC_GROUP_NAME
+    except Exception:
+        return _DEFAULT_BASIC_GROUP_NAME
+
 def set_global_cfg(cfg: configparser.ConfigParser):
     """Install a pre-read config for use across helpers."""
     global _CFG
@@ -93,6 +114,11 @@ def gpq_dir() -> Path:
     cfg = _ensure_cfg()
     sub = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
     out = base_dir() / sub
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+def output_dir() -> Path:
+    out = base_dir() / "output"
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -1166,6 +1192,112 @@ def normalize_area_epsg(raw: str) -> str:
     except Exception:
         return "EPSG:3035"
 
+# --- NEW: tiny helpers for geodesic area stats (WGS84) ---
+def _to_epsg4326(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf is None or gdf.empty:
+        return gdf
+    g = gdf.copy()
+    if g.crs is None:
+        try:
+            cfg = _ensure_cfg()
+            epsg = int((cfg["DEFAULT"].get("workingprojection_epsg","4326") or "4326"))
+            g = g.set_crs(epsg=epsg, allow_override=True)
+        except Exception:
+            g = g.set_crs(4326, allow_override=True)
+    if str(g.crs).upper() != "EPSG:4326":
+        g = g.to_crs(4326)
+    return g
+
+def _valid_geom(geom):
+    if geom is None or getattr(geom, "is_empty", False):
+        return geom
+    try:
+        if _make_valid is not None:
+            return _make_valid(geom)
+        g = geom.buffer(0)
+        return g if (g is not None and not g.is_empty) else geom
+    except Exception:
+        return geom
+
+def _geodesic_area_m2(geom) -> float:
+    if geom is None or getattr(geom, "is_empty", False):
+        return 0.0
+    gt = getattr(geom, "geom_type", "")
+    try:
+        if gt == "Polygon":
+            a, _ = _GEOD.geometry_area_perimeter(geom)
+            return abs(a)
+        elif gt == "MultiPolygon":
+            return float(sum(abs(_GEOD.geometry_area_perimeter(p)[0]) for p in geom.geoms))
+    except Exception:
+        pass
+    return 0.0
+
+def _compute_area_stats_from_tbl_flat(tbl_flat: gpd.GeoDataFrame) -> dict:
+    """
+    Mirror of the UI's compute_stats_by_geodesic_area_from_flat_basic, but done offline.
+    Aggregates A–E geodesic areas (km²) for the configured BASIC group.
+    """
+    labels = list("ABCDE")
+    basic = (_basic_group_name() or _DEFAULT_BASIC_GROUP_NAME).strip().lower()
+    msg = f'The geocode/partition "{basic}" is missing.'
+
+    if tbl_flat is None or tbl_flat.empty or "name_gis_geocodegroup" not in tbl_flat.columns:
+        return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
+
+    df = tbl_flat.copy()
+    df["name_gis_geocodegroup"] = df["name_gis_geocodegroup"].astype("string").str.strip().str.lower()
+    df = df[df["name_gis_geocodegroup"] == basic]
+
+    if "sensitivity_code_max" in df.columns:
+        df["sensitivity_code_max"] = (
+            df["sensitivity_code_max"].astype("string").fillna("").str.strip().str.upper()
+        )
+        df = df[df["sensitivity_code_max"].isin(list("ABCDE"))]
+    else:
+        df = df.iloc[0:0]
+
+    if df.empty:
+        return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
+
+    # Deduplicate by stable id if available, else by geometry WKB
+    if "id_geocode_object" in df.columns:
+        df = df.drop_duplicates(subset=["id_geocode_object"])
+    else:
+        try:
+            df = df.assign(__wkb__=df.geometry.apply(lambda g: g.wkb if g is not None else None))
+            df = df.drop_duplicates(subset=["__wkb__"]).drop(columns=["__wkb__"])
+        except Exception:
+            df = df.drop_duplicates()
+
+    # Normalize CRS, make valid
+    df = _to_epsg4326(df)
+    df["geometry"] = df["geometry"].apply(_valid_geom)
+
+    out = []
+    for c in labels:
+        sub = df[df["sensitivity_code_max"] == c]
+        if sub.empty:
+            out.append(0.0)
+            continue
+        a_m2 = float(sub.geometry.apply(_geodesic_area_m2).sum())
+        out.append(a_m2 / 1e6)  # km²
+    return {"labels": labels, "values": out}
+
+def _write_area_stats_json(stats: dict):
+    """
+    Writes area stats JSON to <base>/output/area_stats.json (NOT inside the GeoParquet subfolder).
+    """
+    try:
+        out_p = output_dir() / "area_stats.json"
+        tmp = out_p.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, out_p)
+        log_to_gui(log_widget, f"Wrote {out_p}")
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed to write area_stats.json: {e}")
+
 def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     log_to_gui(log_widget, "Building presentation table (tbl_flat)…")
 
@@ -1184,6 +1316,16 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
         write_parquet("tbl_flat", gdf_empty)
+
+        # NEW: produce a zeroed area_stats.json as well
+        try:
+            stats = {"labels": list("ABCDE"), "values": [0,0,0,0,0], "message": f'The geocode/partition "{_basic_group_name()}" is missing.'}
+            log_to_gui(log_widget, "Computing area stats (empty dataset)…")
+            update_progress(87)
+            _write_area_stats_json(stats)
+            update_progress(89)
+        except Exception as e:
+            log_to_gui(log_widget, f"Area stats (empty) failed: {e}")
         return
 
     if stacked.crs is None:
@@ -1435,6 +1577,16 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 
     write_parquet("tbl_flat", tbl_flat)
     log_to_gui(log_widget, f"tbl_flat saved with {len(tbl_flat):,} rows.")
+
+    # NEW: area stats JSON (geodesic, WGS84) for the map UI
+    try:
+        log_to_gui(log_widget, "Computing geodesic area stats for basic mosaic (A–E)…")
+        update_progress(87)
+        stats = _compute_area_stats_from_tbl_flat(tbl_flat)
+        _write_area_stats_json(stats)
+        update_progress(89)
+    except Exception as e:
+        log_to_gui(log_widget, f"Area stats computation failed: {e}")
 
     # Backfill area_m2 to stacked parts
     try:
@@ -1867,8 +2019,8 @@ if __name__ == "__main__":
 
     # right
     tk.Label(right, text="Processing progress map", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
-    tk.Label(right, text=("For longer calculations this will give the user an overview of when the calculation\n"
-                          "can be expected to be finished.\n"),
+    tk.Label(right, text=("For more complex calculations this will give the user a better \n"
+                          "understanding of the progress of when the calculation\n"),
              justify="left").pack(padx=10, anchor="w")
     tb.Button(right, text="Open map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
 
