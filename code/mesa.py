@@ -9,9 +9,7 @@ import webbrowser
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import pandas as pd
-import geopandas as gpd
 import configparser
-import sqlite3
 import socket
 import uuid
 import datetime
@@ -19,7 +17,6 @@ from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import sys
-from shapely import wkb
 import pyarrow.parquet as pq  # <-- for GeoParquet status checks
 
 # -------------------------------
@@ -29,50 +26,85 @@ def is_frozen() -> bool:
     """True when running inside a PyInstaller/onefile bundle."""
     return getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 
-def resource_path(*parts) -> str:
-    """
-    Resolve a path either from the PyInstaller temp dir (_MEIPASS) or the
-    original working directory (set below).
-    """
-    base = sys._MEIPASS if is_frozen() else original_working_directory
-    return os.path.join(base, *parts)
 
-def run_tool(basename: str, *, wait: bool = True, pass_owd: bool = True):
-    """
-    Launch a helper either as a bundled EXE (frozen) or as a .py (dev).
-    If wait=True we block and then call update_stats().
-    """
-    args = []
-    if pass_owd:
-        args.append(f'--original_working_directory={original_working_directory}')
+def app_base_dir() -> str:
+    """Folder where the running app lives (EXE when frozen, .py folder in dev)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
-    if is_frozen():
-        exe = resource_path('tools', f'{basename}.exe')
-        if not os.path.exists(exe):
-            log_to_logfile(f"[run_tool] Missing bundled helper EXE: {exe}")
-            return
-        cmd = [exe] + args
-    else:
-        script = os.path.join(original_working_directory, f'{basename}.py')
-        if os.path.exists(script):
-            cmd = [sys.executable, script] + args
-        else:
-            # dev fallback: if someone compiled helpers locally into code/tools
-            exe = os.path.join(original_working_directory, 'tools', f'{basename}.exe')
-            if os.path.exists(exe):
-                cmd = [exe] + args
-            else:
-                log_to_logfile(f"[run_tool] Missing helper: {script} / {exe}")
-                return
 
+def resource_path(*parts: str) -> str:
+    """Find resources in both packaged and dev modes."""
+    candidates = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, *parts))      # packed
+    candidates.append(os.path.join(app_base_dir(), *parts))        # next to mesa.exe / mesa.py
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]
+
+
+def tool_path(exe_name: str) -> str:
+    """
+    Locate helper EXE robustly:
+    - dist\mesa\tools\<exe>   (built layout)
+    - _MEIPASS\tools\<exe>    (if ever packed inside the EXE)
+    """
+    paths = [
+        os.path.join(app_base_dir(), "tools", exe_name),
+    ]
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        paths.append(os.path.join(sys._MEIPASS, "tools", exe_name))
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(f"Helper not found; tried: {paths}")
+
+
+def run_tool(name: str, args: list[str] | None = None, wait: bool = False) -> int | None:
+    """
+    Dev: run name.py with your interpreter.
+    Frozen: run tools\\name.exe.
+    CWD is set to the app base dir so helpers see input/output/qgis/system_resources.
+    If wait=True, return the process' return code; otherwise return None.
+    """
+    import subprocess
+
+    args = args or []
     try:
-        if wait:
-            subprocess.run(cmd, check=True)
-            update_stats(gpkg_file)
+        if getattr(sys, "frozen", False):
+            exe = tool_path(f"{name}.exe")
+            cmd = [exe, *args]
+            creationflags = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+            if wait:
+                completed = subprocess.run(cmd, cwd=app_base_dir(), check=False,
+                                           creationflags=creationflags, shell=False, close_fds=True)
+                return completed.returncode
+            else:
+                subprocess.Popen(cmd, cwd=app_base_dir(), shell=False, close_fds=True,
+                                 creationflags=creationflags)
+                return None
         else:
-            subprocess.Popen(cmd)
+            # Dev: run the .py helper sitting next to mesa.py
+            script = os.path.join(app_base_dir(), f"{name}.py")
+            if not os.path.exists(script):
+                raise FileNotFoundError(f"Dev helper not found: {script}")
+            cmd = [sys.executable, script, *args]
+            if wait:
+                completed = subprocess.run(cmd, cwd=os.path.dirname(script), check=False, shell=False, close_fds=True)
+                return completed.returncode
+            else:
+                subprocess.Popen(cmd, cwd=os.path.dirname(script), shell=False, close_fds=True)
+                return None
     except Exception as e:
-        log_to_logfile(f"[run_tool] Failed: {cmd} :: {e}")
+        try:
+            log_to_logfile(f"[run_tool] Failed: {cmd} :: {e}")
+        except Exception:
+            pass
+        raise
+
 
 # -------------------------------
 
@@ -323,41 +355,41 @@ def get_status(geoparquet_dir):
 # Tool launchers (now using run_tool)
 # -------------------------------
 def geocodes_grids():
-    run_tool("geocodes_create", wait=True)
+    run_tool("geocodes_create")
 
-def import_assets(gpkg_file):
-    run_tool("data_import", wait=True)
+def import_assets(_gpkg_file):
+    run_tool("data_import")
 
 def edit_processing_setup():
-    # fixed name
-    run_tool("parameters_setup", wait=True)
+    # correct helper name (matches your build list: parametres_setup.py)
+    run_tool("parametres_setup")
 
-def process_data(gpkg_file):
-    run_tool("data_process", wait=True)
+def process_data(_gpkg_file):
+    run_tool("data_process")
 
 def make_atlas():
-    run_tool("atlas_create", wait=True)
+    run_tool("atlas_create")
 
 def admin_lines():
-    run_tool("lines_process", wait=True)
+    run_tool("lines_process")
 
 def open_maps_overview():
-    run_tool("maps_overview", wait=False)
+    run_tool("maps_overview")
 
 def open_present_files():
-    run_tool("data_report", wait=False)
+    run_tool("data_report")
 
 def edit_assets():
-    run_tool("assetgroup_edit", wait=True)
+    run_tool("assetgroup_edit")
 
 def edit_geocodes():
-    run_tool("geocodes_create", wait=True)
+    run_tool("geocodes_create")
 
 def edit_lines():
-    run_tool("lines_admin", wait=True)
+    run_tool("lines_admin")
 
 def edit_atlas():
-    run_tool("atlas_edit", wait=True)
+    run_tool("atlas_edit")
 
 
 def exit_program():
