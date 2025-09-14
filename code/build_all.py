@@ -261,7 +261,6 @@ def main() -> None:
         "lines_process",
         "maps_overview",
         "parametres_setup",
-        "xx_stats_use",
     ]
     for h in helpers:
         build_helper(h)
