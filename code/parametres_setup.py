@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 # MESA – Setup & Registration (3 tabs: Start, Vulnerability, Visualization)
 # Persistence: GeoParquet + JSON only (GPKG removed)
-# - Asset-group vulnerability (importance, susceptibility) → sensitivity (+ A–E code/desc)
-# - Visualization profile (ENV index weights & parameters)
-# Load priority for ENV profile: GeoParquet -> JSON -> defaults; then mirrored back to both.
 
 import locale
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
@@ -14,6 +11,8 @@ import argparse
 import configparser
 import datetime
 import json
+import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -21,8 +20,6 @@ import geopandas as gpd
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
-
-from pathlib import Path
 
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
@@ -37,22 +34,13 @@ DEFAULT_ENV_PROFILE = {
     'scoring': 'linear', 'logistic_a': 8.0, 'logistic_b': 0.6,
 }
 
+# Capture start-CWD before anything changes
+START_CWD = Path.cwd()
+
 # exe dir if frozen, else script dir
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
-# optional: make relative paths predictable for local/dev runs
-os.chdir(APP_DIR)
-
-CONFIG_FILE   = APP_DIR / "config.ini"
-PARQUET_DIR   = APP_DIR / "output" / "geoparquet"
-MBTILES_DIR   = APP_DIR / "output" / "mbtiles"
-
-PARQUET_FILE  = PARQUET_DIR / "tbl_flat.parquet"
-SEGMENT_FILE  = PARQUET_DIR / "tbl_segment_flat.parquet"
-ASSET_FILE    = PARQUET_DIR / "tbl_asset_object.parquet"
-LINES_FILE    = PARQUET_DIR / "tbl_lines.parquet"
-
-# ---- profile & asset-group storage (relative to original_working_directory at runtime) ----
+# ---- constant *relative* paths we join to a discovered base dir ----
 PARQUET_ENV_PROFILE  = os.path.join("output", "geoparquet", "tbl_env_profile.parquet")
 JSON_ENV_PROFILE     = os.path.join("output", "env_profile.json")
 PARQUET_ASSET_GROUP  = os.path.join("output", "geoparquet", "tbl_asset_group.parquet")
@@ -63,13 +51,83 @@ valid_input_values: list[int] = []
 classification: dict = {}
 entries_vuln = []
 FALLBACK_VULN = 3
-
 ENV_PROFILE  = {}
 
 # paths set in __main__
 original_working_directory = ""
 config_file = ""
 workingprojection_epsg = "4326"
+
+# -------------------------------
+# Path helpers
+# -------------------------------
+def has_project_markers(p: Path) -> bool:
+    """Heuristic: does 'p' look like the base?"""
+    if not p or not p.exists():
+        return False
+    if (p / "config.ini").exists():
+        return True
+    if (p / "output" / "geoparquet").exists():
+        return True
+    return False
+
+def resource_path(rel: str | os.PathLike) -> Path:
+    """Resolve bundled resources both for frozen and source runs."""
+    try:
+        base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    except Exception:
+        base = APP_DIR
+    return base / rel
+
+def find_base_dir(cli_arg: str | None) -> Path:
+    """
+    Resolve the runtime base dir in a way that works in all three modes:
+    - Direct .py
+    - Called from mesa.py
+    - Launched as helper under mesa.exe
+    Precedence:
+      1) --original_working_directory (if given and valid)
+      2) MESA_BASE_DIR env (if valid)
+      3) START_CWD, APP_DIR, and a few parents where markers exist
+    """
+    # 1) CLI
+    if cli_arg:
+        p = Path(cli_arg).resolve()
+        if has_project_markers(p):
+            return p
+
+    # 2) Env
+    env_p = os.environ.get("MESA_BASE_DIR", "").strip()
+    if env_p:
+        p = Path(env_p).resolve()
+        if has_project_markers(p):
+            return p
+
+    # 3) Discovery list
+    candidates: list[Path] = []
+
+    # Start CWD (parent processes often set this to the true base)
+    candidates.append(START_CWD)
+
+    # The exe / script directory (for one-folder builds this is usually the base)
+    candidates.append(APP_DIR)
+
+    # Walk up a couple of levels from both START_CWD and APP_DIR
+    for root in (START_CWD, APP_DIR):
+        for up in [root.parent, root.parent.parent, root.parent.parent.parent]:
+            if up and up != up.parent:
+                candidates.append(up)
+
+    # Prefer those with markers
+    for c in candidates:
+        try:
+            if has_project_markers(c):
+                return c.resolve()
+        except Exception:
+            pass
+
+    # Fallbacks: if nothing obvious, prefer START_CWD, then APP_DIR
+    return (START_CWD if START_CWD.exists() else APP_DIR).resolve()
 
 # -------------------------------
 # Config (theme/CRS + A–E bins)
@@ -598,19 +656,19 @@ if __name__ == "__main__":
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     args = parser.parse_args()
 
-    original_working_directory = args.original_working_directory
-    if not original_working_directory:
-        original_working_directory = os.getcwd()
-        # legacy safety if launched from a nested "system" folder
-        if "system" in os.path.basename(original_working_directory).lower():
-            original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
+    # Resolve base dir robustly
+    resolved_base = find_base_dir(args.original_working_directory)
+    original_working_directory = str(resolved_base)
 
     # ---- tiny diagnostics (helps catch path mistakes fast)
-    print("[parametres_setup] working dir:", original_working_directory)
+    print("[parametres_setup] start_cwd:", START_CWD)
+    print("[parametres_setup] app_dir  :", APP_DIR)
+    print("[parametres_setup] base_dir :", original_working_directory)
     print("[parametres_setup] env parquet:", os.path.join(original_working_directory, PARQUET_ENV_PROFILE))
     print("[parametres_setup] env json:   ", os.path.join(original_working_directory, JSON_ENV_PROFILE))
     print("[parametres_setup] asset grp:  ", os.path.join(original_working_directory, PARQUET_ASSET_GROUP))
 
+    # Config
     config_file = os.path.join(original_working_directory, "config.ini")
     config = read_config(config_file)
     classification = read_config_classification(config_file)
@@ -619,10 +677,10 @@ if __name__ == "__main__":
     ttk_bootstrap_theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
     workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
 
-    # Load profiles (GeoParquet -> JSON -> defaults), then mirror to both
+    # Profiles (GeoParquet -> JSON -> defaults), then mirror to both
     load_profiles(original_working_directory)
 
-    # Load asset groups
+    # Asset groups
     gdf_asset_group = load_asset_group(original_working_directory)
     if gdf_asset_group is None:
         log_to_file("Failed to load tbl_asset_group (Parquet).")
@@ -632,9 +690,9 @@ if __name__ == "__main__":
     root = tb.Window(themename=ttk_bootstrap_theme)
     root.title("MESA – Setup & Registration (GeoParquet)")
     try:
-        icon_path = os.path.join(original_working_directory, "system_resources", "mesa.ico")
-        if os.path.exists(icon_path):
-            root.iconbitmap(icon_path)
+        icon_path = resource_path(Path("system_resources") / "mesa.ico")
+        if icon_path.exists():
+            root.iconbitmap(str(icon_path))
     except Exception:
         pass
     root.geometry("1100x860")
