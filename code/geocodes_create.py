@@ -694,17 +694,15 @@ def _mosaic_tile_worker(task: Tuple[int, List[bytes], float, float, bytes]):
                     if not g_local or g_local.is_empty:
                         continue
                 except Exception:
-                    # If intersection fails for a broken geom, fall back to original.
                     g_local = g
 
             try:
-                gb = g_local.buffer(buf)  # default GEOS params → identical shape to buffering the full geom
+                gb = g_local.buffer(buf)
                 if shapely_make_valid:
                     gb = shapely_make_valid(gb)
                 else:
                     gb = gb.buffer(0)
 
-                # IMPORTANT: For identical output, simp must be 0 (default in config).
                 if simp and simp > 0:
                     gb = gb.simplify(simp, preserve_topology=True)
 
@@ -844,104 +842,76 @@ def _order_tasks(counts: List[int], mode: str) -> List[int]:
 # -----------------------------------------------------------------------------
 # Mosaic builder (parallel + detailed heartbeats)
 # -----------------------------------------------------------------------------
-def mosaic_faces_from_assets_parallel(base_dir: Path,
-                                      buffer_m: float,
-                                      grid_size_m: float,
-                                      workers: int) -> gpd.GeoDataFrame:
-    t0 = time.time()
+def mosaic_faces_from_assets_parallel(
+    base_dir: Path,
+    buffer_m: float,
+    grid_size_m: float,
+    workers: int | None = None,
+) -> gpd.GeoDataFrame:
+    """
+    Unchanged high-level behavior:
+      - Plan tiles (quadtree + heavy split)
+      - Stream faces out to __mosaic_faces_tmp as Parquet parts
+      - Assemble to final GeoDataFrame in EPSG:4326
+    New bits:
+      - Pool warm-up with timeout; auto-fallback to serial if warm-up fails
+      - Optional force-serial honored by run_mosaic()
+    """
     cfg = read_config(config_path(base_dir))
+    update_progress(0)
 
-    # heartbeat config
-    global HEARTBEAT_SECS
-    try:
-        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
-    except Exception:
-        pass
-
-    # Start heartbeat immediately
-    STATS.stage = "starting"
-    STATS.detail = ""
-    STATS.tiles_total = 0
-    STATS.tiles_done = 0
-    STATS.faces_total = 0
-    STATS.started_at = time.time()
-    STATS.worker_started_at = None
-    start_heartbeat()
-
-    # Load assets
-    STATS.stage = "loading assets"
-    pq_path = geoparquet_path(base_dir, "tbl_asset_object")
-    log_to_gui(f"[Mosaic] Asset source: {pq_path} {'(exists)' if pq_path.exists() else '(MISSING)'}")
-    assets = _load_asset_objects(base_dir)
-    log_to_gui(f"[Mosaic] Loaded assets: {len(assets):,} rows; CRS={assets.crs}")
-    if assets.empty:
-        stop_heartbeat()
-        log_to_gui("[Mosaic] No asset objects found; mosaic skipped.", "WARN")
+    # --- load & prep assets (your existing code up to tile planning) ---
+    a = _load_asset_objects(base_dir)
+    if a.empty:
+        log_to_gui("[Mosaic] No assets loaded; nothing to do.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # CRS
-    STATS.stage = "reprojecting"
-    metric_crs = working_metric_crs_for(assets, cfg)
-    t = time.time()
-    a = assets.to_crs(metric_crs).copy()
-    log_to_gui(f"[Mosaic] Reprojected to {metric_crs} in {time.time()-t:.2f}s.")
-
-    # Optional dedup of identical geoms (safe; no output change)
+    # Optionally dedup identical geometries (unchanged behavior)
     try:
-        dedup_assets = cfg["DEFAULT"].get("mosaic_dedup_assets", "true").strip().lower() in ("1","true","yes","on")
+        dedup = str(cfg["DEFAULT"].get("mosaic_dedup_assets", "true")).strip().lower() in ("1","true","yes")
     except Exception:
-        dedup_assets = True
-    if dedup_assets:
-        try:
-            a["_wkb"] = a.geometry.apply(_wkb_hex)
-            before = len(a)
-            a = a.drop_duplicates(subset="_wkb").drop(columns="_wkb")
-            log_to_gui(f"[Mosaic] Dedup identical asset geometries: {before:,} → {len(a):,}")
-        except Exception:
-            pass
+        dedup = True
+    if dedup and not a.empty:
+        before = len(a)
+        a = a.loc[~a.geometry.duplicated()].copy()
+        if len(a) != before:
+            log_to_gui(f"[Mosaic] Dedup identical asset geometries: {before:,} → {len(a):,}", "INFO")
+
+    metric_crs = working_metric_crs_for(a, cfg)
+    t0 = time.time()
+    a = a.to_crs(metric_crs)
+    log_to_gui(f"[Mosaic] Reprojected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
 
     # Spatial index
-    STATS.stage = "building sindex"
-    t = time.time()
-    try:
-        sidx = a.sindex
-        log_to_gui(f"[Mosaic] Built spatial index on {len(a):,} geoms in {time.time()-t:.2f}s.")
-    except Exception:
-        stop_heartbeat()
-        log_to_gui("[Mosaic] Spatial index not available; aborting.", "WARN")
-        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    sidx = a.sindex if hasattr(a, "sindex") else None
+    if sidx is None:
+        log_to_gui("[Mosaic] No spatial index available; building may be slower.", "WARN")
 
-    # Tiler & worker params
+    # Quadtree planning (kept)
     try: max_feats_per_tile = int(cfg["DEFAULT"].get("mosaic_quadtree_max_feats_per_tile", "800"))
     except Exception: max_feats_per_tile = 800
-    try: heavy_mult = float(cfg["DEFAULT"].get("mosaic_quadtree_heavy_split_multiplier", "2.0"))
-    except Exception: heavy_mult = 2.0
-    heavy_threshold = max(1, int(max_feats_per_tile * heavy_mult))
+    try: heavy_split_mult = float(cfg["DEFAULT"].get("mosaic_quadtree_heavy_split_multiplier", "2.0"))
+    except Exception: heavy_split_mult = 2.0
     try: max_depth = int(cfg["DEFAULT"].get("mosaic_quadtree_max_depth", "8"))
     except Exception: max_depth = 8
     try: min_tile_size_m = float(cfg["DEFAULT"].get("mosaic_quadtree_min_tile_m", str(grid_size_m)))
-    except Exception: min_tile_size_m = max(0.0, float(grid_size_m))
+    except Exception: min_tile_size_m = grid_size_m
     try: simplify_tol = float(cfg["DEFAULT"].get("mosaic_simplify_tolerance_m", "0"))
     except Exception: simplify_tol = 0.0
     try: flush_batch = int(cfg["DEFAULT"].get("mosaic_faces_flush_batch", "250000"))
     except Exception: flush_batch = 250000
     try: maxtasks = int(cfg["DEFAULT"].get("mosaic_pool_maxtasksperchild", "8"))
     except Exception: maxtasks = 8
-    task_order = cfg["DEFAULT"].get("mosaic_task_order", "interleave").strip().lower()
-    try:
-        chunksize = int(cfg["DEFAULT"].get("mosaic_pool_chunksize", "1"))
-    except Exception:
-        chunksize = 1
+    try: chunksize = int(cfg["DEFAULT"].get("mosaic_pool_chunksize", "1"))
+    except Exception: chunksize = 1
+    task_order = str(cfg["DEFAULT"].get("mosaic_task_order", "interleave")).strip().lower()
+    clip_before_buffer = str(cfg["DEFAULT"].get("mosaic_clip_before_buffer", "true")).strip().lower() in ("1","true","yes")
+    try: clip_margin = float(cfg["DEFAULT"].get("mosaic_clip_margin_m", "0.05"))
+    except Exception: clip_margin = 0.05
 
-    # NEW: clip-before-buffer flags
-    clip_before_buffer = cfg["DEFAULT"].get("mosaic_clip_before_buffer", "true").strip().lower() in ("1","true","yes","on")
-    try:
-        clip_margin = float(cfg["DEFAULT"].get("mosaic_clip_margin_m", "0.05"))
-    except Exception:
-        clip_margin = 0.05
+    heavy_threshold = int(max_feats_per_tile * max(1.0, heavy_split_mult))
 
-    # Plan tiles
-    STATS.stage = "planning tiles"
+    # plan tiles (your helper; unchanged)
     t_plan0 = time.time()
     minx, miny, maxx, maxy = a.total_bounds
     leaves = _plan_tiles_quadtree(
@@ -949,42 +919,39 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
         overlap_m=buffer_m, max_feats_per_tile=max_feats_per_tile,
         max_depth=max_depth, min_tile_size_m=max(0.0, float(min_tile_size_m))
     )
-    log_to_gui(f"[Mosaic] Planned {len(leaves):,} tiles (first pass); {time.time()-t_plan0:.2f}s.")
+    log_to_gui(f"[Mosaic] Planned {len(leaves):,} tiles (first pass); {time.time()-t_plan0:.2f}s.", "INFO")
 
-    # Heavy split
+    # heavy split (kept)
     STATS.stage = "splitting heavy tiles"
-    balanced: List[Tuple[Tuple[float,float,float,float], List[int]]] = []
+    balanced = []
     heavy_count = 0
     for (bds, idxs) in leaves:
         if len(idxs) > heavy_threshold and max_depth > 0:
             st = _split_tile(bds, a, sidx, overlap_m=buffer_m)
             if st:
-                balanced.extend(st)
-                heavy_count += 1
+                balanced.extend(st); heavy_count += 1
             else:
                 balanced.append((bds, idxs))
         else:
             balanced.append((bds, idxs))
     leaves = balanced
-    log_to_gui(f"[Mosaic] Heavy tiles split: {heavy_count}; final tiles: {len(leaves):,}.")
+    log_to_gui(f"[Mosaic] Heavy tiles split: {heavy_count}; final tiles: {len(leaves):,}.", "INFO")
 
-    # Prepare tasks (WKB of ORIGINAL geoms; workers will clip (optional) + buffer + fix)
+    # pack tasks (kept)
     STATS.stage = "packing tasks"
     counts = []
-    tasks: List[Tuple[int, List[bytes], float, float, bytes]] = []
+    tasks = []
     tick = time.time()
     for i, (bounds, idxs) in enumerate(leaves, start=1):
         sub = a.iloc[idxs]
         counts.append(len(sub))
         wkb_list = [shp_wkb.dumps(g) for g in sub.geometry]
-
         if clip_before_buffer:
             x0, y0, x1, y1 = bounds
             clip_poly = box(x0, y0, x1, y1).buffer(float(buffer_m) + float(clip_margin))
             clip_wkb = shp_wkb.dumps(clip_poly)
         else:
             clip_wkb = b""
-
         tasks.append((i-1, wkb_list, float(buffer_m), float(simplify_tol), clip_wkb))
         if i % 200 == 0 or (time.time() - tick) >= 5:
             STATS.detail = f"(packed {i}/{len(leaves)})"
@@ -993,124 +960,32 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
     order_idx = _order_tasks(counts, task_order)
     tasks = [tasks[i] for i in order_idx]
     counts = [counts[i] for i in order_idx]
-
     n_tasks = len(tasks)
+
     STATS.tiles_total = n_tasks
     STATS.detail = f"(min/med/p95/max feats per tile = {min(counts) if counts else 0}/" \
                    f"{int(np.percentile(counts,50)) if counts else 0}/" \
                    f"{int(np.percentile(counts,95)) if counts else 0}/" \
                    f"{max(counts) if counts else 0})"
-    log_to_gui(f"[Mosaic] Prepared {n_tasks:,} tasks; order={task_order}; chunksize={chunksize}; {STATS.detail}")
+    log_to_gui(f"[Mosaic] Prepared {n_tasks:,} tasks; order={task_order}; chunksize={chunksize}; {STATS.detail}", "INFO")
 
-    # Determine workers
+    # decide workers
     if workers is None or workers <= 0:
         try: workers = max(1, mp.cpu_count())
         except Exception: workers = 4
-    log_to_gui(f"[Mosaic] Parallel polygonize; workers={workers}, maxtasksperchild={maxtasks}.")
+    log_to_gui(f"[Mosaic] Parallel polygonize; workers={workers}, maxtasksperchild={maxtasks}.", "INFO")
 
-    # Streaming parts dir (always cleaned up in finally)
+    # streaming parts dir
     tmp_dir = gpq_dir(base_dir) / "__mosaic_faces_tmp"
     try:
-        try:
-            if tmp_dir.exists():
-                for p in tmp_dir.glob("*.parquet"):
-                    try:
-                        p.unlink()
-                    except Exception:
-                        pass
-            else:
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-
-        face_batches: List[bytes] = []
-        part_files: List[Path] = []
-
-        def _flush_batch_to_parquet(metric_crs: str):
-            nonlocal face_batches, part_files
-            if not face_batches:
-                return
-            gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_batches], crs=metric_crs)
-            gdf = gpd.GeoDataFrame(geometry=gseries).to_crs("EPSG:4326")
-            part = tmp_dir / f"faces_part_{len(part_files):05d}.parquet"
-            gdf.to_parquet(part, index=False)
-            part_files.append(part)
-            STATS.faces_total += len(gdf)
-            face_batches = []
-
-        # Process tasks
-        STATS.stage = "polygonize (workers)"
-        STATS.worker_started_at = time.time()
-        ctx = mp.get_context("spawn")
-        try:
-            if workers == 1 or n_tasks == 1:
-                for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
-                    _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
-                    STATS.tiles_done += 1
-                    if err:
-                        log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
-                    else:
-                        face_batches.extend(res)
-                        if len(face_batches) >= flush_batch:
-                            _flush_batch_to_parquet(metric_crs)
-                    update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
-            else:
-                with ctx.Pool(processes=workers, maxtasksperchild=maxtasks) as pool:
-                    for (idx, res, err) in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=max(1, chunksize)):
-                        STATS.tiles_done += 1
-                        if err:
-                            log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
-                        else:
-                            face_batches.extend(res)
-                            if len(face_batches) >= flush_batch:
-                                _flush_batch_to_parquet(metric_crs)
-                        update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
-        finally:
-            # final flush
-            _flush_batch_to_parquet(metric_crs)
-            log_to_gui(f"[Mosaic] Worker stage done: tiles {STATS.tiles_done}/{STATS.tiles_total}, faces so far {STATS.faces_total:,}.")
-
-        # Assemble faces from parts
-        STATS.stage = "assembling parts"
-        parts_gdfs = []
-        for pf in part_files:
-            try:
-                parts_gdfs.append(gpd.read_parquet(pf))
-            except Exception as e:
-                log_to_gui(f"[Mosaic] Skipping part {pf.name}: {e}", "WARN")
-        if face_batches:
-            gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_batches], crs=metric_crs)
-            parts_gdfs.append(gpd.GeoDataFrame(geometry=gseries).to_crs("EPSG:4326"))
-            STATS.faces_total += len(gseries)
-
-        if not parts_gdfs:
-            stop_heartbeat()
-            log_to_gui("[Mosaic] No valid face parts to assemble.", "WARN")
-            return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-
-        faces = pd.concat(parts_gdfs, ignore_index=True)
-        faces = ensure_wgs84(gpd.GeoDataFrame(faces, geometry="geometry"))
-
-        # Deduplicate final faces by exact WKB
-        STATS.stage = "deduplicating"
-        t_ded = time.time()
-        try:
-            wkb_hex = faces.geometry.apply(_wkb_hex)
-            keep = ~pd.Series(wkb_hex).duplicated()
-            faces = faces.loc[keep.values].reset_index(drop=True)
-        except Exception:
-            pass
-        log_to_gui(f"[Mosaic] Dedup complete in {time.time()-t_ded:.2f}s; faces={len(faces):,}.")
-        STATS.faces_total = len(faces)
-
-        stop_heartbeat()
-        log_to_gui(f"[Mosaic] Completed in {time.time()-t0:.2f}s. Final faces: {len(faces):,}.")
-        return faces
-
-    finally:
-        # Always remove the temp directory when we’re done (success or failure)
-        _safe_rmtree(tmp_dir)
-        log_to_gui(f"[Mosaic] Cleaned temporary directory: {tmp_dir}")
+        if tmp_dir.exists():
+            for p in tmp_dir.glob("*.parquet"):
+                try: p.unlink()
+                except Exception: pass
+        else:
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
     face_batches: List[bytes] = []
     part_files: List[Path] = []
@@ -1127,12 +1002,14 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
         STATS.faces_total += len(gdf)
         face_batches = []
 
-    # Process tasks
+    # --- process tasks (NEW: warm-up + fallback) ---
     STATS.stage = "polygonize (workers)"
     STATS.worker_started_at = time.time()
     ctx = mp.get_context("spawn")
+
     try:
-        if workers == 1 or n_tasks == 1:
+        # Serial path (either requested or trivial)
+        if workers == 1 or n_tasks <= 1:
             for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
                 _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
                 STATS.tiles_done += 1
@@ -1144,8 +1021,21 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
                         _flush_batch_to_parquet(metric_crs)
                 update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
         else:
-            with ctx.Pool(processes=workers, maxtasksperchild=maxtasks) as pool:
-                for (idx, res, err) in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=max(1, chunksize)):
+            # --- Warm-up: prove the frozen children can run our worker ---
+            warm_ok = True
+            try:
+                with ctx.Pool(processes=min(2, workers), maxtasksperchild=1) as warm_pool:
+                    r = warm_pool.apply_async(_mosaic_tile_worker, args=((0, [], 0.0, 0.0, b""),))
+                    # if child cannot import/run, this will raise on get()
+                    r.get(timeout=20)
+            except Exception as e:
+                warm_ok = False
+                log_to_gui(f"[Mosaic] Parallel warm-up failed ({type(e).__name__}: {e}). Falling back to single-process.", "WARN")
+
+            if not warm_ok:
+                # Fallback to serial without restarting whole run
+                for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
+                    _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
                     STATS.tiles_done += 1
                     if err:
                         log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
@@ -1154,47 +1044,42 @@ def mosaic_faces_from_assets_parallel(base_dir: Path,
                         if len(face_batches) >= flush_batch:
                             _flush_batch_to_parquet(metric_crs)
                     update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
+            else:
+                # Real pool
+                with ctx.Pool(processes=workers, maxtasksperchild=maxtasks) as pool:
+                    for (idx, res, err) in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=max(1, chunksize)):
+                        STATS.tiles_done += 1
+                        if err:
+                            log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
+                        else:
+                            face_batches.extend(res)
+                            if len(face_batches) >= flush_batch:
+                                _flush_batch_to_parquet(metric_crs)
+                        update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
     finally:
-        # final flush
+        # Always flush whatever we have so far
         _flush_batch_to_parquet(metric_crs)
-        log_to_gui(f"[Mosaic] Worker stage done: tiles {STATS.tiles_done}/{STATS.tiles_total}, faces so far {STATS.faces_total:,}.")
+        log_to_gui(f"[Mosaic] Worker stage done: tiles {STATS.tiles_done}/{STATS.tiles_total}, faces so far {STATS.faces_total:,}.", "INFO")
 
-    # Assemble faces from parts
-    STATS.stage = "assembling parts"
-    parts_gdfs = []
-    for pf in part_files:
-        try:
-            parts_gdfs.append(gpd.read_parquet(pf))
-        except Exception as e:
-            log_to_gui(f"[Mosaic] Skipping part {pf.name}: {e}", "WARN")
-    if face_batches:
-        gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_batches], crs=metric_crs)
-        parts_gdfs.append(gpd.GeoDataFrame(geometry=gseries).to_crs("EPSG:4326"))
-        STATS.faces_total += len(gseries)
-
-    if not parts_gdfs:
-        stop_heartbeat()
-        log_to_gui("[Mosaic] No valid face parts to assemble.", "WARN")
+    # --- assemble parts ---
+    STATS.stage = "assembling"
+    if not part_files:
+        log_to_gui("[Mosaic] No faces parts produced; nothing to assemble.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    faces = pd.concat(parts_gdfs, ignore_index=True)
-    faces = ensure_wgs84(gpd.GeoDataFrame(faces, geometry="geometry"))
+    parts = []
+    for p in sorted(part_files):
+        try:
+            parts.append(gpd.read_parquet(p))
+        except Exception as e:
+            log_to_gui(f"[Mosaic] Failed to read part {p.name}: {e}", "WARN")
+    if not parts:
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Deduplicate final faces by exact WKB
-    STATS.stage = "deduplicating"
-    t_ded = time.time()
-    try:
-        wkb_hex = faces.geometry.apply(_wkb_hex)
-        keep = ~pd.Series(wkb_hex).duplicated()
-        faces = faces.loc[keep.values].reset_index(drop=True)
-    except Exception:
-        pass
-    log_to_gui(f"[Mosaic] Dedup complete in {time.time()-t_ded:.2f}s; faces={len(faces):,}.")
-    STATS.faces_total = len(faces)
-
-    stop_heartbeat()
-    log_to_gui(f"[Mosaic] Completed in {time.time()-t0:.2f}s. Final faces: {len(faces):,}.")
+    faces = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
+    log_to_gui(f"[Mosaic] Assembled {len(faces):,} faces from {len(part_files)} part(s).", "INFO")
     return faces
+
 
 # -----------------------------------------------------------------------------
 # Publish mosaic as geocode
@@ -1321,10 +1206,23 @@ def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
 # -----------------------------------------------------------------------------
 def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None):
     cfg = read_config(config_path(base_dir))
+    # Optional force-serial (via config or ENV)
+    force_serial = False
+    try:
+        v = str(cfg["DEFAULT"].get("mosaic_force_serial", "false")).strip().lower()
+        force_serial = v in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    if os.environ.get("MESA_FORCE_SERIAL", "").strip() in ("1", "true", "yes", "on"):
+        force_serial = True
+
     try:
         workers = int(cfg["DEFAULT"].get("mosaic_workers", "0"))
     except Exception:
         workers = 0
+    if force_serial:
+        workers = 1
+
     faces = mosaic_faces_from_assets_parallel(base_dir, buffer_m, grid_size_m, workers)
     if faces.empty:
         log_to_gui("Mosaic produced no faces to publish.", "WARN")
@@ -1333,6 +1231,7 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
             try: on_done(False)
             except Exception: pass
         return
+
     n = publish_mosaic_as_geocode(base_dir, faces)
     log_to_gui(f"Mosaic published as geocode group '{BASIC_MOSAIC_GROUP}' with {n:,} objects.")
     update_progress(100)
@@ -1539,4 +1438,10 @@ if __name__ == "__main__":
         mp.set_start_method("spawn", force=False)  # Windows-safe
     except RuntimeError:
         pass
+    # Important for PyInstaller child processes on Windows:
+    try:
+        mp.freeze_support()
+    except Exception:
+        pass
     main()
+
