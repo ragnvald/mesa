@@ -38,10 +38,7 @@ except Exception:
 # Paths / constants
 # ===============================
 
-# exe dir if frozen, else script dir
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-
-# optional: make relative paths predictable
 os.chdir(APP_DIR)
 
 CONFIG_FILE   = APP_DIR / "config.ini"
@@ -152,7 +149,7 @@ def bounds_to_leaflet(b):
         miny -= dy*0.1; maxy += dy*0.1
     minx = max(-180.0, minx); maxx = min(180.0, maxx)
     miny = max(-85.0,  miny); maxy = min(85.0,  maxy)
-    return [[miny, minx],[maxy, maxx]]  # [[south, west],[north, east]]
+    return [[miny, minx],[maxy, maxx]]
 
 def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
     feats = []
@@ -190,7 +187,7 @@ def assets_to_geojson(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> 
             "name_asset_object": row.get("name_asset_object", None),
             "area_km2": area_km2
         }
-        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
+        feats.append({"type": "FeatureCollection", "features": feats})
     return {"type": "FeatureCollection", "features": feats}
 
 def envindex_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
@@ -204,7 +201,7 @@ def envindex_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
             "area_km2": (float(row.get("area_m2", 0.0)) / 1e6) if ("area_m2" in row) else None,
             "geocode_group": row.get("name_gis_geocodegroup", None),
         }
-        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
+        feats.append({"type": "FeatureCollection", "features": feats})
     return {"type": "FeatureCollection", "features": feats}
 
 def totals_to_geojson(gdf: gpd.GeoDataFrame, total_col: str) -> dict:
@@ -217,7 +214,7 @@ def totals_to_geojson(gdf: gpd.GeoDataFrame, total_col: str) -> dict:
             total_col: row.get(total_col, None),
             "geocode_group": row.get("name_gis_geocodegroup", None),
         }
-        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
+        feats.append({"type": "FeatureCollection", "features": feats})
     return {"type": "FeatureCollection", "features": feats}
 
 # --- geodesic area helpers (WGS84) ---
@@ -280,7 +277,7 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
             out.append(0.0)
             continue
         a_m2 = float(sub.geometry.apply(geodesic_area_m2).sum())
-        out.append(a_m2 / 1e6)  # km²
+        out.append(a_m2 / 1e6)
     return {"labels": labels, "values": out}
 
 # ===============================
@@ -290,7 +287,6 @@ def _norm_key_local(s: str) -> str:
     return (s or "").strip().lower().replace(" ", "_").replace("-", "_")
 
 def _to_float_safe(v) -> float:
-    """Convert a value to float or return 0.0 if not numeric; tolerate '1,234.5' strings."""
     if v is None:
         return 0.0
     if isinstance(v, (int, float)):
@@ -308,25 +304,14 @@ def _to_float_safe(v) -> float:
         return 0.0
 
 def _extract_labels_values(obj, default_units="km2"):
-    """
-    Accepts multiple shapes:
-      { "labels":["A","B",...], "values":[...], "units":"km2" }
-      { "labels":["A","B",...], "values": {"A":..., "B":...}, "units":"km2" }
-      { "A": 12.3, "B": 4.2, ..., "units":"m2" }
-      { "area_m2": {"A":..., ...} } or { "area_km2": {...} }
-      [vA, vB, vC, vD, vE]  (assumed order A..E)
-    Returns (labels, values_in_km2)
-    """
     labels_out = list("ABCDE")
     units = (default_units or "km2").lower()
 
     if isinstance(obj, dict):
-        # Explicit labels + values
         if "labels" in obj and "values" in obj:
             labs = [str(x).upper() for x in (obj.get("labels") or [])]
             vals = obj.get("values")
             if isinstance(vals, (list, tuple)):
-                # Only pair up if list looks numeric-ish
                 numbers = []
                 for v in vals:
                     numbers.append(_to_float_safe(v))
@@ -345,7 +330,6 @@ def _extract_labels_values(obj, default_units="km2"):
                 valsA = [v/1e6 for v in valsA]
             return labels_out, valsA
 
-        # Nested area dicts
         for key, is_m2 in (("area_km2", False), ("km2", False), ("area_m2", True), ("m2", True)):
             if key in obj and isinstance(obj[key], dict):
                 m = {str(k).upper(): _to_float_safe(v) for k, v in obj[key].items()}
@@ -354,7 +338,6 @@ def _extract_labels_values(obj, default_units="km2"):
                     valsA = [v/1e6 for v in valsA]
                 return labels_out, valsA
 
-        # Plain dict with A..E keys (ignore extra metadata)
         use = {}
         for k, v in obj.items():
             ku = str(k).upper()
@@ -371,32 +354,22 @@ def _extract_labels_values(obj, default_units="km2"):
         valsA = [_to_float_safe(obj[i]) for i in range(5)]
         return labels_out, valsA
 
-    # Fallback
     return labels_out, [0.0]*5
 
 def _read_area_json(path: Path, group_name: str) -> dict | None:
-    """
-    Returns {"labels":[A..E],"values":[km2,...]} or None if not found/invalid.
-    Does not throw.
-    """
     try:
         if not path.exists():
             return None
-        # tolerate transient writes by reading once; if it fails JSON-decode, return None
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
-        # JSON busy/invalid
         sys.stderr.write(f"[area_stats.json] Read/parse failed: {e}\n")
         return None
 
-    # Where is the group?
     cand = None
     if isinstance(data, dict):
-        # Preferred: nested "groups"
         groups = data.get("groups")
         if isinstance(groups, dict):
-            # try exact, then normalized
             cand = groups.get(group_name)
             if cand is None:
                 nk = _norm_key_local(group_name)
@@ -405,7 +378,6 @@ def _read_area_json(path: Path, group_name: str) -> dict | None:
                         cand = groups[k]
                         break
         if cand is None:
-            # maybe group sits at root
             cand = data.get(group_name)
             if cand is None:
                 nk = _norm_key_local(group_name)
@@ -413,17 +385,14 @@ def _read_area_json(path: Path, group_name: str) -> dict | None:
                     if _norm_key_local(str(k)) == nk:
                         cand = data[k]
                         break
-        # or the root itself is the A..E dict
         if cand is None:
             cand = data
 
     try:
         labels, values = _extract_labels_values(cand if cand is not None else {})
-        # sanity: values must be numeric list length 5
         if not (isinstance(values, list) and len(values) >= 5):
             return None
         if any(not isinstance(v, (int, float)) for v in values):
-            # coerce once more, safely
             values = [_to_float_safe(v) for v in values[:5]]
         return { "labels": list("ABCDE"), "values": [float(v) for v in values[:5]] }
     except Exception as e:
@@ -431,20 +400,13 @@ def _read_area_json(path: Path, group_name: str) -> dict | None:
         return None
 
 def get_area_stats() -> dict:
-    """
-    Try JSON first (output/area_stats.json). If missing/invalid, fall back to GeoParquet computation.
-    Always returns {"labels":[...], "values":[...]} and optionally {"message": "..."}.
-    """
-    # JSON attempt
     js = _read_area_json(AREA_JSON, BASIC_GROUP_NAME)
     if js is not None:
         return js
-    # Fallback to parquet computation
     msg = ("Area statistics JSON not available yet; using live computation from GeoParquet. "
            f"Expected at {AREA_JSON.name}.")
     fallback = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
     if "message" in fallback:
-        # carry their message if basic_mosaic missing
         return fallback
     fallback["message"] = msg
     return fallback
@@ -460,13 +422,11 @@ def scan_mbtiles(dir_path: str):
     rev = {}
     if not os.path.isdir(dir_path):
         return idx, rev
-
     for fn in os.listdir(dir_path):
         if not fn.lower().endswith(".mbtiles"):
             continue
         path = os.path.join(dir_path, fn)
         lo   = fn.lower()
-
         kind = None
         cat = None
         if lo.endswith("_sensitivity.mbtiles"):
@@ -483,11 +443,9 @@ def scan_mbtiles(dir_path: str):
             kind = "assetstotal"
         else:
             continue
-
         idx.setdefault(cat, {"sensitivity": None, "envindex": None, "groupstotal": None, "assetstotal": None})
         idx[cat][kind] = path
         rev[_norm_key(cat)] = cat
-
     return idx, rev
 
 MBTILES_INDEX, MBTILES_REV = scan_mbtiles(MBTILES_DIR)
@@ -536,13 +494,8 @@ def _resolve_cat(cat: str):
 
 class _MBTilesHandler(BaseHTTPRequestHandler):
     connections = {}
-
-    # --- MUTE ALL LOGGING ---
-    def log_message(self, format, *args):  # noqa: N802
-        return
-    def log_error(self, format, *args):  # noqa: N802
-        return
-
+    def log_message(self, format, *args): return
+    def log_error(self, format, *args): return
     def do_GET(self):
         try:
             parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
@@ -641,7 +594,6 @@ SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 ASSETS_AVAILABLE    = (not ASSET_GDF.empty) and ("geometry" in ASSET_GDF.columns)
 ENVINDEX_AVAILABLE  = GEOCODE_AVAILABLE and ("env_index" in GDF.columns)
 
-# ---- categories: union of MBTiles stems and vector groups ----
 mb_cats   = list(MBTILES_INDEX.keys())
 vec_cats  = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
 CATS      = sorted(set(mb_cats) | set(vec_cats), key=lambda s: (str(s).lower()))
@@ -651,7 +603,6 @@ if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
 else:
     SEG_CATS = []
 
-# Build mapping from human-readable line name -> name_gis (PK)
 LINE_NAMES = []
 LINE_USER_TO_GIS = {}
 if not LINES_GDF.empty and ("name_gis" in LINES_GDF.columns):
@@ -698,10 +649,9 @@ class Api:
         }
 
     def get_geocode_layer(self, geocode_category):
-        """Prefer MBTiles sensitivity; otherwise vector fallback. Stats from JSON if available; else parquet."""
         try:
             mb = mbtiles_info(geocode_category)
-            stats = get_area_stats()  # <-- JSON first, then parquet fallback
+            stats = get_area_stats()
 
             if mb.get("sensitivity_url"):
                 return {
@@ -727,7 +677,6 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_envindex_layer(self, geocode_category):
-        """Prefer MBTiles envindex; otherwise vector fallback."""
         try:
             mb = mbtiles_info(geocode_category)
             if mb.get("envindex_url"):
@@ -759,7 +708,6 @@ class Api:
         return {"ok": True, "geojson": gj, "range": {"min": vmin, "max": vmax}}
 
     def get_groupstotal_layer(self, geocode_category):
-        """Prefer MBTiles <group>_groupstotal.mbtiles; otherwise vector fallback on asset_groups_total."""
         try:
             mb = mbtiles_info(geocode_category)
             if mb.get("groupstotal_url"):
@@ -772,7 +720,6 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_assetstotal_layer(self, geocode_category):
-        """Prefer MBTiles <group>_assetstotal.mbtiles; otherwise vector fallback on assets_overlap_total."""
         try:
             mb = mbtiles_info(geocode_category)
             if mb.get("assetstotal_url"):
@@ -893,11 +840,9 @@ HTML_TEMPLATE = r"""
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
 
-  /* Leaflet Layers control tweaks and tooltip-like help */
   .leaflet-control-layers { font-size: 12px; }
   .leaflet-control-layers label { display:block; line-height: 1.35; }
   .inlineSel { margin:4px 0 6px 22px; }
-  /* STACK the checkboxes vertically, under the selector */
   .inlineChecks { margin:0 0 6px 22px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
   .inlineChecks label { display:inline-flex; gap:6px; align-items:center; font-weight:500; }
 
@@ -914,6 +859,12 @@ HTML_TEMPLATE = r"""
   .poly-tip .kv { display:grid; grid-template-columns:92px 1fr; gap:4px 10px; }
   .poly-tip .k { opacity:.8; }
   .poly-tip .v { text-align:right; white-space:nowrap; }
+
+  /* Hide the checkbox for the "Geocode group" row and fix spacing */
+  .leaflet-control-layers-overlays label.no-toggle { padding-left: 0; }
+  .leaflet-control-layers-overlays label.no-toggle .inlineSel,
+  .leaflet-control-layers-overlays label.no-toggle .inlineChecks { margin-left: 0; }
+  .leaflet-control-layers-overlays label.no-toggle input.leaflet-control-layers-selector { display: none !important; }
 </style>
 </head>
 <body>
@@ -966,7 +917,7 @@ function setError(msg){
 }
 function fmtKm2(x){ return Number(x||0).toLocaleString('en-US',{maximumFractionDigits:2}); }
 
-/* ---------- legend & chart ---------- */
+/* legend & chart omitted for brevity in comment—unchanged in logic */
 function renderLegend(stats){
   var container=document.getElementById('legend');
   var codes=['A','B','C','D','E'], values={}, total=0;
@@ -997,7 +948,7 @@ function renderChart(stats){
   var r=document.getElementById('chart').getBoundingClientRect(); CHART.resize(Math.floor(r.width),Math.floor(r.height));
 }
 
-/* ---------- basemaps ---------- */
+/* basemaps */
 function tileXYToQuadKey(x,y,z){ var q=''; for(var i=z;i>0;i--){ var d=0,m=1<<(i-1); if((x&m)!==0)d+=1; if((y&m)!==0)d+=2; q+=d.toString(); } return q; }
 var BingAerial = L.TileLayer.extend({ createTile: function(coords, done){ var img=document.createElement('img'); var zoom=this._getZoomForUrl(); if(!BING_KEY_JS){ img.onload=function(){done(null,img)}; img.onerror=function(){done(null,img)}; img.src='about:blank'; return img; } var q=tileXYToQuadKey(coords.x,coords.y,zoom); var t=(coords.x+coords.y)%4; var url='https://ecn.t'+t+'.tiles.virtualearth.net/tiles/a'+q+'.jpeg?g=1&n=z&key='+encodeURIComponent(BING_KEY_JS); img.crossOrigin='anonymous'; img.onload=function(){done(null,img)}; img.onerror=function(){done(null,img)}; img.src=url; return img; }});
 function buildBaseSources(){
@@ -1009,32 +960,21 @@ function buildBaseSources(){
   return {osm:osm, topo:topo, sat_bing:bing, sat_esri:SATELLITE_FALLBACK};
 }
 
-/* ---------- Loaders (raster preferred, vector fallback) ---------- */
+/* opacity helper */
 function _setOpacityMaybe(layer, alpha){
   if (!layer) return;
   if (typeof layer.setOpacity==='function'){ try{ layer.setOpacity(alpha); }catch(e){} }
   else if (typeof layer.setStyle==='function'){ try{ layer.setStyle({fillOpacity:alpha, opacity:alpha}); }catch(e){} }
 }
 
-/* --- shared blue ramp --- */
+/* gradients etc. */
 function _hexToRgb(h){ h=h.replace('#',''); if(h.length===3){ h=h.split('').map(x=>x+x).join(''); } var n=parseInt(h,16); return {r:(n>>16)&255,g:(n>>8)&255,b:n&255}; }
 function _rgbToHex(r,g,b){ return '#'+[r,g,b].map(v=>{var s=v.toString(16); return s.length===1?'0'+s:s;}).join(''); }
 function _lerp(a,b,t){ return a+(b-a)*t; }
-function rampBlue(t){
-  // Light -> dark blue ramp
-  var light=_hexToRgb('#dbeafe'); // very light blue
-  var dark =_hexToRgb('#1e3a8a'); // dark blue
-  var r=Math.round(_lerp(light.r,dark.r,t));
-  var g=Math.round(_lerp(light.g,dark.g,t));
-  var b=Math.round(_lerp(light.b,dark.b,t));
-  return _rgbToHex(r,g,b);
-}
-function _normalize(val, vmin, vmax){
-  if (vmax===vmin){ return 1.0; }
-  var t=(Number(val)-vmin)/(vmax-vmin);
-  if (!isFinite(t)) t=0;
-  return Math.max(0, Math.min(1, t));
-}
+function rampBlue(t){ var light=_hexToRgb('#dbeafe'), dark=_hexToRgb('#1e3a8a'); var r=Math.round(_lerp(light.r,dark.r,t)), g=Math.round(_lerp(light.g,dark.g,t)), b=Math.round(_lerp(light.b,dark.b,t)); return _rgbToHex(r,g,b); }
+function _normalize(val, vmin, vmax){ if (vmax===vmin){ return 1.0; } var t=(Number(val)-vmin)/(vmax-vmin); if (!isFinite(t)) t=0; return Math.max(0, Math.min(1, t)); }
+
+/* loaders – unchanged */
 
 function loadGeocodeIntoGroup(cat, preserveView){
   var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
@@ -1047,25 +987,21 @@ function loadGeocodeIntoGroup(cat, preserveView){
       var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
       LAYER=L.tileLayer(res.mbtiles.sensitivity_url, opts); GEO_GROUP.addLayer(LAYER);
     } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
-      LAYER=L.geoJSON(res.geojson, { style:function(f){ var c=(f.properties&&f.properties.sensitivity_code_max)||''; return {color:'white',weight:.5,opacity:1,fillOpacity:FILL_ALPHA,fillColor:(COLOR_MAP[c]||'#bdbdbd')}; }, renderer:RENDERERS.geocodes });
+      LAYER=L.geoJSON(res.geojson, { style:function(f){ var c=(f.properties&&f.properties.sensitivity_code_max)||''; return {color:'white',weight:.5,opacity:1,fillOpacity:FILL_ALPHA,fillColor:(COLOR_MAP[c]||'#bdbdbd')}; }});
       GEO_GROUP.addLayer(LAYER);
     }
 
-    // Always update HOME_BOUNDS
     HOME_BOUNDS = res.home_bounds || HOME_BOUNDS;
     if (!prev && HOME_BOUNDS){ MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); }
     if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
 
     renderLegend(res.stats); renderChart(res.stats);
 
-    // reload dependent toggles if they are on
     var chkEnv=document.getElementById('chkEnvIndex');
     var chkGT =document.getElementById('chkGroupsTotal');
     var chkAT =document.getElementById('chkAssetsTotal');
-
     var selEl=(document.getElementById('groupCatSel')||{});
     var envCat=selEl.value||cat||null;
-
     if (chkEnv && chkEnv.checked && envCat) loadEnvIndexIntoGroup(envCat, true);
     if (chkGT  && chkGT.checked  && envCat) loadGroupstotalIntoGroup(envCat, true);
     if (chkAT  && chkAT.checked  && envCat) loadAssetstotalIntoGroup(envCat, true);
@@ -1087,14 +1023,13 @@ function loadEnvIndexIntoGroup(cat, preserveView){
       function r2h(r,g,b){ return '#'+[r,g,b].map(v=>{var h=v.toString(16); return h.length===1?'0'+h:h;}).join(''); }
       function lerp(a,b,t){ return a+(b-a)*t; }
       function envColor(x){ if(x==null||isNaN(x)) return '#cccccc'; var t=clamp(Number(x)/100,0,1), y=h2r('#ffff00'), r=h2r('#ff0000'); return r2h(Math.round(lerp(y.r,r.r,t)), Math.round(lerp(y.g,r.g,t)), Math.round(lerp(y.b,r.b,t))); }
-      LAYER_ENV=L.geoJSON(res.geojson, { style:function(f){ var v=(f.properties&&f.properties.env_index!=null)?Number(f.properties.env_index):null; return {color:'white',weight:.5,opacity:1,fillOpacity:FILL_ALPHA,fillColor:envColor(v)}; }, renderer:RENDERERS.env });
+      LAYER_ENV=L.geoJSON(res.geojson, { style:function(f){ var v=(f.properties&&f.properties.env_index!=null)?Number(f.properties.env_index):null; return {color:'white',weight:.5,opacity:1,fillOpacity:FILL_ALPHA,fillColor:envColor(v)}; }});
       ENV_GROUP.addLayer(LAYER_ENV);
     }
     if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
 
-/* --- NEW: groupstotal --- */
 function loadGroupstotalIntoGroup(cat, preserveView){
   var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_groupstotal_layer(cat).then(function(res){
@@ -1113,8 +1048,7 @@ function loadGroupstotalIntoGroup(cat, preserveView){
           var t=(v==null||!isFinite(v))?0:_normalize(v, vmin, vmax);
           var col=rampBlue(t);
           return {color:'#ffffff', weight:.5, opacity:1, fillOpacity:FILL_ALPHA, fillColor:col};
-        },
-        renderer:RENDERERS.groupstotal
+        }
       });
       GROUPSTOTAL_GROUP.addLayer(LAYER_GROUPSTOTAL);
     }
@@ -1122,7 +1056,6 @@ function loadGroupstotalIntoGroup(cat, preserveView){
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
 
-/* --- NEW: assetstotal --- */
 function loadAssetstotalIntoGroup(cat, preserveView){
   var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_assetstotal_layer(cat).then(function(res){
@@ -1141,8 +1074,7 @@ function loadAssetstotalIntoGroup(cat, preserveView){
           var t=(v==null||!isFinite(v))?0:_normalize(v, vmin, vmax);
           var col=rampBlue(t);
           return {color:'#ffffff', weight:.5, opacity:1, fillOpacity:FILL_ALPHA, fillColor:col};
-        },
-        renderer:RENDERERS.assetstotal
+        }
       });
       ASSETSTOTAL_GROUP.addLayer(LAYER_ASSETSTOTAL);
     }
@@ -1156,7 +1088,7 @@ function loadSegmentsIntoGroup(lineNameOrAll){
     if (!document.getElementById('err').textContent){ setError(''); }
     if (SEG_GROUP) SEG_GROUP.clearLayers();
     if (res.geojson && res.geojson.features && res.geojson.features.length>0){
-      LAYER_SEG=L.geoJSON(res.geojson, { style:function(f){ var c=(f.properties&&f.properties.sensitivity_code_max)||''; return {color:'#f7f7f7',weight:.7,opacity:1,fillOpacity:FILL_ALPHA,fillColor:(COLOR_MAP[c]||'#bdbdbd')}; }, renderer:RENDERERS.segments });
+      LAYER_SEG=L.geoJSON(res.geojson, { style:function(f){ var c=(f.properties&&f.properties.sensitivity_code_max)||''; return {color:'#f7f7f7',weight:.7,opacity:1,fillOpacity:FILL_ALPHA,fillColor:(COLOR_MAP[c]||'#bdbdbd')}; }});
       SEG_GROUP.addLayer(LAYER_SEG);
     }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
@@ -1166,18 +1098,32 @@ function loadAssetsIntoGroup(){
     if (!res.ok){ setError('Failed to load assets: '+res.error); return; }
     if (ASSET_GROUP) ASSET_GROUP.clearLayers();
     if (res.geojson && res.geojson.features && res.geojson.features.length>0){
-      LAYER_ASSETS=L.geoJSON(res.geojson,{ style:function(){ return {color:ASSET_COLOR,weight:.6,opacity:FILL_ALPHA,fillOpacity:FILL_ALPHA,fillColor:ASSET_COLOR}; }, renderer:RENDERERS.assets, pane:'assetsPane',
-        pointToLayer:function(ft,latlng){ return L.circleMarker(latlng,{pane:'assetsPane',radius:3.5,color:ASSET_COLOR,weight:.8,opacity:FILL_ALPHA,fillOpacity:FILL_ALPHA,fillColor:ASSET_COLOR,renderer:RENDERERS.assets}); }});
+      LAYER_ASSETS=L.geoJSON(res.geojson,{ style:function(){ return {color:ASSET_COLOR,weight:.6,opacity:FILL_ALPHA,fillOpacity:FILL_ALPHA,fillColor:ASSET_COLOR}; }, pane:'assetsPane',
+        pointToLayer:function(ft,latlng){ return L.circleMarker(latlng,{pane:'assetsPane',radius:3.5,color:ASSET_COLOR,weight:.8,opacity:FILL_ALPHA,fillOpacity:FILL_ALPHA,fillColor:ASSET_COLOR}); }});
       ASSET_GROUP.addLayer(LAYER_ASSETS);
     }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
 
-/* ---------- Helpers to manage folder sub-layers ---------- */
+/* helpers */
 function ensureOnMap(g){ if (g && !MAP.hasLayer(g)) g.addTo(MAP); }
 function ensureOffMap(g){ if (g && MAP.hasLayer(g)) MAP.removeLayer(g); }
 
-/* ---------- Build native layers control ---------- */
+/* ---- NEW: utility to remove the checkbox next to "Geocode group" ---- */
+function hideGeocodeFolderCheckbox(ctrl){
+  try{
+    var ctn = ctrl.getContainer();
+    var sel = ctn.querySelector('#groupCatSel');
+    if (!sel) return;
+    var label = sel.closest('label') || (sel.parentElement && sel.parentElement.closest && sel.parentElement.closest('label'));
+    if (!label) return;
+    var cb = label.querySelector('input.leaflet-control-layers-selector');
+    if (cb) cb.remove();                  // remove the actual checkbox node
+    label.classList.add('no-toggle');     // fix spacing via CSS
+  }catch(e){ logErr('hideGeocodeFolderCheckbox: '+e); }
+}
+
+/* build layers control */
 function buildLayersControl(state){
   var baseLayers={
     'OpenStreetMap': BASE_SOURCES.osm,
@@ -1190,7 +1136,6 @@ function buildLayersControl(state){
   GROUPSTOTAL_GROUP=L.layerGroup(); ASSETSTOTAL_GROUP=L.layerGroup();
   GEO_FOLDER=L.layerGroup();
 
-  // Geocode "folder" with stacked checkboxes (now includes Groups/Assets total)
   var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div>' +
                   '<div class="inlineChecks">' +
                   '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitive areas</label>' +
@@ -1199,15 +1144,19 @@ function buildLayersControl(state){
                   '<label><input type="checkbox" id="chkAssetsTotal"> Assets total</label>' +
                   '</div>';
 
-  // Overlay order: Sensitivity lines, Geocode groups (folder), Assets
   var overlays={};
   overlays['Sensitivity lines <div class="inlineSel"><select id="segLineSel"></select></div>']=SEG_GROUP;
-  overlays[folderLabel]=GEO_FOLDER;
+  overlays[folderLabel]=GEO_FOLDER;  // we will hide its checkbox
   overlays['Assets']=ASSET_GROUP;
 
   var ctrl=L.control.layers(baseLayers, overlays, { collapsed:false, position:'topleft' }).addTo(MAP);
 
-  // Keep basemaps section at the very bottom
+  /* Hide/strip the Geocode folder checkbox robustly (now and shortly after in case Leaflet reflows) */
+  hideGeocodeFolderCheckbox(ctrl);
+  setTimeout(function(){ hideGeocodeFolderCheckbox(ctrl); }, 50);
+  setTimeout(function(){ hideGeocodeFolderCheckbox(ctrl); }, 300);
+
+  /* keep basemaps at bottom (unchanged) */
   try {
     var ctn  = ctrl.getContainer();
     var form = ctn.querySelector('.leaflet-control-layers-list');
@@ -1227,13 +1176,10 @@ function buildLayersControl(state){
   } catch(e){ logErr('Layer reorder failed: ' + e); }
 
   BASE_SOURCES.osm.addTo(MAP);
-
-  // Add our overlay groups to the map (controlled by the inline checkboxes)
   GEO_GROUP.addTo(MAP);
   SEG_GROUP.addTo(MAP);
 
   setTimeout(function(){
-    // Populate geocode selector with union category list
     var geocodes=(state.geocode_categories||[]);
     var sel=document.getElementById('groupCatSel');
     if (sel){
@@ -1252,22 +1198,19 @@ function buildLayersControl(state){
     var chkGT   =document.getElementById('chkGroupsTotal');
     var chkAT   =document.getElementById('chkAssetsTotal');
 
-    // default visibility
     if (chkAreas && chkAreas.checked){ ensureOnMap(GEO_GROUP); } else { ensureOffMap(GEO_GROUP); }
     if (chkEnv   && chkEnv.checked)  { ensureOnMap(ENV_GROUP); if (initialCat) loadEnvIndexIntoGroup(initialCat, true); } else { ensureOffMap(ENV_GROUP); }
     if (chkGT    && chkGT.checked)   { ensureOnMap(GROUPSTOTAL_GROUP); if (initialCat) loadGroupstotalIntoGroup(initialCat, true); } else { ensureOffMap(GROUPSTOTAL_GROUP); }
     if (chkAT    && chkAT.checked)   { ensureOnMap(ASSETSTOTAL_GROUP); if (initialCat) loadAssetstotalIntoGroup(initialCat, true); } else { ensureOffMap(ASSETSTOTAL_GROUP); }
 
-    // On category change: preserve view and reload whichever are checked
     sel && sel.addEventListener('change', function(){
       var cat=sel.value||initialCat;
-      loadGeocodeIntoGroup(cat, /*preserveView*/ true);
-      if (chkEnv && chkEnv.checked) loadEnvIndexIntoGroup(cat, /*preserveView*/ true);
-      if (chkGT  && chkGT.checked)  loadGroupstotalIntoGroup(cat, /*preserveView*/ true);
-      if (chkAT  && chkAT.checked)  loadAssetstotalIntoGroup(cat, /*preserveView*/ true);
+      loadGeocodeIntoGroup(cat, true);
+      if (chkEnv && chkEnv.checked) loadEnvIndexIntoGroup(cat, true);
+      if (chkGT  && chkGT.checked)  loadGroupstotalIntoGroup(cat, true);
+      if (chkAT  && chkAT.checked)  loadAssetstotalIntoGroup(cat, true);
     });
 
-    // Sensitivity lines
     var segsel=document.getElementById('segLineSel');
     if (segsel){
       segsel.innerHTML='';
@@ -1283,9 +1226,7 @@ function buildLayersControl(state){
       segsel.addEventListener('change', function(){ loadSegmentsIntoGroup(segsel.value||"__ALL__"); });
     }
 
-    // Folder checkbox behavior (preserve current view)
     function currentCat(){ return (document.getElementById('groupCatSel')||{}).value||initialCat; }
-
     if (chkAreas){
       chkAreas.addEventListener('change', function(){
         var cat=currentCat();
@@ -1319,7 +1260,7 @@ function buildLayersControl(state){
   return ctrl;
 }
 
-/* ---------- Boot ---------- */
+/* Boot */
 function boot(){
   MAP = L.map('map', {
     zoomControl:false, preferCanvas:true,
@@ -1401,12 +1342,8 @@ document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview &
 </html>
 """
 
-# Inject steel-blue color without %-format conflicts
 HTML = HTML_TEMPLATE.replace("__ASSET_COLOR__", STEEL_BLUE)
 
-# ===============================
-# Run
-# ===============================
 if __name__ == "__main__":
     window = webview.create_window(
         title="Maps overview",
