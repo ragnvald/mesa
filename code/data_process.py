@@ -46,6 +46,27 @@ progress_var = None
 progress_label = None
 HEARTBEAT_SECS = 60
 
+
+def _mp_allowed() -> bool:
+    """Multiprocessing Pool is unsafe from a non-main thread in frozen builds (PyInstaller/Windows).
+    Return True only when it's safe to create a Pool.
+    """
+    try:
+        if getattr(sys, 'frozen', False):
+            import threading
+            return threading.current_thread() is threading.main_thread()
+        return True
+    except Exception:
+        return True
+
+# Faster heartbeat in frozen builds so the minimap shows life quickly
+if getattr(sys, 'frozen', False):
+    try:
+        HEARTBEAT_SECS = min(HEARTBEAT_SECS, 10)
+    except Exception:
+        pass
+
+
 _PARTS_DIR = None  # worker output folder
 
 # minimap status (tiny JSON snapshots)
@@ -71,10 +92,54 @@ _DEFAULT_BASIC_GROUP_NAME = "basic_mosaic"
 # Paths & config helpers
 # ----------------------------
 def base_dir() -> Path:
-    bd = Path(original_working_directory or os.getcwd())
-    if bd.name.lower() == "system":
-        return bd.parent
-    return bd
+    """
+    Resolve the mesa root folder in all modes:
+    - dev .py, compiled helper .exe (tools\), launched from mesa.exe, or double-clicked in tools\
+    """
+    candidates: list[Path] = []
+
+    # 1) explicit hint (mesa.exe usually passes this)
+    try:
+        if 'original_working_directory' in globals() and original_working_directory:
+            candidates.append(Path(original_working_directory))
+    except Exception:
+        pass
+
+    # 2) frozen exe location
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        # 3) script location (dev)
+        if "__file__" in globals():
+            candidates.append(Path(__file__).resolve().parent)
+
+    # 4) last resort: CWD
+    candidates.append(Path(os.getcwd()).resolve())
+
+    def normalize(p: Path) -> Path:
+        p = p.resolve()
+        # Normalize typical subfolders to the mesa root
+        if p.name.lower() in ("tools", "system", "code"):
+            p = p.parent
+        # Try climbing up a few levels to find a folder that looks like mesa root
+        q = p
+        for _ in range(4):
+            if (q / "output").exists() and (q / "input").exists():
+                return q
+            if (q / "tools").exists() and (q / "config.ini").exists():
+                return q
+            q = q.parent
+        return p
+
+    for c in candidates:
+        root = normalize(c)
+        if (root / "tools").exists() or ((root / "output").exists() and (root / "input").exists()):
+            return root
+
+    # Fallback: normalized first candidate
+    return normalize(candidates[0])
+
+
 
 def _ensure_cfg() -> configparser.ConfigParser:
     """
@@ -377,17 +442,37 @@ def map_num_to_code(val, ranges_map: dict) -> str | None:
 # IO helpers
 # ----------------------------
 def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
-    file_path = gpq_dir() / f"{name}.parquet"
-    dir_path  = _dataset_dir(name)
+    """
+    Tries (in order):
+      1) <base>/<parquet_folder>/<name>.parquet
+      2) <base>/<parquet_folder>/<name>/  (partitioned)
+      3) <base>/input/geoparquet/<name>.parquet
+      4) <base>/input/geoparquet/<name>/  (partitioned)
+    Returns empty GeoDataFrame if none found.
+    """
+    out_root = gpq_dir()
+    in_root  = base_dir() / "input" / "geoparquet"
+
+    file_path = out_root / f"{name}.parquet"
+    dir_path  = out_root / name
+    alt_file  = in_root / f"{name}.parquet"
+    alt_dir   = in_root / name
+
     try:
         if file_path.exists():
             return gpd.read_parquet(file_path)
         if dir_path.exists() and dir_path.is_dir():
             return gpd.read_parquet(str(dir_path))
+        if alt_file.exists():
+            return gpd.read_parquet(alt_file)
+        if alt_dir.exists() and alt_dir.is_dir():
+            return gpd.read_parquet(str(alt_dir))
+        log_to_gui(log_widget, f"[read] Not found: {name} under {out_root} or {in_root}")
         return gpd.GeoDataFrame(geometry=[], crs=None)
     except Exception as e:
         log_to_gui(log_widget, f"Failed to read {name}: {e}")
         return gpd.GeoDataFrame(geometry=[], crs=None)
+
 
 def write_parquet(name: str, gdf: gpd.GeoDataFrame):
     path = gpq_dir() / f"{name}.parquet"
@@ -561,11 +646,32 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
     started_at = time.time(); last_ping = started_at
     done = 0; out_files = []
 
-    ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(processes=max(1, max_workers),
-                  initializer=_grid_pool_init2,
-                  initargs=(grid_gdf, str(tmp_out))) as pool:
-        for out_path in pool.imap_unordered(_grid_worker, input_parts, chunksize=1):
+    if _mp_allowed() and max_workers > 1:
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(processes=max(1, max_workers),
+                      initializer=_grid_pool_init2,
+                      initargs=(grid_gdf, str(tmp_out))) as pool:
+            for out_path in pool.imap_unordered(_grid_worker, input_parts, chunksize=1):
+                out_files.append(out_path)
+                done += 1
+                now = time.time()
+                if (now - last_ping) >= HEARTBEAT_SECS or done == total_chunks:
+                    pct = (done / total_chunks) * 100 if total_chunks else 100.0
+                    elapsed = now - started_at
+                    eta = "?"
+                    if done:
+                        est_total = elapsed / done * total_chunks
+                        eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
+                        eta = eta_ts.strftime("%H:%M:%S")
+                        dd = (eta_ts.date() - datetime.now().date()).days
+                        if dd > 0: eta += f" (+{dd}d)"
+                    log_to_gui(log_widget, f"[grid-assign] {done}/{total_chunks} chunks (~{pct:.2f}%) • ETA {eta}")
+                    last_ping = now
+    else:
+        # Safe serial fallback in frozen builds when called from a non-main thread
+        _grid_pool_init2(grid_gdf, str(tmp_out)) 
+        for in_p in input_parts:
+            out_path = _grid_worker(in_p)
             out_files.append(out_path)
             done += 1
             now = time.time()
@@ -887,190 +993,26 @@ def _intersection_worker(args):
                 pass
         return (idx, 0, None, err_msg, logs)
 
-def intersect_assets_geocodes(asset_data, geocode_data, cell_size_m, max_workers,
-                              asset_soft_limit, geocode_soft_limit):
-    global _GRID_BBOX_MAP
-    log_to_gui(log_widget, "Creating analysis grid + tagging geocodes.")
-    geocode_tagged = assign_geocodes_to_grid(geocode_data, cell_size_m, max_workers)
-
-    # ---- prepare chunks
-    chunks = make_spatial_chunks(geocode_tagged, max_workers, multiplier=18)
-    total_chunks = len(chunks)
-    log_to_gui(log_widget, f"Intersecting in {total_chunks} chunks with {max_workers} workers. Heartbeat every {HEARTBEAT_SECS}s.")
-    update_progress(35)
-
-    # mapping: chunk idx -> set of grid_cell ids
-    chunk_cells = {i+1: set(ch['grid_cell'].unique().tolist()) for i, ch in enumerate(chunks)}
-    # per-cell feature count (for tooltip)
-    try:
-        cell_counts = geocode_tagged.groupby('grid_cell').size().to_dict()
-    except Exception:
-        cell_counts = {}
-
-    # ---- initial minimap status (per-cell tiles, all queued)
-    try:
-        minx, miny, maxx, maxy = geocode_tagged.total_bounds
-        home_bounds = [[float(miny), float(minx)], [float(maxy), float(maxx)]]
-    except Exception:
-        home_bounds = None
-
-    cells_meta = []
-    for cid in sorted(set().union(*chunk_cells.values())):
-        bbox = _GRID_BBOX_MAP.get(int(cid))
-        cells_meta.append({"id": int(cid), "state": "queued", "n": int(cell_counts.get(int(cid), 0)), "bbox": bbox})
-
-    _write_status_atomic({
-        "phase": "intersect",
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-        "chunks_total": total_chunks,
-        "done": 0,
-        "running": [],
-        "cells": cells_meta,
-        "home_bounds": home_bounds
-    })
-
-    geom_types = asset_data.geometry.geom_type.unique().tolist()
-
-    tmp_parts = _dataset_dir("__stacked_parts")
-    _rm_rf(tmp_parts)
-    tmp_parts.mkdir(parents=True, exist_ok=True)
-
-    written = 0
-    files   = []
+def _process_chunks(chunks, max_workers, asset_data, geom_types, tmp_parts,
+                    asset_soft_limit, geocode_soft_limit,
+                    chunk_cells, cells_meta, home_bounds, total_chunks,
+                    progress_state, files, written):
+    """
+    Run intersection either with a multiprocessing Pool (safe contexts)
+    or serially (when running from a background thread in frozen builds).
+    Returns (done_count, written, files, error_msg).
+    """
+    done_count = progress_state.get('done', 0)
     error_msg = None
-    started_at = time.time()
-    last_ping  = started_at
-    done_count = 0
-
-    hb_stop = threading.Event()
-    progress_state = {'done': 0, 'total': total_chunks, 'rows': 0, 'started_at': started_at}
-
-    def heartbeat():
-        while not hb_stop.wait(HEARTBEAT_SECS):
-            mem_txt = ""
-            try:
-                if psutil is not None:
-                    vm = psutil.virtual_memory()
-                    mem_txt = f" • RAM used {vm.percent:.0f}%"
-            except Exception:
-                pass
-            d = progress_state['done']; t = progress_state['total']; r = progress_state['rows']
-            elapsed = time.time() - progress_state['started_at']
-            pct = (d / t) * 100 if t else 100.0
-            eta = "?"
-            if d:
-                est_total = elapsed / d * t
-                eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
-                eta = eta_ts.strftime("%H:%M:%S")
-                dd = (eta_ts.date() - datetime.now().date()).days
-                if dd > 0: eta += f" (+{dd}d)"
-            log_to_gui(log_widget, f"[heartbeat] {d}/{t} chunks (~{pct:.2f}%) • rows written: {r:,}{mem_txt} • ETA {eta}")
-
-            # update minimap states for cells
-            try:
-                running_chunk_ids = list(range(d+1, min(d + max_workers, t) + 1))
-                running_cells = set().union(*(chunk_cells.get(i, set()) for i in running_chunk_ids)) if running_chunk_ids else set()
-                done_cells = set().union(*(chunk_cells.get(i, set()) for i in range(1, d+1))) if d else set()
-
-                id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
-                for cid in done_cells:
-                    i = id_to_idx.get(int(cid))
-                    if i is not None: cells_meta[i]["state"] = "done"
-                for cid in running_cells:
-                    i = id_to_idx.get(int(cid))
-                    if i is not None and cells_meta[i]["state"] != "done":
-                        cells_meta[i]["state"] = "running"
-
-                status = {
-                    "phase": "intersect",
-                    "updated_at": datetime.utcnow().isoformat() + "Z",
-                    "chunks_total": t,
-                    "done": d,
-                    "running": running_chunk_ids,
-                    "cells": cells_meta,
-                    "home_bounds": home_bounds
-                }
-                _write_status_atomic(status)
-            except Exception:
-                pass
-
-    hb_thread = threading.Thread(target=heartbeat, daemon=True)
-    hb_thread.start()
-
-    iterable = ((i, ch) for i, ch in enumerate(chunks, start=1))
-    with multiprocessing.get_context("spawn").Pool(
-            processes=max_workers,
-            initializer=_intersect_pool_init,
-            initargs=(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
-
-        for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
-            done_count += 1
-            progress_state['done'] = done_count
-
-            try:
-                running_chunk_ids = list(range(done_count+1, min(done_count + max_workers, total_chunks) + 1))
-                running_cells = set().union(*(chunk_cells.get(i, set()) for i in running_chunk_ids)) if running_chunk_ids else set()
-                done_cells = set().union(*(chunk_cells.get(i, set()) for i in range(1, done_count+1))) if done_count else set()
-
-                id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
-                for cid in done_cells:
-                    i = id_to_idx.get(int(cid))
-                    if i is not None:
-                        cells_meta[i]["state"] = "done"
-                for cid in running_cells:
-                    i = id_to_idx.get(int(cid))
-                    if i is not None and cells_meta[i]["state"] != "done":
-                        cells_meta[i]["state"] = "running"
-
-                _write_status_atomic({
-                    "phase": "intersect",
-                    "updated_at": datetime.utcnow().isoformat() + "Z",
-                    "chunks_total": total_chunks,
-                    "done": done_count,
-                    "running": running_chunk_ids,
-                    "cells": cells_meta,
-                    "home_bounds": home_bounds
-                })
-            except Exception:
-                pass
+    started_at = progress_state.get('started_at', 0.0)
+    last_ping = started_at if started_at else 0.0
+    done_count, written, files, error_msg = _process_chunks(
+            chunks, max_workers, asset_data, geom_types, tmp_parts,
+            asset_soft_limit, geocode_soft_limit,
+            chunk_cells, cells_meta, home_bounds, total_chunks,
+            progress_state, files, written)
 
 
-            if logs:
-                for line in logs:
-                    log_to_gui(log_widget, line)
-
-            if err:
-                log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
-                error_msg = err
-                pool.terminate()
-                break
-
-            written += nrows
-            progress_state['rows'] = written
-            if paths:
-                if isinstance(paths, list):
-                    files.extend(paths)
-                else:
-                    files.append(paths)
-
-            now = time.time()
-            if (now - last_ping) >= HEARTBEAT_SECS or done_count == total_chunks:
-                elapsed = now - started_at
-                pct = (done_count / total_chunks) * 100 if total_chunks else 100.0
-                eta = "?"
-                if done_count:
-                    est_total = elapsed / max(done_count, 1) * total_chunks
-                    eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
-                    eta = eta_ts.strftime("%H:%M:%S")
-                    dd = (eta_ts.date() - datetime.now().date()).days
-                    if dd > 0:
-                        eta += f" (+{dd}d)"
-                log_to_gui(log_widget, f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {written:,} • ETA {eta}")
-                update_progress(35.0 + (done_count / max(total_chunks, 1)) * 15.0)
-                last_ping = now
-
-            if done_count % 8 == 0:
-                gc.collect()
 
     hb_stop.set()
     hb_thread.join(timeout=1.5)
@@ -1897,7 +1839,273 @@ def open_minimap_window():
 # ----------------------------
 # Entrypoint (GUI default; headless optional)
 # ----------------------------
+def base_dir() -> Path:
+    """Resolve the mesa root in dev and compiled runs."""
+    candidates = []
+    try:
+        if 'original_working_directory' in globals() and original_working_directory:
+            candidates.append(Path(original_working_directory))
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        if "__file__" in globals():
+            candidates.append(Path(__file__).resolve().parent)
+    candidates.append(Path(os.getcwd()).resolve())
+    def normalize(p: Path) -> Path:
+        p = p.resolve()
+        if p.name.lower() in ("tools", "system", "system_resources", "code"):
+            p = p.parent
+        q = p
+        for _ in range(5):
+            if (q / "output").exists() and (q / "input").exists():
+                return q
+            if (q / "tools").exists() and (q / "config.ini").exists():
+                return q
+            q = q.parent
+        return p
+    for c in candidates:
+        root = normalize(c)
+        if (root / "tools").exists() or ((root / "output").exists() and (root / "input").exists()):
+            return root
+    return normalize(candidates[0])
+def gpq_dir() -> Path:
+    cfg = _ensure_cfg()
+    sub = cfg.get("DEFAULT", {}).get("parquet_folder", "output/geoparquet") if isinstance(cfg, dict) else cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
+    root = base_dir()
+    cand = root / sub
+    dev_alt = root / "code" / "output" / "geoparquet"
+    if not getattr(sys, "frozen", False):
+        try:
+            here = Path(__file__).resolve()
+            if "code" in (p.lower() for p in here.parts) and dev_alt.exists():
+                return dev_alt
+        except Exception:
+            pass
+        if (not cand.exists()) and dev_alt.exists():
+            return dev_alt
+    cand.mkdir(parents=True, exist_ok=True)
+    return cand
+def output_dir() -> Path:
+    root = base_dir()
+    dev_alt = root / "code" / "output"
+    if not getattr(sys, "frozen", False) and dev_alt.exists():
+        dev_alt.mkdir(parents=True, exist_ok=True)
+        return dev_alt
+    out = root / "output"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
+    out_root = gpq_dir()
+    in_root  = base_dir() / "input" / "geoparquet"
+    code_in  = base_dir() / "code" / "input" / "geoparquet"
+    paths = [out_root / f"{name}.parquet", out_root / name, in_root / f"{name}.parquet", in_root / name, code_in / f"{name}.parquet", code_in / name]
+    try:
+        for pth in paths:
+            if pth.exists():
+                return gpd.read_parquet(str(pth))
+        log_to_gui(log_widget, f"[read] Not found: {name} under {out_root} or {in_root} or {code_in}")
+        return gpd.GeoDataFrame(geometry=[], crs=None)
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed to read {name}: {e}")
+        return gpd.GeoDataFrame(geometry=[], crs=None)
+def _find_tiles_script() -> Path | None:
+    root = base_dir()
+    candidates = [root / "tools" / "create_raster_tiles.exe", root / "code" / "create_raster_tiles.py",
+                  root / "create_raster_tiles.py", root / "system" / "create_raster_tiles.py",
+                  root / "system_resources" / "create_raster_tiles.py"]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
+    script_path = _find_tiles_script()
+    if not script_path:
+        log_to_gui(log_widget, "[Tiles] Missing script: create_raster_tiles (looked in tools/, code/, base/, system/, system_resources/)")
+        return None
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    if script_path.suffix.lower() == ".exe":
+        cmd = [str(script_path)]
+        cwd = str(base_dir())
+    else:
+        if getattr(sys, "frozen", False):
+            log_to_gui(log_widget, "[Tiles] In a compiled build, provide tools/create_raster_tiles.exe or run from source.")
+            return None
+        cmd = [sys.executable, str(script_path)]
+        cwd = str(script_path.parent)
+    if isinstance(minzoom, int):
+        cmd += ["--minzoom", str(minzoom)]
+    if isinstance(maxzoom, int):
+        cmd += ["--maxzoom", str(maxzoom)]
+    return subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1, env=env)
+def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
+                              geocode_data: gpd.GeoDataFrame,
+                              meters_cell: int,
+                              max_workers: int,
+                              asset_soft_limit: int,
+                              geocode_soft_limit: int) -> gpd.GeoDataFrame:
+    if asset_data is None or asset_data.empty:
+        log_to_gui(log_widget, "No assets; skipping intersection.")
+        return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs if geocode_data is not None else None)
+    if geocode_data is None or geocode_data.empty:
+        log_to_gui(log_widget, "No geocodes; skipping intersection.")
+        return gpd.GeoDataFrame(geometry=[], crs=asset_data.crs)
+    try: _ = asset_data.sindex
+    except Exception: pass
+    try: _ = geocode_data.sindex
+    except Exception: pass
+    meters_cell = int(max(100, meters_cell))
+    tagged = assign_geocodes_to_grid(geocode_data, meters_cell, max_workers)
+    if tagged is None or tagged.empty or "grid_cell" not in tagged.columns:
+        log_to_gui(log_widget, "Grid tagging failed or returned empty; aborting intersection.")
+        return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
+    chunks = make_spatial_chunks(tagged, max_workers=max_workers, multiplier=18)
+    total_chunks = len(chunks)
+    log_to_gui(log_widget, f"Intersecting in {total_chunks} chunks with {max_workers} workers. Heartbeat every {HEARTBEAT_SECS}s.")
+    update_progress(35.0)
+    chunk_cells = {}
+    for i, ch in enumerate(chunks, start=1):
+        try: ids = set(int(x) for x in ch['grid_cell'].dropna().unique().tolist())
+        except Exception: ids = set()
+        chunk_cells[i] = ids
+    try:
+        g4326 = geocode_data
+        if g4326.crs is None: g4326 = g4326.set_crs(4326, allow_override=True)
+        if str(g4326.crs).upper() != "EPSG:4326": g4326 = g4326.to_crs(4326)
+        minx, miny, maxx, maxy = g4326.total_bounds
+        home_bounds = [float(minx), float(miny), float(maxx), float(maxy)]
+    except Exception:
+        home_bounds = None
+    cells_meta = []
+    try:
+        for cid, bbox in _GRID_BBOX_MAP.items():
+            cells_meta.append({"id": int(cid), "state": "queued", "n": 0, "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]})
+    except Exception: pass
+    tmp_parts = _dataset_dir("__stacked_parts"); _rm_rf(tmp_parts); tmp_parts.mkdir(parents=True, exist_ok=True)
+    try: geom_types = sorted(set(asset_data.geometry.geom_type.dropna().unique().tolist()))
+    except Exception: geom_types = ["Polygon","MultiPolygon","LineString","Point"]
+    progress_state = {"done": 0, "rows": 0, "started_at": time.time()}
+    hb_stop = threading.Event()
+    def _heartbeat():
+        while not hb_stop.wait(HEARTBEAT_SECS):
+            try:
+                vm_used = None
+                if psutil is not None:
+                    vm = psutil.virtual_memory(); vm_used = f"{int(vm.percent)}%"
+                pct = (progress_state["done"] / max(1, total_chunks)) * 100.0
+                msg = f"[heartbeat] {progress_state['done']}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {progress_state['rows']:,}"
+                if vm_used: msg += f" • RAM used {vm_used}"
+                msg += " • ETA ?"
+                log_to_gui(log_widget, msg)
+            except Exception: pass
+    hb_thread = threading.Thread(target=_heartbeat, daemon=True); hb_thread.start()
+    try:
+        _write_status_atomic({"phase":"intersect","updated_at": datetime.utcnow().isoformat()+"Z","chunks_total": total_chunks,"done":0,"running": list(range(1, min(max_workers, total_chunks)+1)),"cells": cells_meta,"home_bounds": home_bounds})
+    except Exception: pass
+    def _update_status(done_count:int):
+        try:
+            running_chunk_ids = list(range(done_count+1, min(done_count+max_workers, total_chunks)+1))
+            running_cells = set().union(*(chunk_cells.get(i,set()) for i in running_chunk_ids)) if running_chunk_ids else set()
+            done_cells = set().union(*(chunk_cells.get(i,set()) for i in range(1, done_count+1))) if done_count else set()
+            id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
+            for cid in done_cells:
+                i = id_to_idx.get(int(cid))
+                if i is not None: cells_meta[i]["state"] = "done"
+            for cid in running_cells:
+                i = id_to_idx.get(int(cid))
+                if i is not None and cells_meta[i]["state"] != "done": cells_meta[i]["state"] = "running"
+            _write_status_atomic({"phase":"intersect","updated_at": datetime.utcnow().isoformat()+"Z","chunks_total": total_chunks,"done": done_count,"running": running_chunk_ids,"cells": cells_meta,"home_bounds": home_bounds})
+        except Exception: pass
+    def _tick_progress(done_count:int, written:int, started_at:float):
+        try:
+            now = time.time(); elapsed = now - started_at; pct = (done_count / max(1,total_chunks))*100.0; eta = "?"
+            if done_count>0:
+                est_total = elapsed / done_count * total_chunks
+                eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed)); eta = eta_ts.strftime("%H:%M:%S")
+                dd = (eta_ts.date() - datetime.now().date()).days
+                if dd>0: eta += f" (+{dd}d)"
+            log_to_gui(log_widget, f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {written:,} • ETA {eta}")
+            update_progress(35.0 + (done_count / max(1,total_chunks)) * 15.0)
+        except Exception: pass
+    files = []; written = 0; error_msg = None; iterable = ((i, ch) for i, ch in enumerate(chunks, start=1))
+    if _mp_allowed() and max_workers > 1:
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(processes=max_workers, initializer=_intersect_pool_init, initargs=(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
+            for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
+                progress_state["done"] += 1; done_count = progress_state["done"]
+                if logs:
+                    for line in logs: log_to_gui(log_widget, line)
+                if err:
+                    error_msg = err; log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
+                    try: pool.terminate()
+                    except Exception: pass
+                    break
+                written += int(nrows or 0); progress_state["rows"] = written
+                if paths:
+                    if isinstance(paths, list): files.extend(paths)
+                    else: files.append(paths)
+                _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
+                if done_count % 8 == 0: gc.collect()
+    else:
+        _intersect_pool_init(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)
+        for args in iterable:
+            (idx, nrows, paths, err, logs) = _intersection_worker(args)
+            progress_state["done"] += 1; done_count = progress_state["done"]
+            if logs:
+                for line in logs: log_to_gui(log_widget, line)
+            if err:
+                error_msg = err; log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}"); break
+            written += int(nrows or 0); progress_state["rows"] = written
+            if paths:
+                if isinstance(paths, list): files.extend(paths)
+                else: files.append(paths)
+            _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
+            if done_count % 8 == 0: gc.collect()
+    try:
+        hb_stop.set(); hb_thread.join(timeout=1.5)
+    except Exception: pass
+    try:
+        for c in cells_meta: c["state"] = "done"
+        _write_status_atomic({"phase": "flatten_pending" if error_msg is None else "error","updated_at": datetime.utcnow().isoformat()+"Z","chunks_total": total_chunks,"done": progress_state["done"],"running": [],"cells": cells_meta,"home_bounds": home_bounds})
+    except Exception: pass
+    if error_msg: raise RuntimeError(error_msg)
+    if not files:
+        log_to_gui(log_widget, "No intersections; tbl_stacked is empty.")
+        return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
+    final_ds = _dataset_dir("tbl_stacked"); _rm_rf(final_ds)
+    try: Path(tmp_parts).rename(final_ds)
+    except Exception:
+        final_ds.mkdir(parents=True, exist_ok=True)
+        for f in Path(tmp_parts).glob("*.parquet"): shutil.move(str(f), str(final_ds / f.name))
+        _rm_rf(tmp_parts)
+    log_to_gui(log_widget, f"tbl_stacked dataset written as folder with {len(files)} parts and ~{written:,} rows: {final_ds}")
+    return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
+
+
+
+
+
+
 if __name__ == "__main__":
+    # Windows + PyInstaller: ensure child processes bootstrap correctly.
+    # This allows the minimap helper process (spawn) to start in frozen builds.
+    try:
+        import multiprocessing as _mp
+        try:
+            _mp.freeze_support()
+        except Exception:
+            pass
+        try:
+            # Use spawn consistently; ignore if already set by the environment
+            _mp.set_start_method("spawn", force=False)
+        except Exception:
+            pass
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="Process stacked/flat GeoParquet with A..E categorisation + ENV index")
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     parser.add_argument('--headless', action='store_true', help='Run without GUI (CLI mode)')
@@ -2028,3 +2236,135 @@ if __name__ == "__main__":
     # Check tiles button eligibility at startup
     _refresh_tiles_button_state()
     root.mainloop()
+
+def _process_chunks(chunks, max_workers, asset_data, geom_types, tmp_parts,
+                    asset_soft_limit, geocode_soft_limit,
+                    chunk_cells, cells_meta, home_bounds, total_chunks,
+                    progress_state, files, written):
+    """
+    Run intersection either with a multiprocessing Pool (safe contexts)
+    or serially (when running from a background thread in frozen builds).
+    Returns (done_count, written, files, error_msg).
+    """
+    done_count = progress_state.get('done', 0)
+    error_msg = None
+    started_at = progress_state.get('started_at', 0.0)
+    last_ping = started_at if started_at else 0.0
+
+    iterable = ((i, ch) for i, ch in enumerate(chunks, start=1))
+
+    def _update_status():
+        try:
+            running_chunk_ids = list(range(done_count+1, min(done_count + max_workers, total_chunks) + 1))
+            running_cells = set().union(*(chunk_cells.get(i, set()) for i in running_chunk_ids)) if running_chunk_ids else set()
+            done_cells = set().union(*(chunk_cells.get(i, set()) for i in range(1, done_count+1))) if done_count else set()
+
+            id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
+            for cid in done_cells:
+                i = id_to_idx.get(int(cid))
+                if i is not None:
+                    cells_meta[i]["state"] = "done"
+            for cid in running_cells:
+                i = id_to_idx.get(int(cid))
+                if i is not None and cells_meta[i]["state"] != "done":
+                    cells_meta[i]["state"] = "running"
+
+            _write_status_atomic({
+                "phase": "intersect",
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "chunks_total": total_chunks,
+                "done": done_count,
+                "running": running_chunk_ids,
+                "cells": cells_meta,
+                "home_bounds": home_bounds
+            })
+        except Exception:
+            pass
+
+    def _tick_progress():
+        nonlocal last_ping, written, done_count
+        now = time.time()
+        if (now - last_ping) >= HEARTBEAT_SECS or done_count == total_chunks:
+            elapsed = now - started_at if started_at else 0.0
+            pct = (done_count / total_chunks) * 100 if total_chunks else 100.0
+            eta = "?"
+            if done_count and started_at:
+                est_total = elapsed / max(done_count, 1) * total_chunks
+                eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
+                eta = eta_ts.strftime("%H:%M:%S")
+                dd = (eta_ts.date() - datetime.now().date()).days
+                if dd > 0:
+                    eta += f" (+{dd}d)"
+            log_to_gui(log_widget, f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {written:,} • ETA {eta}")
+            update_progress(35.0 + (done_count / max(total_chunks, 1)) * 15.0)
+            last_ping = now
+
+    # Pool path (safe in dev or main-thread contexts)
+    if _mp_allowed() and max_workers > 1:
+        with multiprocessing.get_context("spawn").Pool(
+                processes=max_workers,
+                initializer=_intersect_pool_init,
+                initargs=(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
+
+            for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
+                done_count += 1
+                progress_state['done'] = done_count
+
+                if logs:
+                    for line in logs:
+                        log_to_gui(log_widget, line)
+
+                if err:
+                    log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
+                    error_msg = err
+                    pool.terminate()
+                    break
+
+                written += nrows
+                progress_state['rows'] = written
+                if paths:
+                    if isinstance(paths, list):
+                        files.extend(paths)
+                    else:
+                        files.append(paths)
+
+                _update_status()
+                _tick_progress()
+
+                if done_count % 8 == 0:
+                    gc.collect()
+    else:
+        # Serial fallback (initialize globals like pool initializer does)
+        _intersect_pool_init(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)
+        for args in iterable:
+            (idx, nrows, paths, err, logs) = _intersection_worker(args)
+
+            done_count += 1
+            progress_state['done'] = done_count
+
+            if logs:
+                for line in logs:
+                    log_to_gui(log_widget, line)
+
+            if err:
+                log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
+                error_msg = err
+                break
+
+            written += nrows
+            progress_state['rows'] = written
+            if paths:
+                if isinstance(paths, list):
+                    files.extend(paths)
+                else:
+                    files.append(paths)
+
+            _update_status()
+            _tick_progress()
+
+            if done_count % 8 == 0:
+                gc.collect()
+
+    return done_count, written, files, error_msg
+
+
