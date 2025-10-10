@@ -85,7 +85,8 @@ HELPER_COLLECTS = [
     "--collect-data", "pandas",      # data only, avoid tests
     "--collect-data", "pyarrow",     # data only, avoid tests
     "--collect-submodules", "ttkbootstrap",
-    "--collect-submodules", "tkinterweb",
+    "--collect-all", "h3",
+    "--collect-all", "pywebview",
 ]
 HELPER_EXCLUDES = [
     "--exclude-module", "cupy",
@@ -108,7 +109,6 @@ MAIN_COLLECTS = [
     "--collect-data", "pandas",
     "--collect-data", "pyarrow",
     "--collect-submodules", "ttkbootstrap",
-    "--collect-submodules", "tkinterweb",
 ]
 MAIN_EXCLUDES = [
     "--exclude-module", "cupy",
@@ -130,6 +130,7 @@ MAIN_EXCLUDES = [
     "--exclude-module", "MySQLdb",
     "--exclude-module", "psycopg2",
     "--exclude-module", "fiona._shim",
+    "--exclude-module", "tkinterweb", 
 ]
 
 FLAGS_HELPER = [
