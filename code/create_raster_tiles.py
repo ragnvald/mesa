@@ -19,9 +19,30 @@ Usage examples:
   python create_raster_tiles.py --procs 8 --stroke-alpha 0.6
 """
 
-import argparse, math, os, sqlite3, re, multiprocessing as mp
+import argparse, math, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Iterable
+
+# Ensure stdout/stderr can handle Unicode across environments (Windows cp1252, pipes, etc.)
+def _tame_stdio():
+    try:
+        # Prefer UTF-8 when requested; otherwise keep current encoding but allow replacement
+        enc = None
+        if os.environ.get("PYTHONUTF8", "").strip() == "1":
+            enc = "utf-8"
+        if not enc:
+            enc = os.environ.get("PYTHONIOENCODING") or getattr(sys.stdout, "encoding", None) or "utf-8"
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding=enc, errors="replace")
+            sys.stderr.reconfigure(encoding=enc, errors="replace")
+        else:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=enc, errors="replace", line_buffering=True)
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding=enc, errors="replace", line_buffering=True)
+    except Exception:
+        # Never fail due to console encoding issues
+        pass
+
+_tame_stdio()
 
 import numpy as np
 import pandas as pd
@@ -52,7 +73,20 @@ def mbtiles_dir() -> Path:
 
 # ----------------------- Logging -----------------------
 def log(msg: str):
-    print(msg, flush=True)
+    # Safe print that won’t crash on non-encodable characters
+    try:
+        print(str(msg), flush=True)
+    except Exception:
+        try:
+            sys.stdout.write(str(msg) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            # Last resort: replace unknown characters
+            try:
+                sys.stdout.write(str(msg).encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8") + "\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
 
 # ----------------------- Tile math -----------------------
 TILE_SIZE = 256
@@ -147,7 +181,7 @@ def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.
     b = int(round(255 + t * (107 - 255)))
     return (r, g, b, int(max(0.0, min(1.0, alpha))*255))
 
-def read_sensitivity_palette_from_config(cfg_path: Path) -> Dict[str, Tuple[int,int,int,int]]:
+def read_sensitivity_palette_from_config(cfg_path: Path, alpha: float = 1.0) -> Dict[str, Tuple[int,int,int,int]]:
     import configparser
     # IMPORTANT: don't treat '#' as comment (colors like #ff0000)
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';',), strict=False)
@@ -159,7 +193,7 @@ def read_sensitivity_palette_from_config(cfg_path: Path) -> Dict[str, Tuple[int,
         hexc = None
         if code in cfg:
             hexc = cfg[code].get("category_colour", None) or cfg[code].get("category_color", None)
-        pal[code] = hex_to_rgba(hexc or defaults[code], 0.70)  # semi-transparent fill
+        pal[code] = hex_to_rgba(hexc or defaults[code], alpha)
     return pal
 
 def read_ranges_map(cfg_path: Path) -> Dict[str, range]:
@@ -519,6 +553,10 @@ def main():
     ap.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 8)//2), help="Worker processes (default ~= half cores)")
     ap.add_argument("--stroke", default="#000000", help="Stroke color hex")
     ap.add_argument("--stroke-alpha", type=float, default=0.0, help="Stroke alpha 0..1")
+    # Optional fill alpha overrides (0..1). If not provided, values are read from config.ini or default to 1.0
+    ap.add_argument("--fill-alpha", type=float, default=None, help="Fill alpha for sensitivity tiles (0..1)")
+    ap.add_argument("--env-alpha", type=float, default=None, help="Fill alpha for envindex tiles (0..1)")
+    ap.add_argument("--blue-alpha", type=float, default=None, help="Fill alpha for *_total tiles (0..1)")
     ap.add_argument("--stroke-width", type=float, default=0.0, help="Stroke width px")
     args = ap.parse_args()
 
@@ -559,7 +597,32 @@ def main():
 
     # Styling from config.ini
     cfg_path = settings_dir() / "config.ini"
-    sensitivity_palette = read_sensitivity_palette_from_config(cfg_path)
+    # Alpha settings: CLI > config.ini > default(1.0)
+    import configparser
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
+    try:
+        cfg.read(cfg_path, encoding="utf-8")
+    except Exception:
+        pass
+    def _get_alpha(key: str, cli_val: Optional[float], default: float = 1.0) -> float:
+        try:
+            if cli_val is not None:
+                return max(0.0, min(1.0, float(cli_val)))
+        except Exception:
+            pass
+        try:
+            v = cfg["DEFAULT"].get(key, None)
+            if v is not None:
+                return max(0.0, min(1.0, float(str(v).strip())))
+        except Exception:
+            pass
+        return default
+
+    sens_alpha = _get_alpha("tiles_fill_alpha", args.fill_alpha, 1.0)
+    env_alpha  = _get_alpha("tiles_env_alpha", args.env_alpha, 1.0)
+    blue_alpha = _get_alpha("tiles_blue_alpha", args.blue_alpha, 1.0)
+
+    sensitivity_palette = read_sensitivity_palette_from_config(cfg_path, alpha=sens_alpha)
     ranges_map = read_ranges_map(cfg_path)
     stroke_rgba = hex_to_rgba(args.stroke, args.stroke_alpha)
 
@@ -598,7 +661,7 @@ def main():
 
         # ENV INDEX layer
         log(f"  → building {slug}_envindex.mbtiles …")
-        env_palette = {"env_alpha": 0.70}
+        env_palette = {"env_alpha": env_alpha}
         run_one_layer(
             group_name=slug,
             gdf=gdf,
@@ -615,7 +678,7 @@ def main():
 
         # ASSET GROUPS TOTAL (light->dark blue, per-group min/max)
         log(f"  → building {slug}_groupstotal.mbtiles …")
-        blue_palette = {"blue_alpha": 0.70}
+        blue_palette = {"blue_alpha": blue_alpha}
         run_one_layer(
             group_name=slug,
             gdf=gdf,
