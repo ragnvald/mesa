@@ -3,7 +3,6 @@ locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
 from tkinter import *
 import os
-from tkinterweb import HtmlFrame 
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
@@ -26,13 +25,11 @@ def is_frozen() -> bool:
     """True when running inside a PyInstaller/onefile bundle."""
     return getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 
-
 def app_base_dir() -> str:
     """Folder where the running app lives (EXE when frozen, .py folder in dev)."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
-
 
 def resource_path(*parts: str) -> str:
     """Find resources in both packaged and dev modes."""
@@ -45,12 +42,11 @@ def resource_path(*parts: str) -> str:
             return p
     return candidates[0]
 
-
 def tool_path(exe_name: str) -> str:
     """
     Locate helper EXE robustly:
-    - dist\mesa\tools\<exe>   (built layout)
-    - _MEIPASS\tools\<exe>    (if ever packed inside the EXE)
+    - dist\\mesa\\tools\\<exe>   (built layout)
+    - _MEIPASS\\tools\\<exe>     (if ever packed inside the EXE)
     """
     paths = [
         os.path.join(app_base_dir(), "tools", exe_name),
@@ -61,7 +57,6 @@ def tool_path(exe_name: str) -> str:
         if os.path.exists(p):
             return p
     raise FileNotFoundError(f"Helper not found; tried: {paths}")
-
 
 def run_tool(name: str, args: list[str] | None = None, wait: bool = False) -> int | None:
     """
@@ -105,10 +100,9 @@ def run_tool(name: str, args: list[str] | None = None, wait: bool = False) -> in
             pass
         raise
 
-
 # -------------------------------
-
 # Read the configuration file
+# -------------------------------
 def read_config(file_name):
     config = configparser.ConfigParser()
     if hasattr(sys, '_MEIPASS'):
@@ -132,7 +126,6 @@ def is_connected(hostname="8.8.8.8", port=53, timeout=3):
         print(ex)
         return False
 
-
 # Function to check and create folders
 def check_and_create_folders():
     folders = ["input/geocode", "output", "qgis", "input/lines"]
@@ -140,13 +133,11 @@ def check_and_create_folders():
         if not os.path.exists(folder):
             os.makedirs(folder)
 
-
 def log_to_logfile(message):
     timestamp = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted_message = f"{timestamp} - {message}"
     with open("log.txt", "a") as log_file:
         log_file.write(formatted_message + "\n")
-
 
 def create_link_icon(parent, url, row, col, padx, pady):
     # Create a canvas widget
@@ -156,16 +147,12 @@ def create_link_icon(parent, url, row, col, padx, pady):
     
     # Draw a circle with a white fill
     canvas.create_oval(2, 2, icon_size-2, icon_size-2, fill='white', outline='blue')
-    
     # Place the letter "i" inside the circle
     canvas.create_text(icon_size/2, icon_size/2, text="i", font=('Calibri', 10, 'bold'), fill='blue')
-    
     # Bind the canvas to open the URL on click
     canvas.bind("<Button-1>", lambda e: webbrowser.open(url))
 
-
-# This function updates the stats in the labelframe. Clear labels first,
-# then write the updates.
+# This function updates the stats in the labelframe. Clear labels first, then write the updates.
 def update_stats(_unused_gpkg_path):
     """
     Update the right-hand status panel based on GeoParquet files in output/geoparquet.
@@ -201,7 +188,7 @@ def update_stats(_unused_gpkg_path):
             status_label.grid(row=1, column=0, padx=5, pady=5)
             message_label = ttk.Label(info_labelframe,
                                       text="To initiate the system please import assets.\n"
-                                           "Press the Import button.",
+                                           "Press the 'Import' button.",
                                       wraplength=380, justify="left")
             message_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
             create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
@@ -209,7 +196,6 @@ def update_stats(_unused_gpkg_path):
     # Always refresh the UI so the new lights actually appear
     root.update_idletasks()
     root.update()
-
 
 def get_status(geoparquet_dir):
     """
@@ -350,7 +336,6 @@ def get_status(geoparquet_dir):
     except Exception as e:
         return pd.DataFrame({'Status': ['Error'], 'Message': [f"Error accessing statistics: {e}"], 'Link': [""]})
 
-
 # -------------------------------
 # Tool launchers (now using run_tool)
 # -------------------------------
@@ -391,10 +376,8 @@ def edit_lines():
 def edit_atlas():
     run_tool("atlas_edit")
 
-
 def exit_program():
     root.destroy()
-
 
 def update_config_with_values(config_file, **kwargs):
     # Read the entire config file to keep the layout and comments
@@ -413,7 +396,6 @@ def update_config_with_values(config_file, **kwargs):
     # Write the updated content back to the file
     with open(config_file, 'w') as file:
         file.writelines(lines)
-
 
 def increment_stat_value(config_file, stat_name, increment_value):
     # Check if the config file exists
@@ -436,13 +418,11 @@ def increment_stat_value(config_file, stat_name, increment_value):
             if len(parts) == 2:
                 current_value = parts[1].strip()
                 try:
-                    # Attempt to convert the current value to an integer and increment it
                     new_value = int(current_value) + increment_value
                     lines[i] = f"{stat_name} = {new_value}\n"
                     updated = True
                     break
                 except ValueError:
-                    # Handle the case where the conversion fails
                     log_to_logfile(f"Error: Current value of {stat_name} is not an integer.")
                     return
     
@@ -451,7 +431,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
         with open(config_file, 'w') as file:
             file.writelines(lines)
 
-
 # Define functions for showing each frame
 def show_main_frame():
     about_frame.pack_forget()
@@ -459,13 +438,12 @@ def show_main_frame():
     settings_frame.pack_forget()
     main_frame.pack(fill='both', expand=True, pady=10)
 
-
 def show_about_frame():
     main_frame.pack_forget()
     registration_frame.pack_forget()
     settings_frame.pack_forget()
+    # Just show the already-built plain-text about frame
     about_frame.pack(fill='both', expand=True)
-
 
 def show_registration_frame():
     main_frame.pack_forget()
@@ -479,18 +457,12 @@ def show_settings_frame():
     registration_frame.pack_forget()
     settings_frame.pack(fill='both', expand=True)
 
-
 def add_text_to_labelframe(labelframe, text):
     label = tk.Label(labelframe, text=text, justify='left')
     label.pack(padx=10, pady=10, fill='both', expand=True)
-
-    # Function to update the wraplength based on the width of the labelframe
     def update_wrap(event):
         label.config(wraplength=labelframe.winfo_width() - 20)
-
-    # Bind the resize event of the labelframe to the update_wrap function
     labelframe.bind('<Configure>', update_wrap)
-
 
 def store_logs_online(
         log_host, 
@@ -514,7 +486,6 @@ def store_logs_online(
         return "No network access, logs not updated"
     
     try:
-        # Function to execute the writing process
         def write_point():
             client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
             point = Point("tbl_usage") \
@@ -530,25 +501,19 @@ def store_logs_online(
                 .field("mesa_stat_edit_atlas", int(mesa_stat_edit_atlas)) \
                 .field("mesa_stat_create_atlas", int(mesa_stat_create_atlas)) \
                 .field("mesa_stat_process_lines", int(mesa_stat_process_lines))
-
             write_api = client.write_api(write_options=WriteOptions(batch_size=1))
             write_api.write(bucket=log_bucket, org=log_org, record=point)
 
-        # Using ThreadPoolExecutor to enforce a timeout
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(write_point)
-            # Adjust timeout as needed (2-3 seconds as per the requirement)
             future.result(timeout=3)
 
     except TimeoutError:
         return "No network access, logs not updated"
-    
     except Exception as e:
-        # Handle other exceptions, if needed
         return f"An error occurred: {str(e)}"
 
     return "Usage logs updated successfully"
-
 
 def store_userinfo_online(
         log_host, 
@@ -563,36 +528,29 @@ def store_userinfo_online(
         return "No network access, logs not updated"
     
     try:
-        # Function to execute the writing process
         def write_point():
             client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
             point = Point("tbl_user") \
                 .tag("uuid", id_uuid) \
                 .field("id_name", id_name) \
                 .field("id_email", id_email)
-
             write_api = client.write_api(write_options=WriteOptions(batch_size=1))
             write_api.write(bucket=log_bucket, org=log_org, record=point)
 
-        # Using ThreadPoolExecutor to enforce a timeout
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(write_point)
-            # Adjust timeout as needed (2-3 seconds as per the requirement)
             future.result(timeout=3)
 
     except TimeoutError:
         return "No network access, logs not updated"
     except Exception as e:
-        # Handle other exceptions, if needed
         return f"An error occurred: {str(e)}"
 
     return "User logs updated successfully"
 
-
 #####################################################################################
 #  Main
 #
-
 # Establish working directory that all helpers should use
 original_working_directory  = os.getcwd()
 
@@ -634,49 +592,48 @@ has_run_update_stats = False
 
 # Function to handle the submission of the form
 def submit_form():
-    global id_name, id_email  # If they're used globally; adjust according to your application's structure
+    global id_name, id_email
     id_name = name_entry.get()
     id_email = email_entry.get()
-    # Capture the current states of the checkboxes
     id_uuid_ok_str = str(id_uuid_ok.get())
     id_personalinfo_ok_str = str(id_personalinfo_ok.get())
-    # Update the config file with these values
     update_config_with_values(config_file, 
                               id_uuid=id_uuid, 
                               id_name=id_name, 
                               id_email=id_email, 
                               id_uuid_ok=id_uuid_ok_str, 
                               id_personalinfo_ok=id_personalinfo_ok_str)
-    
 
-# Check and populate id_uuid if empty
-if not id_uuid:  # if id_uuid is empty
-    id_uuid = str(uuid.uuid4())  # Generate a new UUID
-    update_config_with_values(config_file, id_uuid=id_uuid)  # Update the config file manually to preserve structure and comments
+# Check and populate id_uuid / dates
+if not id_uuid:
+    id_uuid = str(uuid.uuid4())
+    update_config_with_values(config_file, id_uuid=id_uuid)
 
-if not log_date_initiated:  # if log_date_initiated is empty
+if not log_date_initiated:
     log_date_initiated=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     update_config_with_values(config_file, log_date_initiated=log_date_initiated)
 
-if not log_date_lastupdate:  # if log_date_lastupdate is empty
+if not log_date_lastupdate:
     log_date_lastupdate=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     update_config_with_values(config_file, log_date_lastupdate=log_date_lastupdate)
 
 now = datetime.now()
 log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:%S")
 
-# Log if the number of hours exceeds hour limit (hours =xx).
+# Log if the number of hours exceeds hour limit
 if ((now - log_date_lastupdate_dt) > timedelta(hours=1)) and (id_uuid_ok_value == True):
-    # Parameters for store_logs_online function should be provided accordingly
-    storing_usage_message = store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_version, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets, mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines, mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines)
+    storing_usage_message = store_logs_online(
+        log_host, log_token, log_org, log_bucket, id_uuid,
+        mesa_version, mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets,
+        mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines,
+        mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines
+    )
     log_to_logfile(storing_usage_message)
 
     storing_user_message = store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email )
     log_to_logfile(storing_user_message)
-   
-    # Update log_date_lastupdate with the current datetime, formatted as a string
     update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
-    
+
 # Check and create folders at the beginning
 check_and_create_folders()
 
@@ -685,7 +642,7 @@ if __name__ == "__main__":
     # Setup the main Tkinter window
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title("MESA 5")
-    # Make icon robust both dev/frozen (non-breaking if missing)
+    # Icon (robust dev/frozen)
     try:
         root.iconbitmap(resource_path("system_resources", "mesa.ico"))
     except Exception:
@@ -716,7 +673,7 @@ if __name__ == "__main__":
 
     main_frame.grid_columnconfigure(0, minsize=220)  # Set minimum size for left panel
 
-    # Add buttons to left panel with spacing between buttons
+    # Buttons
     import_assets_btn       = ttk.Button(left_panel, text="Import", command=lambda: import_assets(gpkg_file), width=button_width, bootstyle=PRIMARY)
     import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
     
@@ -735,11 +692,9 @@ if __name__ == "__main__":
     admin_lines_btn         = ttk.Button(left_panel, text="Segments", command=admin_lines, width=button_width)
     admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
 
-    # --- Maps Overview button ---
     maps_overview_btn       = ttk.Button(left_panel, text="Maps overview", command=open_maps_overview, width=button_width, bootstyle=PRIMARY)
     maps_overview_btn.grid(row=6, column=0, padx=button_padx, pady=button_pady)
 
-    # --- New button for Present files (02_present_files.py) ---
     present_files_btn       = ttk.Button(left_panel, text="Report engine", command=open_present_files, width=button_width)
     present_files_btn.grid(row=7, column=0, padx=button_padx, pady=button_pady)
 
@@ -751,67 +706,62 @@ if __name__ == "__main__":
     right_panel = ttk.Frame(main_frame)
     right_panel.grid(row=0, column=2, sticky="nsew", padx=5)
 
-    # Configure the rows and columns within the right panel where widgets will be placed
-    right_panel.grid_rowconfigure(0, weight=1)  # Adjust row for info_labelframe to grow
-    right_panel.grid_columnconfigure(0, weight=1)  # Allow the column to grow
+    right_panel.grid_rowconfigure(0, weight=1)   # info_labelframe grows
+    right_panel.grid_columnconfigure(0, weight=1)
 
-    # Info label frame (add this above the exit button)
+    # Info label frame
     info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
     info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-    info_labelframe.grid_columnconfigure(0, weight=1)  # For status symbols
-    info_labelframe.grid_columnconfigure(1, weight=3)  # For messages
-    info_labelframe.grid_columnconfigure(2, weight=2)  # For links
+    info_labelframe.grid_columnconfigure(0, weight=1)
+    info_labelframe.grid_columnconfigure(1, weight=3)
+    info_labelframe.grid_columnconfigure(2, weight=2)
     
     update_stats(gpkg_file)
-
     log_to_logfile("User interface, statistics updated.")
 
-
     ###################################################
-    # About frame set up
+    # About frame (PLAIN TEXT — no HTML)
     #
-    # Adjusted Content for About Page
-    about_frame = ttk.Frame(root)  # This frame is for the alternate screen
-
+    about_frame = ttk.Frame(root)  # alternate screen
     increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
 
-    # Create a HtmlFrame widget
-    html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
+    about_text = (
+        "Welcome to the MESA tool. The tool is based on a method developed by "
+        "UNEP-WCMC and the Norwegian Environment Agency. You are now in the quick "
+        "guide for our tool. Our aim with this page is to give you some basic "
+        "information about how to use the system.\n\n"
+        "Why this system? We built MESA to streamline and enhance sensitivity analysis "
+        "by applying the MESA method, which is typically complex and prone to errors "
+        "when done manually in GIS tools. The software allows users to perform this analysis "
+        "faster and with greater accuracy, reducing the likelihood of mistakes. It also aims "
+        "to improve user experience by automating the process and making it more accessible.\n\n"
+        "How to use this system? Information about using this system is available on a GitHub website.\n"
+        "Using MESA wiki — https://github.com/ragnvald/mesa/wiki\n\n"
+        "Who built it? This is the fourth generation of the tool. This version is the result of several "
+        "workshops and consultations with partners in Ghana, Tanzania, Uganda, Mozambique, and Kenya. "
+        "Important contributions were made by individuals at UNEP-WCMC and the Norwegian Environment Agency. "
+        "Lead programmer for this version was Ragnvald Larsen — https://www.linkedin.com/in/ragnvald/"
+    )
 
-    # Define the path to your HTML content file
-    if hasattr(sys, '_MEIPASS'):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
+    about_box = ttk.LabelFrame(about_frame, text="About MESA", bootstyle='secondary')
+    about_box.pack(side='top', fill='both', expand=True, padx=10, pady=10)
+    add_text_to_labelframe(about_box, about_text)
 
-    file_path = os.path.join(base_path, "system_resources/userguide.html")
-
-    # Read the HTML content from the file
-    with open(file_path, "r", encoding="utf-8") as file:
-        html_content = file.read()
-
-    html_frame.load_html(html_content)
-
-    # Pack the HtmlFrame into the ttkbootstrap window
-    html_frame.pack(fill=BOTH, expand=YES)
-
+   
 
     ###################################################
     # Registration frame set up
     #
-
-    # Setup for the registration frame (assuming root is your Tk window)
     registration_frame = ttk.Frame(root)
     registration_frame.pack(fill='both', expand=True)
 
     id_uuid_ok = tk.BooleanVar(value=id_uuid_ok_value)
     id_personalinfo_ok = tk.BooleanVar(value=id_personalinfo_ok_value)
 
-    # About label frame
     about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
     about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-    mesa_text = ("MESA 4.1 is open source software. It is available under the "
+    mesa_text = ("MESA is open source software. It is available under the "
                 "GNU GPLv3 license. This means you can use the software for free."
                 "\n\n"
                 "In MESA, a unique random identifier (UUID) is automatically generated. "
@@ -829,24 +779,20 @@ if __name__ == "__main__":
 
     add_text_to_labelframe(about_labelframe, mesa_text)
 
-    # Create a new frame for the grid layout within registration_frame
+    # Registration grid
     grid_frame = ttk.Frame(registration_frame)
     grid_frame.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-    # Labels in the first column
-    # Checkboxes in the first column
     uuid_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok)
     uuid_ok_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
     personalinfo_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok)
     personalinfo_ok_checkbox.grid(row=1, column=0, padx=10, pady=5, sticky="w")
 
-    # Labels for UUID, Name, Email in the second column
     ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
     ttk.Label(grid_frame, text="Name:").grid(row=1, column=1, padx=10, pady=5, sticky="w")
     ttk.Label(grid_frame, text="Email:").grid(row=2, column=1, padx=10, pady=5, sticky="w")
 
-    # UUID value, Name and Email entries in the third column
     ttk.Label(grid_frame, text=id_uuid).grid(row=0, column=2, padx=10, pady=5, sticky="w")
         
     name_entry = ttk.Entry(grid_frame)
@@ -857,70 +803,54 @@ if __name__ == "__main__":
     email_entry.grid(row=2, column=2, padx=10, pady=5, sticky="we")
     email_entry.insert(0, id_email)
 
-    # Submit button in the fourth column's bottom cell
     submit_btn = ttk.Button(grid_frame, text="Save", command=submit_form, bootstyle=SUCCESS)
     submit_btn.grid(row=2, column=3, padx=10, pady=5, sticky="e")
 
-    # Optional: Configure the grid_frame column 2 (Entries) to take extra space
     grid_frame.columnconfigure(2, weight=1)
 
-    # Setup for the registration frame (assuming root is your Tk window)
+    # Settings frame
     settings_frame = ttk.Frame(root)
     settings_frame.pack(fill='both', expand=True)
 
-    # About label frame
     about_labelframe = ttk.LabelFrame(settings_frame, text="Settings", bootstyle='info')
     about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
 
-    mesa_text = ("Some of the objects you already have imported or created might need some further adjustments.\nYou may do this by reading up on the below suggestions.")
-
+    mesa_text = ("Some of the objects you already have imported or created might need some further adjustments.\n"
+                 "You may do this by reading up on the below suggestions.")
     add_text_to_labelframe(about_labelframe, mesa_text)
 
-    # Create the bottom frame with grid layout
     grid_frame = ttk.Frame(settings_frame)
     grid_frame.pack(side='top', fill='both', expand=True, padx=20, pady=20)
 
-    # Create buttons and labels manually
-
-    # Edit assets button and label
     edit_polygons_btn = ttk.Button(grid_frame, text="Edit assets", command=edit_assets, bootstyle="primary")
     edit_polygons_btn.grid(row=1, column=0, padx=5, pady=5, sticky='ew')
     edit_polygons_lbl = ttk.Label(grid_frame, text="This is where you can add titles to the different layers you have imported. You may also add a short descriptive text.", wraplength=550)
     edit_polygons_lbl.grid(row=1, column=1, padx=5, pady=5, sticky='w')
 
-    # Edit geocodes button and label
     edit_geocode_btn = ttk.Button(grid_frame, text="Edit geocodes", command=edit_geocodes, bootstyle="primary")
     edit_geocode_btn.grid(row=2, column=0, padx=5, pady=5, sticky='ew')
     edit_geocode_lbl = ttk.Label(grid_frame, text="Geocodes can be grid cells, hexagons or other types of polygons. You may add titles to them here for easier reference later.", wraplength=550)
     edit_geocode_lbl.grid(row=2, column=1, padx=5, pady=5, sticky='w')
 
-    # Edit Lines button and label
     edit_lines_btn = ttk.Button(grid_frame, text="Edit lines", command=edit_lines, bootstyle="primary")
     edit_lines_btn.grid(row=3, column=0, padx=5, pady=5, sticky='ew')
     edit_lines_lbl = ttk.Label(grid_frame, text="Remember to import lines before attempting to edit them. Lines are processed to segments with the parameters length and width. Default values are set when the lines are imported. If you want to do the processing with other segment sizes you may do so here on a per line basis. This is where you can adjust the parameters as well as their names.", wraplength=550)
     edit_lines_lbl.grid(row=3, column=1, padx=5, pady=5, sticky='w')
 
-    # Edit atlas button and label
     edit_atlas_btn = ttk.Button(grid_frame, text="Edit atlas", command=edit_atlas, bootstyle="primary")
     edit_atlas_btn.grid(row=4, column=0, padx=5, pady=5, sticky='ew')
     edit_atlas_lbl = ttk.Label(grid_frame, text="Remember to import or create atlases before attempting to edit them. Atlases are polygons which will be highlighted in the QGIS project file.", wraplength=550)
     edit_atlas_lbl.grid(row=4, column=1, padx=5, pady=5, sticky='w')
 
-
-    # Optional: Configure the grid_frame column 1 (Labels) to take extra space
     grid_frame.columnconfigure(1, weight=1)
-
-    # Optional: Configure the grid_frame column 2 (Entries) to take extra space
     grid_frame.columnconfigure(2, weight=1)
 
-
     ###################################################
-    # Bottom frame in Main Interface for toggling to About Page
+    # Bottom frame for navigation
     #
     bottom_frame_buttons = ttk.Frame(root)
     bottom_frame_buttons.pack(side='bottom', fill='x', padx=10, pady=5)
 
-    # Create buttons for each frame
     main_frame_btn = ttk.Button(bottom_frame_buttons, text="MESA desktop", command=show_main_frame, bootstyle="primary")
     main_frame_btn.pack(side='left', padx=(0, 10))
 
@@ -933,19 +863,15 @@ if __name__ == "__main__":
     registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register...", command=show_registration_frame, bootstyle="primary")
     registration_frame_btn.pack(side='left', padx=(0, 10))
 
-    # Center frame for version label
     center_frame = ttk.Frame(bottom_frame_buttons)
     center_frame.pack(side='left', expand=True, fill='x')
 
     version_label = ttk.Label(center_frame, text=mesa_version, font=("Calibri", 7))
-    version_label.pack(side='left', padx=50, pady=5)  # Adjust side and padding as needed
+    version_label.pack(side='left', padx=50, pady=5)
 
-    # Continue with the Exit button and version label as before
     exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, bootstyle="warning")
-    exit_btn.pack(side='right')  # Assuming `root.destroy` for exiting
+    exit_btn.pack(side='right')
 
     show_main_frame()
-
     root.update_idletasks()
-
     root.mainloop()
