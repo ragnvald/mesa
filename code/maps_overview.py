@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, base64, configparser, locale, sqlite3, threading, json, time
+import os, sys, base64, configparser, locale, sqlite3, threading, json, time, io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 import pandas as pd
@@ -35,10 +35,60 @@ except Exception:
     pass
 
 # ===============================
-# Paths / constants
+# Paths / constants (robust for .py and .exe in tools/)
 # ===============================
 
-APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+def base_dir() -> Path:
+    """Resolve the mesa root folder whether running as .py or frozen .exe in tools/.
+    Searches: original_working_directory (if provided), executable/script folder,
+    current working dir; normalizes tools/system/code to parent; then climbs up
+    a few levels to find a folder containing output/ and input/ or tools/ + config.ini.
+    """
+    candidates = []
+    try:
+        if 'original_working_directory' in globals() and original_working_directory:
+            candidates.append(Path(original_working_directory))
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        if "__file__" in globals():
+            candidates.append(Path(__file__).resolve().parent)
+    candidates.append(Path(os.getcwd()).resolve())
+
+    def normalize(p: Path) -> Path:
+        p = p.resolve()
+        if p.name.lower() in ("tools", "system", "code"):
+            p = p.parent
+        q = p
+        for _ in range(4):
+            if (q / "output").exists() and (q / "input").exists():
+                return q
+            if (q / "tools").exists() and (q / "config.ini").exists():
+                return q
+            q = q.parent
+        return p
+
+    for c in candidates:
+        root = normalize(c)
+        if (root / "tools").exists() or ((root / "output").exists() and (root / "input").exists()):
+            return root
+    return normalize(candidates[0])
+
+# Tame stdio encoding so printing unicode from pywebview handlers is safe on Windows
+try:
+    enc = os.environ.get("PYTHONIOENCODING") or getattr(sys.stdout, "encoding", None) or "utf-8"
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding=enc, errors="replace")
+        sys.stderr.reconfigure(encoding=enc, errors="replace")
+    else:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=enc, errors="replace", line_buffering=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding=enc, errors="replace", line_buffering=True)
+except Exception:
+    pass
+
+APP_DIR = base_dir()
 os.chdir(APP_DIR)
 
 CONFIG_FILE   = APP_DIR / "config.ini"
@@ -61,8 +111,12 @@ STEEL_BLUE       = "#4682B4"
 # Config / colors
 # ===============================
 def read_config(path: str) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
-    cfg.read(path, encoding="utf-8")
+    # Allow # in color hex values; only ';' starts inline comments
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(';',), strict=False)
+    try:
+        cfg.read(path, encoding="utf-8")
+    except Exception:
+        pass
     return cfg
 
 def _safe_hex(s, fb="#BDBDBD"):
@@ -187,7 +241,7 @@ def assets_to_geojson(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> 
             "name_asset_object": row.get("name_asset_object", None),
             "area_km2": area_km2
         }
-        feats.append({"type": "FeatureCollection", "features": feats})
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
 
 def envindex_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
@@ -201,7 +255,7 @@ def envindex_to_geojson(gdf: gpd.GeoDataFrame) -> dict:
             "area_km2": (float(row.get("area_m2", 0.0)) / 1e6) if ("area_m2" in row) else None,
             "geocode_group": row.get("name_gis_geocodegroup", None),
         }
-        feats.append({"type": "FeatureCollection", "features": feats})
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
 
 def totals_to_geojson(gdf: gpd.GeoDataFrame, total_col: str) -> dict:
@@ -214,7 +268,7 @@ def totals_to_geojson(gdf: gpd.GeoDataFrame, total_col: str) -> dict:
             total_col: row.get(total_col, None),
             "geocode_group": row.get("name_gis_geocodegroup", None),
         }
-        feats.append({"type": "FeatureCollection", "features": feats})
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
 
 # --- geodesic area helpers (WGS84) ---
@@ -874,7 +928,7 @@ HTML_TEMPLATE = r"""
 
     <div class="slider">
       <span class="label-sm">Opacity</span>
-      <input id="opacity" type="range" min="10" max="100" value="80">
+      <input id="opacity" type="range" min="0" max="100" value="80">
       <span id="opv" class="label-sm">80%</span>
     </div>
 
