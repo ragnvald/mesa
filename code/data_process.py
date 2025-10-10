@@ -76,6 +76,9 @@ MINIMAP_LOCK = threading.Lock()
 # minimap helper process
 _MAP_PROC = None
 
+# processing worker process (to keep GUI responsive and allow true multiprocessing in frozen builds)
+_PROC = None
+
 # grid meta for minimap
 _GRID_BBOX_MAP: dict[int, list[float]] = {}   # grid_cell -> [S,W,N,E]
 
@@ -400,6 +403,12 @@ def _run_tiles_stream_to_gui(update_btn_state_fn=None, minzoom=None, maxzoom=Non
         try:
             if callable(update_btn_state_fn):
                 update_btn_state_fn()
+        except Exception:
+            pass
+
+        # Tail the shared worker log file into the GUI while the worker runs
+        try:
+            _start_log_tailer(root)
         except Exception:
             pass
 
@@ -1836,6 +1845,185 @@ def open_minimap_window():
     _MAP_PROC.start()
     log_to_gui(log_widget, "Opening minimap (separate process)…")
 
+"""
+"""
+
+# ------------------------------------------------------------
+# Processing worker (separate process) + GUI progress polling
+# ------------------------------------------------------------
+def _processing_worker_entry(cfg_path_str: str) -> None:
+    """Entry point for heavy processing in a separate process.
+    Runs process_all without touching GUI state so child can safely create Pools.
+    """
+    try:
+        # Ensure spawn-friendly bootstrap in child as well
+        import multiprocessing as _mp
+        try:
+            _mp.freeze_support()
+        except Exception:
+            pass
+        try:
+            _mp.set_start_method("spawn", force=False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        process_all(Path(cfg_path_str))
+    except Exception:
+        # Child errors are reflected in status/log files; just exit.
+        pass
+
+def _start_processing_worker(cfg_path: Path) -> None:
+    """Launch processing in a child process so Pools can be used even in frozen GUI runs."""
+    global _PROC
+    ctx = multiprocessing.get_context("spawn")
+    # Important: do NOT daemonize; daemonic processes cannot create child processes (Pools)
+    _PROC = ctx.Process(target=_processing_worker_entry, args=(str(cfg_path),))
+    _PROC.start()
+    try:
+        log_to_gui(log_widget, f"Started processing worker (PID {_PROC.pid})")
+    except Exception:
+        pass
+
+def _poll_progress_periodically(root_obj: tk.Misc, refresh_tiles_fn=None, interval_ms: int = 1000) -> None:
+    """Periodically read the status JSON (same as minimap) and reflect progress in the GUI bar."""
+    def _poll():
+        try:
+            p = _status_path()
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    st = json.load(f)
+                total = int(st.get("chunks_total", 0) or 0)
+                done = int(st.get("done", 0) or 0)
+                phase = (st.get("phase", "") or "").lower()
+                # Map intersect progress to ~35..50% like the worker side uses
+                if total > 0 and phase == "intersect":
+                    pct = 35.0 + (done / max(total, 1)) * 15.0
+                elif phase in ("flatten_pending", "flatten", "writing"):
+                    pct = 80.0
+                elif phase in ("completed", "done"):
+                    pct = 100.0
+                else:
+                    pct = 10.0
+                update_progress(pct)
+        except Exception:
+            pass
+        finally:
+            try:
+                if refresh_tiles_fn is not None:
+                    refresh_tiles_fn()
+            except Exception:
+                pass
+            try:
+                # keep polling while worker is alive; run a few extra ticks after
+                if _PROC is not None and _PROC.is_alive():
+                    root_obj.after(interval_ms, _poll)
+                else:
+                    # one last delayed refresh
+                    root_obj.after(2 * interval_ms, _poll)
+            except Exception:
+                pass
+
+    try:
+        root_obj.after(interval_ms, _poll)
+    except Exception:
+        pass
+
+
+def _start_log_tailer(root_obj: tk.Misc,
+                      log_path: Path | None = None,
+                      interval_ms: int = 750) -> None:
+    """
+    Periodically tail base_dir()/log.txt (written by the worker process) and
+    append new lines to the GUI log widget. This restores live log updates
+    when the heavy processing runs in a separate process.
+    """
+    # Candidate log files: root/log.txt (new) and code/log.txt (legacy)
+    try:
+        root_log = (log_path if isinstance(log_path, Path) else None) or (base_dir() / "log.txt")
+    except Exception:
+        root_log = None
+    try:
+        code_log = base_dir() / "code" / "log.txt"
+    except Exception:
+        code_log = None
+
+    candidates: list[Path] = []
+    if root_log is not None:
+        candidates.append(root_log)
+    if code_log is not None and code_log != root_log:
+        candidates.append(code_log)
+
+    if not candidates:
+        return
+
+    # Start reading from current EOF to avoid dumping old logs
+    state: dict[str, int] = {}
+    for p in candidates:
+        try:
+            state[str(p)] = p.stat().st_size if p.exists() else 0
+        except Exception:
+            state[str(p)] = 0
+
+    def _gui_append(line: str) -> None:
+        try:
+            if log_widget and log_widget.winfo_exists():
+                log_widget.insert(tk.END, line + "\n")
+                log_widget.see(tk.END)
+        except Exception:
+            try:
+                print(line, flush=True)
+            except Exception:
+                pass
+
+    def _tail_once():
+        try:
+            # Read and append any new lines from each candidate file
+            for p in candidates:
+                try:
+                    if not p.exists():
+                        continue
+                    with open(p, "r", encoding="utf-8", errors="replace") as f:
+                        key = str(p)
+                        pos = state.get(key, 0)
+                        try:
+                            f.seek(pos)
+                        except Exception:
+                            pos = 0
+                            f.seek(0)
+                        data = f.read()
+                        state[key] = f.tell()
+                    if data:
+                        for line in data.splitlines():
+                            if line.strip():
+                                _gui_append(line)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            # Keep tailing while worker is alive; a few extra ticks after
+            try:
+                if _PROC is not None and _PROC.is_alive():
+                    root_obj.after(interval_ms, _tail_once)
+                else:
+                    root_obj.after(2 * interval_ms, _tail_once)
+            except Exception:
+                pass
+
+    # Announce attachment once
+    try:
+        for p in candidates:
+            _gui_append(f"[tail] Attached: {p}")
+    except Exception:
+        pass
+    try:
+        _tail_once()
+    except Exception:
+        pass
+
 # ----------------------------
 # Entrypoint (GUI default; headless optional)
 # ----------------------------
@@ -2149,6 +2337,12 @@ if __name__ == "__main__":
     try:
         # Keep backward-compat path for the icon
         ico = (base_dir() / "system_resources" / "mesa.ico")
+        # Tail the shared worker log file into the GUI while the worker runs
+        try:
+            _start_log_tailer(root)
+        except Exception:
+            pass
+
         if ico.exists():
             root.iconbitmap(str(ico))
     except Exception:
@@ -2180,15 +2374,16 @@ if __name__ == "__main__":
     tk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
 
     def _run():
-        process_all(cfg_path)
+        _start_processing_worker(cfg_path)
+        # Kick off periodic GUI polling of the shared status file for progress updates
         try:
-            root.after(0, _refresh_tiles_button_state)
+            _poll_progress_periodically(root, refresh_tiles_fn=lambda: root.after(0, _refresh_tiles_button_state))
         except Exception:
             pass
 
     btn_frame = tk.Frame(left); btn_frame.pack(pady=6)
     tb.Button(btn_frame, text="Process", bootstyle=PRIMARY,
-              command=lambda: threading.Thread(target=_run, daemon=True).start()).pack(side=tk.LEFT, padx=5)
+              command=_run).pack(side=tk.LEFT, padx=5)
     # Raster tiles button (enabled only when eligible)
     tiles_btn = tb.Button(btn_frame, text="Create raster tiles", bootstyle=PRIMARY)
     tiles_btn.pack(side=tk.LEFT, padx=5)
