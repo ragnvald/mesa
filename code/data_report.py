@@ -18,7 +18,11 @@ import matplotlib.colors as mcolors
 import numpy as np
 import argparse
 import os
-import contextily as ctx
+import sys
+try:
+    import contextily as ctx  # optional; heavy deps (rasterio) may be absent in EXE
+except Exception:
+    ctx = None
 from matplotlib.patches import Rectangle
 
 from reportlab.lib.pagesizes import A4
@@ -40,6 +44,7 @@ from ttkbootstrap.constants import PRIMARY, WARNING
 import threading
 from pathlib import Path
 import subprocess
+import io, math, urllib.request
 
 # ---------------- UI / sizing constants ----------------
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
@@ -74,9 +79,76 @@ def config_path(base_dir: str) -> str:
 
 def parquet_dir_from_cfg(base_dir: str, cfg: configparser.ConfigParser) -> str:
     sub = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
-    p = os.path.join(base_dir, sub)
-    os.makedirs(p, exist_ok=True)
-    return p
+    required = ("tbl_asset_object.parquet", "tbl_asset_group.parquet", "tbl_flat.parquet")
+
+    base_path = Path(base_dir)
+    sub_path = Path(sub)
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _register(path: Path):
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(resolved)
+
+    if sub_path.is_absolute():
+        _register(sub_path)
+    else:
+        ancestors = [base_path]
+        ancestors.extend(list(base_path.parents)[:4])
+        for ancestor in ancestors:
+            _register(ancestor / sub_path)
+            _register(ancestor / "code" / sub_path)
+
+    primary = candidates[0] if candidates else (base_path / sub_path)
+    for cand in candidates:
+        if all((cand / req).exists() for req in required):
+            if cand != primary:
+                write_to_log(f"Using parquet folder at {cand}", base_dir)
+            return str(cand)
+
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    if all((primary / req).exists() for req in required):
+        return str(primary)
+
+    write_to_log(f"Expected parquet tables not found; using {primary}", base_dir)
+    return str(primary)
+
+# ---------------- Base dir normalization ----------------
+def normalize_base_dir(path_str: str) -> str:
+    """Return the logical app root for both .py and packaged .exe runs.
+    - If started inside tools/ or system/ or code/, climb to parent.
+    - Then climb up a few levels to find a folder containing 'output' & 'input'
+      or containing 'tools' and 'config.ini'.
+    """
+    try:
+        p = Path(path_str).resolve()
+    except Exception:
+        return path_str
+
+    if p.name.lower() in ("tools", "system", "code"):
+        p = p.parent
+
+    q = p
+    for _ in range(4):
+        try:
+            if (q / "output").exists() and (q / "input").exists():
+                return str(q)
+            if (q / "tools").exists() and (q / "config.ini").exists():
+                return str(q)
+        except Exception:
+            pass
+        q = q.parent
+    return str(p)
 
 # ---------------- Logging ----------------
 def write_to_log(message: str, base_dir: str | None = None):
@@ -160,10 +232,150 @@ def _safe_to_3857(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return g
 
 def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
+    """Add a basemap under current axes.
+    Prefers contextily; if unavailable, fetches OSM Web Mercator tiles and composites them.
+    """
+    # Preferred path: contextily
+    if ctx is not None:
+        try:
+            ctx.add_basemap(ax, crs=f"EPSG:{crs_epsg}", source=ctx.providers.OpenStreetMap.Mapnik)
+            return
+        except Exception as e:
+            write_to_log(f"Basemap via contextily failed, falling back to tiles: {e}", base_dir)
+
+    # Fallback: simple OSM tile fetch/composite in EPSG:3857 only
+    if int(crs_epsg) != 3857:
+        write_to_log("Basemap fallback only supports EPSG:3857; skipping.", base_dir)
+        return
+
     try:
-        ctx.add_basemap(ax, crs=f"EPSG:{crs_epsg}", source=ctx.providers.OpenStreetMap.Mapnik)
+        # Current view in meters (WebMercator)
+        minx, maxx = ax.get_xlim()
+        miny, maxy = ax.get_ylim()
+
+        def merc_to_lonlat(x, y):
+            R = 6378137.0
+            lon = (x / R) * 180.0 / math.pi
+            lat = (2.0 * math.atan(math.exp(y / R)) - math.pi/2.0) * 180.0 / math.pi
+            return lon, lat
+
+        def lonlat_to_tile(lon, lat, z):
+            n = 2 ** z
+            x = int((lon + 180.0) / 360.0 * n)
+            lat = max(-85.05112878, min(85.05112878, float(lat)))
+            lat_rad = math.radians(lat)
+            y = int((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
+            return x, y
+
+        def tile_bounds_lonlat(z, x, y):
+            n = 2.0 ** z
+            minlon = x / n * 360.0 - 180.0
+            maxlon = (x + 1) / n * 360.0 - 180.0
+            def tiley_to_lat(t):
+                Y = t / n
+                lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * Y)))
+                return math.degrees(lat_rad)
+            maxlat = tiley_to_lat(y)
+            minlat = tiley_to_lat(y + 1)
+            return (minlon, minlat, maxlon, maxlat)
+
+        def lonlat_to_merc(lon, lat):
+            R = 6378137.0
+            x = lon * math.pi / 180.0 * R
+            lat = max(-85.05112878, min(85.05112878, float(lat)))
+            y = math.log(math.tan((90.0 + lat) * math.pi / 360.0)) * R
+            return x, y
+
+        # Decide a zoom level based on axis pixel size to keep labels crisp.
+        # Aim for mosaic pixel dims >= 1.5x axes pixels (oversample to reduce blur).
+        bbox = ax.get_window_extent()
+        try:
+            ax_pix_w = int(bbox.width)
+            ax_pix_h = int(bbox.height)
+        except Exception:
+            # Fallback: estimate from figure size
+            ax_pix_w = int(ax.figure.dpi * ax.figure.get_size_inches()[0])
+            ax_pix_h = int(ax.figure.dpi * ax.figure.get_size_inches()[1])
+
+        lon0, lat1 = merc_to_lonlat(minx, maxy)
+        lon1, lat0 = merc_to_lonlat(maxx, miny)
+
+        target_w = max(512, int(ax_pix_w * 1.5))
+        target_h = max(512, int(ax_pix_h * 1.5))
+
+        z = 3
+        for test in range(3, 20):
+            x0, y0 = lonlat_to_tile(lon0, lat0, test)
+            x1, y1 = lonlat_to_tile(lon1, lat1, test)
+            w = (abs(x1 - x0) + 1) * 256
+            h = (abs(y1 - y0) + 1) * 256
+            if w >= target_w and h >= target_h:
+                z = test
+                break
+
+        tile_limit = 400 if getattr(sys, "frozen", False) else 900
+        def _tile_range(z_level):
+            tx0, ty0 = lonlat_to_tile(lon0, lat0, z_level)
+            tx1, ty1 = lonlat_to_tile(lon1, lat1, z_level)
+            return (min(tx0, tx1), max(tx0, tx1), min(ty0, ty1), max(ty0, ty1))
+
+        xmin, xmax, ymin, ymax = _tile_range(z)
+        tile_span = (xmax - xmin + 1) * (ymax - ymin + 1)
+        while tile_span > tile_limit and z > 3:
+            z -= 1
+            xmin, xmax, ymin, ymax = _tile_range(z)
+            tile_span = (xmax - xmin + 1) * (ymax - ymin + 1)
+
+        if tile_span > tile_limit:
+            try:
+                ax.set_facecolor("#f5f5f5")
+            except Exception:
+                pass
+            write_to_log(f"Basemap fallback skipped; tile span too large ({tile_span} tiles @ z{z}).", base_dir)
+            return
+
+        if tile_span > tile_limit * 0.6:
+            write_to_log(f"Basemap fallback using reduced zoom z{z} ({tile_span} tiles).", base_dir)
+
+        TILE = 256
+        W, H = (xmax - xmin + 1) * TILE, (ymax - ymin + 1) * TILE
+
+        mosaic = PILImage.new("RGB", (W, H), (240, 240, 240))
+
+        ua = ("Mozilla/5.0 (compatible; MESA-Report/1.0)")
+        opener = urllib.request.build_opener()
+        opener.addheaders = [("User-Agent", ua)]
+        urllib.request.install_opener(opener)
+
+        def tile_url(z, x, y):
+            return f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+        for xi, x in enumerate(range(xmin, xmax+1)):
+            for yi, y in enumerate(range(ymin, ymax+1)):
+                try:
+                    url = tile_url(z, x, y)
+                    with urllib.request.urlopen(url, timeout=5) as resp:
+                        data = resp.read()
+                    img = PILImage.open(io.BytesIO(data)).convert("RGB")
+                    mosaic.paste(img, (xi*TILE, yi*TILE))
+                except Exception:
+                    # Leave blank on failure
+                    pass
+
+        # Extent of mosaic in Mercator meters (XYZ scheme)
+        west  = tile_bounds_lonlat(z, xmin, ymin)[0]  # minlon of top-left tile
+        north = tile_bounds_lonlat(z, xmin, ymin)[3]  # maxlat of top-left tile
+        east  = tile_bounds_lonlat(z, xmax, ymax)[2]  # maxlon of bottom-right tile
+        south = tile_bounds_lonlat(z, xmax, ymax)[1]  # minlat of bottom-right tile
+
+        lx, north_y = lonlat_to_merc(west,  north)
+        rx, south_y = lonlat_to_merc(east,  south)
+
+        # Show with correct extent; origin='upper' so row 0 is at 'north'
+        ax.imshow(mosaic, extent=[lx, rx, south_y, north_y], origin="upper",
+                  interpolation='bilinear', resample=True)
     except Exception as e:
-        write_to_log(f"Basemap unavailable (offline?): {e}", base_dir)
+        write_to_log(f"Basemap fallback failed: {e}", base_dir)
 
 def _expand_bounds(bounds, pad_ratio=0.08):
     minx, miny, maxx, maxy = bounds
@@ -248,10 +460,11 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
             ax.set_xlim(minx, maxx)
             ax.set_ylim(miny, maxy)
 
-        facecolors = g['sensitivity_code_max'].map(lambda v: palette.get(str(v).upper(), '#BDBDBD'))
-        g.plot(ax=ax, facecolor=facecolors, edgecolor='white', linewidth=0.3, alpha=0.85)
-
+        # Draw basemap first, then polygons on top for clarity
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        facecolors = g['sensitivity_code_max'].map(lambda v: palette.get(str(v).upper(), '#BDBDBD'))
+        g.plot(ax=ax, facecolor=facecolors, edgecolor='white', linewidth=0.3, alpha=0.85, zorder=10)
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -299,10 +512,11 @@ def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
         norm = mcolors.Normalize(vmin=0, vmax=100)
         cmap = mpl_cmaps.get_cmap('YlOrRd')
 
-        colors_arr = cmap(norm(g['env_index'].values))
-        g.plot(ax=ax, color=colors_arr, edgecolor='white', linewidth=0.25, alpha=0.95)
-
+        # Basemap first, colored polygons above
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        colors_arr = cmap(norm(g['env_index'].values))
+        g.plot(ax=ax, color=colors_arr, edgecolor='white', linewidth=0.25, alpha=0.95, zorder=10)
 
         sm = cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
@@ -1141,8 +1355,7 @@ if __name__ == "__main__":
     base_dir = args.original_working_directory
     if not base_dir:
         base_dir = os.getcwd()
-        if os.path.basename(base_dir).lower() == "system":
-            base_dir = os.path.abspath(os.path.join(base_dir, ".."))
+    base_dir = normalize_base_dir(base_dir)
 
     cfg_path = config_path(base_dir)
     cfg = read_config(cfg_path)
