@@ -70,7 +70,7 @@ def resolve_path(rel_path: str) -> str:
     return p_disk_1
 
 # ---------------------------------------------------------------------
-# Config helpers (disk first, then bundled; auto-heal headerless INI)
+# Config helpers (disk alongside EXE; auto-heal headerless INI)
 # ---------------------------------------------------------------------
 def _ensure_default_header_present(path: str):
     try:
@@ -96,12 +96,9 @@ def read_config(abs_or_rel_path: str):
     if os.path.isabs(abs_or_rel_path):
         cfg_path = abs_or_rel_path
     else:
-        # Prefer disk config beside EXE/mesa.py; fallback to bundled
-        disk_cfg = os.path.join(PROJECT_BASE, abs_or_rel_path)
-        if os.path.exists(disk_cfg):
-            cfg_path = disk_cfg
-        else:
-            cfg_path = resolve_path(abs_or_rel_path)
+        cfg_path = os.path.join(PROJECT_BASE, abs_or_rel_path)
+        if not os.path.exists(cfg_path):
+            raise FileNotFoundError(f"Configuration not found: {cfg_path}")
 
     _ensure_default_header_present(cfg_path)
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
@@ -149,6 +146,75 @@ def create_link_icon(parent, url, row, col, padx, pady):
     canvas.create_text(icon_size/2, icon_size/2, text="i", font=('Calibri', 10, 'bold'), fill='blue')
     canvas.bind("<Button-1>", lambda e: webbrowser.open(url))
 
+def _detect_geoparquet_dir() -> str:
+    """Locate the geoparquet folder, preferring the live data set when multiple copies exist."""
+    candidates = [
+        os.path.join(original_working_directory, "output", "geoparquet"),
+        os.path.join(PROJECT_BASE, "output", "geoparquet"),
+        os.path.join(PROJECT_BASE, "code", "output", "geoparquet"),
+    ]
+    if RESOURCE_BASE and RESOURCE_BASE != PROJECT_BASE:
+        candidates.extend([
+            os.path.join(RESOURCE_BASE, "output", "geoparquet"),
+            os.path.join(RESOURCE_BASE, "code", "output", "geoparquet"),
+        ])
+
+    seen = set()
+    unique_candidates = []
+    for path in candidates:
+        ap = os.path.abspath(path)
+        if ap not in seen:
+            seen.add(ap)
+            unique_candidates.append(ap)
+
+    sentinel_files = [
+        "tbl_asset_group.parquet",
+        "tbl_geocode_group.parquet",
+        "tbl_lines_original.parquet",
+        "tbl_flat.parquet",
+        "tbl_segment_flat.parquet",
+    ]
+
+    def score(path: str) -> int:
+        if not os.path.isdir(path):
+            return -1
+        hits = 0
+        for sentinel in sentinel_files:
+            fp = os.path.join(path, sentinel)
+            if os.path.exists(fp):
+                hits += 10
+                continue
+            alt = os.path.join(path, os.path.splitext(sentinel)[0])
+            if os.path.isdir(alt):
+                hits += 10
+        try:
+            extra = sum(
+                1 for entry in os.listdir(path)
+                if entry.lower().endswith(".parquet") and not entry.startswith("__")
+            )
+        except OSError:
+            extra = 0
+        return hits + extra
+
+    best_path = None
+    best_score = -1
+    for candidate in unique_candidates:
+        current = score(candidate)
+        if current > best_score:
+            best_score = current
+            best_path = candidate
+
+    if best_path and best_score >= 0:
+        if unique_candidates and best_path != unique_candidates[0]:
+            log_to_logfile(f"[status] Using geoparquet dir: {best_path}")
+        return best_path
+
+    for candidate in unique_candidates:
+        if os.path.isdir(candidate):
+            return candidate
+
+    return unique_candidates[0] if unique_candidates else os.path.join(PROJECT_BASE, "output", "geoparquet")
+
 # ---------------------------------------------------------------------
 # Status panel (unchanged logic, reads GeoParquet)
 # ---------------------------------------------------------------------
@@ -156,7 +222,7 @@ def update_stats(_unused_gpkg_path):
     for widget in info_labelframe.winfo_children():
         widget.destroy()
 
-    geoparquet_dir = os.path.join(original_working_directory, "output", "geoparquet")
+    geoparquet_dir = _detect_geoparquet_dir()
 
     if not os.path.isdir(geoparquet_dir):
         status_label = ttk.Label(info_labelframe, text='\u26AB', bootstyle='danger')
@@ -481,7 +547,10 @@ def exit_program():
 # Config updaters (preserve layout, ensure [DEFAULT])
 # ---------------------------------------------------------------------
 def update_config_with_values(config_file, **kwargs):
-    cfg_path = config_file if os.path.isabs(config_file) else resolve_path(config_file)
+    if os.path.isabs(config_file):
+        cfg_path = config_file
+    else:
+        cfg_path = os.path.join(PROJECT_BASE, config_file)
     _ensure_default_header_present(cfg_path)
     if not os.path.isfile(cfg_path):
         with open(cfg_path, "w", encoding="utf-8") as f:
@@ -623,12 +692,10 @@ def store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_
 # The directory where data/logs should live (never _MEIPASS)
 original_working_directory = PROJECT_BASE
 
-# Config path: prefer disk override; fallback to bundled
-disk_cfg = os.path.join(PROJECT_BASE, "system", "config.ini")
-if os.path.exists(disk_cfg):
-    config_file = disk_cfg
-else:
-    config_file = resolve_path(os.path.join("system", "config.ini"))
+# Config path: always sit next to mesa.py / mesa.exe
+config_file = os.path.join(PROJECT_BASE, "config.ini")
+if not os.path.exists(config_file):
+    raise FileNotFoundError(f"Configuration not found: {config_file}")
 
 gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
 
