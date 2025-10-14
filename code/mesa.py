@@ -45,8 +45,8 @@ def resource_path(*parts: str) -> str:
 def tool_path(exe_name: str) -> str:
     """
     Locate helper EXE robustly:
-    - dist\\mesa\\tools\\<exe>   (built layout)
-    - _MEIPASS\\tools\\<exe>     (if ever packed inside the EXE)
+    - dist\mesa\tools\<exe>   (built layout)
+    - _MEIPASS\tools\<exe>     (if ever packed inside the EXE)
     """
     paths = [
         os.path.join(app_base_dir(), "tools", exe_name),
@@ -105,11 +105,10 @@ def run_tool(name: str, args: list[str] | None = None, wait: bool = False) -> in
 # -------------------------------
 def read_config(file_name):
     config = configparser.ConfigParser()
-    if hasattr(sys, '_MEIPASS'):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    config.read(os.path.join(base_path, file_name))
+    cfg_path = os.path.join(app_base_dir(), file_name)
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(f"Configuration not found: {cfg_path}")
+    config.read(cfg_path)
     return config
 
 def is_connected(hostname="8.8.8.8", port=53, timeout=3):
