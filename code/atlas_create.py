@@ -21,6 +21,7 @@ import argparse
 import datetime
 import threading
 import configparser
+import math
 from pathlib import Path
 
 import tkinter as tk
@@ -52,6 +53,16 @@ atlas_lon_size_km: float = 10.0
 atlas_lat_size_km: float = 10.0
 atlas_overlap_percent: float = 10.0
 config_file: str = ""  # path used by increment_stat_value
+
+# UI option state
+tile_mode_var = None
+tile_lon_var = None
+tile_lat_var = None
+tile_overlap_var = None
+tile_count_var = None
+tile_tolerance_var = None
+custom_option_entries: list = []
+count_option_entries: list = []
 
 # ----------------------------
 # Base dir / Config helpers
@@ -182,6 +193,22 @@ def update_progress(new_value):
     except Exception:
         pass
 
+def update_tile_mode_ui():
+    """Enable/disable option fields based on the selected tile mode."""
+    mode = tile_mode_var.get() if tile_mode_var is not None else "config"
+    custom_state = tk.NORMAL if mode == "custom" else tk.DISABLED
+    count_state = tk.NORMAL if mode == "count" else tk.DISABLED
+    for widget in custom_option_entries:
+        try:
+            widget.configure(state=custom_state)
+        except Exception:
+            pass
+    for widget in count_option_entries:
+        try:
+            widget.configure(state=count_state)
+        except Exception:
+            pass
+
 # ----------------------------
 # GeoParquet helpers
 # ----------------------------
@@ -308,8 +335,95 @@ def generate_atlas_geometries(tbl_flat, lon_km, lat_km, overlap_pct):
         y += step_y
     return atlas_geometries
 
+def generate_atlas_geometries_by_count(tbl_flat, tile_count: int, tolerance_pct: float):
+    log_to_gui(log_widget, f"Generating atlas geometries for {tile_count} tiles (tolerance {tolerance_pct}%).")
+    if tbl_flat is None or tbl_flat.empty:
+        log_to_gui(log_widget, "No data available to derive atlas extent.")
+        return []
+
+    try:
+        minx, miny, maxx, maxy = tbl_flat.total_bounds
+    except Exception:
+        log_to_gui(log_widget, "Failed to compute bounds from data.")
+        return []
+
+    width = maxx - minx
+    height = maxy - miny
+    if width <= 0:
+        width = 1e-6
+        minx -= width / 2.0
+        maxx += width / 2.0
+    if height <= 0:
+        height = 1e-6
+        miny -= height / 2.0
+        maxy += height / 2.0
+
+    tile_count = max(2, int(tile_count))
+    tolerance_pct = max(0.0, float(tolerance_pct))
+
+    pad_x = width * (tolerance_pct / 100.0) / 2.0
+    pad_y = height * (tolerance_pct / 100.0) / 2.0
+
+    expanded_minx = minx - pad_x
+    expanded_maxx = maxx + pad_x
+    expanded_miny = miny - pad_y
+    expanded_maxy = maxy + pad_y
+
+    total_width = expanded_maxx - expanded_minx
+    total_height = expanded_maxy - expanded_miny
+
+    if total_width <= 0 or total_height <= 0:
+        log_to_gui(log_widget, "Invalid atlas extent after tolerance adjustment.")
+        return []
+
+    ratio = total_width / total_height if total_height > 0 else 1.0
+    ratio = max(ratio, 1e-6)
+
+    cols = max(1, math.ceil(math.sqrt(tile_count * ratio)))
+    rows = max(1, math.ceil(tile_count / cols))
+    while cols * rows < tile_count:
+        rows += 1
+
+    tile_width = total_width / cols
+    tile_height = total_height / rows
+
+    atlas_geometries = []
+    atlas_total = cols * rows
+    log_to_gui(
+        log_widget,
+        f"Tile grid: {cols} columns x {rows} rows (total {atlas_total} tiles). Approx tile size ~{tile_width * 111.0:.2f} x {tile_height * 111.0:.2f} km."
+    )
+
+    id_counter = 1
+    for row in range(rows):
+        y0 = expanded_miny + row * tile_height
+        y1 = expanded_miny + (row + 1) * tile_height
+        if row == rows - 1:
+            y1 = expanded_maxy
+        for col in range(cols):
+            x0 = expanded_minx + col * tile_width
+            x1 = expanded_minx + (col + 1) * tile_width
+            if col == cols - 1:
+                x1 = expanded_maxx
+            geom = box(x0, y0, x1, y1)
+            atlas_geometries.append({
+                'id': id_counter,
+                'name_gis': f'atlas{id_counter:03d}',
+                'title_user': f'Map title for {id_counter:03d}',
+                'geom': geom,
+                'description': '',
+                'image_name_1': '',
+                'image_desc_1': '',
+                'image_name_2': '',
+                'image_desc_2': ''
+            })
+            id_counter += 1
+
+    return atlas_geometries
+
 def main_create_atlas(log_widget_, progress_var_):
-    log_to_gui(log_widget_, "Starting atlas generation (GeoParquet)…")
+
+    log_to_gui(log_widget_, "Starting atlas generation (GeoParquet).")
     update_progress(10)
 
     tbl_flat = read_flat_parquet()
@@ -319,13 +433,72 @@ def main_create_atlas(log_widget_, progress_var_):
         return
 
     update_progress(30)
-    atlas_geometries = generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
+
+    mode = tile_mode_var.get() if tile_mode_var is not None else "config"
+    mode = (mode or "config").lower()
+
+    atlas_geometries = []
+
+    if mode == "custom":
+        try:
+            lon_km = float(tile_lon_var.get())
+            lat_km = float(tile_lat_var.get())
+            overlap = float(tile_overlap_var.get())
+        except Exception:
+            log_to_gui(log_widget_, "Invalid custom tile size values; please enter numeric values.")
+            update_progress(100)
+            return
+        if lon_km <= 0 or lat_km <= 0:
+            log_to_gui(log_widget_, "Tile sizes must be positive numbers.")
+            update_progress(100)
+            return
+        overlap = max(0.0, min(overlap, 90.0))
+        log_to_gui(log_widget_, f"Tile mode: custom size {lon_km} km x {lat_km} km with {overlap}% overlap.")
+        atlas_geometries = generate_atlas_geometries(tbl_flat, lon_km, lat_km, overlap)
+
+    elif mode == "count":
+        if tile_count_var is None:
+            log_to_gui(log_widget_, "Tile count option unavailable in this context.")
+            update_progress(100)
+            return
+        try:
+            requested_tiles = int(tile_count_var.get())
+        except Exception:
+            log_to_gui(log_widget_, "Invalid tile count; please enter an integer value (minimum 2).")
+            update_progress(100)
+            return
+        requested_tiles = max(2, requested_tiles)
+        try:
+            tolerance = float(tile_tolerance_var.get()) if tile_tolerance_var is not None else 0.0
+        except Exception:
+            log_to_gui(log_widget_, "Invalid tolerance percentage; please enter a number.")
+            update_progress(100)
+            return
+        tolerance = max(0.0, tolerance)
+        log_to_gui(log_widget_, f"Tile mode: distribute {requested_tiles} tiles across data extent (tolerance {tolerance}%).")
+        atlas_geometries = generate_atlas_geometries_by_count(tbl_flat, requested_tiles, tolerance)
+        if atlas_geometries:
+            log_to_gui(log_widget_, f"Generated {len(atlas_geometries)} tiles to cover the dataset.")
+
+    else:
+        log_to_gui(
+            log_widget_,
+            f"Tile mode: config defaults ({atlas_lon_size_km} km x {atlas_lat_size_km} km, overlap {atlas_overlap_percent}%)."
+        )
+        atlas_geometries = generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
+
+    if not atlas_geometries:
+        log_to_gui(log_widget_, "No atlas tiles were generated; aborting.")
+        update_progress(100)
+        return
+
     update_progress(60)
 
     updated = filter_and_update_atlas_geometries(atlas_geometries, tbl_flat)
     update_progress(80)
 
     if not updated.empty:
+        log_to_gui(log_widget_, f"Atlas tiles intersecting data: {len(updated)}.")
         write_atlas_parquet(updated)
     else:
         empty = gpd.GeoDataFrame(
@@ -515,6 +688,114 @@ if __name__ == "__main__":
     except Exception:
         pass
 
+    tile_mode_var = tk.StringVar(value="config")
+    tile_lon_var = tk.StringVar(value=f"{atlas_lon_size_km:.2f}")
+    tile_lat_var = tk.StringVar(value=f"{atlas_lat_size_km:.2f}")
+    tile_overlap_var = tk.StringVar(value=f"{atlas_overlap_percent:.2f}")
+    tile_count_var = tk.StringVar(value="4")
+    tile_tolerance_var = tk.StringVar(value="5")
+    custom_option_entries = []
+    count_option_entries = []
+
+    if tb is not None:
+        options_frame = tb.LabelFrame(root, text="Tile generation options", bootstyle="info")
+    else:
+        options_frame = tk.LabelFrame(root, text="Tile generation options")
+    options_frame.pack(padx=10, pady=(10, 4), fill=tk.X)
+
+    if tb is not None:
+        rb_config = tb.Radiobutton(options_frame, text="Use config.ini defaults", variable=tile_mode_var,
+                                   value="config", command=update_tile_mode_ui, bootstyle="secondary")
+    else:
+        rb_config = tk.Radiobutton(options_frame, text="Use config.ini defaults", variable=tile_mode_var,
+                                   value="config", command=update_tile_mode_ui)
+    rb_config.grid(row=0, column=0, columnspan=4, sticky="w")
+
+    if tb is not None:
+        rb_custom = tb.Radiobutton(options_frame, text="Custom tile size (km)", variable=tile_mode_var,
+                                   value="custom", command=update_tile_mode_ui, bootstyle="secondary")
+    else:
+        rb_custom = tk.Radiobutton(options_frame, text="Custom tile size (km)", variable=tile_mode_var,
+                                   value="custom", command=update_tile_mode_ui)
+    rb_custom.grid(row=1, column=0, columnspan=4, sticky="w")
+
+    if tb is not None:
+        lbl_width = tb.Label(options_frame, text="Width (lon km):")
+    else:
+        lbl_width = tk.Label(options_frame, text="Width (lon km):")
+    lbl_width.grid(row=2, column=0, sticky="w", padx=(20, 4))
+
+    entry_lon = (tb.Entry(options_frame, textvariable=tile_lon_var, width=8)
+                 if tb is not None else tk.Entry(options_frame, textvariable=tile_lon_var, width=8))
+    entry_lon.grid(row=2, column=1, sticky="w")
+
+    if tb is not None:
+        lbl_height = tb.Label(options_frame, text="Height (lat km):")
+    else:
+        lbl_height = tk.Label(options_frame, text="Height (lat km):")
+    lbl_height.grid(row=2, column=2, sticky="w", padx=(10, 4))
+
+    entry_lat = (tb.Entry(options_frame, textvariable=tile_lat_var, width=8)
+                 if tb is not None else tk.Entry(options_frame, textvariable=tile_lat_var, width=8))
+    entry_lat.grid(row=2, column=3, sticky="w")
+
+    if tb is not None:
+        lbl_overlap = tb.Label(options_frame, text="Overlap % (between custom tiles):")
+    else:
+        lbl_overlap = tk.Label(options_frame, text="Overlap % (between custom tiles):")
+    lbl_overlap.grid(row=3, column=0, sticky="w", padx=(20, 4))
+
+    entry_overlap = (tb.Entry(options_frame, textvariable=tile_overlap_var, width=8)
+                     if tb is not None else tk.Entry(options_frame, textvariable=tile_overlap_var, width=8))
+    entry_overlap.grid(row=3, column=1, sticky="w")
+    custom_option_entries.extend([entry_lon, entry_lat, entry_overlap])
+
+    if tb is not None:
+        rb_count = tb.Radiobutton(options_frame, text="Distribute fixed number of tiles", variable=tile_mode_var,
+                                  value="count", command=update_tile_mode_ui, bootstyle="secondary")
+    else:
+        rb_count = tk.Radiobutton(options_frame, text="Distribute fixed number of tiles", variable=tile_mode_var,
+                                  value="count", command=update_tile_mode_ui)
+    rb_count.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+    if tb is not None:
+        lbl_tiles = tb.Label(options_frame, text="Tiles:")
+    else:
+        lbl_tiles = tk.Label(options_frame, text="Tiles:")
+    lbl_tiles.grid(row=5, column=0, sticky="w", padx=(20, 4))
+
+    entry_count = (tb.Entry(options_frame, textvariable=tile_count_var, width=8)
+                   if tb is not None else tk.Entry(options_frame, textvariable=tile_count_var, width=8))
+    entry_count.grid(row=5, column=1, sticky="w")
+
+    if tb is not None:
+        lbl_tol = tb.Label(options_frame, text="Padding % (expands extent):")
+    else:
+        lbl_tol = tk.Label(options_frame, text="Padding % (expands extent):")
+    lbl_tol.grid(row=5, column=2, sticky="w", padx=(10, 4))
+
+    entry_tol = (tb.Entry(options_frame, textvariable=tile_tolerance_var, width=8)
+                 if tb is not None else tk.Entry(options_frame, textvariable=tile_tolerance_var, width=8))
+    entry_tol.grid(row=5, column=3, sticky="w")
+    count_option_entries.extend([entry_count, entry_tol])
+
+    if tb is not None:
+        note_label = tb.Label(
+            options_frame,
+            text="Overlap applies to custom tiles; padding expands the extent for tile-count mode.",
+            bootstyle="secondary"
+        )
+    else:
+        note_label = tk.Label(
+            options_frame,
+            text="Overlap applies to custom tiles; padding expands the extent for tile-count mode.",
+            font=("Segoe UI", 9), fg="#555555"
+        )
+    note_label.grid(row=6, column=0, columnspan=4, sticky="w", padx=(20, 0), pady=(4, 0))
+
+    tile_mode_var.trace_add("write", lambda *args: update_tile_mode_ui())
+    update_tile_mode_ui()
+
     # Log widget
     log_widget = scrolledtext.ScrolledText(root, height=10)
     log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
@@ -534,7 +815,7 @@ if __name__ == "__main__":
 
     # Info text
     info_label_text = ("Import or generate atlas geometries (GeoParquet only).\n"
-                       "Frame size set in config.ini. Previous atlas (tbl_atlas.parquet) will be replaced.")
+                       "Choose a tile generation mode above. Previous atlas (tbl_atlas.parquet) will be replaced.")
     tk.Label(root, text=info_label_text, wraplength=620, justify="left").pack(padx=10, pady=10)
 
     # Buttons
