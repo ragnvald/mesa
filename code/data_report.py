@@ -44,12 +44,14 @@ from ttkbootstrap.constants import PRIMARY, WARNING
 import threading
 from pathlib import Path
 import subprocess
-import io, math, urllib.request
+import io, math, time, urllib.request
 
 # ---------------- UI / sizing constants ----------------
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
 MAX_MAP_CM_HEIGHT = 10.0           # map display cap inside PDF (cm)
 RIBBON_CM_HEIGHT   = 0.6           # ribbon display height inside PDF (cm)
+
+TILE_CACHE_MAX_AGE_DAYS = 30       # discard cached OSM tiles older than this (<=0 keeps forever)
 
 # ---------------- GUI / globals ----------------
 log_widget = None
@@ -699,6 +701,53 @@ def _safe_to_3857(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             pass
     return g
 
+def _tile_cache_root(base_dir: str | None) -> Path:
+    """
+    Resolve the cache directory used for XYZ tiles. Defaults to <base>/output/tile_cache.
+    """
+    try:
+        base = Path(base_dir) if base_dir else Path.cwd()
+    except Exception:
+        base = Path.cwd()
+    cache = base / "output" / "tile_cache"
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return cache
+
+def _load_cached_tile(cache_path: Path):
+    if not cache_path.exists():
+        return None
+    if TILE_CACHE_MAX_AGE_DAYS > 0:
+        try:
+            age = time.time() - cache_path.stat().st_mtime
+            if age > TILE_CACHE_MAX_AGE_DAYS * 86400:
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            return None
+    try:
+        with PILImage.open(cache_path) as pil_img:
+            return pil_img.convert("RGB")
+    except Exception:
+        try:
+            cache_path.unlink()
+        except Exception:
+            pass
+        return None
+
+def _save_tile_to_cache(cache_path: Path, data: bytes) -> None:
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            f.write(data)
+    except Exception:
+        pass
+
 def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
     """Add a basemap under current axes.
     Prefers contextily; if unavailable, fetches OSM Web Mercator tiles and composites them.
@@ -818,17 +867,34 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
         def tile_url(z, x, y):
             return f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
+        cache_root = _tile_cache_root(base_dir)
+        cache_hits = 0
+        fetched = 0
+
         for xi, x in enumerate(range(xmin, xmax+1)):
             for yi, y in enumerate(range(ymin, ymax+1)):
-                try:
-                    url = tile_url(z, x, y)
-                    with urllib.request.urlopen(url, timeout=5) as resp:
-                        data = resp.read()
-                    img = PILImage.open(io.BytesIO(data)).convert("RGB")
+                cache_path = cache_root / str(z) / str(x) / f"{y}.png"
+                img = _load_cached_tile(cache_path)
+                if img is not None:
+                    cache_hits += 1
+                else:
+                    try:
+                        url = tile_url(z, x, y)
+                        with urllib.request.urlopen(url, timeout=5) as resp:
+                            data = resp.read()
+                        img = PILImage.open(io.BytesIO(data)).convert("RGB")
+                        _save_tile_to_cache(cache_path, data)
+                        fetched += 1
+                    except Exception:
+                        img = None
+                if img is not None:
                     mosaic.paste(img, (xi*TILE, yi*TILE))
-                except Exception:
-                    # Leave blank on failure
-                    pass
+
+        if (cache_hits or fetched) and base_dir:
+            try:
+                write_to_log(f"Basemap tiles z{z}: {cache_hits} cached, {fetched} fetched ({tile_span} total).", base_dir)
+            except Exception:
+                pass
 
         # Extent of mosaic in Mercator meters (XYZ scheme)
         west  = tile_bounds_lonlat(z, xmin, ymin)[0]  # minlon of top-left tile
