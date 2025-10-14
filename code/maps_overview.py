@@ -60,14 +60,23 @@ def base_dir() -> Path:
     def normalize(p: Path) -> Path:
         p = p.resolve()
         if p.name.lower() in ("tools", "system", "code"):
-            p = p.parent
+            if not ((p / "config.ini").exists() or (p / "output").exists()):
+                p = p.parent
         q = p
         for _ in range(4):
             if (q / "output").exists() and (q / "input").exists():
                 return q
             if (q / "tools").exists() and (q / "config.ini").exists():
                 return q
+            code_candidate = q / "code"
+            if code_candidate.exists() and (code_candidate / "config.ini").exists():
+                return code_candidate
             q = q.parent
+        if (p / "config.ini").exists():
+            return p
+        code_alt = p / "code"
+        if code_alt.exists() and (code_alt / "config.ini").exists():
+            return code_alt
         return p
 
     for c in candidates:
