@@ -57,6 +57,318 @@ progress_var = None
 progress_label = None
 last_report_path = None
 link_var = None  # hyperlink label StringVar
+report_mode_var = None  # radio button selection for report detail level
+atlas_geocode_var = None  # Combobox selection for atlas geocode group
+_atlas_geocode_choices: list[str] = []  # cached list for GUI
+
+SENSITIVITY_ORDER = ['A', 'B', 'C', 'D', 'E']
+SENSITIVITY_UNKNOWN_COLOR = "#FF00F2"
+_SENSITIVITY_NUMERIC_RANGES: list[tuple[str, float, float]] = []
+
+class ReportEngine:
+    """
+    Helper responsible for rendering all cartographic artefacts and tracking temporary files.
+    """
+
+    def __init__(self,
+                 base_dir: str,
+                 tmp_dir: str,
+                 palette: dict,
+                 desc: dict,
+                 config_path: str):
+        self.base_dir = base_dir
+        self.tmp_dir = Path(tmp_dir)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.palette = palette
+        self.desc = desc
+        self.config_path = config_path
+        self.generated_paths: list[Path] = []
+
+    def register(self, path: str | Path):
+        self.generated_paths.append(Path(path))
+
+    def make_path(self, *parts: str, suffix: str = ".png") -> str:
+        name = "_".join(parts) + suffix
+        full = self.tmp_dir / name
+        self.register(full)
+        return str(full)
+
+    def cleanup(self):
+        for path in self.generated_paths:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+        self.generated_paths.clear()
+
+    def render_geocode_maps(self,
+                            flat_df: gpd.GeoDataFrame,
+                            set_progress_callback) -> tuple[list, list, list]:
+        pages: list = []
+        intro_table = None
+        groups = []
+        if flat_df.empty or 'name_gis_geocodegroup' not in flat_df.columns:
+            return pages, intro_table, groups
+
+        groups = (flat_df['name_gis_geocodegroup']
+                  .astype('string')
+                  .dropna().unique().tolist())
+        groups = sorted(groups)
+
+        counts = (flat_df.groupby('name_gis_geocodegroup')
+                  .size()
+                  .rename('count')
+                  .reset_index())
+        intro_table = [["Geocode category", "Geocode objects"]]
+        for _, row in counts.sort_values('name_gis_geocodegroup').iterrows():
+            intro_table.append([str(row['name_gis_geocodegroup']), int(row['count'])])
+
+        fixed_bounds_3857 = compute_fixed_bounds_3857(flat_df, base_dir=self.base_dir)
+
+        done = 0
+        for gname in groups:
+            sub = flat_df[flat_df['name_gis_geocodegroup'] == gname].copy()
+
+            safe = _safe_name(gname)
+            sens_png = self.make_path("geocode", safe, "sens")
+            env_png = self.make_path("geocode", safe, "env")
+
+            ok_sens = draw_group_map_sensitivity(sub, gname, self.palette, self.desc, sens_png, fixed_bounds_3857, base_dir=self.base_dir)
+            ok_env = draw_group_map_envindex(sub, gname, env_png, fixed_bounds_3857, base_dir=self.base_dir)
+
+            if ok_sens and _file_ok(sens_png):
+                pages += [
+                    ('heading(2)', f"Geocode group: {gname}"),
+                    ('text', "Sensitivity (A–E palette)."),
+                    ('image', ("Sensitivity map", sens_png)),
+                    ('new_page', None),
+                ]
+            if ok_env and _file_ok(env_png):
+                pages += [
+                    ('heading(2)', f"Geocode group: {gname}"),
+                    ('text', "Environment index (0–100)."),
+                    ('image', ("Environment index map", env_png)),
+                    ('new_page', None),
+                ]
+
+            done += 1
+            if set_progress_callback:
+                set_progress_callback(done, max(1, len(groups)))
+
+        return pages, intro_table, groups
+
+    def render_atlas_maps(self,
+                          flat_df: gpd.GeoDataFrame,
+                          atlas_df: gpd.GeoDataFrame,
+                          atlas_geocode_pref: str | None,
+                          include_atlas_maps: bool,
+                          set_progress_callback) -> tuple[list, str | None]:
+        pages = []
+        atlas_geocode_selected = None
+        if not include_atlas_maps or atlas_df is None or atlas_df.empty:
+            return pages, atlas_geocode_selected
+
+        flat_geos = flat_df if flat_df is not None else gpd.GeoDataFrame()
+        flat_polys_3857 = gpd.GeoDataFrame()
+        if not flat_geos.empty and 'geometry' in flat_geos.columns:
+            flat_polys = flat_geos[flat_geos.geometry.type.isin(['Polygon','MultiPolygon'])].copy()
+            if 'name_gis_geocodegroup' in flat_polys.columns:
+                flat_polys['name_gis_geocodegroup'] = (
+                    flat_polys['name_gis_geocodegroup']
+                    .astype('string')
+                    .str.strip()
+                )
+            flat_polys_3857 = _safe_to_3857(flat_polys)
+
+        atlas_crs = atlas_df.crs
+        atlas_df = atlas_df[atlas_df['geometry'].notna()].copy()
+
+        def _pick_geocode_level():
+            nonlocal atlas_geocode_selected
+            levels = []
+            if not flat_df.empty and 'name_gis_geocodegroup' in flat_df.columns:
+                levels = sorted(flat_df['name_gis_geocodegroup'].astype('string').dropna().unique().tolist())
+            if atlas_geocode_pref and atlas_geocode_pref in levels:
+                atlas_geocode_selected = atlas_geocode_pref
+            elif 'basic_mosaic' in levels:
+                atlas_geocode_selected = 'basic_mosaic'
+            elif levels:
+                atlas_geocode_selected = levels[0]
+
+        _pick_geocode_level()
+
+        polys_for_atlas = flat_polys_3857
+        if atlas_geocode_selected and not flat_polys_3857.empty:
+            if 'name_gis_geocodegroup' in flat_polys_3857.columns:
+                atlas_mask = flat_polys_3857['name_gis_geocodegroup'].astype('string').str.lower() == atlas_geocode_selected.lower()
+                filtered = flat_polys_3857[atlas_mask].copy()
+                if filtered.empty:
+                    write_to_log(f"No atlas polygons found for geocode '{atlas_geocode_selected}'. Using all polygons.", self.base_dir)
+                else:
+                    polys_for_atlas = filtered
+            else:
+                write_to_log("Atlas polygons missing 'name_gis_geocodegroup'; using all polygons.", self.base_dir)
+
+        bounds = compute_fixed_bounds_3857(flat_df, base_dir=self.base_dir)
+        overview_png = self.make_path("atlas", "overview")
+        ok_overview = draw_atlas_overview_map(atlas_df, atlas_crs, polys_for_atlas, overview_png, bounds, base_dir=self.base_dir)
+        if ok_overview and _file_ok(overview_png):
+            text = "Overview of all atlas tiles within the study area."
+            if atlas_geocode_selected:
+                text += f" Geocode level shown: <b>{atlas_geocode_selected}</b>."
+            pages += [
+                ('heading(3)', "Atlas overview"),
+                ('text', text),
+                ('image', ("Atlas tiles overview", overview_png)),
+                ('new_page', None),
+            ]
+
+        atlas_total = len(atlas_df)
+        for idx, tile_row in atlas_df.iterrows():
+            safe_tile = _safe_name(tile_row.get('name_gis') or f"atlas_{idx+1}")
+            sens_png = self.make_path("atlas", safe_tile, "sens")
+            env_png = self.make_path("atlas", safe_tile, "env")
+
+            ok_sens = draw_atlas_map(tile_row, atlas_crs, polys_for_atlas, self.palette, self.desc, sens_png, bounds, base_dir=self.base_dir)
+            ok_env = draw_atlas_map(tile_row, atlas_crs, polys_for_atlas, self.palette, self.desc, env_png, bounds, base_dir=self.base_dir, metric="env_index")
+
+            has_entries = False
+            title_raw = tile_row.get('title_user') or tile_row.get('name_gis') or safe_tile
+            tile_id = tile_row.get('name_gis') or safe_tile
+            heading = f"Atlas tile: {title_raw}" if str(title_raw) == str(tile_id) else f"Atlas tile: {title_raw} ({tile_id})"
+            pages.append(('heading(3)', heading))
+            info_parts = []
+            if isinstance(tile_row.get('description'), str) and tile_row.get('description').strip():
+                info_parts.append(tile_row.get('description').strip())
+            if atlas_geocode_selected:
+                info_parts.append(f"Geocode level: <b>{atlas_geocode_selected}</b>.")
+            info_parts.append("Inset highlights tile within the study area.")
+            pages.append(('text', " ".join(info_parts)))
+
+            if ok_sens and _file_ok(sens_png):
+                pages.append(('text', "Sensitivity (A–E palette)."))
+                pages.append(('image', ("Sensitivity atlas map", sens_png)))
+                has_entries = True
+            if ok_env and _file_ok(env_png):
+                pages.append(('text', "Environment index (0–100)."))
+                pages.append(('image', ("Environment index atlas map", env_png)))
+                has_entries = True
+
+            if has_entries:
+                pages.append(('new_page', None))
+            else:
+                pages.pop()  # remove heading
+                pages.pop()  # remove text
+
+            if set_progress_callback:
+                set_progress_callback(idx+1, max(1, atlas_total))
+
+        return pages, atlas_geocode_selected
+
+    def render_segments(self,
+                        lines_df: gpd.GeoDataFrame,
+                        segments_df: gpd.GeoDataFrame,
+                        palette: dict,
+                        base_dir: str,
+                        set_progress_callback):
+        pages_lines = []
+        log_data = []
+        if (lines_df.empty or segments_df.empty or
+            {'name_gis','segment_id','sensitivity_code_max','sensitivity_code_min'}.issubset(segments_df.columns) is False or
+            'length_m' not in lines_df.columns or 'geometry' not in lines_df.columns):
+            return pages_lines, log_data
+
+        total = len(lines_df)
+        for idx, line in lines_df.iterrows():
+            ln_visible = line['name_gis']
+            ln_safe = _safe_name(ln_visible)
+            length_m = float(line.get('length_m', 0) or 0)
+            length_km = length_m / 1000.0
+            segment_records = sort_segments_numerically(segments_df[segments_df['name_gis'] == ln_visible]).copy()
+
+            if not segment_records.empty:
+                segment_records['__sens_code_max'] = segment_records.apply(
+                    lambda row: _normalize_sensitivity_code(
+                        row.get('sensitivity_code_max'),
+                        row.get('sensitivity_max')
+                    ),
+                    axis=1
+                )
+                segment_records['__sens_code_min'] = segment_records.apply(
+                    lambda row: _normalize_sensitivity_code(
+                        row.get('sensitivity_code_min'),
+                        row.get('sensitivity_min')
+                    ),
+                    axis=1
+                )
+
+            context_img = self.make_path("line", ln_safe, "context")
+            seg_map_max = self.make_path("line", ln_safe, "segments_max")
+            seg_map_min = self.make_path("line", ln_safe, "segments_min")
+
+            ok_context = draw_line_context_map(line, context_img, pad_ratio=1.0, rect_buffer_ratio=0.03, base_dir=base_dir)
+            ok_max = draw_line_segments_map(segments_df, ln_visible, palette, seg_map_max, mode='max', pad_ratio=0.20, base_dir=base_dir)
+            ok_min = draw_line_segments_map(segments_df, ln_visible, palette, seg_map_min, mode='min', pad_ratio=0.20, base_dir=base_dir)
+
+            max_stats_img = self.make_path("line", ln_safe, "max_dist")
+            min_stats_img = self.make_path("line", ln_safe, "min_dist")
+            max_codes = segment_records.get('__sens_code_max', segment_records.get('sensitivity_code_max'))
+            min_codes = segment_records.get('__sens_code_min', segment_records.get('sensitivity_code_min'))
+            if max_codes is None:
+                max_codes = pd.Series(dtype=object)
+            if min_codes is None:
+                min_codes = pd.Series(dtype=object)
+            create_sensitivity_summary(max_codes, palette, max_stats_img)
+            create_sensitivity_summary(min_codes, palette, min_stats_img)
+
+            max_img = self.make_path("line", ln_safe, "max_ribbon")
+            min_img = self.make_path("line", ln_safe, "min_ribbon")
+            create_line_statistic_image(ln_visible, max_codes, palette, length_m, max_img)
+            create_line_statistic_image(ln_visible, min_codes, palette, length_m, min_img)
+
+            first_page = [
+                ('heading(2)', f"Line: {ln_visible}"),
+                ('text', f"This section summarizes sensitivity along the line <b>{ln_visible}</b> "
+                         f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segment_records)}</b>). "
+                         "Below: geographical context and segments maps colored by sensitivity values, "
+                         "followed by the distribution and a ribbon (maximum sensitivity).")
+            ]
+
+            if ok_context and _file_ok(context_img):
+                first_page.append(('image', ("Geographical context", context_img)))
+            if ok_max and _file_ok(seg_map_max):
+                first_page.append(('image', ("Segments colored by maximum sensitivity", seg_map_max)))
+            first_page.append(('image', ("Maximum sensitivity – distribution", max_stats_img)))
+            first_page.append(('text', f"Distance (km): 0 – {length_km/2:.1f} – {length_km:.1f}"))
+            first_page.append(('image_ribbon', ("Maximum sensitivity – along line", max_img)))
+            first_page.append(('new_page', None))
+
+            second_page = [
+                ('heading(2)', f"Line: {ln_visible} (continued)"),
+                ('text', "Minimum sensitivity map, distribution, and ribbon.")
+            ]
+            if ok_min and _file_ok(seg_map_min):
+                second_page.append(('image', ("Segments colored by minimum sensitivity", seg_map_min)))
+            second_page.append(('image', ("Minimum sensitivity – distribution", min_stats_img)))
+            second_page.append(('text', f"Distance (km): 0 – {length_km/2:.1f} – {length_km:.1f}"))
+            second_page.append(('image_ribbon', ("Minimum sensitivity – along line", min_img)))
+            second_page.append(('new_page', None))
+
+            pages_lines += first_page + second_page
+
+            for _, seg in segment_records.iterrows():
+                log_data.append({
+                    'line_name': ln_visible,
+                    'segment_id': seg['segment_id'],
+                    'sensitivity_code_max': seg['sensitivity_code_max'],
+                    'sensitivity_code_min': seg['sensitivity_code_min']
+                })
+
+            if set_progress_callback:
+                set_progress_callback(idx+1, total)
+
+        return pages_lines, log_data
 
 # Primary UI color (Steel Blue by default)
 PRIMARY_HEX = "#4682B4"        # Steel blue
@@ -178,6 +490,49 @@ def _safe_name(name: str) -> str:
     # Windows-safe file name (keep visible name unchanged in titles)
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name))
 
+def _cfg_getboolean(cfg: configparser.ConfigParser,
+                    section: str,
+                    option: str,
+                    default: bool = False) -> bool:
+    """
+    Robust boolean reader for configparser with permissive parsing.
+    Accepts truthy values like '1', 'true', 'yes', 'on'.
+    """
+    try:
+        raw = cfg.get(section, option, fallback=None)
+    except Exception:
+        raw = None
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+def _available_geocode_levels(base_dir: str,
+                              config_file: str) -> list[str]:
+    """
+    Return sorted list of geocode group names available in tbl_flat.
+    Used for GUI combo box population. Falls back to an empty list on failure.
+    """
+    try:
+        cfg = read_config(config_file)
+        gpq_dir = parquet_dir_from_cfg(base_dir, cfg)
+        flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
+        if flat_df.empty or 'name_gis_geocodegroup' not in flat_df.columns:
+            return []
+        levels = (flat_df['name_gis_geocodegroup']
+                  .astype('string')
+                  .dropna()
+                  .unique()
+                  .tolist())
+        return sorted(levels)
+    except Exception as exc:
+        write_to_log(f"Failed to enumerate geocode levels for UI: {exc}", base_dir)
+        return []
+
 def _dpi_for_fig_height(fig_height_in: float, px_cap: int = MAX_MAP_PX_HEIGHT, min_dpi: int = 110, max_dpi: int = 300) -> int:
     """
     Choose a DPI so that fig_height_in * dpi <= px_cap, bounded by min/max dpi.
@@ -191,24 +546,137 @@ def _dpi_for_fig_height(fig_height_in: float, px_cap: int = MAX_MAP_PX_HEIGHT, m
 # ---------------- Palette / descriptions ----------------
 def read_sensitivity_palette_and_desc(file_name: str):
     """
-    Reads color palette and descriptions for A–E from config.ini.
-    Returns: (colors: dict{A..E->hex}, desc: dict{A..E->str})
+    Reads color palette and descriptions for A-E from config.ini.
+    Returns: (colors: dict{A..E->hex, 'UNKNOWN'->hex}, desc: dict{A..E->str})
     """
+    global SENSITIVITY_UNKNOWN_COLOR, _SENSITIVITY_NUMERIC_RANGES
     cfg = configparser.ConfigParser()
     try:
         cfg.read(file_name, encoding="utf-8")
     except Exception:
         pass
+
+    unknown_col = '#BDBDBD'
+    if cfg.has_section('VALID_VALUES'):
+        try:
+            unknown_col = cfg['VALID_VALUES'].get('category_colour_unknown', unknown_col).strip() or unknown_col
+        except Exception:
+            pass
+    SENSITIVITY_UNKNOWN_COLOR = unknown_col
+
+    ranges: list[tuple[str, float, float]] = []
+
+    def _parse_range(range_str: str):
+        try:
+            parts = re.split(r'\s*[-]\s*', range_str.strip())
+            if len(parts) == 2:
+                lo = float(parts[0])
+                hi = float(parts[1])
+                if lo > hi:
+                    lo, hi = hi, lo
+                return lo, hi
+        except Exception:
+            return None
+        return None
+
     colors_map, desc_map = {}, {}
     for code in ['A','B','C','D','E']:
         if cfg.has_section(code):
-            col = cfg[code].get('category_colour', '').strip() or '#BDBDBD'
+            col = cfg[code].get('category_colour', '').strip() or unknown_col
             colors_map[code] = col
             desc_map[code] = cfg[code].get('description', '').strip()
+            range_str = cfg[code].get('range', '').strip()
+            parsed = _parse_range(range_str) if range_str else None
+            if parsed:
+                ranges.append((code, parsed[0], parsed[1]))
         else:
-            colors_map[code] = '#BDBDBD'
+            colors_map[code] = unknown_col
             desc_map[code] = ''
+    colors_map['UNKNOWN'] = unknown_col
+    _SENSITIVITY_NUMERIC_RANGES = ranges
     return colors_map, desc_map
+
+def _normalize_sensitivity_code(code_val, numeric_val):
+    if code_val is not None and not pd.isna(code_val):
+        try:
+            code_str = str(code_val).strip().upper()
+        except Exception:
+            code_str = str(code_val).upper()
+        if code_str in SENSITIVITY_ORDER:
+            return code_str
+    numeric_code = _sensitivity_code_from_numeric(numeric_val)
+    if numeric_code in SENSITIVITY_ORDER:
+        return numeric_code
+    return 'UNKNOWN'
+
+def _prepare_sensitivity_annotations(df: gpd.GeoDataFrame,
+                                     code_column: str,
+                                     numeric_column: str) -> gpd.GeoDataFrame:
+    if df.empty:
+        return df.copy()
+    codes = df.apply(
+        lambda row: _normalize_sensitivity_code(
+            row.get(code_column),
+            row.get(numeric_column)
+        ),
+        axis=1
+    )
+    out = df.copy()
+    out['__sens_code'] = codes.fillna('UNKNOWN')
+    return out
+
+
+def _colors_from_annotations(gdf: gpd.GeoDataFrame,
+                             palette: dict[str, str]) -> pd.Series:
+    """
+    Map normalized sensitivity codes stored in '__sens_code' to palette colors.
+    Falls back to the configured UNKNOWN color when missing.
+    """
+    fallback = palette.get('UNKNOWN', SENSITIVITY_UNKNOWN_COLOR)
+
+    def _lookup(code):
+        if pd.isna(code):
+            return fallback
+        try:
+            key = str(code).strip().upper()
+        except Exception:
+            key = str(code).upper()
+        return palette.get(key, fallback)
+
+    return gdf['__sens_code'].apply(_lookup)
+
+def _sensitivity_code_from_numeric(value: float | int | None) -> str | None:
+    try:
+        if value is None or (isinstance(value, float) and not math.isfinite(value)):
+            return None
+        val = float(value)
+    except Exception:
+        return None
+    for code, lo, hi in _SENSITIVITY_NUMERIC_RANGES:
+        if lo <= val <= hi:
+            return code
+    return None
+
+def _resolve_sensitivity_color(code_value,
+                               numeric_value,
+                               palette: dict[str, str]) -> str:
+    if code_value is not None:
+        try:
+            code_str = str(code_value).strip().upper()
+        except Exception:
+            code_str = str(code_value).upper()
+        if code_str:
+            color = palette.get(code_str)
+            if color:
+                return color
+    numeric_code = _sensitivity_code_from_numeric(numeric_value)
+    if numeric_code:
+        color = palette.get(numeric_code)
+        if color:
+            return color
+    return palette.get('UNKNOWN', SENSITIVITY_UNKNOWN_COLOR)
+
+
 
 # ---------------- Generic plotting utils ----------------
 def _safe_to_3857(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -463,8 +931,19 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
         # Draw basemap first, then polygons on top for clarity
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
 
-        facecolors = g['sensitivity_code_max'].map(lambda v: palette.get(str(v).upper(), '#BDBDBD'))
-        g.plot(ax=ax, facecolor=facecolors, edgecolor='white', linewidth=0.3, alpha=0.85, zorder=10)
+        annotated = _prepare_sensitivity_annotations(g, 'sensitivity_code_max', 'sensitivity_max')
+        if annotated.empty:
+            write_to_log(f"[{group_name}] No sensitivity records to plot.", base_dir)
+            plt.close(fig)
+            return False
+
+        colors = _colors_from_annotations(annotated, palette)
+        annotated.plot(ax=ax,
+                       color=colors,
+                       edgecolor='white',
+                       linewidth=0.3,
+                       alpha=0.95,
+                       zorder=10)
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -529,6 +1008,169 @@ def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
         return True
     except Exception as e:
         write_to_log(f"Env index map failed for {group_name}: {e}", base_dir)
+        plt.close('all')
+        return False
+
+def draw_atlas_map(tile_row: pd.Series,
+                   atlas_crs,
+                   atlas_polys_3857: gpd.GeoDataFrame,
+                   palette: dict,
+                   desc: dict,
+                   out_path: str,
+                   global_bounds_3857=None,
+                   base_dir: str | None = None,
+                   metric: str = "sensitivity") -> bool:
+    """
+    Render a single atlas tile map (sensitivity or env_index) using shared cartography.
+    """
+    try:
+        geom = tile_row.get('geometry', None)
+        tile_name = tile_row.get('name_gis', '?')
+        if geom is None or getattr(geom, "is_empty", True):
+            write_to_log(f"[Atlas {tile_name}] Missing geometry; skipping map.", base_dir)
+            return False
+
+        tile_gdf = gpd.GeoDataFrame([{'geometry': geom}], geometry='geometry', crs=atlas_crs)
+        if tile_gdf.crs is None:
+            tile_gdf.set_crs(4326, inplace=True)
+        tile_3857 = _safe_to_3857(tile_gdf)
+        if tile_3857.empty or tile_3857.geometry.is_empty.all():
+            write_to_log(f"[Atlas {tile_name}] Reprojection failed; skipping map.", base_dir)
+            return False
+
+        tile_bounds = _expand_bounds(tile_3857.total_bounds, pad_ratio=0.05)
+
+        subset = gpd.GeoDataFrame()
+        if atlas_polys_3857 is not None and not atlas_polys_3857.empty:
+            try:
+                mask = atlas_polys_3857.geometry.intersects(tile_3857.iloc[0].geometry)
+                subset = atlas_polys_3857[mask].copy()
+            except Exception as e:
+                write_to_log(f"[Atlas {tile_name}] Intersection failed: {e}", base_dir)
+                subset = gpd.GeoDataFrame()
+
+        fig_h_in = 10.0
+        fig_w_in = 10.0
+        dpi = _dpi_for_fig_height(fig_h_in)
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+        ax.set_xlim(tile_bounds[0], tile_bounds[2])
+        ax.set_ylim(tile_bounds[1], tile_bounds[3])
+
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        metric = (metric or "sensitivity").lower()
+        drew_data = False
+        if metric == "env_index":
+            if subset.empty or "env_index" not in subset.columns:
+                write_to_log(f"[Atlas {tile_name}] env_index missing for atlas map.", base_dir)
+            else:
+                subset = subset.copy()
+                subset["env_index"] = pd.to_numeric(subset["env_index"], errors="coerce")
+                subset = subset[np.isfinite(subset["env_index"])]
+                if subset.empty:
+                    write_to_log(f"[Atlas {tile_name}] env_index has no finite values.", base_dir)
+                else:
+                    norm = mcolors.Normalize(vmin=0, vmax=100)
+                    cmap = mpl_cmaps.get_cmap("YlOrRd")
+                    colors_arr = cmap(norm(subset["env_index"].values))
+                    subset.plot(ax=ax, color=colors_arr, edgecolor="none", linewidth=0.0, alpha=0.95, zorder=10)
+                    drew_data = True
+        else:
+            if not subset.empty and "sensitivity_code_max" in subset.columns:
+                subset_ann = _prepare_sensitivity_annotations(subset, "sensitivity_code_max", "sensitivity_max")
+                if subset_ann.empty:
+                    write_to_log(f"[Atlas {tile_name}] Sensitivity annotations empty.", base_dir)
+                else:
+                    colors = _colors_from_annotations(subset_ann, palette)
+                    subset_ann.plot(ax=ax,
+                                    color=colors,
+                                    edgecolor="none",
+                                    linewidth=0.0,
+                                    alpha=1.0,
+                                    zorder=10)
+                    drew_data = True
+            elif not subset.empty:
+                subset.plot(ax=ax,
+                            color=SENSITIVITY_UNKNOWN_COLOR,
+                            edgecolor="none",
+                            linewidth=0.0,
+                            alpha=1.0,
+                            zorder=10)
+                drew_data = True
+        if not drew_data:
+            plt.close(fig)
+            write_to_log(f"[Atlas {tile_name}] No drawable data for metric '{metric}'.", base_dir)
+            return False
+
+        tile_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.6, zorder=12)
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        write_to_log(f"Atlas map saved: {out_path}", base_dir)
+        return True
+    except Exception as e:
+        write_to_log(f"Atlas map failed for {tile_row.get('name_gis', '?')}: {e}", base_dir)
+        plt.close('all')
+        return False
+
+def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
+                            atlas_crs,
+                            atlas_polys_3857: gpd.GeoDataFrame,
+                            out_path: str,
+                            global_bounds_3857=None,
+                            base_dir: str | None = None) -> bool:
+    """
+    Draw an overview map showing every atlas tile in relation to the full dataset extent.
+    """
+    try:
+        if atlas_df.empty or 'geometry' not in atlas_df.columns:
+            write_to_log("Atlas overview skipped (no geometries).", base_dir)
+            return False
+
+        atlas_gdf = atlas_df.copy()
+        atlas_gdf = atlas_gdf[atlas_gdf['geometry'].notna()]
+        if atlas_gdf.empty:
+            write_to_log("Atlas overview skipped (all geometries empty).", base_dir)
+            return False
+
+        if atlas_crs is not None:
+            try:
+                atlas_gdf = atlas_gdf.set_crs(atlas_crs, allow_override=True)
+            except Exception:
+                pass
+        atlas_3857 = _safe_to_3857(atlas_gdf)
+        if atlas_3857.empty:
+            write_to_log("Atlas overview reprojection failed; skipping.", base_dir)
+            return False
+
+        if global_bounds_3857:
+            bounds = global_bounds_3857
+        else:
+            bounds = _expand_bounds(atlas_3857.total_bounds, pad_ratio=0.08)
+
+        fig_h_in = 10.0
+        fig_w_in = 10.0
+        dpi = _dpi_for_fig_height(fig_h_in)
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+        ax.set_xlim(bounds[0], bounds[2])
+        ax.set_ylim(bounds[1], bounds[3])
+
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        if atlas_polys_3857 is not None and not atlas_polys_3857.empty:
+            atlas_polys_3857.plot(ax=ax, facecolor="#d9d9d9", edgecolor='white',
+                                 linewidth=0.15, alpha=0.5, zorder=8)
+
+        atlas_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.0, alpha=0.9, zorder=12)
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        write_to_log(f"Atlas overview map saved: {out_path}", base_dir)
+        return True
+    except Exception as e:
+        write_to_log(f"Atlas overview map failed: {e}", base_dir)
         plt.close('all')
         return False
 
@@ -633,18 +1275,27 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
 
         polys = segs[segs.geometry.type.isin(['Polygon','MultiPolygon'])]
         lines = segs[segs.geometry.type.isin(['LineString','MultiLineString'])]
+        value_col = 'sensitivity_max' if mode == 'max' else 'sensitivity_min'
 
         if not polys.empty:
-            facecolors = polys[col].astype('string').str.upper().map(lambda v: palette.get(v, '#BDBDBD'))
-            polys.plot(ax=ax, facecolor=facecolors, edgecolor='white', linewidth=0.5, alpha=0.85, zorder=12)
+            polys_ann = _prepare_sensitivity_annotations(polys, col, value_col)
+            colors_polys = _colors_from_annotations(polys_ann, palette)
+            polys_ann.plot(ax=ax,
+                           color=colors_polys,
+                           edgecolor='white',
+                           linewidth=0.4,
+                           alpha=0.95,
+                           zorder=12)
 
         if not lines.empty:
-            colors_l = lines[col].astype('string').str.upper().map(lambda v: palette.get(v, '#BDBDBD'))
+            lines_ann = _prepare_sensitivity_annotations(lines, col, value_col)
+            line_colors = _colors_from_annotations(lines_ann, palette)
+            line_colors_rgba = [mcolors.to_rgba(c, alpha=1.0) for c in line_colors]
             try:
                 lines.plot(ax=ax, color='white', linewidth=4.2, alpha=0.9, zorder=13)
             except Exception:
                 pass
-            lines.plot(ax=ax, color=colors_l, linewidth=2.4, alpha=1.0, zorder=14)
+            lines.plot(ax=ax, color=line_colors_rgba, linewidth=2.4, alpha=1.0, zorder=14)
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -657,7 +1308,7 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
 
 # ---------------- Existing (kept / refined) ----------------
 def get_color_from_code(code, color_codes):
-    return color_codes.get(code, "#BDBDBD")
+    return _resolve_sensitivity_color(code, None, color_codes)
 
 def sort_segments_numerically(segments):
     def extract_number(segment_id):
@@ -711,6 +1362,7 @@ def resize_image(image_path, max_width_px, max_height_px):
 def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
     counts = sensitivity_series.value_counts().reindex(['A','B','C','D','E']).fillna(0)
     total = max(1, len(sensitivity_series))
+    fallback_color = color_codes.get('UNKNOWN', SENSITIVITY_UNKNOWN_COLOR)
 
     fig, (ax_text, ax_bar) = plt.subplots(2, 1, figsize=(10, 1.7), height_ratios=[0.45, 0.55])
     plt.subplots_adjust(hspace=0.15)
@@ -723,12 +1375,112 @@ def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
     left = 0
     for c in ['A','B','C','D','E']:
         w = counts[c] / total
-        ax_bar.barh(0, w, left=left, color=color_codes.get(c, '#BDBDBD'), edgecolor='white')
+        ax_bar.barh(0, w, left=left, color=color_codes.get(c, fallback_color), edgecolor='white')
         left += w
     ax_bar.set_xlim(0, 1); ax_bar.set_ylim(-0.5, 0.5); ax_bar.axis('off')
 
     plt.savefig(output_path, bbox_inches='tight', dpi=110)
     plt.close(fig)
+
+def debug_atlas_sample(base_dir: str,
+                       cfg: configparser.ConfigParser,
+                       palette: dict[str, str],
+                       desc: dict[str, str],
+                       tile_name: str,
+                       geocode_level: str | None = None,
+                       sample_size: int | None = None) -> str | None:
+    """
+    Render a quick atlas sensitivity map for a single tile using an optional
+    subset of polygons. Helpful when debugging palette application.
+    """
+    gpq_dir = parquet_dir_from_cfg(base_dir, cfg)
+    flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
+    if flat_df.empty:
+        write_to_log("debug_atlas_sample: tbl_flat missing or empty.", base_dir)
+        return None
+
+    atlas_path = os.path.join(gpq_dir, "tbl_atlas.parquet")
+    if not os.path.exists(atlas_path):
+        write_to_log("debug_atlas_sample: tbl_atlas.parquet not found.", base_dir)
+        return None
+
+    try:
+        atlas_df = gpd.read_parquet(atlas_path)
+    except Exception as e:
+        write_to_log(f"debug_atlas_sample: failed to read tbl_atlas ({e})", base_dir)
+        return None
+
+    if atlas_df.empty or 'geometry' not in atlas_df.columns:
+        write_to_log("debug_atlas_sample: atlas table empty or missing geometry.", base_dir)
+        return None
+
+    tile_row = atlas_df[atlas_df['name_gis'] == tile_name]
+    if tile_row.empty:
+        write_to_log(f"debug_atlas_sample: tile '{tile_name}' not found in atlas.", base_dir)
+        return None
+    tile_row = tile_row.iloc[0]
+
+    flat_polys = flat_df[flat_df.geometry.type.isin(['Polygon','MultiPolygon'])].copy()
+    if flat_polys.empty:
+        write_to_log("debug_atlas_sample: no polygon geometries in tbl_flat.", base_dir)
+        return None
+
+    if 'name_gis_geocodegroup' in flat_polys.columns:
+        flat_polys['name_gis_geocodegroup'] = (
+            flat_polys['name_gis_geocodegroup']
+            .astype('string')
+            .str.strip()
+        )
+    else:
+        geocode_level = None  # cannot filter by level if column missing
+
+    if geocode_level:
+        mask_lvl = flat_polys['name_gis_geocodegroup'].astype('string').str.lower() == geocode_level.lower()
+        filtered = flat_polys[mask_lvl].copy()
+        if filtered.empty:
+            write_to_log(f"debug_atlas_sample: geocode '{geocode_level}' produced no polygons; using full set.", base_dir)
+        else:
+            flat_polys = filtered
+
+    flat_polys_3857 = _safe_to_3857(flat_polys)
+    if flat_polys_3857.empty:
+        write_to_log("debug_atlas_sample: reprojection yielded empty polygon set.", base_dir)
+        return None
+
+    tile_gdf = gpd.GeoDataFrame([tile_row], geometry='geometry', crs=atlas_df.crs)
+    tile_3857 = _safe_to_3857(tile_gdf)
+    if tile_3857.empty or tile_3857.geometry.is_empty.all():
+        write_to_log(f"debug_atlas_sample: tile '{tile_name}' reprojection failed.", base_dir)
+        return None
+
+    try:
+        intersects_mask = flat_polys_3857.geometry.intersects(tile_3857.iloc[0].geometry)
+    except Exception as e:
+        write_to_log(f"debug_atlas_sample: intersection failed ({e}).", base_dir)
+        return None
+
+    subset = flat_polys_3857[intersects_mask].copy()
+    if subset.empty:
+        write_to_log(f"debug_atlas_sample: no polygons intersect tile '{tile_name}'.", base_dir)
+        return None
+
+    if sample_size and sample_size > 0 and len(subset) > sample_size:
+        subset = subset.sample(sample_size, random_state=0)
+        write_to_log(f"debug_atlas_sample: down-sampled to {len(subset)} polygons.", base_dir)
+    else:
+        write_to_log(f"debug_atlas_sample: using {len(subset)} polygons.", base_dir)
+
+    counts = _prepare_sensitivity_annotations(subset, 'sensitivity_code_max', 'sensitivity_max')['__sens_code'].value_counts(dropna=False)
+    write_to_log(f"debug_atlas_sample sensitivity distribution: {counts.to_dict()}", base_dir)
+
+    bounds = compute_fixed_bounds_3857(flat_df, base_dir=base_dir)
+    out_path = os.path.join(base_dir, "output", "tmp", f"debug_atlas_{_safe_name(tile_name)}.png")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    ok = draw_atlas_map(tile_row, atlas_df.crs, subset, palette, desc, out_path, bounds, base_dir=base_dir)
+    if ok:
+        write_to_log(f"debug_atlas_sample: saved {out_path}", base_dir)
+        return out_path
+    return None
 
 def fetch_asset_group_statistics(asset_group_df: gpd.GeoDataFrame, asset_object_df: gpd.GeoDataFrame):
     """
@@ -1032,10 +1784,25 @@ def set_progress(pct: float, message: str | None = None):
 def generate_report(base_dir: str,
                     config_file: str,
                     palette_A2E: dict,
-                    desc_A2E: dict):
+                    desc_A2E: dict,
+                    report_mode: str | None = None,
+                    atlas_geocode_level: str | None = None):
+    engine: ReportEngine | None = None
     try:
         set_progress(3, "Initializing report generation …")
         cfg       = read_config(config_file)
+        include_atlas_cfg = _cfg_getboolean(cfg, 'DEFAULT', 'report_include_atlas_maps', default=False)
+        if report_mode is None:
+            include_atlas_maps = include_atlas_cfg
+        else:
+            include_atlas_maps = (str(report_mode).lower() == "detailed")
+        atlas_geocode_pref = (atlas_geocode_level or
+                              cfg['DEFAULT'].get('atlas_report_geocode_level', '') or '').strip()
+        atlas_geocode_selected: str | None = None
+        write_to_log(f"Report mode selected: {'Detailed (atlas included)' if include_atlas_maps else 'General maps only'}", base_dir)
+        if include_atlas_maps:
+            if atlas_geocode_pref:
+                write_to_log(f"Atlas geocode preference: {atlas_geocode_pref}", base_dir)
         gpq_dir   = parquet_dir_from_cfg(base_dir, cfg)
         tmp_dir   = os.path.join(base_dir, 'output', 'tmp')
         os.makedirs(tmp_dir, exist_ok=True)
@@ -1064,145 +1831,65 @@ def generate_report(base_dir: str,
         export_to_excel(ag_stats_df, ag_stats_xlsx)
         set_progress(22, "Asset stats ready.")
 
-        # ---- Lines & segments (grouped per line with context & segments maps) ----
+        flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
+                # ---- Lines & segments (grouped per line with context & segments maps) ----
         lines_df, segments_df = fetch_lines_and_segments(gpq_dir)
-        pages_lines = []
-        if (not lines_df.empty and not segments_df.empty and
-            {'name_gis','segment_id','sensitivity_code_max','sensitivity_code_min'}.issubset(segments_df.columns) and
-            'length_m' in lines_df.columns and 'name_gis' in lines_df.columns and 'geometry' in lines_df.columns):
+        engine = ReportEngine(base_dir, tmp_dir, palette_A2E, desc_A2E, config_file)
 
-            log_data = []
-            for _, line in lines_df.iterrows():
-                ln_visible = line['name_gis']
-                ln_safe = _safe_name(ln_visible)
-                length_m = float(line.get('length_m', 0) or 0)
-                length_km = length_m / 1000.0
-                segs = sort_segments_numerically(segments_df[segments_df['name_gis']==ln_visible])
+        def _progress_segments(done: int, total: int):
+            set_progress(30 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
 
-                # Context & segments maps
-                context_img  = os.path.join(tmp_dir, f"{ln_safe}_context.png")
-                seg_map_max  = os.path.join(tmp_dir, f"{ln_safe}_segments_max.png")
-                seg_map_min  = os.path.join(tmp_dir, f"{ln_safe}_segments_min.png")
+        pages_lines, log_data = engine.render_segments(lines_df, segments_df, palette_A2E, base_dir, _progress_segments)
 
-                ok_context = draw_line_context_map(line, context_img, pad_ratio=1.0, rect_buffer_ratio=0.03, base_dir=base_dir)
-                ok_max     = draw_line_segments_map(segments_df, ln_visible, palette_A2E, seg_map_max, mode='max', pad_ratio=0.20, base_dir=base_dir)
-                ok_min     = draw_line_segments_map(segments_df, ln_visible, palette_A2E, seg_map_min, mode='min', pad_ratio=0.20, base_dir=base_dir)
-
-                # summaries
-                max_stats_img = os.path.join(tmp_dir, f"{ln_safe}_max_dist.png")
-                min_stats_img = os.path.join(tmp_dir, f"{ln_safe}_min_dist.png")
-                create_sensitivity_summary(segs['sensitivity_code_max'], palette_A2E, max_stats_img)
-                create_sensitivity_summary(segs['sensitivity_code_min'], palette_A2E, min_stats_img)
-
-                # ribbons (identical canvas)
-                max_img = os.path.join(tmp_dir, f"{ln_safe}_max_ribbon.png")
-                min_img = os.path.join(tmp_dir, f"{ln_safe}_min_ribbon.png")
-                create_line_statistic_image(ln_visible, segs['sensitivity_code_max'], palette_A2E, length_m, max_img)
-                create_line_statistic_image(ln_visible, segs['sensitivity_code_min'], palette_A2E, length_m, min_img)
-
-                # GROUPED presentation per line (descriptions as text/headings)
-                first_page = [
-                    ('heading(2)', f"Line: {ln_visible}"),
-                    ('text', f"This section summarizes sensitivity along the line <b>{ln_visible}</b> "
-                             f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segs)}</b>). "
-                             "Below: geographical context and segments maps colored by sensitivity values, "
-                             "followed by the distribution and a ribbon (maximum sensitivity).")
-                ]
-
-                if ok_context and _file_ok(context_img):
-                    first_page.append(('image', ("Geographical context", context_img)))
-                if ok_max and _file_ok(seg_map_max):
-                    first_page.append(('image', ("Segments colored by maximum sensitivity", seg_map_max)))
-                first_page.append(('image', ("Maximum sensitivity – distribution", max_stats_img)))
-                first_page.append(('text', f"Distance (km): 0 — {length_km/2:.1f} — {length_km:.1f}"))
-                first_page.append(('image_ribbon', ("Maximum sensitivity – along line", max_img)))
-                first_page.append(('new_page', None))
-
-                second_page = [
-                    ('heading(2)', f"Line: {ln_visible} (continued)"),
-                    ('text', "Minimum sensitivity map, distribution, and ribbon.")
-                ]
-                if ok_min and _file_ok(seg_map_min):
-                    second_page.append(('image', ("Segments colored by minimum sensitivity", seg_map_min)))
-                second_page.append(('image', ("Minimum sensitivity – distribution", min_stats_img)))
-                second_page.append(('text', f"Distance (km): 0 — {length_km/2:.1f} — {length_km:.1f}"))
-                second_page.append(('image_ribbon', ("Minimum sensitivity – along line", min_img)))
-                second_page.append(('new_page', None))
-
-                pages_lines += first_page + second_page
-
-                for _, seg in segs.iterrows():
-                    log_data.append({
-                        'line_name': ln_visible,
-                        'segment_id': seg['segment_id'],
-                        'sensitivity_code_max': seg['sensitivity_code_max'],
-                        'sensitivity_code_min': seg['sensitivity_code_min']
-                    })
-
-            if log_data:
-                log_df = pd.DataFrame(log_data)
-                log_xlsx = os.path.join(tmp_dir, 'line_segment_log.xlsx')
-                export_to_excel(log_df, log_xlsx)
-                write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
+        if log_data:
+            log_df = pd.DataFrame(log_data)
+            log_xlsx = os.path.join(tmp_dir, 'line_segment_log.xlsx')
+            export_to_excel(log_df, log_xlsx)
+            write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
         else:
             write_to_log("Skipping line/segment pages (missing/empty).", base_dir)
         set_progress(40, "Lines/segments processed.")
 
-        # ---- Per-geocode maps from tbl_flat (same scale, one map per page) ----
-        flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
-        geocode_pages = []
-        geocode_intro_table = None
-        if not flat_df.empty and 'name_gis_geocodegroup' in flat_df.columns:
-            groups = (flat_df['name_gis_geocodegroup']
-                      .astype('string')
-                      .dropna().unique().tolist())
-            groups = sorted(groups)
-            write_to_log(f"Found geocode categories: {groups}", base_dir)
+        # ---- Atlas maps ----
+        atlas_df = gpd.GeoDataFrame()
+        atlas_geocode_selected = None
+        if include_atlas_maps:
+            atlas_pq = os.path.join(gpq_dir, "tbl_atlas.parquet")
+            if os.path.exists(atlas_pq):
+                try:
+                    atlas_df = gpd.read_parquet(atlas_pq)
+                except Exception as e:
+                    write_to_log(f"Failed reading tbl_atlas: {e}", base_dir)
+                    atlas_df = gpd.GeoDataFrame()
+            else:
+                write_to_log("Parquet table tbl_atlas not found; skipping atlas maps.", base_dir)
 
-            counts = (flat_df.groupby('name_gis_geocodegroup')
-                              .size().rename('count').reset_index())
-            counts = counts.sort_values('name_gis_geocodegroup')
-            geocode_intro_table = [["Geocode category","Geocode objects"]]
-            for _, r in counts.iterrows():
-                geocode_intro_table.append([str(r['name_gis_geocodegroup']), int(r['count'])])
+        atlas_geocode_pref = None
+        if include_atlas_maps:
+            atlas_geocode_pref = (atlas_geocode_level or cfg['DEFAULT'].get('atlas_report_geocode_level', '') or '').strip() or None
+            if atlas_geocode_pref:
+                write_to_log(f"Atlas geocode preference: {atlas_geocode_pref}", base_dir)
 
-            fixed_bounds_3857 = compute_fixed_bounds_3857(flat_df, base_dir=base_dir)
+        def _progress_atlas(done: int, total: int):
+            set_progress(45 + int(10 * done / max(1, total)), f"Rendering atlas tiles ({done}/{total})")
 
-            done = 0
-            for gname in groups:
-                sub = flat_df[flat_df['name_gis_geocodegroup'] == gname].copy()
+        atlas_pages, atlas_geocode_selected = engine.render_atlas_maps(flat_df, atlas_df, atlas_geocode_pref, include_atlas_maps, _progress_atlas)
+        if atlas_pages:
+            write_to_log("Per-atlas maps created.", base_dir)
+        elif include_atlas_maps:
+            write_to_log("Atlas maps requested but none were rendered.", base_dir)
+        set_progress(55, "Atlas maps processed.")
 
-                safe = _safe_name(gname)
-                sens_png = os.path.join(tmp_dir, f"map_sensitivity_{safe}.png")
-                ok_sens = draw_group_map_sensitivity(sub, gname, palette_A2E, desc_A2E, sens_png, fixed_bounds_3857, base_dir=base_dir)
+        # ---- Per-geocode maps ----
+        def _progress_geocode(done: int, total: int):
+            set_progress(55 + int(15 * done / max(1, total)), f"Rendered maps for group {done}/{total}")
 
-                env_png  = os.path.join(tmp_dir, f"map_envindex_{safe}.png")
-                ok_env   = draw_group_map_envindex(sub, gname, env_png, fixed_bounds_3857, base_dir=base_dir)
-
-                if ok_sens and _file_ok(sens_png):
-                    geocode_pages += [
-                        ('heading(2)', f"Geocode group: {gname}"),
-                        ('text', "Sensitivity (A–E palette)."),
-                        ('image', ("Sensitivity map", sens_png)),
-                        ('new_page', None),
-                    ]
-                if ok_env and _file_ok(env_png):
-                    geocode_pages += [
-                        ('heading(2)', f"Geocode group: {gname}"),
-                        ('text', "Environment index (0–100)."),
-                        ('image', ("Environment index map", env_png)),
-                        ('new_page', None),
-                    ]
-
-                done += 1
-                set_progress(40 + int(30 * done/max(1,len(groups))), f"Rendered maps for '{gname}'")
-
-            if geocode_pages:
-                write_to_log("Per-geocode maps created.", base_dir)
+        geocode_pages, geocode_intro_table, geocode_groups = engine.render_geocode_maps(flat_df, _progress_geocode)
+        if geocode_pages:
+            write_to_log("Per-geocode maps created.", base_dir)
         else:
             write_to_log("tbl_flat missing or no 'name_gis_geocodegroup'; skipping per-geocode maps.", base_dir)
         set_progress(70, "Per-geocode maps completed.")
-
         # ---- Compose PDF ----
         timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 
@@ -1212,15 +1899,22 @@ def generate_report(base_dir: str,
             "Line and point assets are still counted in '# objects' and can be visualized on maps."
         )
 
+        contents_lines = [
+            "- Assets overview & statistics",
+            "- Per-geocode maps (Sensitivity & Environment Index, shared scale)"
+        ]
+        if atlas_pages:
+            contents_lines.append("- Atlas tile maps (per atlas object with inset)")
+        contents_lines.append("- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)")
+        contents_text = "<br/>".join(contents_lines)
+
         order_list = [
             ('heading(1)', "MESA report"),
             ('text', f"Timestamp: {timestamp}"),
             ('rule', None),
 
             ('heading(2)', "Contents"),
-            ('text', "- Assets overview & statistics"
-                     "<br/>- Per-geocode maps (Sensitivity & Environment Index, shared scale)"
-                     "<br/>- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)"),
+            ('text', contents_text),
             ('new_page', None),
 
             ('heading(2)', "Assets – overview"),
@@ -1248,6 +1942,15 @@ def generate_report(base_dir: str,
             order_list.append(('rule', None))
 
         order_list.extend(geocode_pages)
+        if atlas_pages:
+            order_list.append(('heading(2)', "Atlas maps"))
+            atlas_intro = ("Each atlas tile focuses on a subset of the study area. "
+                           "An inset map indicates where the tile sits relative to the full extent.")
+            if atlas_geocode_selected:
+                atlas_intro += f" Geocode level shown: <b>{atlas_geocode_selected}</b>."
+            order_list.append(('text', atlas_intro))
+            order_list.append(('rule', None))
+            order_list.extend(atlas_pages)
 
         if pages_lines:
             order_list.append(('heading(2)', "Lines and segments"))
@@ -1265,6 +1968,8 @@ def generate_report(base_dir: str,
         output_pdf = os.path.join(base_dir, f'output/MESA-report_{ts_pdf}.pdf')
         os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
         compile_pdf(output_pdf, elements)
+        engine.cleanup()
+        engine = None
         set_progress(100, "Report completed.")
 
         global last_report_path
@@ -1280,17 +1985,23 @@ def generate_report(base_dir: str,
     except Exception as e:
         write_to_log(f"ERROR during report generation: {e}", base_dir)
         set_progress(100, "Report failed.")
+    finally:
+        if engine is not None:
+            try:
+                engine.cleanup()
+            except Exception:
+                pass
 
 # ---------------- GUI runner ----------------
-def _start_report_thread(base_dir, config_file, palette, desc):
+def _start_report_thread(base_dir, config_file, palette, desc, report_mode, atlas_geocode):
     threading.Thread(
         target=generate_report,
-        args=(base_dir, config_file, palette, desc),
+        args=(base_dir, config_file, palette, desc, report_mode, atlas_geocode),
         daemon=True
     ).start()
 
 def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str):
-    global log_widget, progress_var, progress_label, link_var
+    global log_widget, progress_var, progress_label, link_var, report_mode_var, atlas_geocode_var, _atlas_geocode_choices
     root = tb.Window(themename=theme)
     root.title("MESA – Report generator")
     try:
@@ -1313,9 +2024,40 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     progress_label = tk.Label(pframe, text="0%", width=5, anchor="w")
     progress_label.pack(side=tk.LEFT)
 
+    mode_frame = tb.LabelFrame(root, text="Report detail level", bootstyle="secondary")
+    mode_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
+    report_mode_var = tk.StringVar(value="general")
+    rb_general = tb.Radiobutton(mode_frame, text="General maps", variable=report_mode_var,
+                                value="general", bootstyle="info-toolbutton")
+    rb_general.grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    rb_detailed = tb.Radiobutton(mode_frame, text="Detailed maps / overviews", variable=report_mode_var,
+                                 value="detailed", bootstyle="info-toolbutton")
+    rb_detailed.grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+    atlas_frame = tb.LabelFrame(root, text="Atlas geocode level", bootstyle="secondary")
+    atlas_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
+    _atlas_geocode_choices = _available_geocode_levels(base_dir, config_file)
+    default_level = None
+    if _atlas_geocode_choices:
+        default_level = 'basic_mosaic' if 'basic_mosaic' in _atlas_geocode_choices else _atlas_geocode_choices[0]
+    atlas_geocode_var = tk.StringVar(value=default_level or '')
+    atlas_combo = tb.Combobox(atlas_frame, textvariable=atlas_geocode_var,
+                              values=tuple(_atlas_geocode_choices),
+                              state="readonly" if _atlas_geocode_choices else "disabled",
+                              width=30)
+    atlas_combo.grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    if _atlas_geocode_choices:
+        tk.Label(atlas_frame, text="Used for atlas sensitivity and environment maps.",
+                 anchor="w").grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    else:
+        tk.Label(atlas_frame, text="(No geocode levels detected yet)", anchor="w")\
+          .grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
     btn_frame = tk.Frame(root); btn_frame.pack(pady=4)
     tb.Button(btn_frame, text="Generate report", bootstyle=PRIMARY,
-              command=lambda: _start_report_thread(base_dir, config_file, palette, desc)
+              command=lambda: _start_report_thread(base_dir, config_file, palette, desc,
+                                                   report_mode_var.get(),
+                                                   atlas_geocode_var.get())
               ).grid(row=0, column=0, padx=6)
     tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).grid(row=0, column=1, padx=6)
 
@@ -1350,6 +2092,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Presentation report (GeoParquet per geocode, same-scale maps, line context + segments maps with buffers)')
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     parser.add_argument('--no-gui', action='store_true', help='Run directly without GUI')
+    parser.add_argument('--report-mode', choices=['general', 'detailed'],
+                        help='Select report detail level (general maps or detailed with atlas overviews).')
+    parser.add_argument('--atlas-geocode',
+                        help='Override geocode level to use for atlas maps (e.g. basic_mosaic, H3_R7).')
+    parser.add_argument('--debug-atlas-sample',
+                        help='Render a standalone sensitivity atlas map for the specified tile (name_gis).')
+    parser.add_argument('--debug-atlas-geocode',
+                        help='Optional geocode level to filter polygons when using --debug-atlas-sample.')
+    parser.add_argument('--debug-atlas-size', type=int,
+                        help='Optional max polygon count for --debug-atlas-sample (down-sample if exceeded).')
     args = parser.parse_args()
 
     base_dir = args.original_working_directory
@@ -1364,6 +2116,22 @@ if __name__ == "__main__":
     # Sensitivity palette + descriptions from config (A–E)
     palette_A2E, desc_A2E = read_sensitivity_palette_and_desc(cfg_path)
 
+    if args.debug_atlas_sample:
+        out = debug_atlas_sample(
+            base_dir,
+            cfg,
+            palette_A2E,
+            desc_A2E,
+            args.debug_atlas_sample,
+            geocode_level=args.debug_atlas_geocode,
+            sample_size=args.debug_atlas_size
+        )
+        if out:
+            print(f"Debug atlas sample saved to: {out}")
+        else:
+            print("Debug atlas sample failed. Check log for details.")
+        sys.exit(0)
+
     # Optional override for brand color from config
     PRIMARY_HEX = cfg['DEFAULT'].get('ui_primary_color', PRIMARY_HEX).strip() or PRIMARY_HEX
     try:
@@ -1377,6 +2145,9 @@ if __name__ == "__main__":
         pass
 
     if args.no_gui:
-        generate_report(base_dir, cfg_path, palette_A2E, desc_A2E)
+        generate_report(base_dir, cfg_path, palette_A2E, desc_A2E,
+                        report_mode=args.report_mode,
+                        atlas_geocode_level=args.atlas_geocode)
     else:
         launch_gui(base_dir, cfg_path, palette_A2E, desc_A2E, theme)
+
