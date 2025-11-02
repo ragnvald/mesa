@@ -25,7 +25,13 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import ttk
+
+try:
+    import ttkbootstrap as tb
+    from ttkbootstrap import ttk
+    from ttkbootstrap.constants import INFO, PRIMARY, SECONDARY, SUCCESS, WARNING
+except ModuleNotFoundError as exc:  # pragma: no cover - ttkbootstrap required at runtime
+    raise SystemExit("ttkbootstrap is required (pip install ttkbootstrap).") from exc
 
 try:
     locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
@@ -72,6 +78,14 @@ DEFAULT_COLOR_FALLBACK: Dict[str, str] = {
 # --------------------------------------------------------------------------- #
 # Helpers shared with the setup tool
 # --------------------------------------------------------------------------- #
+
+def apply_bootstyle(widget: Any, style: str) -> None:
+    if not style:
+        return
+    try:
+        widget.configure(bootstyle=style)
+    except Exception:
+        pass
 
 def debug_log(base_dir: Path, message: str) -> None:
     """Append a timestamped message to log.txt for diagnostics."""
@@ -983,13 +997,15 @@ class GroupHeader:
         self.frame = ttk.Frame(master, padding=(6, 6))
         self.frame.columnconfigure(0, weight=1)
 
-        self.header_label = ttk.Label(self.frame, text=title, style="Heading2.TLabel")
+        self.header_label = ttk.Label(self.frame, text=title, font=("Segoe UI", 12, "bold"))
+        apply_bootstyle(self.header_label, PRIMARY)
         self.header_label.grid(row=0, column=0, sticky="w")
 
         self.combo_var = tk.StringVar()
         self.combobox = ttk.Combobox(self.frame, textvariable=self.combo_var, state="readonly", width=40)
         self.combobox.grid(row=1, column=0, sticky="ew", pady=(2, 4))
         self.combobox.bind("<<ComboboxSelected>>", self._handle_selection)
+        apply_bootstyle(self.combobox, SECONDARY)
 
         summary_frame = ttk.Frame(self.frame)
         summary_frame.grid(row=2, column=0, sticky="ew")
@@ -1115,14 +1131,16 @@ class BasicPanel:
 
         self.message_var = tk.StringVar(value="")
         self.message_label = ttk.Label(
-            self.frame, textvariable=self.message_var, style="Warning.TLabel", wraplength=360, justify="left"
+            self.frame, textvariable=self.message_var, wraplength=360, justify="left"
         )
+        apply_bootstyle(self.message_label, WARNING)
         self.message_label.grid(row=0, column=0, sticky="w")
 
         polygon_frame = ttk.LabelFrame(self.frame, text="Polygons")
         polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
         polygon_frame.columnconfigure(0, weight=1)
         polygon_frame.rowconfigure(0, weight=1)
+        apply_bootstyle(polygon_frame, SECONDARY)
 
         self.tree = ttk.Treeview(
             polygon_frame,
@@ -1144,11 +1162,17 @@ class BasicPanel:
 
         chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
         chart_frame.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
+        apply_bootstyle(chart_frame, INFO)
         self.chart = SensitivityChart(chart_frame, palette_map)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
-        self.message_var.set(summary.get("message", ""))
+        message = summary.get("message", "")
+        self.message_var.set(message)
+        if message:
+            self.message_label.grid()
+        else:
+            self.message_label.grid_remove()
 
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1175,14 +1199,16 @@ class ComprehensivePanel:
 
         self.message_var = tk.StringVar(value="")
         self.message_label = ttk.Label(
-            self.frame, textvariable=self.message_var, style="Warning.TLabel", wraplength=360, justify="left"
+            self.frame, textvariable=self.message_var, wraplength=360, justify="left"
         )
+        apply_bootstyle(self.message_label, WARNING)
         self.message_label.grid(row=0, column=0, sticky="w")
 
         polygon_frame = ttk.LabelFrame(self.frame, text="Polygon totals (stacked)")
         polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
         polygon_frame.columnconfigure(0, weight=1)
         polygon_frame.rowconfigure(0, weight=1)
+        apply_bootstyle(polygon_frame, SECONDARY)
 
         self.polygon_tree = ttk.Treeview(
             polygon_frame,
@@ -1204,6 +1230,7 @@ class ComprehensivePanel:
         asset_frame.grid(row=2, column=0, sticky="nsew", pady=(4, 4))
         asset_frame.columnconfigure(0, weight=1)
         asset_frame.rowconfigure(0, weight=1)
+        apply_bootstyle(asset_frame, SUCCESS)
 
         self.asset_tree = ttk.Treeview(
             asset_frame,
@@ -1225,11 +1252,17 @@ class ComprehensivePanel:
 
         chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
         chart_frame.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
+        apply_bootstyle(chart_frame, INFO)
         self.chart = SensitivityChart(chart_frame, palette_map)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
-        self.message_var.set(summary.get("message", ""))
+        message = summary.get("message", "")
+        self.message_var.set(message)
+        if message:
+            self.message_label.grid()
+        else:
+            self.message_label.grid_remove()
 
         for item in self.polygon_tree.get_children():
             self.polygon_tree.delete(item)
@@ -1301,6 +1334,7 @@ class ComparisonTable:
         self.frame = ttk.LabelFrame(master, text="Comparison totals")
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(0, weight=1)
+        apply_bootstyle(self.frame, INFO)
 
         self.tree = ttk.Treeview(
             self.frame,
@@ -1341,42 +1375,46 @@ class ComparisonTable:
 
 
 class ComparisonApp:
-    def __init__(self, data: AnalysisData) -> None:
+    def __init__(self, data: AnalysisData, theme: str) -> None:
         self.data = data
-        self.root = tk.Tk()
+        self.palette_map = data.palette_map
+        self.root = tb.Window(themename=theme)
         self.root.title("MESA Area Analysis - Comparison")
         self.root.geometry("1280x780")
         self.root.minsize(1100, 720)
-        self.palette_map = data.palette_map
 
         self._configure_style()
 
-        container = ttk.Frame(self.root, padding=(10, 10))
+        container = ttk.Frame(self.root, padding=(12, 12))
         container.pack(fill=tk.BOTH, expand=True)
+        apply_bootstyle(container, SECONDARY)
 
         header_frame = ttk.Frame(container)
-        header_frame.pack(fill=tk.X)
+        header_frame.pack(fill=tk.X, pady=(0, 6))
         header_frame.columnconfigure(0, weight=1)
         header_frame.columnconfigure(1, weight=1)
+        apply_bootstyle(header_frame, SECONDARY)
 
         self.left_header = GroupHeader(header_frame, "Left group", self._on_left_selection)
-        self.left_header.frame.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.left_header.frame.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         self.right_header = GroupHeader(header_frame, "Right group", self._on_right_selection)
-        self.right_header.frame.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.right_header.frame.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         self.notebook = ttk.Notebook(container)
+        apply_bootstyle(self.notebook, SECONDARY)
         self.basic_view = BasicComparisonView(self.notebook, self.palette_map)
         self.notebook.add(self.basic_view.frame, text="Basic analysis")
         self.comprehensive_view = ComprehensiveComparisonView(self.notebook, self.palette_map)
         self.notebook.add(self.comprehensive_view.frame, text="Comprehensive analysis")
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
         self.comparison_table = ComparisonTable(container)
         self.comparison_table.frame.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
 
         self.status_var = tk.StringVar(value=self.data.status_message())
-        self.status_label = ttk.Label(container, textvariable=self.status_var, style="Status.TLabel", anchor="w")
+        self.status_label = ttk.Label(container, textvariable=self.status_var, anchor="w")
+        apply_bootstyle(self.status_label, INFO)
         self.status_label.pack(fill=tk.X, pady=(8, 0))
 
         self.display_to_id: Dict[str, str] = {}
@@ -1388,14 +1426,9 @@ class ComparisonApp:
         self._populate_options()
 
     def _configure_style(self) -> None:
-        style = ttk.Style()
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
-        style.configure("Heading2.TLabel", font=("Segoe UI", 12, "bold"))
+        style = ttk.Style(self.root)
         style.configure("Caption.TLabel", font=("Segoe UI", 9))
         style.configure("Value.TLabel", font=("Segoe UI", 10, "bold"))
-        style.configure("Warning.TLabel", foreground="#c1121f", font=("Segoe UI", 9))
-        style.configure("Status.TLabel", font=("Segoe UI", 9))
 
     def _populate_options(self) -> None:
         choices = self.data.group_choices
@@ -1460,6 +1493,22 @@ class ComparisonApp:
         rows = self.data.comparison_rows(self.left_summary, self.right_summary)
         self.comparison_table.update_rows(rows)
 
+        messages: List[str] = []
+        for summary in (
+            self.left_summary,
+            self.right_summary,
+            self.left_stacked_summary,
+            self.right_stacked_summary,
+        ):
+            if isinstance(summary, dict):
+                msg = summary.get("message")
+                if msg:
+                    messages.append(str(msg))
+        if messages:
+            self.status_var.set(messages[0])
+        else:
+            self.status_var.set(self.data.status_message())
+
     def run(self) -> None:
         self.root.mainloop()
 
@@ -1487,10 +1536,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     palette_map = read_sensitivity_palette(cfg)
     for code_key, entry in palette_map.items():
         debug_log(base_dir, f"presentation palette {code_key}: {entry.get('color', '')}")
+
+    theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "litera").strip() or "litera"
+    debug_log(base_dir, f"presentation theme: {theme}")
+
     data = AnalysisData(base_dir, cfg, palette_map)
     debug_log(base_dir, "Comparison viewer initialised")
 
-    app = ComparisonApp(data)
+    app = ComparisonApp(data, theme)
     app.run()
 
 
