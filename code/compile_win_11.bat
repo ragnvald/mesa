@@ -1,6 +1,9 @@
 @echo off
 setlocal EnableExtensions
 
+REM Capture start time (FileTime ticks) to compute total duration later
+for /f %%I in ('powershell -NoLogo -Command "(Get-Date).ToFileTimeUtc()"') do set "START_TICKS=%%I"
+
 REM Run the build via Python to avoid CMD parsing issues
 set "SCRIPT_PATH=%~dp0"
 set "SCRIPT_PATH=%SCRIPT_PATH:~0,-1%"
@@ -14,4 +17,15 @@ if exist "%VENV_PY%" (
   python "%SCRIPT_PATH%\build_all.py"
 )
 
-endlocal
+set "BUILD_EXITCODE=%ERRORLEVEL%"
+
+REM Compute elapsed time (format d.hh:mm:ss if longer than a day)
+for /f "usebackq delims=" %%I in (`powershell -NoLogo -Command "$start=[datetime]::FromFileTimeUtc([int64]$env:START_TICKS);(New-TimeSpan -Start $start -End (Get-Date)).ToString('c')"`) do set "ELAPSED=%%I"
+
+if "%BUILD_EXITCODE%"=="0" (
+  echo Build completed successfully in %ELAPSED%
+) else (
+  echo Build failed (exit code %BUILD_EXITCODE%) after %ELAPSED%
+)
+
+endlocal & exit /b %BUILD_EXITCODE%
