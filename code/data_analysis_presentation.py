@@ -63,7 +63,7 @@ DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
 KM2_DENOMINATOR = 1_000_000.0
 
 UNKNOWN_CODE = "UNKNOWN"
-DEFAULT_SENSITIVITY_ORDER = ["A", "B", "C", "D", "E", UNKNOWN_CODE]
+DEFAULT_SENSITIVITY_ORDER = ["A", "B", "C", "D", "E"]
 
 DEFAULT_COLOR_FALLBACK: Dict[str, str] = {
     "A": "#005f73",
@@ -605,15 +605,40 @@ class AnalysisData:
         return polygon_map
 
     def _build_sensitivity_order(self) -> List[str]:
-        order = [code for code in DEFAULT_SENSITIVITY_ORDER]
+        order = list(DEFAULT_SENSITIVITY_ORDER)
         seen: set[str] = set(order)
-        for palette_code in self.palette_map.keys():
-            normalized = str(palette_code).upper()
+        extras: List[str] = []
+
+        def _add(code: Optional[str]) -> None:
+            if not code:
+                return
+            normalized = str(code).strip().upper()
+            if not normalized or normalized in {"NONE", "NAN", UNKNOWN_CODE}:
+                return
             if normalized not in seen:
-                order.insert(len(DEFAULT_SENSITIVITY_ORDER) - 1, normalized)
+                extras.append(normalized)
                 seen.add(normalized)
-        if UNKNOWN_CODE not in order:
-            order.append(UNKNOWN_CODE)
+
+        for palette_code in self.palette_map.keys():
+            _add(palette_code)
+
+        code_column = (
+            "sensitivity_code_max"
+            if self.has_sensitivity_max and "sensitivity_code_max" in self.flat.columns
+            else "sensitivity_code"
+        )
+        if code_column in self.flat.columns:
+            series = (
+                self.flat[code_column]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            for raw in series:
+                _add(raw)
+
+        if extras:
+            order.extend(sorted(extras))
         return order
 
     # ----------------------- aggregation helpers ----------------------- #
@@ -726,8 +751,9 @@ class AnalysisData:
                 for code, subset in grouped:
                     raw_code = str(code or "").strip()
                     code_upper = raw_code.upper()
-                    code_key = code_upper if code_upper and code_upper not in {"NONE", "NAN"} else UNKNOWN_CODE
-                    code_key = (code_key or UNKNOWN_CODE).upper()
+                    if not code_upper or code_upper in {"NONE", "NAN", UNKNOWN_CODE}:
+                        continue
+                    code_key = code_upper
                     area_m2 = float(subset["analysis_area_m2"].sum(skipna=True))
                     if area_m2 <= 0:
                         continue
@@ -824,8 +850,9 @@ class AnalysisData:
             grouped_codes = subset.groupby("sensitivity_code", dropna=False)
             for code, rows in grouped_codes:
                 code_upper = str(code or "").strip().upper()
-                code_key = code_upper if code_upper and code_upper not in {"NONE", "NAN"} else UNKNOWN_CODE
-                code_key = (code_key or UNKNOWN_CODE).upper()
+                if not code_upper or code_upper in {"NONE", "NAN", UNKNOWN_CODE}:
+                    continue
+                code_key = code_upper
                 area_sum = float(rows["analysis_area_m2"].sum(skipna=True))
                 if area_sum <= 0:
                     continue
@@ -849,13 +876,16 @@ class AnalysisData:
                 total_area = float(rows["analysis_area_m2"].sum(skipna=True))
                 if total_area <= 0:
                     continue
-                code_totals = rows.groupby("sensitivity_code", dropna=False)["analysis_area_m2"].sum()
-                if not code_totals.empty:
-                    dom_code = str(code_totals.idxmax() or "").strip().upper()
-                    if not dom_code or dom_code in {"NONE", "NAN"}:
-                        dom_code = UNKNOWN_CODE
-                else:
-                    dom_code = UNKNOWN_CODE
+                code_totals_series = rows.groupby("sensitivity_code", dropna=False)["analysis_area_m2"].sum()
+                valid_totals: Dict[str, float] = {}
+                for idx_code, val in code_totals_series.items():
+                    code_upper = str(idx_code or "").strip().upper()
+                    if not code_upper or code_upper in {"NONE", "NAN", UNKNOWN_CODE}:
+                        continue
+                    valid_totals[code_upper] = float(val)
+                if not valid_totals:
+                    continue
+                dom_code = max(valid_totals, key=valid_totals.get)
                 desc_text = ""
                 if "sensitivity_description" in rows.columns:
                     desc_vals = rows["sensitivity_description"].dropna()
@@ -958,7 +988,7 @@ class AnalysisData:
             palette_desc = self._palette_entry(code).get("description")
             if palette_desc:
                 description = palette_desc
-            display_code = "Unknown" if str(code).upper() == UNKNOWN_CODE else str(code)
+            display_code = str(code)
             if description:
                 label = f"{display_code} ({description})"
             else:
@@ -1128,6 +1158,7 @@ class BasicPanel:
         self.frame = ttk.Frame(master, padding=(6, 6))
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(1, weight=1)
+        self.frame.rowconfigure(2, weight=2)
 
         self.message_var = tk.StringVar(value="")
         self.message_label = ttk.Label(
@@ -1135,6 +1166,7 @@ class BasicPanel:
         )
         apply_bootstyle(self.message_label, WARNING)
         self.message_label.grid(row=0, column=0, sticky="w")
+        self.message_label.grid_remove()
 
         polygon_frame = ttk.LabelFrame(self.frame, text="Polygons")
         polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
@@ -1146,7 +1178,7 @@ class BasicPanel:
             polygon_frame,
             columns=("title", "area", "run"),
             show="headings",
-            height=8,
+            height=6,
         )
         self.tree.heading("title", text="Title")
         self.tree.heading("area", text="Area (km^2)")
@@ -1203,6 +1235,7 @@ class ComprehensivePanel:
         )
         apply_bootstyle(self.message_label, WARNING)
         self.message_label.grid(row=0, column=0, sticky="w")
+        self.message_label.grid_remove()
 
         polygon_frame = ttk.LabelFrame(self.frame, text="Polygon totals (stacked)")
         polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
