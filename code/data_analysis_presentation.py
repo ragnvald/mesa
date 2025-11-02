@@ -51,6 +51,7 @@ except Exception as exc:  # pragma: no cover - matplotlib is required at runtime
 ANALYSIS_POLYGON_TABLE = "tbl_analysis_polygons.parquet"
 ANALYSIS_GROUP_TABLE = "tbl_analysis_group.parquet"
 ANALYSIS_FLAT_TABLE = "tbl_analysis_flat.parquet"
+ANALYSIS_STACKED_TABLE = "tbl_analysis_stacked.parquet"
 DEFAULT_PARQUET_SUBDIR = "output/geoparquet"
 DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
 KM2_DENOMINATOR = 1_000_000.0
@@ -322,6 +323,29 @@ class SensitivitySummary:
         return display
 
 
+@dataclass
+class AssetGroupSummary:
+    asset_group: str
+    dominant_code: str
+    dominant_description: str
+    total_area_m2: float
+
+    @property
+    def area_km2(self) -> float:
+        return area_to_km2(self.total_area_m2)
+
+    @property
+    def area_label(self) -> str:
+        return format_km2(self.area_km2)
+
+    @property
+    def dominant_label(self) -> str:
+        code_display = "Unknown" if self.dominant_code.upper() == UNKNOWN_CODE else self.dominant_code
+        if self.dominant_description:
+            return f"{code_display} ({self.dominant_description})"
+        return code_display
+
+
 class AnalysisData:
     """Load and aggregate analysis outputs for comparison."""
 
@@ -333,9 +357,11 @@ class AnalysisData:
         self.groups = self._load_groups()
         self.polygons = self._load_polygons()
         self.flat = self._load_flat_results()
+        self.stacked = self._load_stacked_results()
         self.group_choices = self._build_group_choices()
         self.sensitivity_order = self._build_sensitivity_order()
         self.has_analysis = not self.flat.empty
+        self.has_stacked = not self.stacked.empty
 
     # ----------------------- loading helpers ----------------------- #
     def _load_groups(self) -> pd.DataFrame:
@@ -465,6 +491,79 @@ class AnalysisData:
         df["analysis_polygon_notes"] = df.get("analysis_polygon_notes", pd.Series(dtype="object")).fillna("").astype(str)
         return df
 
+    def _load_stacked_results(self) -> pd.DataFrame:
+        path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_STACKED_TABLE)
+        if not path:
+            debug_log(self.base_dir, "analysis stacked table not found; comprehensive view will start empty")
+            return pd.DataFrame(
+                columns=[
+                    "analysis_group_id",
+                    "analysis_polygon_id",
+                    "analysis_polygon_title",
+                    "analysis_polygon_notes",
+                    "analysis_geocode",
+                    "analysis_area_m2",
+                    "analysis_timestamp",
+                    "sensitivity_code",
+                    "sensitivity_description",
+                    "asset_group_name",
+                    "name_gis_assetgroup",
+                    "total_asset_objects",
+                ]
+            )
+        try:
+            gdf = gpd.read_parquet(path)
+        except Exception as exc:
+            debug_log(self.base_dir, f"failed to read {ANALYSIS_STACKED_TABLE}: {exc}")
+            return pd.DataFrame(
+                columns=[
+                    "analysis_group_id",
+                    "analysis_polygon_id",
+                    "analysis_polygon_title",
+                    "analysis_polygon_notes",
+                    "analysis_geocode",
+                    "analysis_area_m2",
+                    "analysis_timestamp",
+                    "sensitivity_code",
+                    "sensitivity_description",
+                    "asset_group_name",
+                    "name_gis_assetgroup",
+                    "total_asset_objects",
+                ]
+            )
+        df = pd.DataFrame(gdf.drop(columns=[col for col in ("geometry",) if col in gdf.columns]))
+        if "analysis_timestamp" in df.columns:
+            df["analysis_timestamp"] = pd.to_datetime(df["analysis_timestamp"], errors="coerce")
+        if "analysis_area_m2" in df.columns:
+            df["analysis_area_m2"] = pd.to_numeric(df["analysis_area_m2"], errors="coerce")
+        for col in ("analysis_group_id", "analysis_polygon_id"):
+            if col in df.columns:
+                df[col] = df[col].astype(str)
+        if "analysis_polygon_title" in df.columns:
+            df["analysis_polygon_title"] = df["analysis_polygon_title"].fillna("").astype(str)
+        if "analysis_polygon_notes" in df.columns:
+            df["analysis_polygon_notes"] = df["analysis_polygon_notes"].fillna("").astype(str)
+        if "analysis_geocode" in df.columns:
+            df["analysis_geocode"] = df["analysis_geocode"].fillna("").astype(str)
+        if "sensitivity_code" in df.columns:
+            df["sensitivity_code"] = (
+                df["sensitivity_code"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .replace({"": "", "NAN": ""})
+            )
+        else:
+            df["sensitivity_code"] = ""
+        if "sensitivity_description" in df.columns:
+            df["sensitivity_description"] = df["sensitivity_description"].fillna("").astype(str).str.strip()
+        else:
+            df["sensitivity_description"] = ""
+        for asset_col in ("asset_group_name", "name_gis_assetgroup"):
+            if asset_col in df.columns:
+                df[asset_col] = df[asset_col].fillna("").astype(str)
+        return df
+
     def _build_group_choices(self) -> List[Tuple[str, str]]:
         choices: List[Tuple[str, str]] = []
         for _, row in self.groups.iterrows():
@@ -474,6 +573,22 @@ class AnalysisData:
             display = f"{display} ({group_id})"
             choices.append((group_id, display))
         return choices
+
+    def _polygon_metadata(self, group_id: str) -> Dict[str, Dict[str, Any]]:
+        polygon_rows = self.polygons[self.polygons["group_id"].astype(str) == str(group_id)].copy()
+        polygon_map: Dict[str, Dict[str, Any]] = {}
+        if polygon_rows.empty:
+            return polygon_map
+        for _, row in polygon_rows.iterrows():
+            pid = str(row.get("id", ""))
+            if not pid:
+                continue
+            polygon_map[pid] = {
+                "title": coalesce(row.get("title"), default="(untitled)"),
+                "notes": row.get("notes", ""),
+                "created_at": safe_datetime(row.get("created_at")),
+            }
+        return polygon_map
 
     def _build_sensitivity_order(self) -> List[str]:
         order = [code for code in DEFAULT_SENSITIVITY_ORDER]
@@ -516,18 +631,7 @@ class AnalysisData:
         summary["group_name"] = coalesce(group_row.iloc[0].get("name"), default=str(group_id))
         summary["group_notes"] = group_row.iloc[0].get("notes", "")
 
-        polygon_rows = self.polygons[self.polygons["group_id"].astype(str) == str(group_id)].copy()
-        polygon_map: Dict[str, Dict[str, Any]] = {}
-        if not polygon_rows.empty:
-            for _, row in polygon_rows.iterrows():
-                pid = str(row.get("id", ""))
-                if not pid:
-                    continue
-                polygon_map[pid] = {
-                    "title": coalesce(row.get("title"), default="(untitled)"),
-                    "notes": row.get("notes", ""),
-                    "created_at": safe_datetime(row.get("created_at")),
-                }
+        polygon_map = self._polygon_metadata(str(group_id))
 
         summary["configured_count"] = len(polygon_map)
 
@@ -597,7 +701,8 @@ class AnalysisData:
         summary["last_run"] = last_run
         summary["last_run_label"] = format_timestamp(last_run)
 
-        sensitivity_rows: List[SensitivitySummary] = []
+        totals_by_code: Dict[str, float] = {}
+        fallback_desc: Dict[str, str] = {}
         if not analysis.empty:
             code_column = "sensitivity_code_max" if self.has_sensitivity_max and "sensitivity_code_max" in analysis.columns else "sensitivity_code"
             desc_candidates = ["sensitivity_description_max", "sensitivity_description"]
@@ -608,43 +713,158 @@ class AnalysisData:
                     raw_code = str(code or "").strip()
                     code_upper = raw_code.upper()
                     code_key = code_upper if code_upper and code_upper not in {"NONE", "NAN"} else UNKNOWN_CODE
-                    code_key = code_key or UNKNOWN_CODE
-                    if code_key != UNKNOWN_CODE:
-                        code_key = code_key.upper()
+                    code_key = (code_key or UNKNOWN_CODE).upper()
                     area_m2 = float(subset["analysis_area_m2"].sum(skipna=True))
                     if area_m2 <= 0:
                         continue
+                    totals_by_code[code_key] = totals_by_code.get(code_key, 0.0) + area_m2
                     desc = ""
                     if desc_column:
                         desc_values = subset[desc_column].dropna()
                         if not desc_values.empty:
                             desc = str(desc_values.iloc[-1]).strip()
-                    palette_entry = self._palette_entry(code_key)
-                    if palette_entry and palette_entry.get("description"):
-                        desc = palette_entry["description"]
-                    sensitivity_rows.append(
-                        SensitivitySummary(
-                            code=code_key,
-                            description=desc,
-                            area_m2=area_m2,
-                        )
-                    )
-        existing = {entry.code: entry for entry in sensitivity_rows}
-        ordered_entries: List[SensitivitySummary] = []
-        for code in self.sensitivity_order:
-            normalized_code = code if code != UNKNOWN_CODE else UNKNOWN_CODE
-            entry = existing.get(normalized_code)
-            if entry is None:
-                palette_entry = self._palette_entry(normalized_code)
-                desc = palette_entry.get("description", "")
-                entry = SensitivitySummary(code=normalized_code, description=desc, area_m2=0.0)
-            ordered_entries.append(entry)
-        summary["sensitivity"] = ordered_entries
+                    if desc and code_key not in fallback_desc:
+                        fallback_desc[code_key] = desc
+        summary["sensitivity"] = self._sensitivity_entries(totals_by_code, fallback_desc)
 
-        if not sensitivity_rows and summary["processed_count"] == 0:
+        if not totals_by_code and summary["processed_count"] == 0:
             summary["message"] = "No analysis results found. Run the processing workflow in data_analysis_setup.py."
         else:
             summary["message"] = ""
+        return summary
+
+    def stacked_summary(self, group_id: Optional[str]) -> Dict[str, Any]:
+        summary = {
+            "group_id": group_id or "",
+            "polygons": [],
+            "asset_groups": [],
+            "sensitivity": self._sensitivity_entries({}, {}),
+            "message": "",
+        }
+
+        if not group_id:
+            summary["message"] = "Select an analysis group."
+            return summary
+
+        if not self.has_stacked:
+            summary["message"] = "No comprehensive analysis available yet. Run the processing workflow to populate tbl_analysis_stacked.parquet."
+            return summary
+
+        subset = self.stacked[self.stacked["analysis_group_id"].astype(str) == str(group_id)].copy()
+        if subset.empty:
+            summary["message"] = "No comprehensive analysis results for this group yet."
+            return summary
+
+        subset["analysis_area_m2"] = pd.to_numeric(subset["analysis_area_m2"], errors="coerce").fillna(0.0)
+
+        polygon_map = self._polygon_metadata(str(group_id))
+        polygon_totals = subset.groupby("analysis_polygon_id", dropna=False)["analysis_area_m2"].sum()
+        polygon_times: Dict[str, Optional[dt.datetime]] = {}
+        if "analysis_timestamp" in subset.columns:
+            ts_series = subset.groupby("analysis_polygon_id", dropna=False)["analysis_timestamp"].max()
+            polygon_times = {
+                str(pid or "").strip(): safe_datetime(ts_value) for pid, ts_value in ts_series.items()
+            }
+
+        polygon_entries: List[PolygonSummary] = []
+        for pid_raw, area_m2 in polygon_totals.items():
+            pid = str(pid_raw or "").strip()
+            if not pid:
+                continue
+            info = polygon_map.get(pid, {})
+            title = info.get("title") or "(untitled)"
+            notes = info.get("notes", "")
+            last_ts = polygon_times.get(pid)
+            polygon_entries.append(
+                PolygonSummary(
+                    polygon_id=pid,
+                    title=title,
+                    notes=notes,
+                    area_m2=float(area_m2),
+                    has_analysis=float(area_m2) > 0.0,
+                    last_timestamp=last_ts,
+                )
+            )
+
+        existing_pids = {p.polygon_id for p in polygon_entries}
+        for pid, info in polygon_map.items():
+            if pid in existing_pids:
+                continue
+            polygon_entries.append(
+                PolygonSummary(
+                    polygon_id=pid,
+                    title=info.get("title", "(untitled)"),
+                    notes=info.get("notes", ""),
+                    area_m2=0.0,
+                    has_analysis=False,
+                    last_timestamp=None,
+                )
+            )
+
+        polygon_entries.sort(key=lambda p: (0 if p.has_analysis else 1, -p.area_m2))
+        summary["polygons"] = polygon_entries
+
+        totals_by_code: Dict[str, float] = {}
+        fallback_desc: Dict[str, str] = {}
+        if "sensitivity_code" in subset.columns:
+            grouped_codes = subset.groupby("sensitivity_code", dropna=False)
+            for code, rows in grouped_codes:
+                code_upper = str(code or "").strip().upper()
+                code_key = code_upper if code_upper and code_upper not in {"NONE", "NAN"} else UNKNOWN_CODE
+                code_key = (code_key or UNKNOWN_CODE).upper()
+                area_sum = float(rows["analysis_area_m2"].sum(skipna=True))
+                if area_sum <= 0:
+                    continue
+                totals_by_code[code_key] = totals_by_code.get(code_key, 0.0) + area_sum
+                if "sensitivity_description" in rows.columns:
+                    desc_values = rows["sensitivity_description"].dropna()
+                    if not desc_values.empty and code_key not in fallback_desc:
+                        fallback_desc[code_key] = str(desc_values.iloc[-1]).strip()
+
+        summary["sensitivity"] = self._sensitivity_entries(totals_by_code, fallback_desc)
+
+        asset_groups: List[AssetGroupSummary] = []
+        asset_group_col = None
+        for candidate in ("asset_group_name", "name_gis_assetgroup"):
+            if candidate in subset.columns:
+                asset_group_col = candidate
+                break
+        if asset_group_col:
+            grouped_assets = subset.groupby(asset_group_col, dropna=False)
+            for asset_name, rows in grouped_assets:
+                total_area = float(rows["analysis_area_m2"].sum(skipna=True))
+                if total_area <= 0:
+                    continue
+                code_totals = rows.groupby("sensitivity_code", dropna=False)["analysis_area_m2"].sum()
+                if not code_totals.empty:
+                    dom_code = str(code_totals.idxmax() or "").strip().upper()
+                    if not dom_code or dom_code in {"NONE", "NAN"}:
+                        dom_code = UNKNOWN_CODE
+                else:
+                    dom_code = UNKNOWN_CODE
+                desc_text = ""
+                if "sensitivity_description" in rows.columns:
+                    desc_vals = rows["sensitivity_description"].dropna()
+                    if not desc_vals.empty:
+                        desc_text = str(desc_vals.iloc[-1]).strip()
+                palette_desc = self._palette_entry(dom_code).get("description", "")
+                dominant_desc = palette_desc or desc_text
+                name_display = str(asset_name).strip() or "(unnamed asset group)"
+                asset_groups.append(
+                    AssetGroupSummary(
+                        asset_group=name_display,
+                        dominant_code=dom_code,
+                        dominant_description=dominant_desc,
+                        total_area_m2=total_area,
+                    )
+                )
+
+        asset_groups.sort(key=lambda item: item.total_area_m2, reverse=True)
+        summary["asset_groups"] = asset_groups
+
+        if not totals_by_code:
+            summary["message"] = "No overlapping asset results found in the comprehensive analysis."
+
         return summary
 
     def _sensitivity_index(self, code: str) -> int:
@@ -661,6 +881,19 @@ class AnalysisData:
         if code_upper in self.palette_map:
             return self.palette_map[code_upper]
         return self.palette_map.get(UNKNOWN_CODE, {})
+
+    def _sensitivity_entries(
+        self,
+        totals: Dict[str, float],
+        fallback_desc: Dict[str, str],
+    ) -> List[SensitivitySummary]:
+        entries: List[SensitivitySummary] = []
+        for code in self.sensitivity_order:
+            palette_entry = self._palette_entry(code)
+            description = palette_entry.get("description", "") or fallback_desc.get(code, "")
+            area_m2 = float(totals.get(code, 0.0) or 0.0)
+            entries.append(SensitivitySummary(code=code, description=description, area_m2=area_m2))
+        return entries
 
     def comparison_rows(
         self,
@@ -742,30 +975,24 @@ class AnalysisData:
 # --------------------------------------------------------------------------- #
 
 
-class ColumnPanel:
-    """UI column showing a group selector, summary labels, polygon table, and chart."""
+class GroupHeader:
+    """Selector and headline statistics for a comparison column."""
 
-    def __init__(
-        self,
-        master: tk.Widget,
-        title: str,
-        palette_map: Dict[str, Dict[str, str]],
-        on_selection: callable,
-    ) -> None:
+    def __init__(self, master: tk.Widget, title: str, on_selection: callable) -> None:
+        self._on_selection = on_selection
         self.frame = ttk.Frame(master, padding=(6, 6))
         self.frame.columnconfigure(0, weight=1)
-        self.palette_map = palette_map or {}
 
         self.header_label = ttk.Label(self.frame, text=title, style="Heading2.TLabel")
         self.header_label.grid(row=0, column=0, sticky="w")
 
         self.combo_var = tk.StringVar()
-        self.combobox = ttk.Combobox(self.frame, textvariable=self.combo_var, state="readonly", width=38)
-        self.combobox.grid(row=1, column=0, sticky="ew", pady=(4, 4))
-        self.combobox.bind("<<ComboboxSelected>>", lambda _evt: on_selection(self.combo_var.get()))
+        self.combobox = ttk.Combobox(self.frame, textvariable=self.combo_var, state="readonly", width=40)
+        self.combobox.grid(row=1, column=0, sticky="ew", pady=(2, 4))
+        self.combobox.bind("<<ComboboxSelected>>", self._handle_selection)
 
         summary_frame = ttk.Frame(self.frame)
-        summary_frame.grid(row=2, column=0, sticky="ew", pady=(4, 4))
+        summary_frame.grid(row=2, column=0, sticky="ew")
         summary_frame.columnconfigure(1, weight=1)
 
         ttk.Label(summary_frame, text="Total area:", style="Caption.TLabel").grid(row=0, column=0, sticky="w")
@@ -780,47 +1007,9 @@ class ColumnPanel:
         self.last_run_var = tk.StringVar(value="--")
         ttk.Label(summary_frame, textvariable=self.last_run_var, style="Value.TLabel").grid(row=2, column=1, sticky="w")
 
-        self.message_var = tk.StringVar(value="")
-        self.message_label = ttk.Label(
-            self.frame, textvariable=self.message_var, style="Warning.TLabel", wraplength=360, justify="left"
-        )
-        self.message_label.grid(row=3, column=0, sticky="w", pady=(2, 2))
-
-        polygon_frame = ttk.LabelFrame(self.frame, text="Polygons")
-        polygon_frame.grid(row=4, column=0, sticky="nsew", pady=(4, 4))
-        polygon_frame.columnconfigure(0, weight=1)
-        polygon_frame.rowconfigure(0, weight=1)
-
-        self.tree = ttk.Treeview(
-            polygon_frame,
-            columns=("title", "area", "run"),
-            show="headings",
-            height=9,
-        )
-        self.tree.heading("title", text="Title")
-        self.tree.heading("area", text="Area (km^2)")
-        self.tree.heading("run", text="Last processed")
-        self.tree.column("title", width=220, anchor="w")
-        self.tree.column("area", width=110, anchor="e")
-        self.tree.column("run", width=140, anchor="w")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-
-        scrollbar = ttk.Scrollbar(polygon_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
-        chart_frame.grid(row=5, column=0, sticky="nsew", pady=(4, 0))
-        chart_frame.columnconfigure(0, weight=1)
-        chart_frame.rowconfigure(0, weight=1)
-
-        self.figure = Figure(figsize=(4.0, 3.0), dpi=100)
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlabel("Area (km^2)")
-        self.ax.set_ylabel("Sensitivity")
-        self.ax.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.6)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=chart_frame)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+    def _handle_selection(self, _event: object = None) -> None:
+        if self._on_selection:
+            self._on_selection(self.combo_var.get())
 
     def set_options(self, options: List[str]) -> None:
         self.combobox["values"] = options
@@ -828,45 +1017,51 @@ class ColumnPanel:
             self.combo_var.set("")
 
     def set_selection(self, display: Optional[str]) -> None:
-        if display:
-            self.combo_var.set(display)
-        else:
-            self.combo_var.set("")
+        self.combo_var.set(display or "")
 
     def current_selection(self) -> str:
         return self.combo_var.get()
 
-    def update_content(self, summary: Dict[str, Any]) -> None:
+    def update_summary(self, summary: Dict[str, Any]) -> None:
+        summary = summary or {}
         self.total_var.set(summary.get("total_area_label", "0.00 km^2"))
         processed = summary.get("processed_count", 0)
         configured = summary.get("configured_count", 0)
         self.count_var.set(f"{processed} / {configured}")
         self.last_run_var.set(summary.get("last_run_label", "--"))
-        self.message_var.set(summary.get("message", ""))
 
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        polygons: Iterable[PolygonSummary] = summary.get("polygons", [])
-        for polygon in polygons:
-            self.tree.insert(
-                "",
-                "end",
-                values=(polygon.title, polygon.area_label, polygon.timestamp_label),
-            )
 
-        self._update_chart(summary.get("sensitivity", []))
+class SensitivityChart:
+    """Reusable horizontal bar chart for sensitivity data."""
+
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+        self.palette_map = palette_map or {}
+        master.columnconfigure(0, weight=1)
+        master.rowconfigure(0, weight=1)
+        self.figure = Figure(figsize=(4.0, 3.0), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_xlabel("Area (km^2)")
+        self.ax.set_ylabel("Sensitivity")
+        self.ax.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.6)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=master)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
     def _palette_entry(self, code: str) -> Dict[str, str]:
         code_upper = str(code).strip().upper() if code is not None else ""
         if not code_upper or code_upper in {"NONE", "NAN"}:
             code_upper = UNKNOWN_CODE
-        if code_upper in self.palette_map:
-            return self.palette_map[code_upper]
-        return self.palette_map.get(UNKNOWN_CODE, {})
+        return self.palette_map.get(code_upper, {})
 
-    def _update_chart(self, data: Iterable[SensitivitySummary]) -> None:
+    def _color_for(self, code: str) -> str:
+        entry = self._palette_entry(code)
+        if entry and entry.get("color"):
+            return entry["color"]
+        return DEFAULT_COLOR_FALLBACK.get(str(code).strip().upper(), "#4e79a7")
+
+    def update(self, data: Iterable[SensitivitySummary]) -> None:
         self.ax.clear()
         self.ax.set_xlabel("Area (km^2)")
+        self.ax.set_ylabel("Sensitivity")
         self.ax.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.6)
 
         entries = list(data)
@@ -886,22 +1081,14 @@ class ColumnPanel:
 
         values = [entry.area_km2 for entry in entries]
         labels = [entry.label for entry in entries]
-        codes = [entry.code for entry in entries]
         y_positions = np.arange(len(entries))
-
-        def _color_for(code: str) -> str:
-            entry = self._palette_entry(code)
-            if entry and entry.get("color"):
-                return entry["color"]
-            return DEFAULT_COLOR_FALLBACK.get(str(code).upper(), "#4e79a7")
-
-        colors = [_color_for(code) for code in codes]
+        colors = [self._color_for(entry.code) for entry in entries]
 
         self.ax.barh(y_positions, values, color=colors)
         self.ax.set_yticks(y_positions)
         self.ax.set_yticklabels(labels)
         self.ax.set_xlim(left=0)
-        self.ax.invert_yaxis()  # Show highest category (A) at the top
+        self.ax.invert_yaxis()
 
         max_value = max(values) if values else 0.0
         offset = max(0.05 * max_value, 0.02)
@@ -916,6 +1103,197 @@ class ColumnPanel:
 
         self.figure.tight_layout()
         self.canvas.draw_idle()
+
+
+class BasicPanel:
+    """Polygons table + sensitivity chart for flat analysis results."""
+
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+        self.frame = ttk.Frame(master, padding=(6, 6))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(1, weight=1)
+
+        self.message_var = tk.StringVar(value="")
+        self.message_label = ttk.Label(
+            self.frame, textvariable=self.message_var, style="Warning.TLabel", wraplength=360, justify="left"
+        )
+        self.message_label.grid(row=0, column=0, sticky="w")
+
+        polygon_frame = ttk.LabelFrame(self.frame, text="Polygons")
+        polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
+        polygon_frame.columnconfigure(0, weight=1)
+        polygon_frame.rowconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(
+            polygon_frame,
+            columns=("title", "area", "run"),
+            show="headings",
+            height=8,
+        )
+        self.tree.heading("title", text="Title")
+        self.tree.heading("area", text="Area (km^2)")
+        self.tree.heading("run", text="Last processed")
+        self.tree.column("title", width=220, anchor="w")
+        self.tree.column("area", width=110, anchor="e")
+        self.tree.column("run", width=140, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(polygon_frame, orient="vertical", command=self.tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
+        chart_frame.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
+        self.chart = SensitivityChart(chart_frame, palette_map)
+
+    def update(self, summary: Dict[str, Any]) -> None:
+        summary = summary or {}
+        self.message_var.set(summary.get("message", ""))
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        polygons: Iterable[PolygonSummary] = summary.get("polygons", [])
+        for polygon in polygons:
+            self.tree.insert(
+                "",
+                "end",
+                values=(polygon.title, polygon.area_label, polygon.timestamp_label),
+            )
+
+        self.chart.update(summary.get("sensitivity", []))
+
+
+class ComprehensivePanel:
+    """Overlap-focused view using stacked analysis results."""
+
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+        self.frame = ttk.Frame(master, padding=(6, 6))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(1, weight=1)
+        self.frame.rowconfigure(2, weight=1)
+        self.frame.rowconfigure(3, weight=1)
+
+        self.message_var = tk.StringVar(value="")
+        self.message_label = ttk.Label(
+            self.frame, textvariable=self.message_var, style="Warning.TLabel", wraplength=360, justify="left"
+        )
+        self.message_label.grid(row=0, column=0, sticky="w")
+
+        polygon_frame = ttk.LabelFrame(self.frame, text="Polygon totals (stacked)")
+        polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
+        polygon_frame.columnconfigure(0, weight=1)
+        polygon_frame.rowconfigure(0, weight=1)
+
+        self.polygon_tree = ttk.Treeview(
+            polygon_frame,
+            columns=("title", "area"),
+            show="headings",
+            height=6,
+        )
+        self.polygon_tree.heading("title", text="Title")
+        self.polygon_tree.heading("area", text="Area (km^2)")
+        self.polygon_tree.column("title", width=220, anchor="w")
+        self.polygon_tree.column("area", width=120, anchor="e")
+        self.polygon_tree.grid(row=0, column=0, sticky="nsew")
+
+        poly_scroll = ttk.Scrollbar(polygon_frame, orient="vertical", command=self.polygon_tree.yview)
+        poly_scroll.grid(row=0, column=1, sticky="ns")
+        self.polygon_tree.configure(yscrollcommand=poly_scroll.set)
+
+        asset_frame = ttk.LabelFrame(self.frame, text="Asset group overlap")
+        asset_frame.grid(row=2, column=0, sticky="nsew", pady=(4, 4))
+        asset_frame.columnconfigure(0, weight=1)
+        asset_frame.rowconfigure(0, weight=1)
+
+        self.asset_tree = ttk.Treeview(
+            asset_frame,
+            columns=("asset", "sensitivity", "area"),
+            show="headings",
+            height=6,
+        )
+        self.asset_tree.heading("asset", text="Asset group")
+        self.asset_tree.heading("sensitivity", text="Dominant sensitivity")
+        self.asset_tree.heading("area", text="Area (km^2)")
+        self.asset_tree.column("asset", width=220, anchor="w")
+        self.asset_tree.column("sensitivity", width=180, anchor="w")
+        self.asset_tree.column("area", width=120, anchor="e")
+        self.asset_tree.grid(row=0, column=0, sticky="nsew")
+
+        asset_scroll = ttk.Scrollbar(asset_frame, orient="vertical", command=self.asset_tree.yview)
+        asset_scroll.grid(row=0, column=1, sticky="ns")
+        self.asset_tree.configure(yscrollcommand=asset_scroll.set)
+
+        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
+        chart_frame.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
+        self.chart = SensitivityChart(chart_frame, palette_map)
+
+    def update(self, summary: Dict[str, Any]) -> None:
+        summary = summary or {}
+        self.message_var.set(summary.get("message", ""))
+
+        for item in self.polygon_tree.get_children():
+            self.polygon_tree.delete(item)
+        for polygon in summary.get("polygons", []):
+            self.polygon_tree.insert(
+                "",
+                "end",
+                values=(polygon.title, polygon.area_label),
+            )
+
+        for item in self.asset_tree.get_children():
+            self.asset_tree.delete(item)
+        for asset in summary.get("asset_groups", []):
+            self.asset_tree.insert(
+                "",
+                "end",
+                values=(asset.asset_group, asset.dominant_label, asset.area_label),
+            )
+
+        self.chart.update(summary.get("sensitivity", []))
+
+
+class BasicComparisonView:
+    """Wraps the left/right basic analysis panels for the notebook."""
+
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+        self.frame = ttk.Frame(master)
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.columnconfigure(1, weight=1)
+        self.frame.rowconfigure(0, weight=1)
+
+        self.left_panel = BasicPanel(self.frame, palette_map)
+        self.left_panel.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        self.right_panel = BasicPanel(self.frame, palette_map)
+        self.right_panel.frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+    def update_left(self, summary: Dict[str, Any]) -> None:
+        self.left_panel.update(summary)
+
+    def update_right(self, summary: Dict[str, Any]) -> None:
+        self.right_panel.update(summary)
+
+
+class ComprehensiveComparisonView:
+    """Wraps the left/right comprehensive analysis panels for the notebook."""
+
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+        self.frame = ttk.Frame(master)
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.columnconfigure(1, weight=1)
+        self.frame.rowconfigure(0, weight=1)
+
+        self.left_panel = ComprehensivePanel(self.frame, palette_map)
+        self.left_panel.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        self.right_panel = ComprehensivePanel(self.frame, palette_map)
+        self.right_panel.frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+    def update_left(self, summary: Dict[str, Any]) -> None:
+        self.left_panel.update(summary)
+
+    def update_right(self, summary: Dict[str, Any]) -> None:
+        self.right_panel.update(summary)
 
 
 class ComparisonTable:
@@ -976,20 +1354,26 @@ class ComparisonApp:
         container = ttk.Frame(self.root, padding=(10, 10))
         container.pack(fill=tk.BOTH, expand=True)
 
-        columns_frame = ttk.Frame(container)
-        columns_frame.pack(fill=tk.BOTH, expand=True)
-        columns_frame.columnconfigure(0, weight=1)
-        columns_frame.columnconfigure(1, weight=1)
-        columns_frame.rowconfigure(0, weight=1)
+        header_frame = ttk.Frame(container)
+        header_frame.pack(fill=tk.X)
+        header_frame.columnconfigure(0, weight=1)
+        header_frame.columnconfigure(1, weight=1)
 
-        self.left_panel = ColumnPanel(columns_frame, "Left group", self.palette_map, self._on_left_selection)
-        self.left_panel.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.left_header = GroupHeader(header_frame, "Left group", self._on_left_selection)
+        self.left_header.frame.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        self.right_panel = ColumnPanel(columns_frame, "Right group", self.palette_map, self._on_right_selection)
-        self.right_panel.frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.right_header = GroupHeader(header_frame, "Right group", self._on_right_selection)
+        self.right_header.frame.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self.notebook = ttk.Notebook(container)
+        self.basic_view = BasicComparisonView(self.notebook, self.palette_map)
+        self.notebook.add(self.basic_view.frame, text="Basic analysis")
+        self.comprehensive_view = ComprehensiveComparisonView(self.notebook, self.palette_map)
+        self.notebook.add(self.comprehensive_view.frame, text="Comprehensive analysis")
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
         self.comparison_table = ComparisonTable(container)
-        self.comparison_table.frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.comparison_table.frame.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
 
         self.status_var = tk.StringVar(value=self.data.status_message())
         self.status_label = ttk.Label(container, textvariable=self.status_var, style="Status.TLabel", anchor="w")
@@ -998,6 +1382,8 @@ class ComparisonApp:
         self.display_to_id: Dict[str, str] = {}
         self.left_summary: Dict[str, Any] = {}
         self.right_summary: Dict[str, Any] = {}
+        self.left_stacked_summary: Dict[str, Any] = {}
+        self.right_stacked_summary: Dict[str, Any] = {}
 
         self._populate_options()
 
@@ -1016,22 +1402,34 @@ class ComparisonApp:
         option_labels = [display for _, display in choices]
         self.display_to_id = {display: group_id for group_id, display in choices}
 
-        self.left_panel.set_options(option_labels)
-        self.right_panel.set_options(option_labels)
+        self.left_header.set_options(option_labels)
+        self.right_header.set_options(option_labels)
+
+        empty_basic = self.data.group_summary(None)
+        empty_comp = self.data.stacked_summary(None)
 
         if not option_labels:
-            self.left_panel.update_content(self.data.group_summary(None))
-            self.right_panel.update_content(self.data.group_summary(None))
+            self.left_header.update_summary(empty_basic)
+            self.right_header.update_summary(empty_basic)
+            self.basic_view.update_left(empty_basic)
+            self.basic_view.update_right(empty_basic)
+            self.comprehensive_view.update_left(empty_comp)
+            self.comprehensive_view.update_right(empty_comp)
             self.comparison_table.update_rows([])
             self.status_var.set(self.data.status_message())
+            self.left_summary = empty_basic
+            self.right_summary = empty_basic
+            self.left_stacked_summary = empty_comp
+            self.right_stacked_summary = empty_comp
             return
 
-        self.left_panel.set_selection(option_labels[0])
-        self._on_left_selection(option_labels[0])
+        left_display = option_labels[0]
+        self.left_header.set_selection(left_display)
+        self._on_left_selection(left_display)
 
-        right_index = 1 if len(option_labels) > 1 else 0
-        self.right_panel.set_selection(option_labels[right_index])
-        self._on_right_selection(option_labels[right_index])
+        right_display = option_labels[1] if len(option_labels) > 1 else option_labels[0]
+        self.right_header.set_selection(right_display)
+        self._on_right_selection(right_display)
 
         if self.data.has_analysis:
             self.status_var.set("Ready. Adjust the selections to compare different groups.")
@@ -1041,13 +1439,21 @@ class ComparisonApp:
     def _on_left_selection(self, display: str) -> None:
         group_id = self.display_to_id.get(display)
         self.left_summary = self.data.group_summary(group_id)
-        self.left_panel.update_content(self.left_summary)
+        self.left_header.update_summary(self.left_summary)
+        self.basic_view.update_left(self.left_summary)
+
+        self.left_stacked_summary = self.data.stacked_summary(group_id)
+        self.comprehensive_view.update_left(self.left_stacked_summary)
         self._refresh_comparison()
 
     def _on_right_selection(self, display: str) -> None:
         group_id = self.display_to_id.get(display)
         self.right_summary = self.data.group_summary(group_id)
-        self.right_panel.update_content(self.right_summary)
+        self.right_header.update_summary(self.right_summary)
+        self.basic_view.update_right(self.right_summary)
+
+        self.right_stacked_summary = self.data.stacked_summary(group_id)
+        self.comprehensive_view.update_right(self.right_stacked_summary)
         self._refresh_comparison()
 
     def _refresh_comparison(self) -> None:
