@@ -256,6 +256,8 @@ def main() -> None:
         "data_import",
         "data_process",
         "data_report",
+        "data_analysis_setup",
+        "data_analysis_presentation",
         "geocodegroup_edit",
         "geocodes_create",
         "lines_admin",
