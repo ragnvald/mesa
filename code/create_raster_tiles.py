@@ -2,11 +2,13 @@
 """
 Raster MBTiles generator (PNG) from tbl_flat.parquet — no GDAL/Tippecanoe.
 
-Per group in name_gis_geocodegroup, produces FOUR MBTiles:
+Per group in name_gis_geocodegroup, produces SIX MBTiles:
   <group>_sensitivity.mbtiles   (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
   <group>_envindex.mbtiles      (yellow->red ramp from env_index 1..100)
   <group>_groupstotal.mbtiles   (light->dark blue, linear ramp of asset_groups_total per group)
   <group>_assetstotal.mbtiles   (light->dark blue, linear ramp of assets_overlap_total per group)
+  <group>_index_asset_layer_objects.mbtiles        (sensitivity-style ramp using index_asset_layer_objects 1..100)
+  <group>_index_sensitivity_layer_objects.mbtiles  (same ramp using index_sensitivity_layer_objects 1..100)
 
 - EPSG:4326 input expected.
 - Transparent background, polygon fill + optional stroke.
@@ -22,6 +24,8 @@ Usage examples:
 import argparse, math, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Iterable
+
+import pyarrow.parquet as pq
 
 # Ensure stdout/stderr can handle Unicode across environments (Windows cp1252, pipes, etc.)
 def _tame_stdio():
@@ -181,6 +185,44 @@ def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.
     b = int(round(255 + t * (107 - 255)))
     return (r, g, b, int(max(0.0, min(1.0, alpha))*255))
 
+def build_index_gradient_from_palette(palette: Dict[str, Tuple[int,int,int,int]],
+                                      steps: int = 25) -> List[Tuple[int,int,int,int]]:
+    """
+    Build a 25-step gradient (1..100) using the sensitivity palette colors
+    ordered from low (E) to high (A).
+    """
+    order = ["E", "D", "C", "B", "A"]
+    stops = []
+    fallback = (255, 255, 178, 255)  # light yellow default
+    for code in order:
+        stops.append(palette.get(code, fallback))
+    gradient: List[Tuple[int,int,int,int]] = []
+    if steps <= 1:
+        gradient.append(stops[-1])
+        return gradient
+    for i in range(steps):
+        t = i / (steps - 1)
+        pos = t * (len(stops) - 1)
+        idx = int(pos)
+        frac = pos - idx
+        if idx >= len(stops) - 1:
+            gradient.append(stops[-1])
+        else:
+            c1 = stops[idx]
+            c2 = stops[idx + 1]
+            interp = tuple(int(round(c1[k] + (c2[k] - c1[k]) * frac)) for k in range(4))
+            gradient.append(interp)
+    return gradient
+
+def index_layer_color(v: Optional[float], gradient: List[Tuple[int,int,int,int]]) -> Tuple[int,int,int,int]:
+    if v is None or not np.isfinite(v) or not gradient:
+        return (0, 0, 0, 0)
+    ratio = (float(v) - 1.0) / 99.0
+    ratio = max(0.0, min(1.0, ratio))
+    idx = int(round(ratio * (len(gradient) - 1)))
+    idx = max(0, min(len(gradient) - 1, idx))
+    return gradient[idx]
+
 def read_sensitivity_palette_from_config(cfg_path: Path, alpha: float = 1.0) -> Dict[str, Tuple[int,int,int,int]]:
     import configparser
     # IMPORTANT: don't treat '#' as comment (colors like #ff0000)
@@ -334,7 +376,7 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
 _G_GEOMS: List = []
 _G_SENS_CODES: List[Optional[str]] = []
 _G_NUMVALS: List[Optional[float]] = []   # used by env/groupstotal/assetstotal
-_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal"
+_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal" | "index_asset" | "index_sens"
 _G_PALETTE: Dict[str, Tuple[int,int,int,int]] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
@@ -378,6 +420,9 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
             elif _G_FILL_MODE in ("groupstotal", "assetstotal"):
                 alpha = _G_PALETTE.get("blue_alpha", 0.70)
                 fill_rgba = blue_ramp_rgba(_G_NUMVALS[i], _G_NUM_MIN, _G_NUM_MAX, alpha=alpha)
+            elif _G_FILL_MODE in ("index_asset", "index_sens"):
+                gradient = _G_PALETTE.get("gradient", [])
+                fill_rgba = index_layer_color(_G_NUMVALS[i], gradient)
             else:
                 continue
 
@@ -442,7 +487,7 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
 # ----------------------- Core -----------------------
 def run_one_layer(group_name: str,
                   gdf: gpd.GeoDataFrame,
-                  layer_mode: str,      # "sensitivity" | "env" | "groupstotal" | "assetstotal"
+                  layer_mode: str,      # "sensitivity" | "env" | "groupstotal" | "assetstotal" | "index_asset" | "index_sens"
                   palette: Dict[str, Tuple[int,int,int,int]],
                   ranges_map: Dict[str, range],
                   out_dir: Path,
@@ -497,6 +542,18 @@ def run_one_layer(group_name: str,
         vmax = float(np.nanmax(numvals.values)) if len(numvals) else 1.0
         if not np.isfinite(vmin): vmin = 0.0
         if not np.isfinite(vmax): vmax = 1.0
+    elif layer_mode == "index_asset":
+        numvals = pd.to_numeric(gdf.get("index_asset_layer_objects", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
+        mbt_name = f"{group_name}_index_asset_layer_objects"
+        out_path = out_dir / f"{mbt_name}.mbtiles"
+        vmin = 1.0; vmax = 100.0
+    elif layer_mode == "index_sens":
+        numvals = pd.to_numeric(gdf.get("index_sensitivity_layer_objects", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
+        mbt_name = f"{group_name}_index_sensitivity_layer_objects"
+        out_path = out_dir / f"{mbt_name}.mbtiles"
+        vmin = 1.0; vmax = 100.0
     else:
         raise ValueError(f"Unknown layer_mode: {layer_mode}")
 
@@ -545,7 +602,7 @@ def run_one_layer(group_name: str,
     log(f"    {mbt_name}: tiles written {written:,} / scheduled {total_tiles:,} → {out_path}")
 
 def main():
-    ap = argparse.ArgumentParser(description="Raster MBTiles (PNG) from tbl_flat.parquet per group (sensitivity, env_index, groupstotal, assetstotal).")
+    ap = argparse.ArgumentParser(description="Raster MBTiles (PNG) from tbl_flat.parquet per group (sensitivity, env_index, totals, and layer-object indexes).")
     ap.add_argument("--group-col", default="name_gis_geocodegroup", help="Grouping column (default: name_gis_geocodegroup)")
     ap.add_argument("--minzoom", type=int, default=6)
     ap.add_argument("--maxzoom", type=int, default=12)
@@ -557,6 +614,7 @@ def main():
     ap.add_argument("--fill-alpha", type=float, default=None, help="Fill alpha for sensitivity tiles (0..1)")
     ap.add_argument("--env-alpha", type=float, default=None, help="Fill alpha for envindex tiles (0..1)")
     ap.add_argument("--blue-alpha", type=float, default=None, help="Fill alpha for *_total tiles (0..1)")
+    ap.add_argument("--index-alpha", type=float, default=None, help="Fill alpha for index layer-object tiles (0..1)")
     ap.add_argument("--stroke-width", type=float, default=0.0, help="Stroke width px")
     args = ap.parse_args()
 
@@ -564,16 +622,38 @@ def main():
     if not parquet.exists():
         raise SystemExit(f"Missing: {parquet}")
 
-    # Load minimal columns (added asset_* totals)
-    need_cols = [
+    # Load minimal columns (optional layers probed dynamically)
+    required_cols = [
         args.group_col, "geometry",
         "sensitivity_code_max", "sensitivity_max",
+    ]
+    optional_cols = [
         "env_index",
-        "asset_groups_total", "assets_overlap_total"
+        "asset_groups_total", "assets_overlap_total",
+        "index_asset_layer_objects", "index_sensitivity_layer_objects",
     ]
     try:
-        gdf_all = gpd.read_parquet(parquet, columns=need_cols)
-    except TypeError:
+        schema_cols = set(pq.ParquetFile(parquet).schema.names)
+    except Exception:
+        schema_cols = None
+
+    if schema_cols is not None:
+        missing_required = [c for c in required_cols if c not in schema_cols]
+        if missing_required:
+            raise SystemExit(f"tbl_flat missing required columns for tiles: {missing_required}")
+        cols_to_read = required_cols + [c for c in optional_cols if c in schema_cols]
+    else:
+        cols_to_read = required_cols + optional_cols
+    seen = set()
+    ordered_cols = []
+    for col in cols_to_read:
+        if col not in seen:
+            ordered_cols.append(col)
+            seen.add(col)
+
+    try:
+        gdf_all = gpd.read_parquet(parquet, columns=ordered_cols)
+    except (TypeError, ValueError):
         gdf_all = gpd.read_parquet(parquet)
 
     # EPSG:4326 expected
@@ -618,13 +698,23 @@ def main():
             pass
         return default
 
-    sens_alpha = _get_alpha("tiles_fill_alpha", args.fill_alpha, 1.0)
-    env_alpha  = _get_alpha("tiles_env_alpha", args.env_alpha, 1.0)
-    blue_alpha = _get_alpha("tiles_blue_alpha", args.blue_alpha, 1.0)
+    sens_alpha  = _get_alpha("tiles_fill_alpha", args.fill_alpha, 1.0)
+    env_alpha   = _get_alpha("tiles_env_alpha", args.env_alpha, 1.0)
+    blue_alpha  = _get_alpha("tiles_blue_alpha", args.blue_alpha, 1.0)
+    index_alpha = _get_alpha("tiles_index_alpha", args.index_alpha, sens_alpha)
 
     sensitivity_palette = read_sensitivity_palette_from_config(cfg_path, alpha=sens_alpha)
+    index_palette_src   = read_sensitivity_palette_from_config(cfg_path, alpha=index_alpha)
+    index_gradient      = build_index_gradient_from_palette(index_palette_src, steps=25)
+    index_palette       = {"gradient": index_gradient}
     ranges_map = read_ranges_map(cfg_path)
     stroke_rgba = hex_to_rgba(args.stroke, args.stroke_alpha)
+    env_available = "env_index" in gdf_all.columns
+    index_asset_available = "index_asset_layer_objects" in gdf_all.columns
+    index_sens_available = "index_sensitivity_layer_objects" in gdf_all.columns
+    groups_total_available = "asset_groups_total" in gdf_all.columns
+    assets_total_available = "assets_overlap_total" in gdf_all.columns
+    blue_palette = {"blue_alpha": blue_alpha}
 
     out_dir = mbtiles_dir()
     log(f"Input:  {parquet}")
@@ -660,54 +750,101 @@ def main():
         )
 
         # ENV INDEX layer
-        log(f"  → building {slug}_envindex.mbtiles …")
-        env_palette = {"env_alpha": env_alpha}
-        run_one_layer(
-            group_name=slug,
-            gdf=gdf,
-            layer_mode="env",
-            palette=env_palette,
-            ranges_map=ranges_map,   # unused here, harmless
-            out_dir=out_dir,
-            minzoom=args.minzoom,
-            maxzoom=args.maxzoom,
-            stroke_rgba=stroke_rgba,
-            stroke_w=args.stroke_width,
-            procs=args.procs
-        )
+        if env_available:
+            log(f"  → building {slug}_envindex.mbtiles …")
+            env_palette = {"env_alpha": env_alpha}
+            run_one_layer(
+                group_name=slug,
+                gdf=gdf,
+                layer_mode="env",
+                palette=env_palette,
+                ranges_map=ranges_map,   # unused here, harmless
+                out_dir=out_dir,
+                minzoom=args.minzoom,
+                maxzoom=args.maxzoom,
+                stroke_rgba=stroke_rgba,
+                stroke_w=args.stroke_width,
+                procs=args.procs
+            )
+        else:
+            log("  → skipping envindex tiles (env_index column missing)")
+
+        # INDEX (asset layer objects)
+        if index_asset_available:
+            log(f"  → building {slug}_index_asset_layer_objects.mbtiles …")
+            run_one_layer(
+                group_name=slug,
+                gdf=gdf,
+                layer_mode="index_asset",
+                palette=index_palette,
+                ranges_map=ranges_map,
+                out_dir=out_dir,
+                minzoom=args.minzoom,
+                maxzoom=args.maxzoom,
+                stroke_rgba=stroke_rgba,
+                stroke_w=args.stroke_width,
+                procs=args.procs
+            )
+        else:
+            log("  → skipping index_asset_layer_objects tiles (column missing)")
+
+        # INDEX (sensitivity layer objects)
+        if index_sens_available:
+            log(f"  → building {slug}_index_sensitivity_layer_objects.mbtiles …")
+            run_one_layer(
+                group_name=slug,
+                gdf=gdf,
+                layer_mode="index_sens",
+                palette=index_palette,
+                ranges_map=ranges_map,
+                out_dir=out_dir,
+                minzoom=args.minzoom,
+                maxzoom=args.maxzoom,
+                stroke_rgba=stroke_rgba,
+                stroke_w=args.stroke_width,
+                procs=args.procs
+            )
+        else:
+            log("  → skipping index_sensitivity_layer_objects tiles (column missing)")
 
         # ASSET GROUPS TOTAL (light->dark blue, per-group min/max)
-        log(f"  → building {slug}_groupstotal.mbtiles …")
-        blue_palette = {"blue_alpha": blue_alpha}
-        run_one_layer(
-            group_name=slug,
-            gdf=gdf,
-            layer_mode="groupstotal",
-            palette=blue_palette,
-            ranges_map=ranges_map,  # unused
-            out_dir=out_dir,
-            minzoom=args.minzoom,
-            maxzoom=args.maxzoom,
-            stroke_rgba=stroke_rgba,
-            stroke_w=args.stroke_width,
-            procs=args.procs
-        )
+        if groups_total_available:
+            log(f"  → building {slug}_groupstotal.mbtiles …")
+            run_one_layer(
+                group_name=slug,
+                gdf=gdf,
+                layer_mode="groupstotal",
+                palette=blue_palette,
+                ranges_map=ranges_map,  # unused
+                out_dir=out_dir,
+                minzoom=args.minzoom,
+                maxzoom=args.maxzoom,
+                stroke_rgba=stroke_rgba,
+                stroke_w=args.stroke_width,
+                procs=args.procs
+            )
+        else:
+            log("  → skipping groupstotal tiles (asset_groups_total column missing)")
 
         # ASSETS OVERLAP TOTAL (light->dark blue, per-group min/max)
-        log(f"  → building {slug}_assetstotal.mbtiles …")
-        run_one_layer(
-            group_name=slug,
-            gdf=gdf,
-            layer_mode="assetstotal",
-            palette=blue_palette,
-            ranges_map=ranges_map,  # unused
-            out_dir=out_dir,
-            minzoom=args.minzoom,
-            maxzoom=args.maxzoom,
-            stroke_rgba=stroke_rgba,
-            stroke_w=args.stroke_width,
-            procs=args.procs
-        )
+        if assets_total_available:
+            log(f"  → building {slug}_assetstotal.mbtiles …")
+            run_one_layer(
+                group_name=slug,
+                gdf=gdf,
+                layer_mode="assetstotal",
+                palette=blue_palette,
+                ranges_map=ranges_map,  # unused
+                out_dir=out_dir,
+                minzoom=args.minzoom,
+                maxzoom=args.maxzoom,
+                stroke_rgba=stroke_rgba,
+                stroke_w=args.stroke_width,
+                procs=args.procs
+            )
+        else:
+            log("  → skipping assetstotal tiles (assets_overlap_total column missing)")
+
 
     log("All done.")
 
