@@ -421,10 +421,24 @@ def run_subprocess(command, fallback_command, gpkg_file):
     except FileNotFoundError as e:
         log_to_logfile(f"File not found for command: {command}, error: {e}")
 
+def _resolve_tool_path(*rel_candidates: str) -> str:
+    """Find the first existing helper path across system/, project root, or code/."""
+    for rel in rel_candidates:
+        candidate = resolve_path(rel)
+        if os.path.exists(candidate):
+            return candidate
+    # Fall back to the first option even if it does not exist (caller handles error)
+    return resolve_path(rel_candidates[0])
+
 def get_script_paths(file_name: str):
-    # Python and compiled variants live under system/
-    python_script = resolve_path(os.path.join("system", f"{file_name}.py"))
-    exe_file     = resolve_path(os.path.join("system", f"{file_name}.exe"))
+    python_script = _resolve_tool_path(
+        os.path.join("system", f"{file_name}.py"),
+        f"{file_name}.py",
+    )
+    exe_file = _resolve_tool_path(
+        os.path.join("system", f"{file_name}.exe"),
+        f"{file_name}.exe",
+    )
     log_to_logfile(f"Python script path: {python_script}")
     log_to_logfile(f"Executable file path: {exe_file}")
     return python_script, exe_file
@@ -452,13 +466,31 @@ def import_assets(gpkg_file):
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_processing_setup():
-    python_script, exe_file = get_script_paths("params_edit")
+    script_candidates = [
+        os.path.join("system", "parametres_setup.py"),
+        "parametres_setup.py",
+        os.path.join("system", "params_edit.py"),
+        "params_edit.py",
+    ]
+    exe_candidates = [
+        os.path.join("system", "parametres_setup.exe"),
+        "parametres_setup.exe",
+        os.path.join("system", "params_edit.exe"),
+        "params_edit.exe",
+    ]
+    python_script = _resolve_tool_path(*script_candidates)
+    exe_file = _resolve_tool_path(*exe_candidates)
+    log_to_logfile(f"Processing setup script path: {python_script}")
+    log_to_logfile(f"Processing setup executable path: {exe_file}")
+    arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "params_edit.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        run_subprocess(
+            [sys.executable or "python", python_script, *arg_tokens],
+            [exe_file, *arg_tokens],
+            gpkg_file
+        )
 
 def process_data(gpkg_file):
     python_script, exe_file = get_script_paths("data_process")
@@ -489,7 +521,10 @@ def admin_lines():
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def open_maps_overview():
-    python_script = resolve_path(os.path.join("system", "maps_overview.py"))
+    python_script = _resolve_tool_path(
+        os.path.join("system", "maps_overview.py"),
+        "maps_overview.py",
+    )
     python_exe = sys.executable or "python"
     try:
         subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
@@ -497,12 +532,33 @@ def open_maps_overview():
         log_to_logfile(f"Failed to open maps_overview.py: {e}")
 
 def open_present_files():
-    python_script = resolve_path(os.path.join("system", "data_report.py"))
+    python_script = _resolve_tool_path(
+        os.path.join("system", "data_report.py"),
+        "data_report.py",
+    )
     python_exe = sys.executable or "python"
     try:
         subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
     except Exception as e:
         log_to_logfile(f"Failed to open data_report.py: {e}")
+
+def open_data_analysis_setup():
+    python_script, exe_file = get_script_paths("data_analysis_setup")
+    if getattr(sys, "frozen", False):
+        file_path = resolve_path(os.path.join("system", "data_analysis_setup.exe"))
+        log_to_logfile(f"Running bundled exe: {file_path}")
+        run_subprocess([file_path], [], gpkg_file)
+    else:
+        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+
+def open_data_analysis_presentation():
+    python_script, exe_file = get_script_paths("data_analysis_presentation")
+    if getattr(sys, "frozen", False):
+        file_path = resolve_path(os.path.join("system", "data_analysis_presentation.exe"))
+        log_to_logfile(f"Running bundled exe: {file_path}")
+        run_subprocess([file_path], [], gpkg_file)
+    else:
+        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_assets():
     python_script, exe_file = get_script_paths("assetgroup_edit")
@@ -596,33 +652,6 @@ def increment_stat_value(config_file, stat_name, increment_value):
     if updated:
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
-
-# ---------------------------------------------------------------------
-# Frame switchers (unchanged)
-# ---------------------------------------------------------------------
-def show_main_frame():
-    about_frame.pack_forget()
-    registration_frame.pack_forget()
-    settings_frame.pack_forget()
-    main_frame.pack(fill='both', expand=True, pady=10)
-
-def show_about_frame():
-    main_frame.pack_forget()
-    registration_frame.pack_forget()
-    settings_frame.pack_forget()
-    about_frame.pack(fill='both', expand=True)
-
-def show_registration_frame():
-    main_frame.pack_forget()
-    about_frame.pack_forget()
-    settings_frame.pack_forget()
-    registration_frame.pack(fill='both', expand=True)
-
-def show_settings_frame():
-    main_frame.pack_forget()
-    about_frame.pack_forget()
-    registration_frame.pack_forget()
-    settings_frame.pack(fill='both', expand=True)
 
 def add_text_to_labelframe(labelframe, text):
     label = tk.Label(labelframe, text=text, justify='left')
@@ -776,73 +805,46 @@ check_and_create_folders()
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     root = ttk.Window(themename=ttk_bootstrap_theme)
-    root.title("MESA 4")
+    root.title(mesa_version or "MESA")
     try:
         root.iconbitmap(resolve_path(os.path.join("system_resources", "mesa.ico")))
     except Exception:
         pass
-    root.geometry("850x540")
+    root.geometry("900x580")
 
-    button_width = 18
-    button_padx  =  7
-    button_pady  =  7
+    intro_text = (
+        "Welcome to the MESA desktop. The Statistics tab is your live status board, while the Operations tab "
+        "launches the main workflows for preparing and analysing data."
+    )
+    ttk.Label(
+        root,
+        text=intro_text,
+        wraplength=780,
+        justify="left",
+        padding=(12, 8)
+    ).pack(fill="x", padx=12, pady=(12, 6))
 
-    main_frame = tk.Frame(root)
-    main_frame.pack(fill='both', expand=True, pady=10)
+    notebook = ttk.Notebook(root, bootstyle=SECONDARY)
+    notebook.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
-    main_frame.grid_columnconfigure(0, weight=0)
-    main_frame.grid_columnconfigure(1, weight=0)
-    main_frame.grid_columnconfigure(2, weight=1)
+    # ------------------------------------------------------------------
+    # Statistics tab
+    # ------------------------------------------------------------------
+    stats_tab = ttk.Frame(notebook)
+    notebook.add(stats_tab, text="Statistics")
 
-    left_panel = tk.Frame(main_frame)
-    left_panel.grid(row=0, column=0, sticky="nsew", padx=20)
-    main_frame.grid_columnconfigure(0, minsize=220)
+    stats_container = ttk.Frame(stats_tab, padding=12)
+    stats_container.pack(fill="both", expand=True)
 
-    import_assets_btn = ttk.Button(left_panel, text="Import",
-                                   command=lambda: import_assets(gpkg_file),
-                                   width=button_width, bootstyle=PRIMARY)
-    import_assets_btn.grid(row=0, column=0, padx=button_padx, pady=button_pady)
-
-    geocodes_btn = ttk.Button(left_panel, text="Geocodes/grids",
-                              command=geocodes_grids, width=button_width)
-    geocodes_btn.grid(row=1, column=0, padx=button_padx, pady=button_pady)
-
-    setup_processing_btn = ttk.Button(left_panel, text="Set up",
-                                      command=edit_processing_setup, width=button_width)
-    setup_processing_btn.grid(row=2, column=0, padx=button_padx, pady=button_pady)
-
-    process_data_btn = ttk.Button(left_panel, text="Process",
-                                  command=lambda: process_data(gpkg_file),
-                                  width=button_width, bootstyle=PRIMARY)
-    process_data_btn.grid(row=3, column=0, padx=button_padx, pady=button_pady)
-
-    admin_atlas_btn = ttk.Button(left_panel, text="Atlas",
-                                 command=make_atlas, width=button_width)
-    admin_atlas_btn.grid(row=4, column=0, padx=button_padx, pady=button_pady)
-
-    admin_lines_btn = ttk.Button(left_panel, text="Segments",
-                                 command=admin_lines, width=button_width)
-    admin_lines_btn.grid(row=5, column=0, padx=button_padx, pady=button_pady)
-
-    maps_overview_btn = ttk.Button(left_panel, text="Maps overview",
-                                   command=open_maps_overview, width=button_width, bootstyle=PRIMARY)
-    maps_overview_btn.grid(row=6, column=0, padx=button_padx, pady=button_pady)
-
-    present_files_btn = ttk.Button(left_panel, text="Report engine",
-                                   command=open_present_files, width=button_width)
-    present_files_btn.grid(row=7, column=0, padx=button_padx, pady=button_pady)
-
-    separator = ttk.Separator(main_frame, orient='vertical')
-    separator.grid(row=0, column=1, sticky='ns')
-
-    right_panel = ttk.Frame(main_frame)
-    right_panel.grid(row=0, column=2, sticky="nsew", padx=5)
-    right_panel.grid_rowconfigure(0, weight=1)
-    right_panel.grid_columnconfigure(0, weight=1)
+    ttk.Label(
+        stats_container,
+        text="This overview updates automatically when you import data or run helper tools.",
+        justify="left"
+    ).pack(anchor="w", pady=(0, 8))
 
     global info_labelframe
-    info_labelframe = ttk.LabelFrame(right_panel, text="Statistics and help", bootstyle='info')
-    info_labelframe.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+    info_labelframe = ttk.LabelFrame(stats_container, text="Statistics and help", bootstyle='info')
+    info_labelframe.pack(fill="both", expand=True)
     info_labelframe.grid_columnconfigure(0, weight=1)
     info_labelframe.grid_columnconfigure(1, weight=3)
     info_labelframe.grid_columnconfigure(2, weight=2)
@@ -850,12 +852,142 @@ if __name__ == "__main__":
     update_stats(gpkg_file)
     log_to_logfile("User interface, statistics updated.")
 
-    # About frame
-    about_frame = ttk.Frame(root)
+    # ------------------------------------------------------------------
+    # Operations tab
+    # ------------------------------------------------------------------
+    operations_tab = ttk.Frame(notebook)
+    notebook.add(operations_tab, text="Operations")
+
+    operations_container = ttk.Frame(operations_tab, padding=12)
+    operations_container.pack(fill="both", expand=True)
+
+    ttk.Label(
+        operations_container,
+        text="Launch the main workflows from here. Each button has a short description of when to use it.",
+        justify="left",
+        wraplength=760
+    ).pack(anchor="w", pady=(0, 10))
+
+    button_width = 16
+    button_padx = 6
+    button_pady = 4
+
+    operations_grid = ttk.Frame(operations_container)
+    operations_grid.pack(fill="both", expand=True)
+    operations_grid.columnconfigure(1, weight=1)
+
+    operations = [
+        ("Import", lambda: import_assets(gpkg_file),
+         "Opens the asset and polygon importer. Start here when preparing a new dataset.", PRIMARY),
+        ("Geocodes/grids", geocodes_grids,
+         "Creates or refreshes geocode grids (hexagons, tiles) that support the analysis.", None),
+        ("Set up", edit_processing_setup,
+         "Adjust processing parameters such as buffers and thresholds before running analysis.", None),
+        ("Process", lambda: process_data(gpkg_file),
+         "Runs the core processing pipeline to produce the GeoParquet outputs.", PRIMARY),
+        ("Atlas", make_atlas,
+         "Generates atlas tiles and artefacts for map visualisations.", None),
+        ("Segments", admin_lines,
+         "Processes transport or utility lines into analysis segments.", None),
+        ("Maps overview", open_maps_overview,
+         "Opens the interactive map viewer with current background layers and assets.", PRIMARY),
+        ("Analysis setup", open_data_analysis_setup,
+         "Launches the area analysis tool used to define polygons and run clipping.", None),
+        ("Analysis presentation", open_data_analysis_presentation,
+         "Opens the comparison dashboard for analysis groups.", None),
+        ("Report engine", open_present_files,
+         "Builds printable reports and map packages for sharing with partners.", None),
+    ]
+
+    for idx, (label, command, description, bootstyle) in enumerate(operations):
+        btn_kwargs = {"text": label, "command": command, "width": button_width}
+        if bootstyle:
+            btn_kwargs["bootstyle"] = bootstyle
+        ttk.Button(
+            operations_grid,
+            **btn_kwargs
+        ).grid(row=idx, column=0, padx=(0, 12), pady=(button_pady, 2), sticky="w")
+        ttk.Label(
+            operations_grid,
+            text=description,
+            wraplength=520,
+            justify="left"
+        ).grid(row=idx, column=1, padx=(0, 4), pady=(button_pady, 2), sticky="w")
+
+    # ------------------------------------------------------------------
+    # Settings tab
+    # ------------------------------------------------------------------
+    settings_tab = ttk.Frame(notebook)
+    notebook.add(settings_tab, text="Settings")
+
+    settings_container = ttk.Frame(settings_tab, padding=12)
+    settings_container.pack(fill="both", expand=True)
+
+    mesa_text2 = (
+        "Some of the objects you already have imported or created might need some further adjustments.\n"
+        "You may do this by reading up on the below suggestions."
+    )
+    ttk.Label(
+        settings_container,
+        text=mesa_text2,
+        wraplength=660,
+        justify="left"
+    ).pack(anchor="w", pady=(0, 10))
+
+    settings_grid = ttk.Frame(settings_container, padding=(10, 10))
+    settings_grid.pack(fill="both", expand=True)
+    settings_grid.columnconfigure(1, weight=1)
+
+    settings_actions = [
+        ("Edit assets", edit_assets,
+         "This is where you can add titles to the different layers you have imported. You may also add a short descriptive text."),
+        ("Edit geocodes", edit_geocodes,
+         "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
+        ("Edit lines", edit_lines,
+         "Remember to import lines before attempting to edit them. Adjust buffer/segment parameters per line as needed."),
+        ("Edit atlas", edit_atlas,
+         "Remember to import or create atlases before attempting to edit them. Atlases are polygons highlighted in the QGIS project."),
+    ]
+
+    for row, (label, command, description) in enumerate(settings_actions):
+        ttk.Button(
+            settings_grid,
+            text=label,
+            command=command,
+            bootstyle="primary",
+            width=18
+        ).grid(row=row, column=0, padx=5, pady=4, sticky="ew")
+        ttk.Label(
+            settings_grid,
+            text=description,
+            wraplength=500,
+            justify="left"
+        ).grid(row=row, column=1, padx=5, pady=4, sticky="w")
+
+    # ------------------------------------------------------------------
+    # About tab
+    # ------------------------------------------------------------------
+    about_tab = ttk.Frame(notebook)
+    notebook.add(about_tab, text="About")
+
+    about_container = ttk.Frame(about_tab, padding=12)
+    about_container.pack(fill="both", expand=True)
+
     increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
 
-    html_frame = HtmlFrame(about_frame, horizontal_scrollbar="auto", messages_enabled=False)
+    about_box = ttk.LabelFrame(about_container, text="About MESA", bootstyle='secondary')
+    about_box.pack(fill='x', expand=False, padx=5, pady=(0, 10))
+    about_text = (
+        "Welcome to the MESA tool. The method is developed by UNEP-WCMC and the Norwegian Environment Agency. "
+        "The software streamlines sensitivity analysis, reducing the likelihood of manual errors in GIS workflows.\n\n"
+        "Documentation and user guides are available on the MESA wiki: https://github.com/ragnvald/mesa/wiki\n\n"
+        "This release incorporates feedback from workshops with partners in Ghana, Tanzania, Uganda, Mozambique, "
+        "and Kenya. Lead programmer: Ragnvald Larsen - https://www.linkedin.com/in/ragnvald/"
+    )
+    userguide_frame = ttk.LabelFrame(about_container, text="User guide", bootstyle='info')
+    userguide_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
+    html_frame = HtmlFrame(userguide_frame, horizontal_scrollbar="auto", messages_enabled=False)
     userguide_path = resolve_path(os.path.join("system_resources", "userguide.html"))
     if os.path.exists(userguide_path):
         with open(userguide_path, "r", encoding="utf-8") as file:
@@ -863,57 +995,51 @@ if __name__ == "__main__":
         html_frame.load_html(html_content)
         html_frame.pack(fill=BOTH, expand=YES)
     else:
-        # Graceful fallback if the HTML is missing
-        fallback_lbl = ttk.Label(about_frame,
-                                 text="User guide (system_resources/userguide.html) not found.\n"
-                                      "Place it under either:\n"
-                                      " - <folder with mesa.py or EXE>\\system_resources\\userguide.html, or\n"
-                                      " - <folder with mesa.py or EXE>\\code\\system_resources\\userguide.html",
-                                 justify="left", wraplength=700)
+        fallback_lbl = ttk.Label(
+            userguide_frame,
+            text="User guide (system_resources/userguide.html) not found.\n"
+                 "Place it under either:\n"
+                 " - <folder with mesa.py or EXE>\\system_resources\\userguide.html, or\n"
+                 " - <folder with mesa.py or EXE>\\code\\system_resources\\userguide.html",
+            justify="left",
+            wraplength=700
+        )
         fallback_lbl.pack(fill='both', expand=True, padx=10, pady=10)
 
-    # Registration frame
-    registration_frame = ttk.Frame(root)
-    registration_frame.pack(fill='both', expand=True)
+    # ------------------------------------------------------------------
+    # Registration tab
+    # ------------------------------------------------------------------
+    registration_tab = ttk.Frame(notebook)
+    notebook.add(registration_tab, text="Register")
+
+    registration_container = ttk.Frame(registration_tab, padding=12)
+    registration_container.pack(fill='both', expand=True)
 
     id_uuid_ok = tk.BooleanVar(value=id_uuid_ok_value)
     id_personalinfo_ok = tk.BooleanVar(value=id_personalinfo_ok_value)
 
-    about_labelframe = ttk.LabelFrame(registration_frame, text="Licensing and personal information", bootstyle='secondary')
-    about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
+    registration_labelframe = ttk.LabelFrame(
+        registration_container,
+        text="Licensing and personal information",
+        bootstyle='secondary'
+    )
+    registration_labelframe.pack(fill='both', expand=False, padx=5, pady=5)
 
-    mesa_text = ("MESA 4.1 is open source software. It is available under the "
-                 "GNU GPLv3 license. This means you can use the software for free."
-                 "\n\n"
-                 "In MESA, a unique random identifier (UUID) is automatically generated. "
-                 "It can be used to count how many times the system has been used. It "
-                 "is not associated with where you are or who you are. The UUID together "
-                 "with usage information will be sent to one of our servers. You can opt "
-                 "out of using this functionality by unticking the associated box below."
-                 "\n\n"
-                 "Additionally you can tick the box next to name and email registration "
-                 "and add your name and email for our reference. This might be used "
-                 "to send you questionaires and information about updates of the MESA "
-                 "tool/method at a later stage."
-                 "\n\n"
-                 "Your email and name is also stored locally in the config.ini-file.")
-    def add_text_to_labelframe(labelframe, text):
-        label = tk.Label(labelframe, text=text, justify='left')
-        label.pack(padx=10, pady=10, fill='both', expand=True)
-        def update_wrap(event):
-            label.config(wraplength=labelframe.winfo_width() - 20)
-        labelframe.bind('<Configure>', update_wrap)
+    mesa_text = (
+        "MESA is open source software available under the GNU GPLv3 license."
+        " A unique random identifier (UUID) is generated to count how many times the system has been used."
+        " It is not associated with who or where you are, and you can opt out by unticking the box below.\n\n"
+        "You may also register your name and email for our reference. This information could be used to send "
+        "you questionnaires or notifications about future updates. The values are stored locally in config.ini."
+    )
+    add_text_to_labelframe(registration_labelframe, mesa_text)
 
-    add_text_to_labelframe(about_labelframe, mesa_text)
+    grid_frame = ttk.Frame(registration_container, padding=(10, 10))
+    grid_frame.pack(fill='both', expand=True, padx=5, pady=5)
+    grid_frame.columnconfigure(2, weight=1)
 
-    grid_frame = ttk.Frame(registration_frame)
-    grid_frame.pack(side='top', fill='both', expand=True, padx=5, pady=5)
-
-    uuid_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok)
-    uuid_ok_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-
-    personalinfo_ok_checkbox = ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok)
-    personalinfo_ok_checkbox.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+    ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+    ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok).grid(row=1, column=0, padx=10, pady=5, sticky="w")
 
     ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
     ttk.Label(grid_frame, text="Name:").grid(row=1, column=1, padx=10, pady=5, sticky="w")
@@ -921,6 +1047,7 @@ if __name__ == "__main__":
 
     ttk.Label(grid_frame, text=id_uuid).grid(row=0, column=2, padx=10, pady=5, sticky="w")
 
+    global name_entry, email_entry
     name_entry = ttk.Entry(grid_frame)
     name_entry.grid(row=1, column=2, padx=10, pady=5, sticky="we")
     name_entry.insert(0, id_name)
@@ -929,74 +1056,19 @@ if __name__ == "__main__":
     email_entry.grid(row=2, column=2, padx=10, pady=5, sticky="we")
     email_entry.insert(0, id_email)
 
-    submit_btn = ttk.Button(grid_frame, text="Save", command=submit_form, bootstyle=SUCCESS)
-    submit_btn.grid(row=2, column=3, padx=10, pady=5, sticky="e")
+    ttk.Button(grid_frame, text="Save", command=submit_form, bootstyle=SUCCESS).grid(
+        row=2, column=3, padx=10, pady=5, sticky="e"
+    )
 
-    grid_frame.columnconfigure(2, weight=1)
+    # ------------------------------------------------------------------
+    # Footer
+    # ------------------------------------------------------------------
+    footer = ttk.Frame(root, padding=(10, 5))
+    footer.pack(fill='x', padx=12, pady=(0, 6))
 
-    # Settings frame
-    settings_frame = ttk.Frame(root)
-    settings_frame.pack(fill='both', expand=True)
+    ttk.Label(footer, text=mesa_version, font=("Calibri", 8)).pack(side='left')
+    ttk.Button(footer, text="Exit", command=root.destroy, bootstyle="warning").pack(side='right')
 
-    about_labelframe = ttk.LabelFrame(settings_frame, text="Settings", bootstyle='info')
-    about_labelframe.pack(side='top', fill='both', expand=True, padx=5, pady=5)
-
-    mesa_text2 = ("Some of the objects you already have imported or created might need some further adjustments.\n"
-                  "You may do this by reading up on the below suggestions.")
-    add_text_to_labelframe(about_labelframe, mesa_text2)
-
-    grid_frame2 = ttk.Frame(settings_frame)
-    grid_frame2.pack(side='top', fill='both', expand=True, padx=20, pady=20)
-
-    edit_polygons_btn = ttk.Button(grid_frame2, text="Edit assets", command=edit_assets, bootstyle="primary")
-    edit_polygons_btn.grid(row=1, column=0, padx=5, pady=5, sticky='ew')
-    edit_polygons_lbl = ttk.Label(grid_frame2, text="This is where you can add titles to the different layers you have imported. You may also add a short descriptive text.", wraplength=550)
-    edit_polygons_lbl.grid(row=1, column=1, padx=5, pady=5, sticky='w')
-
-    edit_geocode_btn = ttk.Button(grid_frame2, text="Edit geocodes", command=edit_geocodes, bootstyle="primary")
-    edit_geocode_btn.grid(row=2, column=0, padx=5, pady=5, sticky='ew')
-    edit_geocode_lbl = ttk.Label(grid_frame2, text="Geocodes can be grid cells, hexagons or other types of polygons. You may add titles to them here for easier reference later.", wraplength=550)
-    edit_geocode_lbl.grid(row=2, column=1, padx=5, pady=5, sticky='w')
-
-    edit_lines_btn = ttk.Button(grid_frame2, text="Edit lines", command=edit_lines, bootstyle="primary")
-    edit_lines_btn.grid(row=3, column=0, padx=5, pady=5, sticky='ew')
-    edit_lines_lbl = ttk.Label(grid_frame2, text="Remember to import lines before attempting to edit them. Lines are processed to segments with the parameters length and width. Default values are set when the lines are imported. If you want to do the processing with other segment sizes you may do so here on a per line basis. This is where you can adjust the parameters as well as their names.", wraplength=550)
-    edit_lines_lbl.grid(row=3, column=1, padx=5, pady=5, sticky='w')
-
-    edit_atlas_btn = ttk.Button(grid_frame2, text="Edit atlas", command=edit_atlas, bootstyle="primary")
-    edit_atlas_btn.grid(row=4, column=0, padx=5, pady=5, sticky='ew')
-    edit_atlas_lbl = ttk.Label(grid_frame2, text="Remember to import or create atlases before attempting to edit them. Atlases are polygons which will be highlighted in the QGIS project file.", wraplength=550)
-    edit_atlas_lbl.grid(row=4, column=1, padx=5, pady=5, sticky='w')
-
-    grid_frame2.columnconfigure(1, weight=1)
-    grid_frame2.columnconfigure(2, weight=1)
-
-    # Bottom nav
-    bottom_frame_buttons = ttk.Frame(root)
-    bottom_frame_buttons.pack(side='bottom', fill='x', padx=10, pady=5)
-
-    main_frame_btn = ttk.Button(bottom_frame_buttons, text="MESA desktop", command=show_main_frame, bootstyle="primary")
-    main_frame_btn.pack(side='left', padx=(0, 10))
-
-    settings_frame_btn = ttk.Button(bottom_frame_buttons, text="Settings", command=show_settings_frame, bootstyle="primary")
-    settings_frame_btn.pack(side='left', padx=(0, 10))
-
-    about_frame_btn = ttk.Button(bottom_frame_buttons, text="About...", command=show_about_frame, bootstyle="primary")
-    about_frame_btn.pack(side='left', padx=(0, 10))
-
-    registration_frame_btn = ttk.Button(bottom_frame_buttons, text="Register...", command=show_registration_frame, bootstyle="primary")
-    registration_frame_btn.pack(side='left', padx=(0, 10))
-
-    center_frame = ttk.Frame(bottom_frame_buttons)
-    center_frame.pack(side='left', expand=True, fill='x')
-
-    version_label = ttk.Label(center_frame, text=mesa_version, font=("Calibri", 7))
-    version_label.pack(side='left', padx=50, pady=5)
-
-    exit_btn = ttk.Button(bottom_frame_buttons, text="Exit", command=root.destroy, bootstyle="warning")
-    exit_btn.pack(side='right')
-
-    # Default view
-    show_main_frame()
+    notebook.select(0)
     root.update_idletasks()
     root.mainloop()
