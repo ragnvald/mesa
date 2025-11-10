@@ -134,23 +134,14 @@ class ReportEngine:
 
             safe = _safe_name(gname)
             sens_png = self.make_path("geocode", safe, "sens")
-            env_png = self.make_path("geocode", safe, "env")
 
             ok_sens = draw_group_map_sensitivity(sub, gname, self.palette, self.desc, sens_png, fixed_bounds_3857, base_dir=self.base_dir)
-            ok_env = draw_group_map_envindex(sub, gname, env_png, fixed_bounds_3857, base_dir=self.base_dir)
 
             if ok_sens and _file_ok(sens_png):
                 pages += [
                     ('heading(2)', f"Geocode group: {gname}"),
                     ('text', "Sensitivity (A–E palette)."),
                     ('image', ("Sensitivity map", sens_png)),
-                    ('new_page', None),
-                ]
-            if ok_env and _file_ok(env_png):
-                pages += [
-                    ('heading(2)', f"Geocode group: {gname}"),
-                    ('text', "Environment index (0–100)."),
-                    ('image', ("Environment index map", env_png)),
                     ('new_page', None),
                 ]
 
@@ -230,10 +221,8 @@ class ReportEngine:
         for idx, tile_row in atlas_df.iterrows():
             safe_tile = _safe_name(tile_row.get('name_gis') or f"atlas_{idx+1}")
             sens_png = self.make_path("atlas", safe_tile, "sens")
-            env_png = self.make_path("atlas", safe_tile, "env")
 
             ok_sens = draw_atlas_map(tile_row, atlas_crs, polys_for_atlas, self.palette, self.desc, sens_png, bounds, base_dir=self.base_dir)
-            ok_env = draw_atlas_map(tile_row, atlas_crs, polys_for_atlas, self.palette, self.desc, env_png, bounds, base_dir=self.base_dir, metric="env_index")
 
             has_entries = False
             title_raw = tile_row.get('title_user') or tile_row.get('name_gis') or safe_tile
@@ -252,11 +241,6 @@ class ReportEngine:
                 pages.append(('text', "Sensitivity (A–E palette)."))
                 pages.append(('image', ("Sensitivity atlas map", sens_png)))
                 has_entries = True
-            if ok_env and _file_ok(env_png):
-                pages.append(('text', "Environment index (0–100)."))
-                pages.append(('image', ("Environment index atlas map", env_png)))
-                has_entries = True
-
             if has_entries:
                 pages.append(('new_page', None))
             else:
@@ -480,6 +464,52 @@ def write_to_log(message: str, base_dir: str | None = None):
             log_widget.see(tk.END)
     except Exception:
         pass
+
+_OUTPUT_ROOT: Path | None = None
+
+def _output_candidates(base_dir: str | None) -> list[Path]:
+    base = Path(base_dir) if base_dir else Path.cwd()
+    try:
+        base = base.resolve()
+    except Exception:
+        pass
+    candidates: list[Path] = []
+    if base.name.lower() != "code":
+        code_dir = (base / "code")
+        if code_dir.exists():
+            candidates.append((code_dir / "output").resolve())
+    candidates.append((base / "output").resolve())
+    return candidates
+
+def _resolve_output_root(base_dir: str | None) -> Path:
+    global _OUTPUT_ROOT
+    if _OUTPUT_ROOT is not None:
+        return _OUTPUT_ROOT
+    candidates = _output_candidates(base_dir)
+    for idx, cand in enumerate(candidates):
+        if cand.exists():
+            _OUTPUT_ROOT = cand
+            if idx > 0 and base_dir:
+                write_to_log(f"Using fallback output folder: {cand}", base_dir)
+            return _OUTPUT_ROOT
+    target = candidates[0]
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        if base_dir:
+            write_to_log(f"Created output folder at {target}", base_dir)
+    except Exception:
+        pass
+    _OUTPUT_ROOT = target
+    return _OUTPUT_ROOT
+
+def output_subpath(base_dir: str | None, *parts: str) -> Path:
+    root = _resolve_output_root(base_dir)
+    path = root.joinpath(*parts)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return path
 
 # ---------------- Small utilities ----------------
 def _file_ok(path: str) -> bool:
@@ -705,11 +735,7 @@ def _tile_cache_root(base_dir: str | None) -> Path:
     """
     Resolve the cache directory used for XYZ tiles. Defaults to <base>/output/tile_cache.
     """
-    try:
-        base = Path(base_dir) if base_dir else Path.cwd()
-    except Exception:
-        base = Path.cwd()
-    cache = base / "output" / "tile_cache"
+    cache = output_subpath(base_dir, "tile_cache")
     try:
         cache.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -1020,63 +1046,6 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
         plt.close('all')
         return False
 
-def draw_group_map_envindex(gdf_group: gpd.GeoDataFrame,
-                            group_name: str,
-                            out_path: str,
-                            fixed_bounds_3857=None,
-                            base_dir: str | None = None):
-    try:
-        if 'env_index' not in gdf_group.columns:
-            write_to_log(f"[{group_name}] env_index missing; skipping env map.", base_dir)
-            return False
-
-        g = gdf_group.copy()
-        g = g[g.geometry.type.isin(['Polygon','MultiPolygon'])]
-        if g.empty:
-            write_to_log(f"[{group_name}] No polygon geometries for env_index map.", base_dir)
-            return False
-
-        g['env_index'] = pd.to_numeric(g['env_index'], errors='coerce')
-        g = g[np.isfinite(g['env_index'])]
-        if g.empty:
-            write_to_log(f"[{group_name}] env_index has no finite values.", base_dir)
-            return False
-
-        g = _safe_to_3857(g)
-        fig_h_in = 10.0
-        fig_w_in = 10.0
-        dpi = _dpi_for_fig_height(fig_h_in)
-        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-        ax.set_axis_off()
-
-        if fixed_bounds_3857:
-            minx, miny, maxx, maxy = fixed_bounds_3857
-            ax.set_xlim(minx, maxx)
-            ax.set_ylim(miny, maxy)
-
-        norm = mcolors.Normalize(vmin=0, vmax=100)
-        cmap = mpl_cmaps.get_cmap('YlOrRd')
-
-        # Basemap first, colored polygons above
-        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
-
-        colors_arr = cmap(norm(g['env_index'].values))
-        g.plot(ax=ax, color=colors_arr, edgecolor='white', linewidth=0.25, alpha=0.95, zorder=10)
-
-        sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-        sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
-        cbar.set_label('env_index')
-
-        plt.savefig(out_path, bbox_inches='tight')
-        plt.close(fig)
-        write_to_log(f"Env index map saved: {out_path}", base_dir)
-        return True
-    except Exception as e:
-        write_to_log(f"Env index map failed for {group_name}: {e}", base_dir)
-        plt.close('all')
-        return False
-
 def draw_atlas_map(tile_row: pd.Series,
                    atlas_crs,
                    atlas_polys_3857: gpd.GeoDataFrame,
@@ -1084,10 +1053,9 @@ def draw_atlas_map(tile_row: pd.Series,
                    desc: dict,
                    out_path: str,
                    global_bounds_3857=None,
-                   base_dir: str | None = None,
-                   metric: str = "sensitivity") -> bool:
+                   base_dir: str | None = None) -> bool:
     """
-    Render a single atlas tile map (sensitivity or env_index) using shared cartography.
+    Render a single atlas tile sensitivity map using shared cartography.
     """
     try:
         geom = tile_row.get('geometry', None)
@@ -1125,48 +1093,31 @@ def draw_atlas_map(tile_row: pd.Series,
 
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
 
-        metric = (metric or "sensitivity").lower()
         drew_data = False
-        if metric == "env_index":
-            if subset.empty or "env_index" not in subset.columns:
-                write_to_log(f"[Atlas {tile_name}] env_index missing for atlas map.", base_dir)
+        if not subset.empty and "sensitivity_code_max" in subset.columns:
+            subset_ann = _prepare_sensitivity_annotations(subset, "sensitivity_code_max", "sensitivity_max")
+            if subset_ann.empty:
+                write_to_log(f"[Atlas {tile_name}] Sensitivity annotations empty.", base_dir)
             else:
-                subset = subset.copy()
-                subset["env_index"] = pd.to_numeric(subset["env_index"], errors="coerce")
-                subset = subset[np.isfinite(subset["env_index"])]
-                if subset.empty:
-                    write_to_log(f"[Atlas {tile_name}] env_index has no finite values.", base_dir)
-                else:
-                    norm = mcolors.Normalize(vmin=0, vmax=100)
-                    cmap = mpl_cmaps.get_cmap("YlOrRd")
-                    colors_arr = cmap(norm(subset["env_index"].values))
-                    subset.plot(ax=ax, color=colors_arr, edgecolor="none", linewidth=0.0, alpha=0.95, zorder=10)
-                    drew_data = True
-        else:
-            if not subset.empty and "sensitivity_code_max" in subset.columns:
-                subset_ann = _prepare_sensitivity_annotations(subset, "sensitivity_code_max", "sensitivity_max")
-                if subset_ann.empty:
-                    write_to_log(f"[Atlas {tile_name}] Sensitivity annotations empty.", base_dir)
-                else:
-                    colors = _colors_from_annotations(subset_ann, palette)
-                    subset_ann.plot(ax=ax,
-                                    color=colors,
-                                    edgecolor="none",
-                                    linewidth=0.0,
-                                    alpha=1.0,
-                                    zorder=10)
-                    drew_data = True
-            elif not subset.empty:
-                subset.plot(ax=ax,
-                            color=SENSITIVITY_UNKNOWN_COLOR,
-                            edgecolor="none",
-                            linewidth=0.0,
-                            alpha=1.0,
-                            zorder=10)
+                colors = _colors_from_annotations(subset_ann, palette)
+                subset_ann.plot(ax=ax,
+                                color=colors,
+                                edgecolor="none",
+                                linewidth=0.0,
+                                alpha=0.75,
+                                zorder=10)
                 drew_data = True
+        elif not subset.empty:
+            subset.plot(ax=ax,
+                        color=SENSITIVITY_UNKNOWN_COLOR,
+                        edgecolor="none",
+                        linewidth=0.0,
+                        alpha=0.75,
+                        zorder=10)
+            drew_data = True
         if not drew_data:
             plt.close(fig)
-            write_to_log(f"[Atlas {tile_name}] No drawable data for metric '{metric}'.", base_dir)
+            write_to_log(f"[Atlas {tile_name}] No drawable data for sensitivity map.", base_dir)
             return False
 
         tile_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.6, zorder=12)
@@ -1540,7 +1491,7 @@ def debug_atlas_sample(base_dir: str,
     write_to_log(f"debug_atlas_sample sensitivity distribution: {counts.to_dict()}", base_dir)
 
     bounds = compute_fixed_bounds_3857(flat_df, base_dir=base_dir)
-    out_path = os.path.join(base_dir, "output", "tmp", f"debug_atlas_{_safe_name(tile_name)}.png")
+    out_path = output_subpath(base_dir, "tmp", f"debug_atlas_{_safe_name(tile_name)}.png")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     ok = draw_atlas_map(tile_row, atlas_df.crs, subset, palette, desc, out_path, bounds, base_dir=base_dir)
     if ok:
@@ -1870,8 +1821,12 @@ def generate_report(base_dir: str,
             if atlas_geocode_pref:
                 write_to_log(f"Atlas geocode preference: {atlas_geocode_pref}", base_dir)
         gpq_dir   = parquet_dir_from_cfg(base_dir, cfg)
-        tmp_dir   = os.path.join(base_dir, 'output', 'tmp')
-        os.makedirs(tmp_dir, exist_ok=True)
+        tmp_dir_path = output_subpath(base_dir, 'tmp')
+        try:
+            tmp_dir_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        tmp_dir   = str(tmp_dir_path)
         set_progress(6, "Paths prepared.")
 
         # Load key tables
@@ -2031,8 +1986,8 @@ def generate_report(base_dir: str,
         elements = line_up_to_pdf(order_list)
 
         ts_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
-        output_pdf = os.path.join(base_dir, f'output/MESA-report_{ts_pdf}.pdf')
-        os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
+        output_pdf_path = output_subpath(base_dir, f"MESA-report_{ts_pdf}.pdf")
+        output_pdf = str(output_pdf_path)
         compile_pdf(output_pdf, elements)
         engine.cleanup()
         engine = None
