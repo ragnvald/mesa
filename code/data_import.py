@@ -196,6 +196,30 @@ def _abs_path_like(p: str | Path) -> Path:
         return p
     return (BASE_DIR / p).resolve()
 
+def _relative_to_base(p: Path) -> Path | None:
+    try:
+        return p.relative_to(BASE_DIR)
+    except ValueError:
+        return None
+
+def _resolve_input_folder(label: str, configured_path: str | Path) -> Path:
+    target = _abs_path_like(configured_path)
+    if target.exists():
+        return target
+
+    rel = _relative_to_base(target)
+    if rel is not None:
+        for parent in ("code", "system"):
+            candidate = (BASE_DIR / parent / rel).resolve()
+            if candidate.exists():
+                log_to_gui(
+                    f"{label} folder missing at {target}. Falling back to {candidate}",
+                    "WARN"
+                )
+                return candidate
+
+    return target
+
 def load_settings(cfg: configparser.ConfigParser) -> dict:
     d = cfg["DEFAULT"]
     return {
@@ -282,10 +306,6 @@ def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
         files = _rglob_many(input_folder_asset, ("*.shp", "*.gpkg", "*.parquet"))
     else:
         log_to_gui(f"Assets folder does not exist: {input_folder_asset}", "WARN")
-        # helpful hint: if BASE_DIR is repo root and code/ contains inputs
-        alt = (BASE_DIR / "code" / "input" / "asset")
-        if alt.exists():
-            log_to_gui(f"Hint: try config input_folder_asset=code/input/asset (found {alt})", "WARN")
     log_to_gui(f"Asset files found: {len(files)}")
 
     for i, fp in enumerate(files, start=1):
@@ -433,9 +453,6 @@ def import_spatial_data_geocode(input_folder_geocode: Path, working_epsg: int):
         files = _rglob_many(input_folder_geocode, ("*.shp", "*.gpkg", "*.parquet"))
     else:
         log_to_gui(f"Geocode folder does not exist: {input_folder_geocode}", "WARN")
-        alt = (BASE_DIR / "code" / "input" / "geocode")
-        if alt.exists():
-            log_to_gui(f"Hint: try config input_folder_geocode=code/input/geocode (found {alt})", "WARN")
     log_to_gui(f"Geocode files found: {len(files)}")
 
     # sort larger first (nice for progress feel)
@@ -507,9 +524,6 @@ def import_spatial_data_lines(input_folder_lines: Path, working_epsg: int):
         files = _rglob_many(input_folder_lines, ("*.shp", "*.gpkg", "*.parquet"))
     else:
         log_to_gui(f"Lines folder does not exist: {input_folder_lines}", "WARN")
-        alt = (BASE_DIR / "code" / "input" / "lines")
-        if alt.exists():
-            log_to_gui(f"Hint: try config input_folder_lines=code/input/lines (found {alt})", "WARN")
     log_to_gui(f"Line files found: {len(files)}")
 
     for i, fp in enumerate(files, start=1):
@@ -605,9 +619,9 @@ if __name__ == "__main__":
     st = load_settings(cfg)
 
     # Resolve input folders (absolute or relative to BASE_DIR)
-    input_folder_asset   = _abs_path_like(st["input_folder_asset"])
-    input_folder_geocode = _abs_path_like(st["input_folder_geocode"])
-    input_folder_lines   = _abs_path_like(st["input_folder_lines"])
+    input_folder_asset   = _resolve_input_folder("Assets", st["input_folder_asset"])
+    input_folder_geocode = _resolve_input_folder("Geocodes", st["input_folder_geocode"])
+    input_folder_lines   = _resolve_input_folder("Lines", st["input_folder_lines"])
     segment_width        = st["segment_width"]
     segment_length       = st["segment_length"]
     ttk_theme            = st["ttk_theme"]
