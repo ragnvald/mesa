@@ -4,6 +4,7 @@
 *.pyd
 *.dll
 *.cpg
+*.pyc
 *.bzl
 *.rc
 *.spec
