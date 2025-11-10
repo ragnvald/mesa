@@ -146,6 +146,7 @@ STATS = Stats()
 # -----------------------------------------------------------------------------
 # Global Parquet subdir (overridden in main from config.ini if provided)
 _PARQUET_SUBDIR = "output/geoparquet"
+_PARQUET_OVERRIDE: Path | None = None
 
 def _exists(p: Path) -> bool:
     try:
@@ -160,13 +161,30 @@ def _has_config_at(root: Path) -> bool:
 def find_base_dir(cli_workdir: str | None = None) -> Path:
     """Choose a canonical project base folder that contains config.ini.
     Priority order:
-      1) env MESA_BASE_DIR
+      1) env MESA_BASE_DIR (honored immediately when valid)
       2) --original_working_directory (CLI)
       3) this script's folder and parents
       4) CWD and CWD/code
     """
-    candidates = []
+    def _maybe_return(path_like: Path) -> Path | None:
+        try:
+            resolved = path_like.resolve()
+        except Exception:
+            resolved = path_like
+        return resolved if _has_config_at(resolved) else None
+
     env_base = os.environ.get("MESA_BASE_DIR")
+    if env_base:
+        env_hit = _maybe_return(Path(env_base))
+        if env_hit:
+            return env_hit
+
+    if cli_workdir:
+        cli_hit = _maybe_return(Path(cli_workdir))
+        if cli_hit:
+            return cli_hit
+
+    candidates = []
     if env_base:
         candidates.append(Path(env_base))
     if cli_workdir:
@@ -175,17 +193,33 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
     candidates += [here.parent, here.parent.parent, here.parent.parent.parent]
     cwd = Path(os.getcwd())
     candidates += [cwd, cwd / "code"]
-    seen = set(); uniq = []
+
+    seen = set()
+    uniq = []
     for c in candidates:
         try:
             r = c.resolve()
         except Exception:
             r = c
         if r not in seen:
-            seen.add(r); uniq.append(r)
+            seen.add(r)
+            uniq.append(r)
+
+    preferred = None
+    fallback = None
     for c in uniq:
         if _has_config_at(c):
-            return c
+            if fallback is None:
+                fallback = c
+            if c.name.lower() not in {"code", "system"}:
+                preferred = c
+                break
+
+    if preferred:
+        return preferred
+    if fallback:
+        return fallback
+
     if here.parent.name.lower() == "system":
         return here.parent.parent
     return here.parent
@@ -212,13 +246,50 @@ def config_path(base_dir: Path) -> Path:
     # FLAT: <base>/config.ini
     return base_dir / "config.ini"
 
+def _set_parquet_override(target_dir: Path):
+    global _PARQUET_OVERRIDE
+    if _PARQUET_OVERRIDE is None:
+        _PARQUET_OVERRIDE = target_dir
+
+def _detect_code_override(base_dir: Path):
+    if _PARQUET_OVERRIDE is not None:
+        return
+    if base_dir.name.lower() == "code":
+        return
+    code_dir = (base_dir / "code" / _PARQUET_SUBDIR).resolve()
+    if code_dir.exists():
+        try:
+            next(code_dir.glob("*.parquet"))
+            _set_parquet_override(code_dir)
+        except StopIteration:
+            pass
+
 def gpq_dir(base_dir: Path) -> Path:
-    p = base_dir / _PARQUET_SUBDIR
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    _detect_code_override(base_dir)
+    base = _PARQUET_OVERRIDE or (base_dir / _PARQUET_SUBDIR)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+def _existing_parquet_path(base_dir: Path, name: str) -> Path | None:
+    primary = (base_dir / _PARQUET_SUBDIR / f"{name}.parquet").resolve()
+    if primary.exists():
+        return primary
+
+    if base_dir.name.lower() != "code":
+        code_dir = (base_dir / "code" / _PARQUET_SUBDIR).resolve()
+        alt = code_dir / f"{name}.parquet"
+        if alt.exists():
+            log_to_gui(f"Using fallback GeoParquet copy for {name}: {alt}", "WARN")
+            _set_parquet_override(code_dir)
+            return alt
+    return None
 
 def geoparquet_path(base_dir: Path, name: str) -> Path:
-    return gpq_dir(base_dir) / f"{name}.parquet"
+    existing = _existing_parquet_path(base_dir, name)
+    if existing is not None:
+        return existing
+    target = gpq_dir(base_dir) / f"{name}.parquet"
+    return target
 
 # -----------------------------------------------------------------------------
 # Logging / progress
@@ -570,8 +641,12 @@ def _bbox_polygon_from(thing) -> Optional[Polygon]:
 
 def _load_existing_geocodes(base_dir: Path) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     geodir = gpq_dir(base_dir)
-    pg = geodir / "tbl_geocode_group.parquet"
-    po = geodir / "tbl_geocode_object.parquet"
+    pg = _existing_parquet_path(base_dir, "tbl_geocode_group")
+    if pg is None:
+        pg = geodir / "tbl_geocode_group.parquet"
+    po = _existing_parquet_path(base_dir, "tbl_geocode_object")
+    if po is None:
+        po = geodir / "tbl_geocode_object.parquet"
     if pg.exists():
         try:
             g = gpd.read_parquet(pg)
