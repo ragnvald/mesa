@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# MESA – Setup & Registration (3 tabs: Start, Vulnerability, Visualization)
+# MESA – Setup & Registration (2 tabs: Start and Vulnerability)
 # Persistence: GeoParquet + JSON only (GPKG removed)
 
 import locale
@@ -10,7 +10,6 @@ import sys
 import argparse
 import configparser
 import datetime
-import json
 import time
 from pathlib import Path
 
@@ -25,15 +24,6 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from ttkbootstrap import ttk as ttkb  # themed ttk widgets
 
-# -------------------------------
-# Defaults & constants
-# -------------------------------
-DEFAULT_ENV_PROFILE = {
-    'w_sensitivity': 0.35, 'w_susceptibility': 0.25, 'w_importance': 0.20, 'w_pressure': 0.20,
-    'gamma': 0.0, 'pnorm_minmax': 4.0, 'overlap_cap_q': 0.95,
-    'scoring': 'linear', 'logistic_a': 8.0, 'logistic_b': 0.6,
-}
-
 # Capture start-CWD before anything changes
 START_CWD = Path.cwd()
 
@@ -41,8 +31,6 @@ START_CWD = Path.cwd()
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 # ---- constant *relative* paths we join to a discovered base dir ----
-PARQUET_ENV_PROFILE  = os.path.join("output", "geoparquet", "tbl_env_profile.parquet")
-JSON_ENV_PROFILE     = os.path.join("output", "env_profile.json")
 PARQUET_ASSET_GROUP  = os.path.join("output", "geoparquet", "tbl_asset_group.parquet")
 
 # UI grid helpers
@@ -51,7 +39,27 @@ valid_input_values: list[int] = []
 classification: dict = {}
 entries_vuln = []
 FALLBACK_VULN = 3
-ENV_PROFILE  = {}
+INDEX_SETTING_DEFAULTS = {
+    "asset": {"group_weight": 6, "overlap_weight": 4, "normalize": False},
+    "sensitivity": {"group_weight": 6, "overlap_weight": 4, "normalize": False},
+}
+INDEX_SETTING_LABELS = {
+    "asset": "Asset layer index (importance_max)",
+    "sensitivity": "Sensitivity layer index (sensitivity_max)",
+}
+INDEX_CONFIG_KEYS = {
+    "asset": {
+        "group": "idx_asset_group_weight",
+        "overlap": "idx_asset_overlap_weight",
+        "normalize": "idx_asset_normalize",
+    },
+    "sensitivity": {
+        "group": "idx_sens_group_weight",
+        "overlap": "idx_sens_overlap_weight",
+        "normalize": "idx_sens_normalize",
+    },
+}
+index_settings = {}
 
 # paths set in __main__
 original_working_directory = ""
@@ -194,6 +202,87 @@ def log_to_file(message: str) -> None:
     except Exception:
         pass
 
+def _ensure_default_header_present(path: str) -> None:
+    try:
+        if not os.path.isfile(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            txt = f.read()
+        first = ""
+        for line in txt.splitlines():
+            s = line.strip()
+            if not s or s.startswith(";") or s.startswith("#"):
+                continue
+            first = s
+            break
+        if first and not first.startswith("["):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("[DEFAULT]\n" + txt)
+    except Exception:
+        pass
+
+def update_config_with_values(cfg_path: str, **kwargs) -> None:
+    if not os.path.isabs(cfg_path):
+        raise ValueError("cfg_path must be absolute")
+    _ensure_default_header_present(cfg_path)
+    if not os.path.isfile(cfg_path):
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("[DEFAULT]\n")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    if not any(line.strip().startswith('[') for line in lines):
+        lines.insert(0, "[DEFAULT]\n")
+    for key, value in kwargs.items():
+        found = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith(f"{key} ="):
+                lines[i] = f"{key} = {value}\n"
+                found = True
+                break
+        if not found:
+            lines.append(f"{key} = {value}\n")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+def _coerce_weight(value, default):
+    try:
+        return max(0, min(10, int(value)))
+    except Exception:
+        return default
+
+def _coerce_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+def load_index_settings_from_config(cfg: configparser.ConfigParser) -> dict:
+    defaults_section = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
+    settings = {}
+    for key, meta in INDEX_CONFIG_KEYS.items():
+        dflt = INDEX_SETTING_DEFAULTS[key]
+        gw = _coerce_weight(defaults_section.get(meta["group"]), dflt["group_weight"])
+        ow = _coerce_weight(defaults_section.get(meta["overlap"]), dflt["overlap_weight"])
+        if gw + ow != 10:
+            gw = dflt["group_weight"]
+            ow = dflt["overlap_weight"]
+        settings[key] = {
+            "group_weight": gw,
+            "overlap_weight": ow,
+            "normalize": _coerce_bool(defaults_section.get(meta["normalize"]), dflt["normalize"]),
+        }
+    return settings
+
+def persist_index_settings(cfg_path: str, settings: dict) -> None:
+    payload = {}
+    for key, meta in INDEX_CONFIG_KEYS.items():
+        current = settings.get(key, INDEX_SETTING_DEFAULTS[key])
+        payload[meta["group"]] = current["group_weight"]
+        payload[meta["overlap"]] = current["overlap_weight"]
+        payload[meta["normalize"]] = str(bool(current["normalize"])).lower()
+    update_config_with_values(cfg_path, **payload)
+
 # -------------------------------
 # Type & vulnerability helpers
 # -------------------------------
@@ -242,79 +331,6 @@ def sanitize_vulnerability(df: pd.DataFrame,
     return df
 
 # -------------------------------
-# Profile persistence (GeoParquet + JSON)
-# -------------------------------
-def _env_profile_parquet_path(base_dir: str) -> str:
-    return os.path.join(base_dir, PARQUET_ENV_PROFILE)
-
-def _env_profile_json_path(base_dir: str) -> str:
-    return os.path.join(base_dir, JSON_ENV_PROFILE)
-
-def _parquet_read_profile(base_dir: str) -> dict | None:
-    path = _env_profile_parquet_path(base_dir)
-    try:
-        if not os.path.exists(path):
-            return None
-        df = pd.read_parquet(path)
-        if {'key','value'}.issubset(df.columns):
-            out = {}
-            for _, r in df.iterrows():
-                try:
-                    out[str(r['key'])] = json.loads(r['value'])
-                except Exception:
-                    out[str(r['key'])] = r['value']
-            return out
-        if len(df) == 1:
-            return df.iloc[0].to_dict()
-    except Exception as e:
-        log_to_file(f"Read env profile parquet failed: {e}")
-    return None
-
-def _parquet_write_profile(base_dir: str, data: dict):
-    try:
-        path = _env_profile_parquet_path(base_dir)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        df = pd.DataFrame({'key': list(data.keys()),
-                           'value': [json.dumps(v) for v in data.values()]})
-        df.to_parquet(path, index=False)
-        log_to_file(f"Wrote ENV profile to GeoParquet: {path}")
-    except Exception as e:
-        log_to_file(f"Write env profile parquet failed: {e}")
-
-def _json_read_profile(base_dir: str) -> dict | None:
-    path = _env_profile_json_path(base_dir)
-    try:
-        if not os.path.exists(path):
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        log_to_file(f"Read env profile JSON failed: {e}")
-        return None
-
-def _json_write_profile(base_dir: str, data: dict):
-    path = _env_profile_json_path(base_dir)
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log_to_file(f"Write env profile JSON failed: {e}")
-
-def load_profiles(base_dir: str):
-    """ENV_PROFILE := Parquet -> JSON -> defaults; then mirrored back to both stores."""
-    global ENV_PROFILE
-    env = _parquet_read_profile(base_dir)
-    if not env:
-        env = _json_read_profile(base_dir)
-    ENV_PROFILE = (DEFAULT_ENV_PROFILE | env) if env else DEFAULT_ENV_PROFILE.copy()
-    persist_profiles(base_dir)
-
-def persist_profiles(base_dir: str):
-    _parquet_write_profile(base_dir, ENV_PROFILE)
-    _json_write_profile(base_dir, ENV_PROFILE)
-
-# -------------------------------
 # Asset group I/O (Parquet only)
 # -------------------------------
 def _parquet_asset_group_path(base_dir: str) -> str:
@@ -361,10 +377,8 @@ def save_all_to_excel(gdf: pd.DataFrame, excel_path: str):
         vuln_cols = ['id','name_original','susceptibility','importance','sensitivity','sensitivity_code','sensitivity_description']
         vcols = [c for c in vuln_cols if c in gdf.columns]
         vuln = gdf[vcols].copy() if vcols else pd.DataFrame(columns=vuln_cols)
-        env_prof = pd.DataFrame([ENV_PROFILE])
         with pd.ExcelWriter(excel_path, engine='openpyxl') as xw:
             vuln.to_excel(xw, sheet_name='vulnerability', index=False)
-            env_prof.to_excel(xw, sheet_name='env_index', index=False)
         messagebox.showinfo("Saved", "Saved all tabs to Excel.")
     except Exception as e:
         log_to_file(f"Excel save failed: {e}")
@@ -397,29 +411,132 @@ def load_all_from_excel(excel_path: str):
     try:
         x = pd.read_excel(excel_path, sheet_name=None)
         if 'vulnerability' in x: _apply_vulnerability_from_df(x['vulnerability'])
-        if 'env_index' in x and not x['env_index'].empty:
-            row = x['env_index'].iloc[0]
-            scoring_val = str(row.get('scoring', ENV_PROFILE['scoring'])).strip().lower()
-            if scoring_val not in ('linear','percentile','logistic'):
-                scoring_val = 'linear'
-            ENV_PROFILE.update({
-                'w_sensitivity': float(row.get('w_sensitivity', ENV_PROFILE['w_sensitivity'])),
-                'w_susceptibility': float(row.get('w_susceptibility', ENV_PROFILE['w_susceptibility'])),
-                'w_importance': float(row.get('w_importance', ENV_PROFILE['w_importance'])),
-                'w_pressure': float(row.get('w_pressure', ENV_PROFILE['w_pressure'])),
-                'gamma': float(row.get('gamma', ENV_PROFILE['gamma'])),
-                'pnorm_minmax': float(row.get('pnorm_minmax', ENV_PROFILE['pnorm_minmax'])),
-                'overlap_cap_q': float(row.get('overlap_cap_q', ENV_PROFILE['overlap_cap_q'])),
-                'scoring': scoring_val,
-                'logistic_a': float(row.get('logistic_a', ENV_PROFILE['logistic_a'])),
-                'logistic_b': float(row.get('logistic_b', ENV_PROFILE['logistic_b'])),
-            })
-            persist_profiles(original_working_directory)
         refresh_vulnerability_grid_from_df()
         messagebox.showinfo("Loaded", "All settings and values were loaded from Excel.")
     except Exception as e:
         log_to_file(f"Excel load failed: {e}")
         messagebox.showerror("Error", f"Failed reading Excel:\n{e}")
+
+# -------------------------------
+# Start tab
+# -------------------------------
+def build_start_tab(parent):
+    global index_settings
+    frm = ttkb.Frame(parent)
+    frm.pack(fill='both', expand=True, padx=12, pady=12)
+
+    info = (
+        "Welcome to the setup utility.\n\n"
+        "• Use the Vulnerability tab to register importance and susceptibility per asset; sensitivity and the A–E "
+        "classification update automatically.\n"
+        "• The shortcuts below let you round-trip data to Excel or persist changes back to GeoParquet.\n\n"
+        "All files are written under the working directory that launched this helper."
+    )
+    ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0, 12))
+
+    btns = ttkb.Frame(frm)
+    btns.pack(anchor='w', pady=6)
+
+    def do_save_all_excel():
+        input_folder = os.path.join(original_working_directory, "input")
+        os.makedirs(input_folder, exist_ok=True)
+        excel_path = filedialog.asksaveasfilename(
+            title="Save Excel File",
+            initialdir=input_folder,
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
+        )
+        if excel_path:
+            save_all_to_excel(gdf_asset_group, excel_path)
+
+    def do_load_all_excel():
+        input_folder = os.path.join(original_working_directory, "input")
+        excel_path = filedialog.askopenfilename(
+            title="Select Excel File",
+            initialdir=input_folder,
+            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
+        )
+        if excel_path:
+            load_all_from_excel(excel_path)
+
+    def do_save_parquet():
+        update_all_vuln_rows(entries_vuln, gdf_asset_group)
+        enforce_vuln_dtypes_inplace(gdf_asset_group)
+        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+        save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        messagebox.showinfo("Saved", "Saved asset-group layer to GeoParquet.")
+
+    ttkb.Button(btns, text="Save all to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(side='left', padx=6)
+    ttkb.Button(btns, text="Load all from Excel", command=do_load_all_excel, bootstyle=INFO).pack(side='left', padx=6)
+    ttkb.Button(btns, text="Save to Parquet", command=do_save_parquet, bootstyle=PRIMARY).pack(side='left', padx=6)
+
+    weights_box = ttkb.LabelFrame(frm, text="Layer object indexes (weights & normalization)", bootstyle="info")
+    weights_box.pack(fill='x', pady=(20, 0), padx=2)
+
+    ttkb.Label(weights_box, text="Index", width=32, anchor='w').grid(row=0, column=0, padx=5, pady=(4, 2), sticky='w')
+    ttkb.Label(weights_box, text="Group weight", width=14).grid(row=0, column=1, padx=5, pady=(4, 2))
+    ttkb.Label(weights_box, text="Overlap weight", width=14).grid(row=0, column=2, padx=5, pady=(4, 2))
+    ttkb.Label(weights_box, text="Normalize 1–100", width=18).grid(row=0, column=3, padx=5, pady=(4, 2))
+
+    weight_rows = {}
+    options = [str(i) for i in range(11)]
+
+    for row_idx, key in enumerate(INDEX_SETTING_LABELS.keys(), start=1):
+        cfg = index_settings.get(key, INDEX_SETTING_DEFAULTS[key])
+        ttkb.Label(weights_box, text=INDEX_SETTING_LABELS[key], anchor='w').grid(row=row_idx, column=0, padx=5, pady=2, sticky='w')
+
+        group_var = tk.StringVar(value=str(cfg["group_weight"]))
+        overlap_var = tk.StringVar(value=str(cfg["overlap_weight"]))
+        normalize_var = tk.BooleanVar(value=cfg["normalize"])
+
+        grp_combo = ttkb.Combobox(weights_box, values=options, textvariable=group_var, state="readonly", width=6)
+        grp_combo.grid(row=row_idx, column=1, padx=5, pady=2)
+        ovl_combo = ttkb.Combobox(weights_box, values=options, textvariable=overlap_var, state="readonly", width=6)
+        ovl_combo.grid(row=row_idx, column=2, padx=5, pady=2)
+        ttkb.Checkbutton(weights_box, variable=normalize_var, bootstyle="round-toggle").grid(row=row_idx, column=3, padx=5, pady=2)
+
+        weight_rows[key] = {
+            "group": group_var,
+            "overlap": overlap_var,
+            "normalize": normalize_var,
+        }
+
+    ttkb.Label(
+        weights_box,
+        text="Weights are expressed in tenths and must sum to 10 per index (e.g., 6+4). "
+             "Normalization stretches results within each geocode group.",
+        justify='left',
+        wraplength=720
+    ).grid(row=len(INDEX_SETTING_LABELS) + 1, column=0, columnspan=4, padx=5, pady=(8, 4), sticky='w')
+
+    def save_weight_settings():
+        updated = {}
+        for key, vars in weight_rows.items():
+            try:
+                g = int(vars["group"].get())
+                o = int(vars["overlap"].get())
+            except ValueError:
+                messagebox.showerror("Weights", "Weights must be numeric between 0 and 10.")
+                return
+            if g + o != 10:
+                messagebox.showerror("Weights", f"{INDEX_SETTING_LABELS[key]} weights must sum to 10 (currently {g + o}).")
+                return
+            updated[key] = {
+                "group_weight": g,
+                "overlap_weight": o,
+                "normalize": bool(vars["normalize"].get()),
+            }
+        try:
+            persist_index_settings(config_file, updated)
+            index_settings.update(updated)
+            messagebox.showinfo("Saved", "Index weights updated in config.ini.")
+        except Exception as err:
+            log_to_file(f"Failed saving index weights: {err}")
+            messagebox.showerror("Error", f"Could not save weights:\n{err}")
+
+    ttkb.Button(weights_box, text="Save weights", command=save_weight_settings, bootstyle=PRIMARY).grid(
+        row=len(INDEX_SETTING_LABELS) + 2, column=0, columnspan=4, pady=(4, 6)
+    )
 
 # -------------------------------
 # Vulnerability UI
@@ -513,129 +630,6 @@ def update_all_vuln_rows(entries_list, gdf):
         gdf.at[idx, 'sensitivity_description'] = desc
 
 # -------------------------------
-# Visualization profile UI
-# -------------------------------
-ENV_UI = {}
-SCORING_OPTIONS = ('linear', 'percentile', 'logistic')
-
-def _parse_float_entry(entry: ttkb.Entry, default: float) -> float:
-    try:
-        v = float(entry.get().strip()); return v if np.isfinite(v) else default
-    except Exception:
-        return default
-
-def build_env_tab(parent):
-    frm = ttkb.Frame(parent); frm.pack(fill='both', expand=True, padx=10, pady=10)
-    ttkb.Label(frm, text="Visualization index – weights (sum = 1)").grid(row=0, column=0, columnspan=4, sticky='w', pady=(0,6))
-    labels = [('Sensitivity','w_sensitivity'), ('Susceptibility','w_susceptibility'),
-              ('Importance','w_importance'), ('Pressure','w_pressure')]
-    for i,(txt,key) in enumerate(labels, start=1):
-        ttkb.Label(frm, text=txt, width=22, anchor='w').grid(row=i, column=0, sticky='w', padx=(0,6), pady=2)
-        e = ttkb.Entry(frm, width=10); e.grid(row=i, column=1, sticky='w'); ENV_UI[key] = e
-    r0 = len(labels) + 2
-    ttkb.Label(frm, text="Compensation γ").grid(row=r0, column=0, sticky='w')
-    ENV_UI['gamma'] = ttkb.Entry(frm, width=10); ENV_UI['gamma'].grid(row=r0, column=1, sticky='w', pady=2)
-    ttkb.Label(frm, text="Hotspot mixing p (min/max)").grid(row=r0+1, column=0, sticky='w')
-    ENV_UI['pnorm_minmax'] = ttkb.Entry(frm, width=10); ENV_UI['pnorm_minmax'].grid(row=r0+1, column=1, sticky='w', pady=2)
-    ttkb.Label(frm, text="Overlap cap quantile (0–1)").grid(row=r0+2, column=0, sticky='w')
-    ENV_UI['overlap_cap_q'] = ttkb.Entry(frm, width=10); ENV_UI['overlap_cap_q'].grid(row=r0+2, column=1, sticky='w', pady=2)
-
-    ttkb.Label(frm, text="Scoring method").grid(row=r0+3, column=0, sticky='w')
-    ENV_UI['scoring'] = ttkb.Combobox(frm, values=list(SCORING_OPTIONS), state="readonly", width=12)
-    ENV_UI['scoring'].grid(row=r0+3, column=1, sticky='w', pady=2)
-
-    ttkb.Label(frm, text="Logistic a").grid(row=r0+4, column=0, sticky='w')
-    ENV_UI['logistic_a'] = ttkb.Entry(frm, width=10); ENV_UI['logistic_a'].grid(row=r0+4, column=1, sticky='w', pady=2)
-    ttkb.Label(frm, text="Logistic b").grid(row=r0+5, column=0, sticky='w')
-    ENV_UI['logistic_b'] = ttkb.Entry(frm, width=10); ENV_UI['logistic_b'].grid(row=r0+5, column=1, sticky='w', pady=2)
-
-    def normalize_weights_env():
-        s = sum([_parse_float_entry(ENV_UI[k], 0.0) for k in ['w_sensitivity','w_susceptibility','w_importance','w_pressure']])
-        if s <= 0:
-            messagebox.showwarning("Weights", "Sum of weights is 0 – cannot normalize."); return
-        for k in ['w_sensitivity','w_susceptibility','w_importance','w_pressure']:
-            v = _parse_float_entry(ENV_UI[k], 0.0) / s
-            ENV_UI[k].delete(0, tk.END); ENV_UI[k].insert(0, f"{v:.4f}")
-
-    def save_profile():
-        scoring_val = ENV_UI['scoring'].get().strip().lower()
-        if scoring_val not in SCORING_OPTIONS:
-            scoring_val = 'linear'
-        ENV_PROFILE.update({
-            'w_sensitivity': _parse_float_entry(ENV_UI['w_sensitivity'], DEFAULT_ENV_PROFILE['w_sensitivity']),
-            'w_susceptibility': _parse_float_entry(ENV_UI['w_susceptibility'], DEFAULT_ENV_PROFILE['w_susceptibility']),
-            'w_importance': _parse_float_entry(ENV_UI['w_importance'], DEFAULT_ENV_PROFILE['w_importance']),
-            'w_pressure': _parse_float_entry(ENV_UI['w_pressure'], DEFAULT_ENV_PROFILE['w_pressure']),
-            'gamma': _parse_float_entry(ENV_UI['gamma'], DEFAULT_ENV_PROFILE['gamma']),
-            'pnorm_minmax': _parse_float_entry(ENV_UI['pnorm_minmax'], DEFAULT_ENV_PROFILE['pnorm_minmax']),
-            'overlap_cap_q': _parse_float_entry(ENV_UI['overlap_cap_q'], DEFAULT_ENV_PROFILE['overlap_cap_q']),
-            'scoring': scoring_val,
-            'logistic_a': _parse_float_entry(ENV_UI['logistic_a'], DEFAULT_ENV_PROFILE['logistic_a']),
-            'logistic_b': _parse_float_entry(ENV_UI['logistic_b'], DEFAULT_ENV_PROFILE['logistic_b']),
-        })
-        persist_profiles(original_working_directory)
-        messagebox.showinfo("Visualization", "Visualization profile saved to GeoParquet & JSON.")
-
-    btns = ttkb.Frame(frm); btns.grid(row=r0+6, column=0, columnspan=3, sticky='w', pady=(10,0))
-    ttkb.Button(btns, text="Normalize weights", command=normalize_weights_env, bootstyle=INFO).pack(side='left', padx=5)
-    ttkb.Button(btns, text="Save profile", command=save_profile, bootstyle=SUCCESS).pack(side='left', padx=5)
-
-def set_env_profile_ui():
-    for k in ('w_sensitivity','w_susceptibility','w_importance','w_pressure','gamma','pnorm_minmax','overlap_cap_q','logistic_a','logistic_b'):
-        if k in ENV_UI:
-            ENV_UI[k].delete(0, tk.END); ENV_UI[k].insert(0, str(ENV_PROFILE.get(k, DEFAULT_ENV_PROFILE[k])))
-    sc = ENV_PROFILE.get('scoring', DEFAULT_ENV_PROFILE['scoring'])
-    if sc not in SCORING_OPTIONS:
-        sc = 'linear'
-    ENV_UI['scoring'].set(sc)
-
-# -------------------------------
-# Start tab
-# -------------------------------
-def build_start_tab(parent):
-    frm = ttkb.Frame(parent); frm.pack(fill='both', expand=True, padx=12, pady=12)
-    info = (
-        "Welcome!\n\n"
-        "• Vulnerability: register importance/susceptibility per asset; sensitivity & A–E are computed.\n"
-        "• Visualization: profile for your 1–100 visualization index (choose scoring method).\n\n"
-        "Profiles stored in: GeoParquet + JSON.\n"
-        "Use buttons below for Excel round-trips and to save asset groups."
-    )
-    ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0,10))
-
-    btns = ttkb.Frame(frm); btns.pack(anchor='w', pady=6)
-
-    def do_save_all_excel():
-        input_folder = os.path.join(original_working_directory, "input")
-        os.makedirs(input_folder, exist_ok=True)
-        excel_path = filedialog.asksaveasfilename(
-            title="Save Excel File", initialdir=input_folder,
-            defaultextension=".xlsx", filetypes=[("Excel Files","*.xlsx"), ("All Files","*.*")]
-        )
-        if excel_path: save_all_to_excel(gdf_asset_group, excel_path)
-
-    def do_load_all_excel():
-        input_folder = os.path.join(original_working_directory, "input")
-        excel_path = filedialog.askopenfilename(
-            title="Select Excel File", initialdir=input_folder,
-            filetypes=[("Excel Files","*.xlsx"), ("All Files","*.*")]
-        )
-        if excel_path: load_all_from_excel(excel_path)
-
-    def do_save_parquet():
-        update_all_vuln_rows(entries_vuln, gdf_asset_group)
-        enforce_vuln_dtypes_inplace(gdf_asset_group)
-        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-        save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        persist_profiles(original_working_directory)
-        messagebox.showinfo("Saved", "Saved asset-group layer + profile to GeoParquet (and JSON).")
-
-    ttkb.Button(btns, text="Save all to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(side='left', padx=6)
-    ttkb.Button(btns, text="Load all from Excel", command=do_load_all_excel, bootstyle=INFO).pack(side='left', padx=6)
-    ttkb.Button(btns, text="Save to Parquet", command=do_save_parquet, bootstyle=PRIMARY).pack(side='left', padx=6)
-    ttkb.Button(frm, text="Exit", command=close_application, bootstyle=WARNING).pack(anchor='e', pady=(20,0))
-
-# -------------------------------
 # Misc helpers
 # -------------------------------
 def close_application():
@@ -644,7 +638,6 @@ def close_application():
         enforce_vuln_dtypes_inplace(gdf_asset_group)
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
         save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        persist_profiles(original_working_directory)
     finally:
         root.destroy()
 
@@ -664,8 +657,6 @@ if __name__ == "__main__":
     print("[parametres_setup] start_cwd:", START_CWD)
     print("[parametres_setup] app_dir  :", APP_DIR)
     print("[parametres_setup] base_dir :", original_working_directory)
-    print("[parametres_setup] env parquet:", os.path.join(original_working_directory, PARQUET_ENV_PROFILE))
-    print("[parametres_setup] env json:   ", os.path.join(original_working_directory, JSON_ENV_PROFILE))
     print("[parametres_setup] asset grp:  ", os.path.join(original_working_directory, PARQUET_ASSET_GROUP))
 
     # Config
@@ -676,9 +667,7 @@ if __name__ == "__main__":
     FALLBACK_VULN = get_fallback_value(config, valid_input_values)
     ttk_bootstrap_theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
     workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
-
-    # Profiles (GeoParquet -> JSON -> defaults), then mirror to both
-    load_profiles(original_working_directory)
+    index_settings = load_index_settings_from_config(config)
 
     # Asset groups
     gdf_asset_group = load_asset_group(original_working_directory)
@@ -704,16 +693,12 @@ if __name__ == "__main__":
     build_start_tab(tab_start)
 
     # Vulnerability
-    tab_vuln = ttkb.Frame(nb); nb.add(tab_vuln, text="Vulnerability")
+    tab_vuln = ttkb.Frame(nb); nb.add(tab_vuln, text="Sensitivity")
     canvas_v, frame_v = create_scrollable_area(tab_vuln)
     entries_vuln = []
     setup_headers_vuln(frame_v, column_widths)
     for i, row in enumerate(gdf_asset_group.itertuples(), start=1):
         add_vuln_row(i, row, frame_v, entries_vuln, gdf_asset_group)
     frame_v.update_idletasks(); canvas_v.configure(scrollregion=canvas_v.bbox("all"))
-
-    # Visualization
-    tab_env = ttkb.Frame(nb); nb.add(tab_env, text="Visualization")
-    build_env_tab(tab_env); set_env_profile_ui()
 
     root.mainloop()
