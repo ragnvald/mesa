@@ -458,12 +458,17 @@ def geocodes_grids():
 
 def import_assets(gpkg_file):
     python_script, exe_file = get_script_paths("data_import")
+    arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         file_path = resolve_path(os.path.join("system", "data_import.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        run_subprocess([file_path, *arg_tokens], [], gpkg_file)
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        run_subprocess(
+            [sys.executable or "python", python_script, *arg_tokens],
+            [exe_file, *arg_tokens],
+            gpkg_file
+        )
 
 def edit_processing_setup():
     script_candidates = [
