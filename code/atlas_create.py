@@ -54,6 +54,10 @@ atlas_lat_size_km: float = 10.0
 atlas_overlap_percent: float = 10.0
 config_file: str = ""  # path used by increment_stat_value
 
+# GeoParquet overrides (handles repo-root vs code/ layouts)
+_PARQUET_SUBDIR = "output/geoparquet"
+_PARQUET_OVERRIDE: Path | None = None
+
 # UI option state
 tile_mode_var = None
 tile_lon_var = None
@@ -209,21 +213,67 @@ def update_tile_mode_ui():
         except Exception:
             pass
 
+def _parquet_candidate_dirs() -> list[Path]:
+    cfg = _ensure_cfg()
+    sub_cfg = cfg["DEFAULT"].get("parquet_folder", _PARQUET_SUBDIR)
+    sub_path = Path(sub_cfg)
+    dirs: list[Path] = []
+    if sub_path.is_absolute():
+        dirs.append(sub_path.resolve())
+        return dirs
+
+    base = BASE_DIR.resolve()
+    dirs.append((base / sub_path).resolve())
+    if base.name.lower() != "code":
+        dirs.append((base / "code" / sub_path).resolve())
+    return dirs
+
+def _select_parquet_dir(prefer_file: str | None = None) -> Path:
+    global _PARQUET_OVERRIDE
+    if _PARQUET_OVERRIDE is not None:
+        return _PARQUET_OVERRIDE
+
+    candidates = _parquet_candidate_dirs()
+
+    if prefer_file:
+        for idx, cand in enumerate(candidates):
+            if (cand / prefer_file).exists():
+                _PARQUET_OVERRIDE = cand
+                if idx > 0:
+                    log_to_gui(log_widget, f"Using GeoParquet fallback dir: {cand}")
+                return _PARQUET_OVERRIDE
+
+    for idx, cand in enumerate(candidates):
+        try:
+            if cand.exists() and any(cand.glob("*.parquet")):
+                _PARQUET_OVERRIDE = cand
+                if idx > 0:
+                    log_to_gui(log_widget, f"Using GeoParquet fallback dir: {cand}")
+                return _PARQUET_OVERRIDE
+        except Exception:
+            pass
+
+    _PARQUET_OVERRIDE = candidates[0]
+    return _PARQUET_OVERRIDE
+
+def _parquet_path(name: str) -> Path:
+    directory = _select_parquet_dir(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / name
+
 # ----------------------------
 # GeoParquet helpers
 # ----------------------------
 def geoparquet_dir() -> Path:
-    cfg = _ensure_cfg()
-    sub = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
-    p = BASE_DIR / sub
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    directory = _select_parquet_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 def atlas_parquet_path() -> Path:
-    return geoparquet_dir() / "tbl_atlas.parquet"
+    return _parquet_path("tbl_atlas.parquet")
 
 def read_flat_parquet() -> gpd.GeoDataFrame:
-    p = geoparquet_dir() / "tbl_flat.parquet"
+    p = _parquet_path("tbl_flat.parquet")
     if not p.exists():
         log_to_gui(log_widget, f"Missing tbl_flat.parquet at {p}")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
