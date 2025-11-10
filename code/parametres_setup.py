@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from typing import Optional
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -32,6 +33,7 @@ APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path
 
 # ---- constant *relative* paths we join to a discovered base dir ----
 PARQUET_ASSET_GROUP  = os.path.join("output", "geoparquet", "tbl_asset_group.parquet")
+ASSET_GROUP_OVERRIDE: Optional[Path] = None
 
 # UI grid helpers
 column_widths = [35, 13, 13, 13, 13, 30]
@@ -333,18 +335,64 @@ def sanitize_vulnerability(df: pd.DataFrame,
 # -------------------------------
 # Asset group I/O (Parquet only)
 # -------------------------------
+def _candidate_asset_group_paths(base_dir: str) -> list[Path]:
+    base = Path(base_dir).resolve()
+    primary = (base / PARQUET_ASSET_GROUP).resolve()
+    candidates = [primary]
+    if base.name.lower() != "code":
+        candidates.append((base / "code" / PARQUET_ASSET_GROUP).resolve())
+    return candidates
+
+def _set_asset_group_override(path: Path):
+    global ASSET_GROUP_OVERRIDE
+    ASSET_GROUP_OVERRIDE = path.resolve()
+
 def _parquet_asset_group_path(base_dir: str) -> str:
-    return os.path.join(base_dir, PARQUET_ASSET_GROUP)
+    if ASSET_GROUP_OVERRIDE is not None:
+        return str(ASSET_GROUP_OVERRIDE)
+    primary = (Path(base_dir).resolve() / PARQUET_ASSET_GROUP).resolve()
+    return str(primary)
+
+def _empty_asset_group_frame() -> gpd.GeoDataFrame:
+    cols = [
+        'id',
+        'name_original',
+        'name_gis_assetgroup',
+        'title_fromuser',
+        'total_asset_objects',
+        'importance',
+        'susceptibility',
+        'sensitivity',
+        'sensitivity_code',
+        'sensitivity_description',
+        'geometry',
+    ]
+    return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
 
 def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
-    path = _parquet_asset_group_path(base_dir)
-    if not os.path.exists(path):
-        log_to_file("tbl_asset_group.parquet not found – starting with empty dataset.")
-        cols = ['id','name_original','importance','susceptibility','sensitivity',
-                'sensitivity_code','sensitivity_description','geometry']
-        return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
+    candidates = _candidate_asset_group_paths(base_dir)
+    target: Optional[Path] = None
+    for idx, cand in enumerate(candidates):
+        if cand.exists():
+            target = cand
+            if idx > 0:
+                log_to_file(f"tbl_asset_group found in fallback location: {cand}")
+                _set_asset_group_override(cand)
+            break
+
+    if target is None:
+        target = candidates[0]
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            empty = _empty_asset_group_frame()
+            empty.to_parquet(target, index=False)
+            log_to_file(f"Initialized blank tbl_asset_group at {target}")
+        except Exception as e:
+            log_to_file(f"Failed to initialise blank asset group parquet at {target}: {e}")
+        return _empty_asset_group_frame()
+
     try:
-        gdf = gpd.read_parquet(path)
+        gdf = gpd.read_parquet(target)
         if gdf.crs is None:
             gdf.set_crs(epsg=int(workingprojection_epsg), inplace=True)
         gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
@@ -352,9 +400,7 @@ def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
         return gdf
     except Exception as e:
         log_to_file(f"Failed reading asset group parquet: {e}")
-        cols = ['id','name_original','importance','susceptibility','sensitivity',
-                'sensitivity_code','sensitivity_description','geometry']
-        return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
+        return _empty_asset_group_frame()
 
 def save_asset_group_to_parquet(gdf: gpd.GeoDataFrame, base_dir: str):
     try:
@@ -657,7 +703,6 @@ if __name__ == "__main__":
     print("[parametres_setup] start_cwd:", START_CWD)
     print("[parametres_setup] app_dir  :", APP_DIR)
     print("[parametres_setup] base_dir :", original_working_directory)
-    print("[parametres_setup] asset grp:  ", os.path.join(original_working_directory, PARQUET_ASSET_GROUP))
 
     # Config
     config_file = os.path.join(original_working_directory, "config.ini")
@@ -671,6 +716,7 @@ if __name__ == "__main__":
 
     # Asset groups
     gdf_asset_group = load_asset_group(original_working_directory)
+    print("[parametres_setup] asset grp:", _parquet_asset_group_path(original_working_directory))
     if gdf_asset_group is None:
         log_to_file("Failed to load tbl_asset_group (Parquet).")
         sys.exit(1)
