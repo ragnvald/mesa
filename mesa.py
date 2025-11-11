@@ -4,6 +4,7 @@ locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 import tkinter as tk
 from tkinter import *
 import os
+from pathlib import Path
 from tkinterweb import HtmlFrame
 import subprocess
 import webbrowser
@@ -215,6 +216,17 @@ def _detect_geoparquet_dir() -> str:
 
     return unique_candidates[0] if unique_candidates else os.path.join(PROJECT_BASE, "output", "geoparquet")
 
+def _preferred_lines_base_dir() -> str:
+    """Infer the base directory whose output/geoparquet folder is currently in use."""
+    try:
+        gpq_path = Path(_detect_geoparquet_dir()).resolve()
+        base_candidate = gpq_path.parent.parent
+        if (base_candidate / "config.ini").exists():
+            return str(base_candidate)
+    except Exception:
+        pass
+    return original_working_directory
+
 # ---------------------------------------------------------------------
 # Status panel (unchanged logic, reads GeoParquet)
 # ---------------------------------------------------------------------
@@ -328,9 +340,10 @@ def get_status(geoparquet_dir):
 
     try:
         asset_group_count = read_table_and_count('tbl_asset_group')
-        append_status("+" if asset_group_count is not None else "-",
-                      f"Asset layers: {asset_group_count}" if asset_group_count is not None else
-                      "Assets are missing.\nImport assets by pressing the Import button.",
+        has_asset_group_rows = asset_group_count is not None and asset_group_count > 0
+        append_status("+" if has_asset_group_rows else "-",
+                      f"Asset layers: {asset_group_count}" if has_asset_group_rows else
+                      "Assets are missing or have no registrations.\nUse 'Set up' to register asset groups.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#assets")
 
         geocode_group_count = read_table_and_count('tbl_geocode_group')
@@ -516,10 +529,10 @@ def make_atlas():
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
-def admin_lines():
-    python_script, exe_file = get_script_paths("lines_admin")
+def process_lines():
+    python_script, exe_file = get_script_paths("lines_process")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "lines_admin.exe"))
+        file_path = resolve_path(os.path.join("system", "lines_process.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
         run_subprocess([file_path], [], gpkg_file)
     else:
@@ -584,13 +597,20 @@ def edit_geocodes():
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_lines():
-    python_script, exe_file = get_script_paths("lines_edit")
+    python_script, exe_file = get_script_paths("lines_admin")
+    chosen_base = _preferred_lines_base_dir()
+    arg_tokens = ["--original_working_directory", chosen_base]
+    log_to_logfile(f"Launching lines_admin with base_dir={chosen_base}")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "lines_edit.exe"))
+        file_path = resolve_path(os.path.join("system", "lines_admin.exe"))
         log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        run_subprocess([file_path, *arg_tokens], [], gpkg_file)
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        run_subprocess(
+            [sys.executable or "python", python_script, *arg_tokens],
+            [exe_file, *arg_tokens],
+            gpkg_file
+        )
 
 def edit_atlas():
     python_script, exe_file = get_script_paths("atlas_edit")
@@ -815,7 +835,7 @@ if __name__ == "__main__":
         root.iconbitmap(resolve_path(os.path.join("system_resources", "mesa.ico")))
     except Exception:
         pass
-    root.geometry("900x580")
+    root.geometry("900x660")
 
     intro_text = (
         "Welcome to the MESA desktop. The Statistics tab is your live status board, while the Operations tab "
@@ -892,7 +912,7 @@ if __name__ == "__main__":
          "Runs the core processing pipeline to produce the GeoParquet outputs.", PRIMARY),
         ("Atlas", make_atlas,
          "Generates atlas tiles and artefacts for map visualisations.", None),
-        ("Segments", admin_lines,
+        ("Segments", process_lines,
          "Processes transport or utility lines into analysis segments.", None),
         ("Maps overview", open_maps_overview,
          "Opens the interactive map viewer with current background layers and assets.", PRIMARY),
@@ -989,27 +1009,52 @@ if __name__ == "__main__":
         "This release incorporates feedback from workshops with partners in Ghana, Tanzania, Uganda, Mozambique, "
         "and Kenya. Lead programmer: Ragnvald Larsen - https://www.linkedin.com/in/ragnvald/"
     )
+    ttk.Label(
+        about_box,
+        text=about_text,
+        wraplength=700,
+        justify="left"
+    ).pack(fill='x', expand=False, padx=10, pady=10)
+
     userguide_frame = ttk.LabelFrame(about_container, text="User guide", bootstyle='info')
     userguide_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
-    html_frame = HtmlFrame(userguide_frame, horizontal_scrollbar="auto", messages_enabled=False)
     userguide_path = resolve_path(os.path.join("system_resources", "userguide.html"))
+
+    def open_userguide():
+        if os.path.exists(userguide_path):
+            webbrowser.open(Path(userguide_path).as_uri())
+        else:
+            log_to_logfile("User guide file not found; unable to open in browser.")
+
+    html_frame_loaded = False
     if os.path.exists(userguide_path):
-        with open(userguide_path, "r", encoding="utf-8") as file:
-            html_content = file.read()
-        html_frame.load_html(html_content)
-        html_frame.pack(fill=BOTH, expand=YES)
-    else:
+        try:
+            with open(userguide_path, "r", encoding="utf-8") as file:
+                html_content = file.read()
+            html_frame = HtmlFrame(userguide_frame, horizontal_scrollbar="auto", messages_enabled=False)
+            html_frame.load_html(html_content)
+            html_frame.pack(fill=BOTH, expand=YES)
+            html_frame_loaded = True
+        except Exception as exc:
+            log_to_logfile(f"Failed to render embedded user guide: {exc}")
+
+    if not html_frame_loaded:
         fallback_lbl = ttk.Label(
             userguide_frame,
-            text="User guide (system_resources/userguide.html) not found.\n"
-                 "Place it under either:\n"
-                 " - <folder with mesa.py or EXE>\\system_resources\\userguide.html, or\n"
-                 " - <folder with mesa.py or EXE>\\code\\system_resources\\userguide.html",
+            text="Unable to embed the user guide.\nClick the button below to open it in your browser or make sure "
+                 "system_resources/userguide.html exists.",
             justify="left",
             wraplength=700
         )
         fallback_lbl.pack(fill='both', expand=True, padx=10, pady=10)
+
+    ttk.Button(
+        userguide_frame,
+        text="Open user guide in browser",
+        command=open_userguide,
+        bootstyle="secondary"
+    ).pack(anchor="w", padx=10, pady=(0, 10))
 
     # ------------------------------------------------------------------
     # Registration tab
