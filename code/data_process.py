@@ -1267,16 +1267,38 @@ def _write_area_stats_json(stats: dict):
         log_to_gui(log_widget, f"Failed to write area_stats.json: {e}")
 
 def _load_index_settings_from_config(cfg: configparser.ConfigParser) -> dict:
-    defaults_section = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
+    def _lookup_option(option: str):
+        if not option:
+            return None
+        opt = option.lower()
+        defaults = cfg.defaults()
+        if opt in defaults:
+            return defaults[opt]
+        for section in cfg.sections():
+            section_proxy = cfg[section]
+            if opt in section_proxy:
+                return section_proxy[opt]
+        return None
+
     settings = {}
+    missing_keys: list[str] = []
     for key, meta in INDEX_CONFIG_KEYS.items():
         base = INDEX_SETTING_DEFAULTS[key]
+        gw_raw = _lookup_option(meta["group"])
+        ow_raw = _lookup_option(meta["overlap"])
+        norm_raw = _lookup_option(meta["normalize"])
+        if gw_raw is None:
+            missing_keys.append(meta["group"])
+        if ow_raw is None:
+            missing_keys.append(meta["overlap"])
+        if norm_raw is None:
+            missing_keys.append(meta["normalize"])
         try:
-            gw = int(defaults_section.get(meta["group"], base["group_weight"]))
+            gw = int(gw_raw) if gw_raw is not None else base["group_weight"]
         except Exception:
             gw = base["group_weight"]
         try:
-            ow = int(defaults_section.get(meta["overlap"], base["overlap_weight"]))
+            ow = int(ow_raw) if ow_raw is not None else base["overlap_weight"]
         except Exception:
             ow = base["overlap_weight"]
         gw = max(0, min(10, gw))
@@ -1284,9 +1306,12 @@ def _load_index_settings_from_config(cfg: configparser.ConfigParser) -> dict:
         if gw + ow != 10:
             gw = base["group_weight"]
             ow = base["overlap_weight"]
-        normalize_flag = str(defaults_section.get(meta["normalize"], str(base["normalize"]))).strip().lower()
+        normalize_flag = str(norm_raw if norm_raw is not None else base["normalize"]).strip().lower()
         normalize = normalize_flag in ("1", "true", "yes", "on")
         settings[key] = {"group_weight": gw, "overlap_weight": ow, "normalize": normalize}
+    if missing_keys:
+        uniq = ", ".join(sorted(set(missing_keys)))
+        log_to_gui(log_widget, f"Index settings missing in config.ini for: {uniq}. Using defaults where needed.")
     return settings
 
 def _group_labels(df: pd.DataFrame) -> pd.Series:
