@@ -106,9 +106,10 @@ PARQUET_DIR   = OUTPUT_DIR / "geoparquet"
 MBTILES_DIR   = OUTPUT_DIR / "mbtiles"
 AREA_JSON     = OUTPUT_DIR / "area_stats.json"
 
-PARQUET_FILE  = PARQUET_DIR / "tbl_flat.parquet"
-SEGMENT_FILE  = PARQUET_DIR / "tbl_segment_flat.parquet"
-LINES_FILE    = PARQUET_DIR / "tbl_lines.parquet"
+PARQUET_FILE          = PARQUET_DIR / "tbl_flat.parquet"
+SEGMENT_FILE          = PARQUET_DIR / "tbl_segment_flat.parquet"
+SEGMENT_OUTLINE_FILE  = PARQUET_DIR / "tbl_segments.parquet"
+LINES_FILE            = PARQUET_DIR / "tbl_lines.parquet"
 
 PLOT_CRS         = "EPSG:4326"
 BASIC_GROUP_NAME = "basic_mosaic"
@@ -226,6 +227,19 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> dict:
         }
         if "name_asset_object" in row: props["name_asset_object"] = row.get("name_asset_object", None)
         if "id_asset_object"   in row: props["id_asset_object"]   = row.get("id_asset_object", None)
+        feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
+    return {"type": "FeatureCollection", "features": feats}
+
+def gdf_to_geojson_lines(gdf: gpd.GeoDataFrame) -> dict:
+    feats = []
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        props = {}
+        for key in ("segment_id", "name_user", "name_gis"):
+            if key in row:
+                props[key] = row.get(key)
         feats.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     return {"type": "FeatureCollection", "features": feats}
 
@@ -625,10 +639,12 @@ DESC         = get_desc_mapping(cfg)
 
 GDF          = load_parquet(PARQUET_FILE)
 SEG_GDF      = load_parquet(SEGMENT_FILE)
+SEG_OUTLINE_GDF = load_parquet(SEGMENT_OUTLINE_FILE)
 LINES_GDF    = load_parquet(LINES_FILE)
 
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
+SEGMENT_OUTLINES_AVAILABLE = (not SEG_OUTLINE_GDF.empty) and ("geometry" in SEG_OUTLINE_GDF.columns)
 
 mb_cats   = list(MBTILES_INDEX.keys())
 vec_cats  = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
@@ -680,6 +696,7 @@ class Api:
             "descriptions": DESC,
             "initial_geocode": (CATS[0] if CATS else None),
             "has_segments": SEGMENTS_AVAILABLE,
+            "has_segment_outlines": SEGMENT_OUTLINES_AVAILABLE,
             "bing_key": BING_KEY,
             "zoom_threshold": ZOOM_THRESHOLD
         }
@@ -789,6 +806,31 @@ class Api:
             df = only_A_to_E(df)
             df = to_plot_crs(df, cfg)
             gj = gdf_to_geojson_min(df)
+            return {"ok": True, "geojson": gj}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_segment_outlines(self):
+        try:
+            if not SEGMENT_OUTLINES_AVAILABLE:
+                return {"ok": False, "error": "Segment outlines are not available."}
+            df = SEG_OUTLINE_GDF.copy()
+            if df.empty:
+                return {"ok": True, "geojson": {"type": "FeatureCollection", "features": []}}
+            def _outline_geom(geom):
+                geom = _valid_geom(geom)
+                if geom is None or geom.is_empty:
+                    return geom
+                if geom.geom_type in ("Polygon", "MultiPolygon"):
+                    try:
+                        return geom.boundary
+                    except Exception:
+                        return geom
+                return geom
+            df["geometry"] = df.geometry.apply(_outline_geom)
+            df = df[df.geometry.notnull() & (~df.geometry.is_empty)]
+            df = to_plot_crs(df, cfg)
+            gj = gdf_to_geojson_lines(df)
             return {"ok": True, "geojson": gj}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -925,14 +967,15 @@ HTML_TEMPLATE = r"""
 
 <script>
 var MAP=null, BASE=null, BASE_SOURCES=null, CHART=null;
-var GEO_GROUP=null, SEG_GROUP=null, GROUPSTOTAL_GROUP=null, ASSETSTOTAL_GROUP=null, INDEX_ASSET_GROUP=null, INDEX_SENS_GROUP=null;
+var GEO_GROUP=null, SEG_GROUP=null, SEG_OUTLINE_GROUP=null, GROUPSTOTAL_GROUP=null, ASSETSTOTAL_GROUP=null, INDEX_ASSET_GROUP=null, INDEX_SENS_GROUP=null;
 var GEO_FOLDER=null;
-var LAYER=null, LAYER_SEG=null, LAYER_GROUPSTOTAL=null, LAYER_ASSETSTOTAL=null, LAYER_INDEX_ASSET=null, LAYER_INDEX_SENS=null;
+var LAYER=null, LAYER_SEG=null, LAYER_SEG_OUTLINE=null, LAYER_GROUPSTOTAL=null, LAYER_ASSETSTOTAL=null, LAYER_INDEX_ASSET=null, LAYER_INDEX_SENS=null;
 var HOME_BOUNDS=null, COLOR_MAP={}, DESC_MAP={};
 var FILL_ALPHA = 0.8;
 var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
 var ZOOM_THRESHOLD_JS = 12;
+var HAS_SEGMENT_OUTLINES=false, SEG_OUTLINE_LOADED=false;
 var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, indexAsset:null, indexSens:null };
 
 function logErr(m){ try{ window.pywebview.api.js_log(m); }catch(e){} }
@@ -1123,6 +1166,30 @@ function loadSegmentsIntoGroup(lineNameOrAll){
     }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
+
+function loadSegmentOutlinesOnce(){
+  if (!HAS_SEGMENT_OUTLINES || SEG_OUTLINE_LOADED) return;
+  SEG_OUTLINE_LOADED = true;
+  window.pywebview.api.get_segment_outlines().then(function(res){
+    if (!res.ok){
+      SEG_OUTLINE_LOADED = false;
+      logErr('Failed to load segment outlines: '+(res.error||''));
+      return;
+    }
+    if (!SEG_OUTLINE_GROUP) return;
+    SEG_OUTLINE_GROUP.clearLayers();
+    if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+      LAYER_SEG_OUTLINE = L.geoJSON(res.geojson, {
+        pane:'segmentsOutlinePane',
+        style:function(){ return {color:'#6b7280', weight:1.2, opacity:0.35, fillOpacity:0}; }
+      });
+      SEG_OUTLINE_GROUP.addLayer(LAYER_SEG_OUTLINE);
+    }
+  }).catch(function(err){
+    SEG_OUTLINE_LOADED = false;
+    logErr('Segment outlines API error: '+err);
+  });
+}
 /* helpers */
 function ensureOnMap(g){ if (g && !MAP.hasLayer(g)) g.addTo(MAP); }
 function ensureOffMap(g){ if (g && MAP.hasLayer(g)) MAP.removeLayer(g); }
@@ -1143,6 +1210,8 @@ function hideGeocodeFolderCheckbox(ctrl){
 
 /* build layers control */
 function buildLayersControl(state){
+  HAS_SEGMENT_OUTLINES = !!(state && state.has_segment_outlines);
+  SEG_OUTLINE_LOADED = false;
   var baseLayers={
     'OpenStreetMap': BASE_SOURCES.osm,
     'OSM Topography': BASE_SOURCES.topo,
@@ -1150,6 +1219,7 @@ function buildLayersControl(state){
   };
 
   SEG_GROUP=L.layerGroup();
+  SEG_OUTLINE_GROUP=L.layerGroup();
   GEO_GROUP=L.layerGroup();
   GROUPSTOTAL_GROUP=L.layerGroup(); ASSETSTOTAL_GROUP=L.layerGroup();
   INDEX_ASSET_GROUP=L.layerGroup(); INDEX_SENS_GROUP=L.layerGroup();
@@ -1208,6 +1278,8 @@ function buildLayersControl(state){
   BASE_SOURCES.osm.addTo(MAP);
   GEO_GROUP.addTo(MAP);
   SEG_GROUP.addTo(MAP);
+  SEG_OUTLINE_GROUP.addTo(MAP);
+  if (HAS_SEGMENT_OUTLINES) loadSegmentOutlinesOnce();
 
   setTimeout(function(){
     var geocodes=(state.geocode_categories||[]);
@@ -1313,7 +1385,8 @@ function boot(){
   });
   L.control.zoom({ position:'topright' }).addTo(MAP);
 
-  MAP.createPane('segmentsPane');      MAP.getPane('segmentsPane').style.zIndex=650;
+  MAP.createPane('segmentsOutlinePane'); MAP.getPane('segmentsOutlinePane').style.zIndex=640;
+  MAP.createPane('segmentsPane');        MAP.getPane('segmentsPane').style.zIndex=650;
   MAP.createPane('indexAssetPane');    MAP.getPane('indexAssetPane').style.zIndex=590;
   MAP.createPane('indexSensPane');     MAP.getPane('indexSensPane').style.zIndex=580;
   MAP.createPane('groupsTotalPane');   MAP.getPane('groupsTotalPane').style.zIndex=560;
