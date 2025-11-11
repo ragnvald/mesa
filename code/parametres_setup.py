@@ -259,21 +259,47 @@ def _coerce_bool(value, default):
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
+def _lookup_config_option(cfg: configparser.ConfigParser, option: str) -> Optional[str]:
+    """Return the first matching option across DEFAULT and all sections (case-insensitive)."""
+    if not option:
+        return None
+    opt = option.lower()
+    defaults = cfg.defaults()
+    if opt in defaults:
+        return defaults[opt]
+    for section in cfg.sections():
+        section_proxy = cfg[section]
+        if opt in section_proxy:
+            return section_proxy[opt]
+    return None
+
 def load_index_settings_from_config(cfg: configparser.ConfigParser) -> dict:
-    defaults_section = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
     settings = {}
+    missing_keys: list[str] = []
     for key, meta in INDEX_CONFIG_KEYS.items():
         dflt = INDEX_SETTING_DEFAULTS[key]
-        gw = _coerce_weight(defaults_section.get(meta["group"]), dflt["group_weight"])
-        ow = _coerce_weight(defaults_section.get(meta["overlap"]), dflt["overlap_weight"])
+        gw_raw = _lookup_config_option(cfg, meta["group"])
+        ow_raw = _lookup_config_option(cfg, meta["overlap"])
+        norm_raw = _lookup_config_option(cfg, meta["normalize"])
+        if gw_raw is None:
+            missing_keys.append(meta["group"])
+        if ow_raw is None:
+            missing_keys.append(meta["overlap"])
+        if norm_raw is None:
+            missing_keys.append(meta["normalize"])
+        gw = _coerce_weight(gw_raw, dflt["group_weight"])
+        ow = _coerce_weight(ow_raw, dflt["overlap_weight"])
         if gw + ow != 10:
             gw = dflt["group_weight"]
             ow = dflt["overlap_weight"]
         settings[key] = {
             "group_weight": gw,
             "overlap_weight": ow,
-            "normalize": _coerce_bool(defaults_section.get(meta["normalize"]), dflt["normalize"]),
+            "normalize": _coerce_bool(norm_raw, dflt["normalize"]),
         }
+    if missing_keys:
+        unique = ", ".join(sorted(set(missing_keys)))
+        log_to_file(f"Index settings missing in config.ini for: {unique}. Using defaults where needed.")
     return settings
 
 def persist_index_settings(cfg_path: str, settings: dict) -> None:
