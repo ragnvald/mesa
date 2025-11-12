@@ -5,7 +5,6 @@ import tkinter as tk
 from tkinter import *
 import os
 from pathlib import Path
-from tkinterweb import HtmlFrame
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
@@ -69,6 +68,32 @@ def resolve_path(rel_path: str) -> str:
 
     # Default guess (caller handles existence)
     return p_disk_1
+
+def _candidate_tool_dirs() -> list[str]:
+    bases = [PROJECT_BASE]
+    if PROJECT_BASE != RESOURCE_BASE and RESOURCE_BASE:
+        bases.append(RESOURCE_BASE)
+    tool_dirs = []
+    for base in bases:
+        tool_dirs.append(os.path.join(base, "tools"))
+        tool_dirs.append(os.path.join(base, "code", "tools"))
+    seen = set()
+    dedup = []
+    for path in tool_dirs:
+        ap = os.path.abspath(path)
+        if ap not in seen:
+            seen.add(ap)
+            dedup.append(ap)
+    return dedup
+
+def _resolve_from_tool_dirs(file_name: str) -> str | None:
+    if not file_name:
+        return None
+    for folder in _candidate_tool_dirs():
+        candidate = os.path.join(folder, file_name)
+        if os.path.exists(candidate):
+            return candidate
+    return None
 
 # ---------------------------------------------------------------------
 # Config helpers (disk alongside EXE; auto-heal headerless INI)
@@ -147,8 +172,17 @@ def create_link_icon(parent, url, row, col, padx, pady):
     canvas.create_text(icon_size/2, icon_size/2, text="i", font=('Calibri', 10, 'bold'), fill='blue')
     canvas.bind("<Button-1>", lambda e: webbrowser.open(url))
 
-def _detect_geoparquet_dir() -> str:
-    """Locate the geoparquet folder, preferring the live data set when multiple copies exist."""
+def _dedup_paths(paths):
+    seen = set()
+    unique = []
+    for path in paths:
+        ap = os.path.abspath(path)
+        if ap not in seen:
+            seen.add(ap)
+            unique.append(ap)
+    return unique
+
+def _geoparquet_base_candidates():
     candidates = [
         os.path.join(original_working_directory, "output", "geoparquet"),
         os.path.join(PROJECT_BASE, "output", "geoparquet"),
@@ -159,14 +193,11 @@ def _detect_geoparquet_dir() -> str:
             os.path.join(RESOURCE_BASE, "output", "geoparquet"),
             os.path.join(RESOURCE_BASE, "code", "output", "geoparquet"),
         ])
+    return _dedup_paths(candidates)
 
-    seen = set()
-    unique_candidates = []
-    for path in candidates:
-        ap = os.path.abspath(path)
-        if ap not in seen:
-            seen.add(ap)
-            unique_candidates.append(ap)
+def _detect_geoparquet_dir() -> str:
+    """Locate the geoparquet folder, preferring the live data set when multiple copies exist."""
+    unique_candidates = _geoparquet_base_candidates()
 
     sentinel_files = [
         "tbl_asset_group.parquet",
@@ -175,6 +206,20 @@ def _detect_geoparquet_dir() -> str:
         "tbl_flat.parquet",
         "tbl_segment_flat.parquet",
     ]
+
+    def has_data(path: str) -> bool:
+        if not os.path.isdir(path):
+            return False
+        for sentinel in sentinel_files:
+            if os.path.exists(os.path.join(path, sentinel)):
+                return True
+        try:
+            for entry in os.listdir(path):
+                if entry.lower().endswith(".parquet") and not entry.startswith("__"):
+                    return True
+        except OSError:
+            pass
+        return False
 
     def score(path: str) -> int:
         if not os.path.isdir(path):
@@ -196,6 +241,12 @@ def _detect_geoparquet_dir() -> str:
         except OSError:
             extra = 0
         return hits + extra
+
+    for candidate in unique_candidates:
+        if has_data(candidate):
+            if unique_candidates and candidate != unique_candidates[0]:
+                log_to_logfile(f"[status] Using geoparquet dir: {candidate}")
+            return candidate
 
     best_path = None
     best_score = -1
@@ -271,11 +322,25 @@ def update_stats(_unused_gpkg_path):
 def get_status(geoparquet_dir):
     status_list = []
 
-    def ppath(layer_name: str) -> str:
-        return os.path.join(geoparquet_dir, f"{layer_name}.parquet")
+    gpq_dirs = _dedup_paths([geoparquet_dir, *_geoparquet_base_candidates()])
 
-    def table_exists_nonempty(layer_name: str) -> bool:
-        fp = ppath(layer_name)
+    def _table_path_candidates(layer_name: str):
+        return [os.path.join(base, f"{layer_name}.parquet") for base in gpq_dirs]
+
+    def _existing_table_path(layer_name: str):
+        for fp in _table_path_candidates(layer_name):
+            if os.path.exists(fp):
+                return fp
+        return None
+
+    def _env_json_candidates():
+        targets = []
+        for base in gpq_dirs:
+            parent = os.path.dirname(base)
+            targets.append(os.path.join(parent, "env_profile.json"))
+        return _dedup_paths(targets)
+
+    def _parquet_has_rows(fp: str) -> bool:
         if not os.path.exists(fp):
             return False
         try:
@@ -285,6 +350,17 @@ def get_status(geoparquet_dir):
                 return len(pd.read_parquet(fp)) > 0
             except Exception:
                 return False
+
+    def ppath(layer_name: str) -> str:
+        fp = _existing_table_path(layer_name)
+        if fp:
+            return fp
+        candidates = _table_path_candidates(layer_name)
+        return candidates[0] if candidates else os.path.join(geoparquet_dir, f"{layer_name}.parquet")
+
+    def table_exists_nonempty(layer_name: str) -> bool:
+        fp = ppath(layer_name)
+        return _parquet_has_rows(fp)
 
     def read_table_and_count(layer_name: str):
         fp = ppath(layer_name)
@@ -302,7 +378,22 @@ def get_status(geoparquet_dir):
                 return None
 
     def read_setup_status():
-        env_ok = table_exists_nonempty('tbl_env_profile')
+        env_messages = []
+        env_status = "missing"  # ok | empty | missing | json
+        env_table_path = _existing_table_path('tbl_env_profile')
+        if env_table_path:
+            if _parquet_has_rows(env_table_path):
+                env_status = "ok"
+            else:
+                env_status = "empty"
+                env_messages.append("tbl_env_profile exists but has no rows.")
+        else:
+            for json_candidate in _env_json_candidates():
+                if os.path.exists(json_candidate):
+                    env_status = "json"
+                    break
+            if env_status == "missing":
+                env_messages.append("tbl_env_profile is missing.")
 
         fp = ppath('tbl_asset_group')
         assets_ok = False
@@ -321,19 +412,22 @@ def get_status(geoparquet_dir):
         except Exception as e:
             log_to_logfile(f"Error evaluating setup status on tbl_asset_group: {e}")
 
-        if env_ok and assets_ok:
+        if assets_ok and env_status in ("ok", "json"):
             return "+", "Set up ok. Feel free to adjust it."
-        else:
-            parts = []
-            if not env_ok:
-                parts.append("tbl_env_profile is missing or empty")
-            if not assets_ok:
-                if missing_cols_msg:
-                    parts.append(missing_cols_msg.strip())
-                else:
-                    parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
-            detail = "; ".join(parts) if parts else "Incomplete setup."
-            return "-", f"You need to set up the calculation. \nPress the 'Set up'-button to proceed. ({detail})"
+        if assets_ok:
+            detail = env_messages[0] if env_messages else "ENV profile not detected."
+            return "+", f"Asset ratings are in place. {detail} Run 'Set up' if you need to regenerate it."
+
+        parts = []
+        if env_status in ("missing", "empty"):
+            parts.extend(env_messages)
+        if not assets_ok:
+            if missing_cols_msg:
+                parts.append(missing_cols_msg.strip())
+            else:
+                parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
+        detail = "; ".join([p for p in parts if p]) or "Incomplete setup."
+        return "-", f"You need to set up the calculation. \nPress the 'Set up'-button to proceed. ({detail})"
 
     def append_status(symbol, message, link):
         status_list.append({'Status': symbol, 'Message': message, 'Link': link})
@@ -440,6 +534,12 @@ def _resolve_tool_path(*rel_candidates: str) -> str:
         candidate = resolve_path(rel)
         if os.path.exists(candidate):
             return candidate
+        tool_candidate = _resolve_from_tool_dirs(os.path.basename(rel))
+        if tool_candidate:
+            return tool_candidate
+    tool_fallback = _resolve_from_tool_dirs(os.path.basename(rel_candidates[0]))
+    if tool_fallback:
+        return tool_fallback
     # Fall back to the first option even if it does not exist (caller handles error)
     return resolve_path(rel_candidates[0])
 
@@ -463,9 +563,8 @@ def geocodes_grids():
     python_script, exe_file = get_script_paths("geocodes_create")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "geocodes_create.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path, *arg_tokens], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
@@ -473,9 +572,8 @@ def import_assets(gpkg_file):
     python_script, exe_file = get_script_paths("data_import")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "data_import.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path, *arg_tokens], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess(
             [sys.executable or "python", python_script, *arg_tokens],
@@ -514,85 +612,80 @@ def process_data(gpkg_file):
     python_script, exe_file = get_script_paths("data_process")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "data_process.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path, *arg_tokens], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def make_atlas():
     python_script, exe_file = get_script_paths("atlas_create")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "atlas_create.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def process_lines():
     python_script, exe_file = get_script_paths("lines_process")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "lines_process.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def open_maps_overview():
-    python_script = _resolve_tool_path(
-        os.path.join("system", "maps_overview.py"),
-        "maps_overview.py",
-    )
-    python_exe = sys.executable or "python"
+    python_script, exe_file = get_script_paths("maps_overview")
     try:
-        subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
+        if getattr(sys, "frozen", False):
+            log_to_logfile(f"Launching maps_overview exe: {exe_file}")
+            subprocess.Popen([exe_file], cwd=PROJECT_BASE, env=_sub_env())
+        else:
+            python_exe = sys.executable or "python"
+            subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
     except Exception as e:
-        log_to_logfile(f"Failed to open maps_overview.py: {e}")
+        log_to_logfile(f"Failed to open maps overview: {e}")
 
 def open_present_files():
-    python_script = _resolve_tool_path(
-        os.path.join("system", "data_report.py"),
-        "data_report.py",
-    )
-    python_exe = sys.executable or "python"
+    python_script, exe_file = get_script_paths("data_report")
     try:
-        subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
+        if getattr(sys, "frozen", False):
+            log_to_logfile(f"Launching data_report exe: {exe_file}")
+            subprocess.Popen([exe_file], cwd=PROJECT_BASE, env=_sub_env())
+        else:
+            python_exe = sys.executable or "python"
+            subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
     except Exception as e:
-        log_to_logfile(f"Failed to open data_report.py: {e}")
+        log_to_logfile(f"Failed to open data_report: {e}")
 
 def open_data_analysis_setup():
     python_script, exe_file = get_script_paths("data_analysis_setup")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "data_analysis_setup.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def open_data_analysis_presentation():
     python_script, exe_file = get_script_paths("data_analysis_presentation")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "data_analysis_presentation.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_assets():
     python_script, exe_file = get_script_paths("assetgroup_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "assetgroup_edit.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_geocodes():
     python_script, exe_file = get_script_paths("geocodegroup_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "geocodegroup_edit.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
@@ -602,9 +695,8 @@ def edit_lines():
     arg_tokens = ["--original_working_directory", chosen_base]
     log_to_logfile(f"Launching lines_admin with base_dir={chosen_base}")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "lines_admin.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path, *arg_tokens], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess(
             [sys.executable or "python", python_script, *arg_tokens],
@@ -615,9 +707,8 @@ def edit_lines():
 def edit_atlas():
     python_script, exe_file = get_script_paths("atlas_edit")
     if getattr(sys, "frozen", False):
-        file_path = resolve_path(os.path.join("system", "atlas_edit.exe"))
-        log_to_logfile(f"Running bundled exe: {file_path}")
-        run_subprocess([file_path], [], gpkg_file)
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file], [], gpkg_file)
     else:
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
@@ -890,10 +981,10 @@ if __name__ == "__main__":
         operations_container,
         text="Launch the main workflows from here. Each button has a short description of when to use it.",
         justify="left",
-        wraplength=760
+        wraplength=800
     ).pack(anchor="w", pady=(0, 10))
 
-    button_width = 16
+    button_width = 20
     button_padx = 6
     button_pady = 4
 
@@ -904,7 +995,7 @@ if __name__ == "__main__":
     operations = [
         ("Import", lambda: import_assets(gpkg_file),
          "Opens the asset and polygon importer. Start here when preparing a new dataset.", PRIMARY),
-        ("Geocodes/grids", geocodes_grids,
+        ("Geocodes", geocodes_grids,
          "Creates or refreshes geocode grids (hexagons, tiles) that support the analysis.", None),
         ("Set up", edit_processing_setup,
          "Adjust processing parameters such as buffers and thresholds before running analysis.", None),
@@ -916,11 +1007,11 @@ if __name__ == "__main__":
          "Processes transport or utility lines into analysis segments.", None),
         ("Maps overview", open_maps_overview,
          "Opens the interactive map viewer with current background layers and assets.", PRIMARY),
-        ("Analysis setup", open_data_analysis_setup,
+        ("Area analysis", open_data_analysis_setup,
          "Launches the area analysis tool used to define polygons and run clipping.", None),
-        ("Analysis presentation", open_data_analysis_presentation,
+        ("Area presentation", open_data_analysis_presentation,
          "Opens the comparison dashboard for analysis groups.", None),
-        ("Report engine", open_present_files,
+        ("Report", open_present_files,
          "Builds printable reports and map packages for sharing with partners.", None),
     ]
 
@@ -1015,46 +1106,6 @@ if __name__ == "__main__":
         wraplength=700,
         justify="left"
     ).pack(fill='x', expand=False, padx=10, pady=10)
-
-    userguide_frame = ttk.LabelFrame(about_container, text="User guide", bootstyle='info')
-    userguide_frame.pack(fill="both", expand=True, padx=5, pady=5)
-
-    userguide_path = resolve_path(os.path.join("system_resources", "userguide.html"))
-
-    def open_userguide():
-        if os.path.exists(userguide_path):
-            webbrowser.open(Path(userguide_path).as_uri())
-        else:
-            log_to_logfile("User guide file not found; unable to open in browser.")
-
-    html_frame_loaded = False
-    if os.path.exists(userguide_path):
-        try:
-            with open(userguide_path, "r", encoding="utf-8") as file:
-                html_content = file.read()
-            html_frame = HtmlFrame(userguide_frame, horizontal_scrollbar="auto", messages_enabled=False)
-            html_frame.load_html(html_content)
-            html_frame.pack(fill=BOTH, expand=YES)
-            html_frame_loaded = True
-        except Exception as exc:
-            log_to_logfile(f"Failed to render embedded user guide: {exc}")
-
-    if not html_frame_loaded:
-        fallback_lbl = ttk.Label(
-            userguide_frame,
-            text="Unable to embed the user guide.\nClick the button below to open it in your browser or make sure "
-                 "system_resources/userguide.html exists.",
-            justify="left",
-            wraplength=700
-        )
-        fallback_lbl.pack(fill='both', expand=True, padx=10, pady=10)
-
-    ttk.Button(
-        userguide_frame,
-        text="Open user guide in browser",
-        command=open_userguide,
-        bootstyle="secondary"
-    ).pack(anchor="w", padx=10, pady=(0, 10))
 
     # ------------------------------------------------------------------
     # Registration tab
