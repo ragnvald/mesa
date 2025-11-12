@@ -16,8 +16,10 @@ import datetime as dt
 import locale
 import math
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +27,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import tkinter as tk
+from tkinter import messagebox
+from openpyxl.drawing.image import Image as XLImage
 
 try:
     import ttkbootstrap as tb
@@ -290,6 +294,14 @@ def coalesce(*values: Any, default: str = "") -> str:
     return default
 
 
+def _figure_to_png_bytes(fig) -> BytesIO:
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+    buf.seek(0)
+    buf.name = "chart.png"
+    return buf
+
+
 # --------------------------------------------------------------------------- #
 # Data access layer
 # --------------------------------------------------------------------------- #
@@ -358,6 +370,85 @@ class AssetGroupSummary:
         if self.dominant_description:
             return f"{code_display} ({self.dominant_description})"
         return code_display
+
+
+def _polygons_dataframe(polygons: Optional[Iterable[Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for polygon in polygons or []:
+        if isinstance(polygon, PolygonSummary):
+            source = {
+                "Polygon ID": polygon.polygon_id,
+                "Title": polygon.title,
+                "Notes": polygon.notes,
+                "Has analysis": "Yes" if polygon.has_analysis else "No",
+                "Area (km²)": polygon.area_km2,
+                "Last processed": format_timestamp(polygon.last_timestamp),
+            }
+        elif isinstance(polygon, dict):
+            source = {
+                "Polygon ID": polygon.get("polygon_id", ""),
+                "Title": polygon.get("title", ""),
+                "Notes": polygon.get("notes", ""),
+                "Has analysis": "Yes" if polygon.get("has_analysis") else "No",
+                "Area (km²)": area_to_km2(polygon.get("area_m2", 0.0)),
+                "Last processed": format_timestamp(polygon.get("last_timestamp")),
+            }
+        else:
+            continue
+        rows.append(source)
+    columns = ["Polygon ID", "Title", "Notes", "Has analysis", "Area (km²)", "Last processed"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _sensitivity_dataframe(entries: Optional[Iterable[Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for entry in entries or []:
+        if isinstance(entry, SensitivitySummary):
+            source = {
+                "Code": entry.code,
+                "Description": entry.description,
+                "Area (km²)": entry.area_km2,
+            }
+        elif isinstance(entry, dict):
+            source = {
+                "Code": entry.get("code", ""),
+                "Description": entry.get("description", ""),
+                "Area (km²)": area_to_km2(entry.get("area_m2", 0.0)),
+            }
+        else:
+            continue
+        rows.append(source)
+    columns = ["Code", "Description", "Area (km²)"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _asset_groups_dataframe(entries: Optional[Iterable[Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for entry in entries or []:
+        if isinstance(entry, AssetGroupSummary):
+            source = {
+                "Asset group": entry.asset_group,
+                "Dominant sensitivity": entry.dominant_label,
+                "Area (km²)": entry.area_km2,
+            }
+        elif isinstance(entry, dict):
+            code = str(entry.get("dominant_code", "")).upper()
+            desc = entry.get("dominant_description", "")
+            if code == UNKNOWN_CODE:
+                code_display = "Unknown"
+            else:
+                code_display = code
+            dominant = f"{code_display} ({desc})" if desc else code_display
+            source = {
+                "Asset group": entry.get("asset_group", ""),
+                "Dominant sensitivity": dominant,
+                "Area (km²)": area_to_km2(entry.get("total_area_m2", 0.0)),
+            }
+        else:
+            continue
+        rows.append(source)
+    columns = ["Asset group", "Dominant sensitivity", "Area (km²)"]
+    return pd.DataFrame(rows, columns=columns)
 
 
 class AnalysisData:
@@ -1218,6 +1309,9 @@ class BasicPanel:
 
         self.chart.update(summary.get("sensitivity", []))
 
+    def chart_figure(self):
+        return self.chart.figure
+
 
 class ComprehensivePanel:
     """Overlap-focused view using stacked analysis results."""
@@ -1317,6 +1411,9 @@ class ComprehensivePanel:
 
         self.chart.update(summary.get("sensitivity", []))
 
+    def chart_figure(self):
+        return self.chart.figure
+
 
 class BasicComparisonView:
     """Wraps the left/right basic analysis panels for the notebook."""
@@ -1339,6 +1436,12 @@ class BasicComparisonView:
     def update_right(self, summary: Dict[str, Any]) -> None:
         self.right_panel.update(summary)
 
+    def chart_figures(self) -> List[Tuple[str, Any]]:
+        return [
+            ("Basic - Left sensitivity", self.left_panel.chart_figure()),
+            ("Basic - Right sensitivity", self.right_panel.chart_figure()),
+        ]
+
 
 class ComprehensiveComparisonView:
     """Wraps the left/right comprehensive analysis panels for the notebook."""
@@ -1360,6 +1463,12 @@ class ComprehensiveComparisonView:
 
     def update_right(self, summary: Dict[str, Any]) -> None:
         self.right_panel.update(summary)
+
+    def chart_figures(self) -> List[Tuple[str, Any]]:
+        return [
+            ("Comprehensive - Left sensitivity", self.left_panel.chart_figure()),
+            ("Comprehensive - Right sensitivity", self.right_panel.chart_figure()),
+        ]
 
 
 class ComparisonTable:
@@ -1434,6 +1543,24 @@ class ComparisonApp:
         self.right_header = GroupHeader(header_frame, "Right group", self._on_right_selection)
         self.right_header.frame.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
+        button_frame = ttk.LabelFrame(header_frame, text="Exports", padding=(8, 4))
+        apply_bootstyle(button_frame, PRIMARY)
+        button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+        tb.Button(
+            button_frame,
+            text="Export basic report (Excel)",
+            bootstyle=SUCCESS,
+            command=self._export_basic_report,
+        ).grid(row=0, column=0, padx=6, pady=4, sticky="ew")
+        tb.Button(
+            button_frame,
+            text="Export comprehensive report (Excel)",
+            bootstyle=INFO,
+            command=self._export_comprehensive_report,
+        ).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+
         self.notebook = ttk.Notebook(container)
         apply_bootstyle(self.notebook, SECONDARY)
         self.basic_view = BasicComparisonView(self.notebook, self.palette_map)
@@ -1449,6 +1576,20 @@ class ComparisonApp:
         self.status_label = ttk.Label(container, textvariable=self.status_var, anchor="w")
         apply_bootstyle(self.status_label, INFO)
         self.status_label.pack(fill=tk.X, pady=(8, 0))
+
+        self.report_dir = (self.data.base_dir / "output" / "reports").resolve()
+        self.report_note_var = tk.StringVar(value="")
+        self.report_link_var = tk.StringVar(value="")
+        self.report_note_label = ttk.Label(container, textvariable=self.report_note_var, anchor="w")
+        apply_bootstyle(self.report_note_label, SECONDARY)
+        self.report_link = tk.Label(
+            container,
+            textvariable=self.report_link_var,
+            fg="#0d6efd",
+            cursor="hand2",
+            anchor="w",
+        )
+        self.report_link.bind("<Button-1>", self._open_report_folder)
 
         self.display_to_id: Dict[str, str] = {}
         self.left_summary: Dict[str, Any] = {}
@@ -1541,6 +1682,162 @@ class ComparisonApp:
             self.status_var.set(messages[0])
         else:
             self.status_var.set(self.data.status_message())
+
+    def _ensure_report_dir(self) -> Path:
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        return self.report_dir
+
+    def _basic_overview_df(self) -> pd.DataFrame:
+        left = self.left_summary or {}
+        right = self.right_summary or {}
+        rows = [
+            {"Metric": "Group name", "Left": left.get("group_name", ""), "Right": right.get("group_name", "")},
+            {"Metric": "Notes", "Left": left.get("group_notes", ""), "Right": right.get("group_notes", "")},
+            {"Metric": "Configured polygons", "Left": left.get("configured_count", 0), "Right": right.get("configured_count", 0)},
+            {"Metric": "Processed polygons", "Left": left.get("processed_count", 0), "Right": right.get("processed_count", 0)},
+            {"Metric": "Total analysed area (km²)", "Left": area_to_km2(left.get("total_area_m2", 0.0)), "Right": area_to_km2(right.get("total_area_m2", 0.0))},
+            {"Metric": "Last run", "Left": left.get("last_run_label", "--"), "Right": right.get("last_run_label", "--")},
+        ]
+        return pd.DataFrame(rows, columns=["Metric", "Left", "Right"])
+
+    def _comprehensive_overview_df(self) -> pd.DataFrame:
+        def _sum_polygons(summary: Dict[str, Any]) -> float:
+            total = 0.0
+            for polygon in summary.get("polygons", []) or []:
+                if isinstance(polygon, PolygonSummary):
+                    total += polygon.area_km2
+                elif isinstance(polygon, dict):
+                    total += area_to_km2(polygon.get("area_m2", 0.0))
+            return total
+
+        def _asset_count(summary: Dict[str, Any]) -> int:
+            assets = summary.get("asset_groups") or []
+            return len(list(assets))
+
+        left = self.left_stacked_summary or {}
+        right = self.right_stacked_summary or {}
+        rows = [
+            {"Metric": "Group name", "Left": left.get("group_id", self.left_summary.get("group_name", "")), "Right": right.get("group_id", self.right_summary.get("group_name", ""))},
+            {"Metric": "Polygons with overlaps", "Left": len(left.get("polygons", []) or []), "Right": len(right.get("polygons", []) or [])},
+            {"Metric": "Total overlap area (km²)", "Left": _sum_polygons(left), "Right": _sum_polygons(right)},
+            {"Metric": "Asset groups reported", "Left": _asset_count(left), "Right": _asset_count(right)},
+        ]
+        return pd.DataFrame(rows, columns=["Metric", "Left", "Right"])
+
+    def _comparison_dataframe(self) -> pd.DataFrame:
+        rows = self.data.comparison_rows(self.left_summary, self.right_summary)
+        data_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            data_rows.append(
+                {
+                    "Category": row.get("label", ""),
+                    "Left (km²)": row.get("left_km2", 0.0),
+                    "Right (km²)": row.get("right_km2", 0.0),
+                    "Difference (km²)": row.get("delta_km2", 0.0),
+                }
+            )
+        columns = ["Category", "Left (km²)", "Right (km²)", "Difference (km²)"]
+        return pd.DataFrame(data_rows, columns=columns)
+
+    def _write_excel_report(
+        self,
+        sheets: Dict[str, pd.DataFrame],
+        prefix: str,
+        chart_figures: Optional[List[Tuple[str, Any]]] = None,
+    ) -> Path:
+        report_dir = self._ensure_report_dir()
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = report_dir / f"{prefix}_{timestamp}.xlsx"
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            for sheet_name, frame in sheets.items():
+                safe_name = sheet_name[:31] or "Sheet"
+                df = frame if not frame.empty else pd.DataFrame(columns=frame.columns if len(frame.columns) else ["Data"])
+                df.to_excel(writer, sheet_name=safe_name, index=False)
+            if chart_figures:
+                charts_sheet = writer.book.create_sheet("Charts")
+                row_cursor = 1
+                for title, fig in chart_figures:
+                    charts_sheet.cell(row=row_cursor, column=1, value=title)
+                    row_cursor += 1
+                    try:
+                        stream = _figure_to_png_bytes(fig)
+                        stream.name = "chart.png"
+                        img = XLImage(stream)
+                        img.anchor = f"A{row_cursor}"
+                        charts_sheet.add_image(img)
+                        height_rows = max(int((img.height or 240) / 18), 15)
+                        row_cursor += height_rows + 2
+                    except Exception as exc:
+                        charts_sheet.cell(row=row_cursor, column=1, value=f"(chart unavailable: {exc})")
+                        row_cursor += 4
+        return path
+
+    def _after_report_export(self, path: Path) -> None:
+        msg = f"Report exported: {path.name}"
+        self.report_note_var.set(msg)
+        self.report_link_var.set(f"Open reports folder ({self.report_dir})")
+        if not self.report_note_label.winfo_ismapped():
+            self.report_note_label.pack(fill=tk.X, pady=(4, 0))
+        if not self.report_link.winfo_ismapped():
+            self.report_link.pack(anchor="w", pady=(0, 8))
+        debug_log(self.data.base_dir, msg)
+
+    def _open_report_folder(self, _event=None) -> None:
+        try:
+            self._ensure_report_dir()
+            folder = str(self.report_dir)
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as exc:
+            messagebox.showerror("Open folder failed", str(exc))
+
+    def _ensure_selection(self, summary: Dict[str, Any]) -> bool:
+        return bool(summary and summary.get("group_id"))
+
+    def _export_basic_report(self) -> None:
+        if not (self._ensure_selection(self.left_summary) and self._ensure_selection(self.right_summary)):
+            messagebox.showwarning("Export basic report", "Select two analysis groups first.")
+            return
+        try:
+            sheets = {
+                "Overview": self._basic_overview_df(),
+                "Left polygons": _polygons_dataframe(self.left_summary.get("polygons")),
+                "Right polygons": _polygons_dataframe(self.right_summary.get("polygons")),
+                "Left sensitivity": _sensitivity_dataframe(self.left_summary.get("sensitivity")),
+                "Right sensitivity": _sensitivity_dataframe(self.right_summary.get("sensitivity")),
+                "Comparison": self._comparison_dataframe(),
+            }
+            charts = self.basic_view.chart_figures()
+            path = self._write_excel_report(sheets, "basic_analysis", chart_figures=charts)
+            self._after_report_export(path)
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
+            debug_log(self.data.base_dir, f"basic report export failed: {exc}")
+
+    def _export_comprehensive_report(self) -> None:
+        if not (self._ensure_selection(self.left_stacked_summary) and self._ensure_selection(self.right_stacked_summary)):
+            messagebox.showwarning("Export comprehensive report", "Select groups that have comprehensive analysis results first.")
+            return
+        try:
+            sheets = {
+                "Overview": self._comprehensive_overview_df(),
+                "Left polygons": _polygons_dataframe(self.left_stacked_summary.get("polygons")),
+                "Right polygons": _polygons_dataframe(self.right_stacked_summary.get("polygons")),
+                "Left assets": _asset_groups_dataframe(self.left_stacked_summary.get("asset_groups")),
+                "Right assets": _asset_groups_dataframe(self.right_stacked_summary.get("asset_groups")),
+                "Left sensitivity": _sensitivity_dataframe(self.left_stacked_summary.get("sensitivity")),
+                "Right sensitivity": _sensitivity_dataframe(self.right_stacked_summary.get("sensitivity")),
+            }
+            charts = self.comprehensive_view.chart_figures()
+            path = self._write_excel_report(sheets, "comprehensive_analysis", chart_figures=charts)
+            self._after_report_export(path)
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
+            debug_log(self.data.base_dir, f"comprehensive report export failed: {exc}")
 
     def run(self) -> None:
         self.root.mainloop()
