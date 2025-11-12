@@ -16,6 +16,7 @@ except Exception:
         pass
 
 import os
+import sys
 import argparse
 import tempfile
 import configparser
@@ -57,6 +58,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 BASE_DIR: Path = Path(".").resolve()
 _CFG: configparser.ConfigParser | None = None
 _CFG_PATH: Path | None = None
+_PARQUET_SUBDIR = "output/geoparquet"
+_PARQUET_OVERRIDE: Path | None = None
 
 original_working_directory: str = ""
 config_file: str = ""
@@ -101,21 +104,50 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
     Priority:
       1) env MESA_BASE_DIR
       2) --original_working_directory (CLI)
-      3) script folder & its parents
-      4) CWD and CWD/code
+      3) folder of the running binary / interpreter (and its parents)
+      4) script folder & its parents (handles PyInstaller _MEIPASS)
+      5) CWD, CWD/code and their parents
     """
     candidates: list[Path] = []
+
+    def _add(path_like):
+        if not path_like:
+            return
+        try:
+            candidates.append(Path(path_like))
+        except Exception:
+            pass
+
     env_base = os.environ.get("MESA_BASE_DIR")
     if env_base:
-        candidates.append(Path(env_base))
+        _add(env_base)
     if cli_workdir:
-        candidates.append(Path(cli_workdir))
+        _add(cli_workdir)
+
+    exe_path: Path | None = None
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = None
+    if exe_path:
+        _add(exe_path.parent)
+        _add(exe_path.parent.parent)
+        _add(exe_path.parent.parent.parent)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _add(meipass)
 
     here = Path(__file__).resolve()
-    candidates += [here.parent, here.parent.parent, here.parent.parent.parent]
+    _add(here.parent)
+    _add(here.parent.parent)
+    _add(here.parent.parent.parent)
 
-    cwd = Path(os.getcwd())
-    candidates += [cwd, cwd / "code"]
+    cwd = Path.cwd()
+    _add(cwd)
+    _add(cwd / "code")
+    _add(cwd.parent)
+    _add(cwd.parent / "code")
 
     seen = set()
     uniq = []
@@ -134,6 +166,10 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
 
     if here.parent.name.lower() == "system":
         return here.parent.parent
+    if exe_path:
+        return exe_path.parent
+    if env_base:
+        return Path(env_base)
     return here.parent
 
 def _ensure_cfg() -> configparser.ConfigParser:
@@ -167,7 +203,7 @@ def _ensure_cfg() -> configparser.ConfigParser:
 
     # defaults (non-destructive)
     d = cfg["DEFAULT"]
-    d.setdefault("parquet_folder", "output/geoparquet")
+    d.setdefault("parquet_folder", _PARQUET_SUBDIR)
     d.setdefault("ttk_bootstrap_theme", "flatly")
     d.setdefault("workingprojection_epsg", "4326")
     d.setdefault("atlas_parquet_file", "tbl_atlas.parquet")
@@ -220,15 +256,39 @@ def increment_stat_value(cfg_path: str, stat_name: str, increment_value: int):
 # -----------------------------
 # GeoParquet I/O
 # -----------------------------
-def geoparquet_dir(base_dir: Path) -> Path:
+def _parquet_dir_candidates(base_dir: Path) -> list[Path]:
     cfg = _ensure_cfg()
-    sub = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
-    p = base_dir / sub
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    sub = cfg["DEFAULT"].get("parquet_folder", _PARQUET_SUBDIR)
+    if os.path.isabs(sub):
+        return [Path(sub)]
+    rel = Path(sub)
+    cands = [(base_dir / rel).resolve()]
+    if base_dir.name.lower() != "code":
+        cands.append((base_dir / "code" / rel).resolve())
+    else:
+        parent = base_dir.parent
+        if parent:
+            cands.append((parent / rel).resolve())
+    return cands
+
+def geoparquet_dir(base_dir: Path, target_file: str | None = None) -> Path:
+    global _PARQUET_OVERRIDE
+    if _PARQUET_OVERRIDE is None:
+        candidates = _parquet_dir_candidates(base_dir)
+        chosen = None
+        if target_file:
+            for cand in candidates:
+                if (cand / target_file).exists():
+                    chosen = cand
+                    break
+        if chosen is None:
+            chosen = candidates[0]
+        chosen.mkdir(parents=True, exist_ok=True)
+        _PARQUET_OVERRIDE = chosen
+    return _PARQUET_OVERRIDE
 
 def atlas_parquet_path(base_dir: Path, layer_file: str) -> Path:
-    return geoparquet_dir(base_dir) / layer_file
+    return geoparquet_dir(base_dir, layer_file) / layer_file
 
 def _empty_gdf() -> gpd.GeoDataFrame:
     cols = [
