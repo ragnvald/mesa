@@ -56,30 +56,53 @@ def _has_config_at(root: Path) -> bool:
 def find_base_dir(cli_workdir: str | None = None) -> Path:
     """
     Choose a canonical project base folder that actually contains config.
-    Priority:
+    Priority order:
       1) env MESA_BASE_DIR
       2) --original_working_directory (CLI)
-      3) script folder & its parents
-      4) CWD and common variants (CWD/code)
+      3) running binary/interpreter folder (and parents)
+      4) script folder & its parents (covers PyInstaller _MEIPASS)
+      5) CWD, CWD/code, and their parents
     """
     candidates: list[Path] = []
-    # 1) explicit env
-    env_base = os.environ.get("MESA_BASE_DIR")
+
+    def _add(path_like):
+        if not path_like:
+            return
+        try:
+            candidates.append(Path(path_like))
+        except Exception:
+            pass
+
+    env_base = os.environ.get('MESA_BASE_DIR')
     if env_base:
-        candidates.append(Path(env_base))
-    # 2) cli
+        _add(env_base)
     if cli_workdir:
-        candidates.append(Path(cli_workdir))
-    # 3) script dir and parents
+        _add(cli_workdir)
+
+    exe_path: Path | None = None
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = None
+    if exe_path:
+        _add(exe_path.parent)
+        _add(exe_path.parent.parent)
+        _add(exe_path.parent.parent.parent)
+
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        _add(meipass)
+
     here = Path(__file__).resolve()
-    candidates += [
-        here.parent,                # .../system
-        here.parent.parent,         # .../code or base
-        here.parent.parent.parent,  # .../repo root (if any)
-    ]
-    # 4) CWD and variant
-    cwd = Path(os.getcwd())
-    candidates += [cwd, cwd / "code"]
+    _add(here.parent)
+    _add(here.parent.parent)
+    _add(here.parent.parent.parent)
+
+    cwd = Path.cwd()
+    _add(cwd)
+    _add(cwd / 'code')
+    _add(cwd.parent)
+    _add(cwd.parent / 'code')
 
     # Deduplicate while preserving order
     seen = set()
@@ -97,10 +120,15 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
         if _has_config_at(c):
             return c
 
-    # fallback: if launched inside /system, prefer its parent (code)
-    if here.parent.name.lower() == "system":
+    # fallback: prefer parent of /system, otherwise interpreter/exe dir, else script dir
+    if here.parent.name.lower() == 'system':
         return here.parent.parent
+    if exe_path:
+        return exe_path.parent
+    if env_base:
+        return Path(env_base)
     return here.parent
+
 
 # ----------------------------
 # Logging / Progress
