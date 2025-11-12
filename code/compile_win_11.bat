@@ -19,13 +19,18 @@ if exist "%VENV_PY%" (
 
 set "BUILD_EXITCODE=%ERRORLEVEL%"
 
-REM Compute elapsed time (format d.hh:mm:ss if longer than a day)
-for /f "usebackq delims=" %%I in (`powershell -NoLogo -Command "$start=[datetime]::FromFileTimeUtc([int64]$env:START_TICKS);(New-TimeSpan -Start $start -End (Get-Date)).ToString('c')"`) do set "ELAPSED=%%I"
+REM Compute elapsed time (format HH:MM:SS, hours may exceed 24)
+for /f "usebackq delims=" %%I in (`
+  powershell -NoLogo -Command ^
+    "$start=[datetime]::FromFileTimeUtc([int64]$env:START_TICKS);" ^
+    "$span=New-TimeSpan -Start $start -End (Get-Date);" ^
+    "('{0:00}:{1:00}:{2:00}' -f [int][math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds)"
+`) do set "ELAPSED=%%I"
 
 if "%BUILD_EXITCODE%"=="0" (
   echo Build completed successfully in %ELAPSED%
 ) else (
-  echo Build failed (exit code %BUILD_EXITCODE%) after %ELAPSED%
+  echo Build failed ^(exit code %BUILD_EXITCODE%^) after %ELAPSED%
 )
 
 endlocal & exit /b %BUILD_EXITCODE%
