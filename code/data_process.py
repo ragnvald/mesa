@@ -357,7 +357,7 @@ def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
         env=env,
     )
 
-def _run_tiles_stream_to_gui(update_btn_state_fn=None, minzoom=None, maxzoom=None):
+def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     Run tiles subprocess, stream its output to the GUI, and update the shared progress bar.
     """
@@ -367,12 +367,13 @@ def _run_tiles_stream_to_gui(update_btn_state_fn=None, minzoom=None, maxzoom=Non
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
         done_steps = 0
-        update_progress(0.0)
-        log_to_gui(log_widget, "[Tiles] Starting MBTiles build for all groups…")
+        update_progress(92.0)
+        log_to_gui(log_widget, "[Tiles] Stage 4/4 - integrating MBTiles build (create_raster_tiles)...")
 
         proc = _spawn_tiles_subprocess(minzoom=minzoom, maxzoom=maxzoom)
 
         if proc is None:
+            log_to_gui(log_widget, "[Tiles] Unable to start create_raster_tiles subprocess.")
             return
 
         re_groups = re.compile(r"^Groups:\s*\[(.*)\]\s*$")
@@ -413,21 +414,31 @@ def _run_tiles_stream_to_gui(update_btn_state_fn=None, minzoom=None, maxzoom=Non
             log_to_gui(log_widget, f"[Tiles] create_raster_tiles exited with code {ret}")
         else:
             log_to_gui(log_widget, "[Tiles] Completed.")
-        update_progress(100.0)
     except Exception as e:
         log_to_gui(log_widget, f"[Tiles] Error: {e}")
     finally:
-        try:
-            if callable(update_btn_state_fn):
-                update_btn_state_fn()
-        except Exception:
-            pass
-
+        update_progress(100.0)
         # Tail the shared worker log file into the GUI while the worker runs
         try:
             _start_log_tailer(root)
         except Exception:
             pass
+
+def _auto_run_tiles_stage(minzoom, maxzoom):
+    """
+    Trigger the MBTiles helper as part of the main processing workflow.
+    """
+    try:
+        ok, counts = _has_big_polygon_group(threshold=0)
+        if not counts:
+            log_to_gui(log_widget, "[Tiles] tbl_flat not present or empty; skipping MBTiles generation.")
+            update_progress(100.0)
+            return
+        log_to_gui(log_widget, f"[Tiles] Preparing MBTiles for {len(counts)} geocode group(s).")
+        _run_tiles_stream_to_gui(minzoom=minzoom, maxzoom=maxzoom)
+    except Exception as e:
+        log_to_gui(log_widget, f"[Tiles] Skipped due to error: {e}")
+        update_progress(100.0)
 
 # ----------------------------
 # A..E classification helpers
@@ -1658,18 +1669,22 @@ def process_all(config_file: Path):
         asset_soft_limit     = cfg_get_int(cfg, "asset_soft_limit", 200000)
         geocode_soft_limit   = cfg_get_int(cfg,  "geocode_soft_limit", 160)
 
+        log_to_gui(log_widget, "[Stage 1/4] Preparing workspace and status files…")
         cleanup_outputs(); update_progress(5)
         _init_idle_status()
 
+        log_to_gui(log_widget, "[Stage 2/4] Building stacked dataset (intersections & classification)…")
         process_tbl_stacked(cfg, working_epsg, cell_size, max_workers,
                             approx_gb_per_worker, mem_target_frac,
                             asset_soft_limit, geocode_soft_limit)
+
+        log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
         flatten_tbl_stacked(config_file, working_epsg); update_progress(95)
 
         for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
             _rm_rf(_dataset_dir(temp_dir))
         
-        log_to_gui(log_widget, "COMPLETED."); update_progress(100)
+        log_to_gui(log_widget, "Core processing (stages 1-3) finished. Preparing raster tiles stage…")
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
         raise
@@ -1927,7 +1942,7 @@ def _start_processing_worker(cfg_path: Path) -> None:
     except Exception:
         pass
 
-def _poll_progress_periodically(root_obj: tk.Misc, refresh_tiles_fn=None, interval_ms: int = 1000) -> None:
+def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> None:
     """Periodically read the status JSON (same as minimap) and reflect progress in the GUI bar."""
     def _poll():
         try:
@@ -1951,11 +1966,6 @@ def _poll_progress_periodically(root_obj: tk.Misc, refresh_tiles_fn=None, interv
         except Exception:
             pass
         finally:
-            try:
-                if refresh_tiles_fn is not None:
-                    refresh_tiles_fn()
-            except Exception:
-                pass
             try:
                 # keep polling while worker is alive; run a few extra ticks after
                 if _PROC is not None and _PROC.is_alive():
@@ -2409,55 +2419,37 @@ if __name__ == "__main__":
             "To start the processing press 'Process'. Then 'Open map' to keep an eye on\n"
             "the progress of your calculations. Many assets and/or detailed geocodes will\n"
             "increase the processing time. All resulting data is saved in the GeoParquet\n"
-            "vector data format. With many objects we advise creating a raster layer for\n"
+            "vector data format. Raster MBTiles are generated automatically at the end for\n"
             "faster viewing of your data in the map viewer.")
     tk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
 
+    def _await_processing_then_tiles(proc_handle):
+        try:
+            proc_handle.join()
+        except Exception:
+            return
+        exit_code = getattr(proc_handle, "exitcode", None)
+        if exit_code not in (0, None):
+            log_to_gui(log_widget, f"[Tiles] Skipping MBTiles stage because processing exited with code {exit_code}.")
+            update_progress(100.0)
+            return
+        _auto_run_tiles_stage(tiles_minzoom, tiles_maxzoom)
+
     def _run():
+        update_progress(0.0)
         _start_processing_worker(cfg_path)
         # Kick off periodic GUI polling of the shared status file for progress updates
         try:
-            _poll_progress_periodically(root, refresh_tiles_fn=lambda: root.after(0, _refresh_tiles_button_state))
+            _poll_progress_periodically(root)
         except Exception:
             pass
+        proc_snapshot = _PROC
+        if proc_snapshot is not None:
+            threading.Thread(target=lambda: _await_processing_then_tiles(proc_snapshot), daemon=True).start()
 
     btn_frame = tk.Frame(left); btn_frame.pack(pady=6)
     tb.Button(btn_frame, text="Process", bootstyle=PRIMARY,
               command=_run).pack(side=tk.LEFT, padx=5)
-    # Raster tiles button (enabled only when eligible)
-    tiles_btn = tb.Button(btn_frame, text="Create raster tiles", bootstyle=PRIMARY)
-    tiles_btn.pack(side=tk.LEFT, padx=5)
-    tiles_btn.configure(state="disabled")
-    tiles_status = tk.Label(btn_frame, text="", fg="#555")
-    tiles_status.pack(side=tk.LEFT, padx=8)
-
-    def _refresh_tiles_button_state():
-        ok, counts = _has_big_polygon_group()
-        if ok:
-            tiles_btn.configure(state="normal")
-            tiles_status.config(text="Eligible (≥50k polygons in a group)")
-        else:
-            tiles_btn.configure(state="disabled")
-            if counts:
-                top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
-                tiles_status.config(text="Not eligible — top groups: " + ", ".join([f"{k}={v:,}" for k,v in top]))
-            else:
-                tiles_status.config(text="Not eligible — no tbl_flat polygons found")
-
-    def _on_tiles_click():
-        tiles_btn.configure(state="disabled")
-        tiles_status.config(text="Running…")
-        threading.Thread(
-            target=lambda: _run_tiles_stream_to_gui(
-                update_btn_state_fn=lambda: root.after(0, _refresh_tiles_button_state),
-                minzoom=tiles_minzoom,
-                maxzoom=tiles_maxzoom
-            ),
-            daemon=True
-        ).start()
-
-    tiles_btn.configure(command=_on_tiles_click)
-
     tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.LEFT, padx=5)
 
     # right
@@ -2468,8 +2460,6 @@ if __name__ == "__main__":
     tb.Button(right, text="Open map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
 
     log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
-    # Check tiles button eligibility at startup
-    _refresh_tiles_button_state()
     root.mainloop()
 
 def _process_chunks(chunks, max_workers, asset_data, geom_types, tmp_parts,
