@@ -33,6 +33,8 @@ BASE_DIR: Path = Path(".").resolve()
 _CFG: configparser.ConfigParser | None = None
 _CFG_PATH: Path | None = None
 ASSET_GROUP_FILE_NAME: str = "tbl_asset_group.parquet"
+_PARQUET_SUBDIR = "output/geoparquet"
+_PARQUET_OVERRIDE: Path | None = None
 
 def _exists(p: Path) -> bool:
     try:
@@ -112,7 +114,7 @@ def _ensure_cfg() -> configparser.ConfigParser:
         cfg["DEFAULT"] = {}
 
     d = cfg["DEFAULT"]
-    d.setdefault("parquet_folder", "output/geoparquet")
+    d.setdefault("parquet_folder", _PARQUET_SUBDIR)
     d.setdefault("ttk_bootstrap_theme", "flatly")
     d.setdefault("asset_group_parquet_file", "tbl_asset_group.parquet")
 
@@ -126,15 +128,39 @@ def config_path(base_dir: Path) -> Path:
         return cfg
     return base_dir / "system" / "config.ini"
 
-def gpq_dir(base_dir: Path) -> Path:
+def _parquet_dir_candidates(base_dir: Path) -> list[Path]:
     cfg = _ensure_cfg()
-    sub = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
-    d = base_dir / sub
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    sub = cfg["DEFAULT"].get("parquet_folder", _PARQUET_SUBDIR)
+    if os.path.isabs(sub):
+        return [Path(sub)]
+    rel = Path(sub)
+    cands = [(base_dir / rel).resolve()]
+    if base_dir.name.lower() != "code":
+        cands.append((base_dir / "code" / rel).resolve())
+    else:
+        parent = base_dir.parent
+        if parent:
+            cands.append((parent / rel).resolve())
+    return cands
+
+def gpq_dir(base_dir: Path, target_file: str | None = None) -> Path:
+    global _PARQUET_OVERRIDE
+    if _PARQUET_OVERRIDE is None:
+        candidates = _parquet_dir_candidates(base_dir)
+        chosen = None
+        if target_file:
+            for cand in candidates:
+                if (cand / target_file).exists():
+                    chosen = cand
+                    break
+        if chosen is None:
+            chosen = candidates[0]
+        chosen.mkdir(parents=True, exist_ok=True)
+        _PARQUET_OVERRIDE = chosen
+    return _PARQUET_OVERRIDE
 
 def asset_group_parquet(base_dir: Path) -> Path:
-    return gpq_dir(base_dir) / ASSET_GROUP_FILE_NAME
+    return gpq_dir(base_dir, ASSET_GROUP_FILE_NAME) / ASSET_GROUP_FILE_NAME
 
 # ------------------------ Stats / logging ------------------------
 def increment_stat_value(cfg_path: Path | str, stat_name: str, increment_value: int):
