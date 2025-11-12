@@ -19,6 +19,9 @@ import os
 from pathlib import Path
 import tempfile
 
+DEFAULT_PARQUET_SUBDIR = "output/geoparquet"
+GEOCODE_GROUP_FILE = "tbl_geocode_group.parquet"
+
 # # # # # # # # # # # # # # 
 # Shared/general functions
 
@@ -50,14 +53,35 @@ def config_path(base_dir: str) -> str:
     """Flat config: <base>/config.ini"""
     return os.path.join(base_dir, "config.ini")
 
-def parquet_dir_from_cfg(base_dir: str, cfg: configparser.ConfigParser) -> str:
-    sub = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
-    p = os.path.join(base_dir, sub)
-    os.makedirs(p, exist_ok=True)
-    return p
+def parquet_dir_from_cfg(base_dir: str, cfg: configparser.ConfigParser, target_file: str | None = None) -> Path:
+    base = Path(base_dir).resolve()
+    sub = cfg["DEFAULT"].get("parquet_folder", DEFAULT_PARQUET_SUBDIR)
+    candidates: list[Path]
+    if os.path.isabs(sub):
+        candidates = [Path(sub)]
+    else:
+        rel = Path(sub)
+        candidates = [(base / rel).resolve()]
+        if base.name.lower() != "code":
+            candidates.append((base / "code" / rel).resolve())
+        else:
+            parent = base.parent
+            if parent:
+                candidates.append((parent / rel).resolve())
+
+    if target_file:
+        for cand in candidates:
+            if (cand / target_file).exists():
+                cand.mkdir(parents=True, exist_ok=True)
+                return cand
+
+    chosen = candidates[0]
+    chosen.mkdir(parents=True, exist_ok=True)
+    return chosen
 
 def gpq_path_geocode_group(base_dir: str, cfg: configparser.ConfigParser) -> str:
-    return os.path.join(parquet_dir_from_cfg(base_dir, cfg), "tbl_geocode_group.parquet")
+    root = parquet_dir_from_cfg(base_dir, cfg, GEOCODE_GROUP_FILE)
+    return str(root / GEOCODE_GROUP_FILE)
 
 def atomic_write_geoparquet(gdf: gpd.GeoDataFrame, path: str):
     """Write GeoParquet atomically to avoid partial writes."""
