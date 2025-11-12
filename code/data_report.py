@@ -59,7 +59,6 @@ progress_var = None
 progress_label = None
 last_report_path = None
 link_var = None  # hyperlink label StringVar
-report_mode_var = None  # radio button selection for report detail level
 atlas_geocode_var = None  # Combobox selection for atlas geocode group
 _atlas_geocode_choices: list[str] = []  # cached list for GUI
 
@@ -1786,13 +1785,12 @@ def compile_pdf(output_pdf, elements):
 
 def set_progress(pct: float, message: str | None = None):
     try:
-        pct = max(0, min(100, int(pct)))
+        pct = max(0.0, min(100.0, float(pct)))
         if progress_var is not None:
             progress_var.set(pct)
         if progress_label is not None:
-            progress_label.config(text=f"{pct}%")
+            progress_label.config(text=f"{int(pct)}%")
         if message:
-            # base_dir is not known here; GUI will show it anyway
             write_to_log(message)
     except Exception:
         pass
@@ -1858,7 +1856,7 @@ def generate_report(base_dir: str,
         engine = ReportEngine(base_dir, tmp_dir, palette_A2E, desc_A2E, config_file)
 
         def _progress_segments(done: int, total: int):
-            set_progress(30 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
+            set_progress(25 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
 
         pages_lines, log_data = engine.render_segments(lines_df, segments_df, palette_A2E, base_dir, _progress_segments)
 
@@ -1869,7 +1867,7 @@ def generate_report(base_dir: str,
             write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
         else:
             write_to_log("Skipping line/segment pages (missing/empty).", base_dir)
-        set_progress(40, "Lines/segments processed.")
+        set_progress(35, "Lines/segments processed.")
 
         # ---- Atlas maps ----
         atlas_df = gpd.GeoDataFrame()
@@ -1892,25 +1890,27 @@ def generate_report(base_dir: str,
                 write_to_log(f"Atlas geocode preference: {atlas_geocode_pref}", base_dir)
 
         def _progress_atlas(done: int, total: int):
-            set_progress(45 + int(10 * done / max(1, total)), f"Rendering atlas tiles ({done}/{total})")
+            if include_atlas_maps:
+                set_progress(37 + int(8 * done / max(1, total)), f"Rendering atlas tiles ({done}/{total})")
 
         atlas_pages, atlas_geocode_selected = engine.render_atlas_maps(flat_df, atlas_df, atlas_geocode_pref, include_atlas_maps, _progress_atlas)
         if atlas_pages:
             write_to_log("Per-atlas maps created.", base_dir)
         elif include_atlas_maps:
             write_to_log("Atlas maps requested but none were rendered.", base_dir)
-        set_progress(55, "Atlas maps processed.")
+        set_progress(45 if include_atlas_maps else 38, "Atlas maps processed." if include_atlas_maps else "Atlas maps skipped.")
 
         # ---- Per-geocode maps ----
         def _progress_geocode(done: int, total: int):
-            set_progress(55 + int(15 * done / max(1, total)), f"Rendered maps for group {done}/{total}")
+            start = 45 if include_atlas_maps else 38
+            set_progress(start + int(30 * done / max(1, total)), f"Rendered maps for group {done}/{total}")
 
         geocode_pages, geocode_intro_table, geocode_groups = engine.render_geocode_maps(flat_df, _progress_geocode)
         if geocode_pages:
             write_to_log("Per-geocode maps created.", base_dir)
         else:
             write_to_log("tbl_flat missing or no 'name_gis_geocodegroup'; skipping per-geocode maps.", base_dir)
-        set_progress(70, "Per-geocode maps completed.")
+        set_progress(75 if include_atlas_maps else 68, "Per-geocode maps completed.")
         # ---- Compose PDF ----
         timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 
@@ -2022,7 +2022,7 @@ def _start_report_thread(base_dir, config_file, palette, desc, report_mode, atla
     ).start()
 
 def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str):
-    global log_widget, progress_var, progress_label, link_var, report_mode_var, atlas_geocode_var, _atlas_geocode_choices
+    global log_widget, progress_var, progress_label, link_var, atlas_geocode_var, _atlas_geocode_choices
     root = tb.Window(themename=theme)
     root.title("MESA – Report generator")
     try:
@@ -2045,16 +2045,6 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     progress_label = tk.Label(pframe, text="0%", width=5, anchor="w")
     progress_label.pack(side=tk.LEFT)
 
-    mode_frame = tb.LabelFrame(root, text="Report detail level", bootstyle="secondary")
-    mode_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
-    report_mode_var = tk.StringVar(value="general")
-    rb_general = tb.Radiobutton(mode_frame, text="General maps", variable=report_mode_var,
-                                value="general", bootstyle="info-toolbutton")
-    rb_general.grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    rb_detailed = tb.Radiobutton(mode_frame, text="Detailed maps / overviews", variable=report_mode_var,
-                                 value="detailed", bootstyle="info-toolbutton")
-    rb_detailed.grid(row=0, column=1, padx=6, pady=4, sticky="w")
-
     atlas_frame = tb.LabelFrame(root, text="Atlas geocode level", bootstyle="secondary")
     atlas_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
     _atlas_geocode_choices = _available_geocode_levels(base_dir, config_file)
@@ -2074,13 +2064,42 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
         tk.Label(atlas_frame, text="(No geocode levels detected yet)", anchor="w")\
           .grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
-    btn_frame = tk.Frame(root); btn_frame.pack(pady=4)
-    tb.Button(btn_frame, text="Generate report", bootstyle=PRIMARY,
-              command=lambda: _start_report_thread(base_dir, config_file, palette, desc,
-                                                   report_mode_var.get(),
-                                                   atlas_geocode_var.get())
-              ).grid(row=0, column=0, padx=6)
-    tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).grid(row=0, column=1, padx=6)
+    action_frame = tb.LabelFrame(root, text="Generate report", bootstyle="primary")
+    action_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
+    action_frame.columnconfigure(1, weight=1)
+
+    tb.Button(
+        action_frame,
+        text="Basic report",
+        bootstyle="success",
+        width=18,
+        command=lambda: _start_report_thread(base_dir, config_file, palette, desc, "general", atlas_geocode_var.get()),
+    ).grid(row=0, column=0, padx=6, pady=(6, 4), sticky="n")
+    tk.Label(
+        action_frame,
+        text="Focuses on core sensitivity and asset overviews for the selected atlas level.",
+        anchor="w",
+        justify="left",
+        wraplength=420,
+    ).grid(row=0, column=1, padx=(4, 8), pady=(6, 4), sticky="w")
+
+    tb.Button(
+        action_frame,
+        text="Detailed report",
+        bootstyle="info",
+        width=18,
+        command=lambda: _start_report_thread(base_dir, config_file, palette, desc, "detailed", atlas_geocode_var.get()),
+    ).grid(row=1, column=0, padx=6, pady=(4, 6), sticky="n")
+    tk.Label(
+        action_frame,
+        text="Adds atlas-specific sensitivity and environment maps for deeper review.",
+        anchor="w",
+        justify="left",
+        wraplength=420,
+    ).grid(row=1, column=1, padx=(4, 8), pady=(4, 6), sticky="w")
+
+    btn_frame = tk.Frame(root); btn_frame.pack(pady=(0, 6))
+    tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.RIGHT, padx=6)
 
     # Live link to report folder
     def open_report_folder(event=None):
