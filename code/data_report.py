@@ -1986,7 +1986,7 @@ def generate_report(base_dir: str,
         elements = line_up_to_pdf(order_list)
 
         ts_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
-        output_pdf_path = output_subpath(base_dir, f"MESA-report_{ts_pdf}.pdf")
+        output_pdf_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_pdf}.pdf")
         output_pdf = str(output_pdf_path)
         compile_pdf(output_pdf, elements)
         engine.cleanup()
