@@ -16,6 +16,7 @@ except Exception:
         pass
 
 import os
+import sys
 import glob
 import argparse
 import datetime
@@ -86,21 +87,50 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
     Priority:
       1) env MESA_BASE_DIR
       2) --original_working_directory (CLI)
-      3) script folder & its parents
-      4) CWD and CWD/code
+      3) running binary/interpreter folder (and parents)
+      4) script folder & its parents (covers PyInstaller _MEIPASS)
+      5) CWD, CWD/code, and their parents
     """
     candidates: list[Path] = []
+
+    def _add(path_like):
+        if not path_like:
+            return
+        try:
+            candidates.append(Path(path_like))
+        except Exception:
+            pass
+
     env_base = os.environ.get("MESA_BASE_DIR")
     if env_base:
-        candidates.append(Path(env_base))
+        _add(env_base)
     if cli_workdir:
-        candidates.append(Path(cli_workdir))
+        _add(cli_workdir)
+
+    exe_path: Path | None = None
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = None
+    if exe_path:
+        _add(exe_path.parent)
+        _add(exe_path.parent.parent)
+        _add(exe_path.parent.parent.parent)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _add(meipass)
 
     here = Path(__file__).resolve()
-    candidates += [here.parent, here.parent.parent, here.parent.parent.parent]
+    _add(here.parent)
+    _add(here.parent.parent)
+    _add(here.parent.parent.parent)
 
-    cwd = Path(os.getcwd())
-    candidates += [cwd, cwd / "code"]
+    cwd = Path.cwd()
+    _add(cwd)
+    _add(cwd / "code")
+    _add(cwd.parent)
+    _add(cwd.parent / "code")
 
     seen = set()
     uniq = []
@@ -119,6 +149,10 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
 
     if here.parent.name.lower() == "system":
         return here.parent.parent
+    if exe_path:
+        return exe_path.parent
+    if env_base:
+        return Path(env_base)
     return here.parent
 
 def _ensure_cfg() -> configparser.ConfigParser:
