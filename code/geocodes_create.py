@@ -43,6 +43,7 @@ import configparser
 import datetime
 import locale
 import os
+import sys
 import time
 import shutil
 import multiprocessing as mp
@@ -163,36 +164,51 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
     Priority order:
       1) env MESA_BASE_DIR (honored immediately when valid)
       2) --original_working_directory (CLI)
-      3) this script's folder and parents
-      4) CWD and CWD/code
+      3) running binary/interpreter folder (and parents)
+      4) this script's folder and parents (covers PyInstaller _MEIPASS)
+      5) CWD, CWD/code, and their parents
     """
     def _maybe_return(path_like: Path) -> Path | None:
         try:
-            resolved = path_like.resolve()
+            resolved = Path(path_like).resolve()
         except Exception:
-            resolved = path_like
+            resolved = Path(path_like)
         return resolved if _has_config_at(resolved) else None
 
     env_base = os.environ.get("MESA_BASE_DIR")
     if env_base:
-        env_hit = _maybe_return(Path(env_base))
+        env_hit = _maybe_return(env_base)
         if env_hit:
             return env_hit
 
     if cli_workdir:
-        cli_hit = _maybe_return(Path(cli_workdir))
+        cli_hit = _maybe_return(cli_workdir)
         if cli_hit:
             return cli_hit
 
-    candidates = []
+    candidates: list[Path] = []
     if env_base:
         candidates.append(Path(env_base))
     if cli_workdir:
         candidates.append(Path(cli_workdir))
+
+    exe_path: Path | None = None
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = None
+    if exe_path:
+        candidates += [exe_path.parent, exe_path.parent.parent, exe_path.parent.parent.parent]
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass))
+
     here = Path(__file__).resolve()
     candidates += [here.parent, here.parent.parent, here.parent.parent.parent]
-    cwd = Path(os.getcwd())
-    candidates += [cwd, cwd / "code"]
+
+    cwd = Path.cwd()
+    candidates += [cwd, cwd / "code", cwd.parent, cwd.parent / "code"]
 
     seen = set()
     uniq = []
@@ -222,6 +238,10 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
 
     if here.parent.name.lower() == "system":
         return here.parent.parent
+    if exe_path:
+        return exe_path.parent
+    if env_base:
+        return Path(env_base)
     return here.parent
 
 def read_config(file_name: Path) -> configparser.ConfigParser:
