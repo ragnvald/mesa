@@ -31,6 +31,22 @@ TOOLS_DIST        = FINAL_DIST / "tools"
 APP_NAME = "mesa"
 ONEDIR_SUBDIR = FINAL_DIST / APP_NAME  # PyInstaller onedir output folder
 
+def resolve_main_script() -> Path:
+    """
+    Locate the mesa entry-point. Prefer code/mesa.py, but fall back to the
+    repo root where the real one currently lives.
+    """
+    candidates = [
+        CODE_DIR / f"{APP_NAME}.py",
+        PROJECT_ROOT / f"{APP_NAME}.py",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    searched = "\n  - ".join(str(c) for c in candidates)
+    fail(f"Could not find '{APP_NAME}.py'. Searched:\n  - {searched}")
+
 # ---------------------------------------------------------------------------
 # Setup / Cleanup
 # ---------------------------------------------------------------------------
@@ -102,10 +118,15 @@ HELPER_EXCLUDES = [
     "--exclude-module", "pysqlite2",
     "--exclude-module", "MySQLdb",
     "--exclude-module", "psycopg2",
-    "--exclude-module", "fiona._shim",
 ]
 
 MAIN_COLLECTS = [
+    "--collect-all", "tkinterweb",
+    "--collect-all", "geopandas",
+    "--collect-all", "shapely",
+    "--collect-all", "pyproj",
+    "--collect-all", "fiona",
+    "--collect-all", "influxdb_client",
     "--collect-data", "pandas",
     "--collect-data", "pyarrow",
     "--collect-submodules", "ttkbootstrap",
@@ -122,15 +143,9 @@ MAIN_EXCLUDES = [
     "--exclude-module", "scipy",
     "--exclude-module", "IPython",
     "--exclude-module", "jedi",
-    "--exclude-module", "geopandas",
-    "--exclude-module", "fiona",
-    "--exclude-module", "pyproj",
-    "--exclude-module", "shapely",
     "--exclude-module", "pysqlite2",
     "--exclude-module", "MySQLdb",
     "--exclude-module", "psycopg2",
-    "--exclude-module", "fiona._shim",
-    "--exclude-module", "tkinterweb", 
 ]
 
 FLAGS_HELPER = [
@@ -175,12 +190,14 @@ def build_main() -> None:
     if sysres.exists():
         data_args += add_data_arg(sysres, "system_resources")
 
+    entry_point = resolve_main_script()
+
     args = FLAGS_MAIN + [
         "--name", APP_NAME,
         "--distpath", str(FINAL_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{APP_NAME}_build"),
         "--specpath", str(BUILD_FOLDER_ROOT),
-    ] + data_args + [str(CODE_DIR / f"{APP_NAME}.py")]
+    ] + data_args + [str(entry_point)]
 
     run_pyinstaller(args)
 
