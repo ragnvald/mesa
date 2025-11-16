@@ -6,7 +6,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import mapping
+import numpy as np
+from shapely.geometry import mapping, Point
+try:
+    from shapely.strtree import STRtree
+except Exception:
+    STRtree = None
 from pyproj import Geod
 from pathlib import Path
 
@@ -630,6 +635,116 @@ def mbtiles_info(cat: str):
         "maxzoom": m["maxzoom"],
     }
 
+OVERLAY_LABELS = {
+    "sensitivity": "Sensitive areas",
+    "groupstotal": "Groups total",
+    "assetstotal": "Assets total",
+    "importance_index": "Importance index",
+    "sensitivity_index": "Sensitivity index",
+}
+
+GENERAL_METRIC_FIELDS = [
+    ("Asset groups total", "asset_groups_total", None, None),
+    ("Assets overlap total", "assets_overlap_total", None, None),
+    ("Importance index", "index_importance", None, None),
+    ("Sensitivity index", "index_sensitivity", None, None),
+    ("Area", "area_m2", lambda v: float(v) / 1_000_000.0, "km²"),
+]
+
+OVERLAY_INFO_FIELDS = {
+    "sensitivity": [
+        ("Sensitivity max", "sensitivity_max", None, None),
+        ("Sensitivity code", "sensitivity_code_max", None, None),
+        ("Sensitivity description", "sensitivity_description_max", None, None),
+        ("Importance max", "importance_max", None, None),
+        ("Susceptibility max", "susceptibility_max", None, None),
+    ],
+    "groupstotal": [
+        ("Asset group names", "asset_group_names", None, None),
+    ],
+    "assetstotal": [
+        ("Assets overlap total", "assets_overlap_total", None, None),
+    ],
+    "importance_index": [
+        ("Importance index", "index_importance", None, None),
+    ],
+    "sensitivity_index": [
+        ("Sensitivity index", "index_sensitivity", None, None),
+    ],
+}
+
+def _clean_metric_value(val):
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (np.integer, int)):
+            return int(val)
+        if isinstance(val, (np.floating, float)):
+            if not np.isfinite(val):
+                return None
+            rounded = round(float(val), 2)
+            if rounded.is_integer():
+                return int(round(rounded))
+            return rounded
+        if pd.isna(val):
+            return None
+    except Exception:
+        pass
+    return val
+
+def _json_ready(value):
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, list):
+        return [_json_ready(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_json_ready(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _json_ready(v) for k, v in value.items()}
+    return value
+
+def _geom_matches_point(geom, point):
+    if geom is None:
+        return False
+    try:
+        if geom.contains(point):
+            return True
+        return geom.touches(point)
+    except Exception:
+        return False
+
+def _build_tile_metrics(row: pd.Series, overlay_kind: str) -> list[dict]:
+    metrics: list[dict] = []
+    for label, col, transformer, unit in GENERAL_METRIC_FIELDS:
+        val = row.get(col)
+        if pd.isna(val):
+            continue
+        try:
+            if transformer:
+                val = transformer(val)
+        except Exception:
+            continue
+        cleaned = _clean_metric_value(val)
+        if cleaned is None:
+            continue
+        metrics.append({"label": label, "value": cleaned, "unit": unit})
+    for label, col, transformer, unit in OVERLAY_INFO_FIELDS.get(overlay_kind, []):
+        val = row.get(col)
+        if pd.isna(val):
+            continue
+        try:
+            if transformer:
+                val = transformer(val)
+        except Exception:
+            continue
+        cleaned = _clean_metric_value(val)
+        if cleaned is None:
+            continue
+        metrics.append({"label": label, "value": cleaned, "unit": unit})
+    return metrics
+
 # ===============================
 # Load datasets
 # ===============================
@@ -637,10 +752,23 @@ cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 
-GDF          = load_parquet(PARQUET_FILE)
-SEG_GDF      = load_parquet(SEGMENT_FILE)
-SEG_OUTLINE_GDF = load_parquet(SEGMENT_OUTLINE_FILE)
-LINES_GDF    = load_parquet(LINES_FILE)
+GDF          = to_epsg4326(load_parquet(PARQUET_FILE), cfg)
+SEG_GDF      = to_epsg4326(load_parquet(SEGMENT_FILE), cfg)
+SEG_OUTLINE_GDF = to_epsg4326(load_parquet(SEGMENT_OUTLINE_FILE), cfg)
+LINES_GDF    = to_epsg4326(load_parquet(LINES_FILE), cfg)
+
+GEO_STR_TREE = None
+GEO_STR_LOOKUP: dict[int, int] = {}
+if not GDF.empty and "geometry" in GDF.columns and STRtree is not None:
+    try:
+        _geom_records = [(idx, geom) for idx, geom in GDF.geometry.items() if geom is not None and not geom.is_empty]
+        _geom_list = [geom for _, geom in _geom_records]
+        GEO_STR_TREE = STRtree(_geom_list) if _geom_list else None
+        if GEO_STR_TREE is not None:
+            GEO_STR_LOOKUP = {id(geom): idx for idx, geom in _geom_records}
+    except Exception:
+        GEO_STR_TREE = None
+        GEO_STR_LOOKUP = {}
 
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
@@ -763,6 +891,72 @@ class Api:
                                     "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]},
                         "home_bounds": mb.get("bounds")}
             return self._get_totals_common(geocode_category, "assets_overlap_total")
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def lookup_tile_info(self, lat, lng, geocode_category=None, overlay_kind="sensitivity"):
+        try:
+            if GDF.empty or "geometry" not in GDF.columns:
+                return {"ok": False, "error": "Tile data is not available."}
+            try:
+                point = Point(float(lng), float(lat))
+            except Exception:
+                return {"ok": False, "error": "Invalid coordinates."}
+
+            geocode_norm = (str(geocode_category).strip() if geocode_category else "").lower()
+            candidate_rows: list[pd.Series] = []
+
+            if GEO_STR_TREE is not None:
+                try:
+                    for geom in GEO_STR_TREE.query(point):
+                        idx = GEO_STR_LOOKUP.get(id(geom))
+                        if idx is None:
+                            continue
+                        row = GDF.loc[idx]
+                        geo_val = str(row.get("name_gis_geocodegroup") or "").strip().lower()
+                        if geocode_norm and geo_val != geocode_norm:
+                            continue
+                        if _geom_matches_point(row.geometry, point):
+                            candidate_rows.append(row)
+                            break
+                except Exception:
+                    candidate_rows = []
+
+            if not candidate_rows:
+                df = GDF
+                if geocode_category:
+                    df = df[df["name_gis_geocodegroup"].astype(str).str.strip().str.lower() == geocode_norm]
+                if df.empty:
+                    return {"ok": False, "error": "No data for the selected geocode group."}
+                matches = df[df.geometry.apply(lambda g: _geom_matches_point(g, point))]
+                if matches.empty:
+                    try:
+                        distances = df.geometry.distance(point)
+                        distances = pd.to_numeric(distances, errors="coerce")
+                        distances = distances.where(distances.notna(), np.inf)
+                        nearest_idx = distances.idxmin()
+                        nearest_dist = float(distances.loc[nearest_idx])
+                        if np.isfinite(nearest_dist) and nearest_dist <= 0.05:
+                            candidate_rows.append(df.loc[nearest_idx])
+                        else:
+                            return {"ok": False, "error": "No mosaic tile at that location."}
+                    except Exception:
+                        return {"ok": False, "error": "No mosaic tile at that location."}
+                else:
+                    candidate_rows.append(matches.iloc[0])
+
+            row = candidate_rows[0]
+            kind = (overlay_kind or "sensitivity").lower()
+            if kind not in OVERLAY_LABELS:
+                kind = "sensitivity"
+            info = {
+                "code": str(row.get("code") or ""),
+                "geocode": str(row.get("name_gis_geocodegroup") or ""),
+                "overlay": kind,
+                "overlay_label": OVERLAY_LABELS.get(kind, kind.title()),
+                "metrics": _build_tile_metrics(row, kind),
+            }
+            return {"ok": True, "info": _json_ready(info)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -933,10 +1127,23 @@ HTML_TEMPLATE = r"""
 
   /* Hide the checkbox for the "Geocode group" row and fix spacing */
   .leaflet-control-layers-overlays label.no-toggle { padding-left: 0; }
-  .leaflet-control-layers-overlays label.no-toggle .inlineSel,
-  .leaflet-control-layers-overlays label.no-toggle .inlineChecks { margin-left: 0; }
-  .leaflet-control-layers-overlays label.no-toggle input.leaflet-control-layers-selector { display: none !important; }
-</style>
+    .leaflet-control-layers-overlays label.no-toggle .inlineSel,
+    .leaflet-control-layers-overlays label.no-toggle .inlineChecks { margin-left: 0; }
+    .leaflet-control-layers-overlays label.no-toggle input.leaflet-control-layers-selector { display: none !important; }
+
+    .tile-popup { font-size:12px; line-height:1.4; max-width:320px; }
+    .tile-popup-title { font-weight:700; margin-bottom:2px; color:#111827; }
+    .tile-popup-sub { font-size:11px; color:#4b5563; margin-bottom:4px; }
+    .tile-popup-tag { display:inline-block; font-size:11px; font-weight:600; color:#1d4ed8; background:#e0e7ff; padding:2px 6px; border-radius:6px; margin-bottom:6px; }
+    .tile-popup table { width:100%; border-collapse:collapse; }
+    .tile-popup th { text-align:left; padding:2px 6px 2px 0; color:#374151; font-weight:600; }
+    .tile-popup td { text-align:right; padding:2px 0; color:#111827; }
+    .tile-popup-empty { font-size:11px; color:#6b7280; }
+
+    #map.leaflet-container { cursor: crosshair; }
+    #map.leaflet-container.leaflet-grab { cursor: crosshair; }
+    #map.leaflet-container.leaflet-dragging { cursor: grabbing; }
+  </style>
 </head>
 <body>
 <div class="wrap">
@@ -987,6 +1194,96 @@ function setError(msg){
   else { e.style.display='none'; e.textContent=''; }
 }
 function fmtKm2(x){ return Number(x||0).toLocaleString('en-US',{maximumFractionDigits:2}); }
+
+var INITIAL_GEOCODE_CAT = null;
+
+function setInitialGeocodeCategory(cat){
+  if (cat !== undefined && cat !== null && cat !== '') INITIAL_GEOCODE_CAT = cat;
+}
+
+function currentGeocodeCategory(){
+  var sel=document.getElementById('groupCatSel');
+  if (sel && sel.value) return sel.value;
+  return INITIAL_GEOCODE_CAT;
+}
+
+function determineActiveOverlayKind(){
+  var order=[
+    {id:'chkImportanceIndex', kind:'importance_index'},
+    {id:'chkSensitivityIndex', kind:'sensitivity_index'},
+    {id:'chkAssetsTotal', kind:'assetstotal'},
+    {id:'chkGroupsTotal', kind:'groupstotal'},
+    {id:'chkGeoAreas', kind:'sensitivity'}
+  ];
+  for (var i=0;i<order.length;i++){
+    var chk=document.getElementById(order[i].id);
+    if (chk && chk.checked) return order[i].kind;
+  }
+  return 'sensitivity';
+}
+
+function escapeHtml(str){
+  if (str === undefined || str === null) return '';
+  return String(str).replace(/[&<>"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]); });
+}
+
+function formatMetricDisplay(val){
+  if (val === null || val === undefined) return '-';
+  if (typeof val === 'number'){
+    if (!isFinite(val)) return '-';
+    var rounded = Math.round(val);
+    if (Math.abs(val - rounded) < 0.01) return String(rounded);
+    return val.toFixed(2).replace(/\.00$/,'');
+  }
+  return String(val);
+}
+
+function showTilePopup(latlng, info){
+  if (!info) return;
+  var title = info.code ? ('Tile ' + info.code) : 'Tile information';
+  var html = '<div class="tile-popup">';
+  html += '<div class="tile-popup-title">'+escapeHtml(title)+'</div>';
+  if (info.geocode){
+    html += '<div class="tile-popup-sub">Group: '+escapeHtml(info.geocode)+'</div>';
+  }
+  if (info.overlay_label){
+    html += '<div class="tile-popup-tag">'+escapeHtml(info.overlay_label)+'</div>';
+  }
+  var metrics = info.metrics || [];
+  if (metrics.length){
+    html += '<table>';
+    metrics.forEach(function(m){
+      var value = formatMetricDisplay(m.value);
+      if (m.unit && value !== '-') value += ' ' + escapeHtml(m.unit);
+      html += '<tr><th>'+escapeHtml(m.label)+'</th><td>'+escapeHtml(value)+'</td></tr>';
+    });
+    html += '</table>';
+  } else {
+    html += '<div class="tile-popup-empty">No details available.</div>';
+  }
+  html += '</div>';
+  L.popup({maxWidth:360}).setLatLng(latlng).setContent(html).openOn(MAP);
+}
+
+function handleMapClick(evt){
+  try{
+    if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.lookup_tile_info){
+      return;
+    }
+    var cat = currentGeocodeCategory();
+    var overlay = determineActiveOverlayKind();
+    window.pywebview.api.lookup_tile_info(evt.latlng.lat, evt.latlng.lng, cat, overlay).then(function(res){
+      if (!res || !res.ok || !res.info){
+        if (res && res.error){
+          setError(res.error);
+          setTimeout(function(){ setError(''); }, 4000);
+        }
+        return;
+      }
+      showTilePopup(evt.latlng, res.info);
+    }).catch(function(){});
+  }catch(e){}
+}
 
 /* legend & chart omitted for brevity in comment—unchanged in logic */
 function renderLegend(stats){
@@ -1295,6 +1592,7 @@ function buildLayersControl(state){
     }
 
     var initialCat=(sel && sel.value) ? sel.value : state.initial_geocode;
+    setInitialGeocodeCategory(initialCat || state.initial_geocode || null);
     if (initialCat){ loadGeocodeIntoGroup(initialCat, false); }
 
     var chkAreas=document.getElementById('chkGeoAreas');
@@ -1314,6 +1612,7 @@ function buildLayersControl(state){
 
     sel && sel.addEventListener('change', function(){
       var cat=sel.value||initialCat;
+      setInitialGeocodeCategory(cat);
       loadGeocodeIntoGroup(cat, true);
       if (chkGT  && chkGT.checked)  loadGroupstotalIntoGroup(cat, true);
       if (chkAT  && chkAT.checked)  loadAssetstotalIntoGroup(cat, true);
@@ -1335,38 +1634,37 @@ function buildLayersControl(state){
       loadSegmentsIntoGroup(segsel.value||"__ALL__");
       segsel.addEventListener('change', function(){ loadSegmentsIntoGroup(segsel.value||"__ALL__"); });
     }
-    function currentCat(){ return (document.getElementById('groupCatSel')||{}).value||initialCat; }
     if (chkAreas){
       chkAreas.addEventListener('change', function(){
-        var cat=currentCat();
+        var cat=currentGeocodeCategory();
         if (chkAreas.checked){ ensureOnMap(GEO_GROUP); if (cat) loadGeocodeIntoGroup(cat, true); }
         else { ensureOffMap(GEO_GROUP); GEO_GROUP.clearLayers(); }
       });
     }
     if (chkGT){
       chkGT.addEventListener('change', function(){
-        var cat=currentCat();
+        var cat=currentGeocodeCategory();
         if (chkGT.checked){ ensureOnMap(GROUPSTOTAL_GROUP); if (cat) loadGroupstotalIntoGroup(cat, true); }
         else { ensureOffMap(GROUPSTOTAL_GROUP); GROUPSTOTAL_GROUP.clearLayers(); }
       });
     }
     if (chkAT){
       chkAT.addEventListener('change', function(){
-        var cat=currentCat();
+        var cat=currentGeocodeCategory();
         if (chkAT.checked){ ensureOnMap(ASSETSTOTAL_GROUP); if (cat) loadAssetstotalIntoGroup(cat, true); }
         else { ensureOffMap(ASSETSTOTAL_GROUP); ASSETSTOTAL_GROUP.clearLayers(); }
       });
     }
     if (chkII && hasImportanceIndex){
       chkII.addEventListener('change', function(){
-        var cat=currentCat();
+        var cat=currentGeocodeCategory();
         if (chkII.checked){ ensureOnMap(IMPORTANCE_INDEX_GROUP); if (cat) loadImportanceIndexIntoGroup(cat, true); }
         else { ensureOffMap(IMPORTANCE_INDEX_GROUP); IMPORTANCE_INDEX_GROUP.clearLayers(); }
       });
     }
     if (chkSI && hasSensitivityIndex){
       chkSI.addEventListener('change', function(){
-        var cat=currentCat();
+        var cat=currentGeocodeCategory();
         if (chkSI.checked){ ensureOnMap(SENSITIVITY_INDEX_GROUP); if (cat) loadSensitivityIndexIntoGroup(cat, true); }
         else { ensureOffMap(SENSITIVITY_INDEX_GROUP); SENSITIVITY_INDEX_GROUP.clearLayers(); }
       });
@@ -1385,6 +1683,7 @@ function boot(){
     worldCopyJump: false
   });
   L.control.zoom({ position:'topright' }).addTo(MAP);
+  MAP.on('click', handleMapClick);
 
   MAP.createPane('segmentsOutlinePane'); MAP.getPane('segmentsOutlinePane').style.zIndex=640;
   MAP.createPane('segmentsPane');        MAP.getPane('segmentsPane').style.zIndex=650;
