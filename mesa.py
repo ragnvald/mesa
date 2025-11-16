@@ -733,11 +733,19 @@ def update_config_with_values(config_file, **kwargs):
         lines.insert(0, "[DEFAULT]\n")
     for key, value in kwargs.items():
         found = False
+        key_norm = key.strip().casefold()
         for i, line in enumerate(lines):
-            if line.strip().startswith(f'{key} ='):
-                lines[i] = f"{key} = {value}\n"
-                found = True
-                break
+            if "=" not in line:
+                continue
+            left, sep, right = line.partition("=")
+            if sep == "":
+                continue
+            if left.strip().casefold() != key_norm:
+                continue
+            indent = left[: len(left) - len(left.lstrip())]
+            lines[i] = f"{indent}{key} = {value}\n"
+            found = True
+            break
         if not found:
             lines.append(f"{key} = {value}\n")
     with open(cfg_path, "w", encoding="utf-8") as f:
