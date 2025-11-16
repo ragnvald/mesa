@@ -45,11 +45,48 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ---------------- Path & config helpers ----------------
 def resolve_base_dir(passed: Optional[str]) -> str:
-    base = passed or os.getcwd()
-    # tolerate legacy launches from a "system" subdir
-    if os.path.basename(base).lower() == "system":
-        base = os.path.abspath(os.path.join(base, ".."))
-    return base
+    """
+    Resolve the canonical Mesa base folder in dev and packaged modes.
+    Priority:
+      1) --original_working_directory argument
+      2) current working directory and its parents
+      3) executable folder when frozen
+      4) script folder parents
+    """
+    candidates: list[str] = []
+    if passed:
+        candidates.append(passed)
+
+    cwd = os.getcwd()
+    candidates.extend([cwd, os.path.join(cwd, "code")])
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.extend([
+            exe_dir,
+            os.path.join(exe_dir, "code"),
+            os.path.abspath(os.path.join(exe_dir, "..")),
+        ])
+
+    here = os.path.abspath(os.path.dirname(__file__))
+    candidates.extend([
+        os.path.abspath(os.path.join(here, "..")),
+        os.path.abspath(os.path.join(here, "..", "..")),
+    ])
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.basename(candidate).lower() == "system":
+            candidate = os.path.abspath(os.path.join(candidate, ".."))
+        cfg = os.path.join(candidate, "config.ini")
+        legacy_cfg = os.path.join(candidate, "system", "config.ini")
+        if os.path.isfile(cfg) or os.path.isfile(legacy_cfg):
+            return os.path.abspath(candidate)
+
+    return os.path.abspath(os.path.join(here, ".."))
 
 def read_config(path: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -64,13 +101,45 @@ def read_config(path: str) -> configparser.ConfigParser:
 # These are set after loading config in main()
 _PARQUET_SUBDIR = "output/geoparquet"
 
+def _parquet_dir_candidates(base_dir: str) -> list[str]:
+    base = os.path.abspath(base_dir or os.getcwd())
+    sub = _PARQUET_SUBDIR.strip("\\/")
+    candidates: list[str] = []
+    first = os.path.join(base, sub)
+    candidates.append(first)
+    if os.path.basename(base).lower() == "code":
+        parent = os.path.abspath(os.path.join(base, ".."))
+        candidates.append(os.path.join(parent, sub))
+    else:
+        candidates.append(os.path.join(base, "code", sub))
+    seen = set()
+    ordered: list[str] = []
+    for cand in candidates:
+        norm = os.path.abspath(cand)
+        if norm not in seen:
+            seen.add(norm)
+            ordered.append(norm)
+    return ordered
+
 def gpq_dir(base_dir: str) -> str:
-    d = os.path.join(base_dir, _PARQUET_SUBDIR)
-    os.makedirs(d, exist_ok=True)
-    return d
+    for cand in _parquet_dir_candidates(base_dir):
+        try:
+            os.makedirs(cand, exist_ok=True)
+        except Exception:
+            continue
+        return cand
+    # fallback to first candidate
+    first = _parquet_dir_candidates(base_dir)[0]
+    os.makedirs(first, exist_ok=True)
+    return first
 
 def lines_parquet_path(base_dir: str) -> str:
-    return os.path.join(gpq_dir(base_dir), "tbl_lines.parquet")
+    for cand in _parquet_dir_candidates(base_dir):
+        path = os.path.join(cand, "tbl_lines.parquet")
+        if os.path.exists(path):
+            return path
+    primary = os.path.join(gpq_dir(base_dir), "tbl_lines.parquet")
+    return primary
 
 def config_path(base_dir: str) -> str:
     # FLAT layout: config.ini sits next to mesa.py
