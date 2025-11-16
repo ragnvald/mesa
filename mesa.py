@@ -972,7 +972,7 @@ if __name__ == "__main__":
     # Operations tab
     # ------------------------------------------------------------------
     operations_tab = ttk.Frame(notebook)
-    notebook.add(operations_tab, text="Operations")
+    notebook.add(operations_tab, text="Activities")
 
     operations_container = ttk.Frame(operations_tab, padding=12)
     operations_container.pack(fill="both", expand=True)
@@ -994,22 +994,22 @@ if __name__ == "__main__":
 
     operations = [
         ("Import", lambda: import_assets(gpkg_file),
-         "Opens the asset and polygon importer. Start here when preparing a new dataset.", PRIMARY),
+         "Opens the asset and polygon importer. Start here when preparing a new dataset.", None),
         ("Geocodes", geocodes_grids,
          "Creates or refreshes geocode grids (hexagons, tiles) that support the analysis.", None),
-        ("Set up", edit_processing_setup,
-         "Adjust processing parameters such as buffers and thresholds before running analysis.", None),
-        ("Process", lambda: process_data(gpkg_file),
-         "Runs the core processing pipeline to produce the GeoParquet outputs.", PRIMARY),
         ("Atlas", make_atlas,
          "Generates atlas tiles and artefacts for map visualisations.", None),
-        ("Segments", process_lines,
+        ("Set up", edit_processing_setup,
+         "Adjust processing parameters such as buffers and thresholds before running analysis.", None),
+        ("Process areas", lambda: process_data(gpkg_file),
+         "Runs the core processing pipeline to produce the GeoParquet outputs.", None),
+        ("Process lines", process_lines,
          "Processes transport or utility lines into analysis segments.", None),
-        ("Maps overview", open_maps_overview,
-         "Opens the interactive map viewer with current background layers and assets.", PRIMARY),
-        ("Area analysis", open_data_analysis_setup,
+        ("Maps", open_maps_overview,
+         "Opens the interactive map viewer with current background layers and assets.", None),
+        ("Analysis setup", open_data_analysis_setup,
          "Launches the area analysis tool used to define polygons and run clipping.", None),
-        ("Area presentation", open_data_analysis_presentation,
+        ("Analysis results", open_data_analysis_presentation,
          "Opens the comparison dashboard for analysis groups.", None),
         ("Report", open_present_files,
          "Builds printable reports and map packages for sharing with partners.", None),
