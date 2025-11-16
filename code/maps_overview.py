@@ -955,7 +955,15 @@ class Api:
                 "overlay": kind,
                 "overlay_label": OVERLAY_LABELS.get(kind, kind.title()),
                 "metrics": _build_tile_metrics(row, kind),
+                "geometry": None,
             }
+            geom = row.geometry
+            if geom is not None:
+                try:
+                    if not geom.is_empty:
+                        info["geometry"] = mapping(geom)
+                except Exception:
+                    info["geometry"] = None
             return {"ok": True, "info": _json_ready(info)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -1179,6 +1187,7 @@ var MAP=null, BASE=null, BASE_SOURCES=null, CHART=null;
 var GEO_GROUP=null, SEG_GROUP=null, SEG_OUTLINE_GROUP=null, GROUPSTOTAL_GROUP=null, ASSETSTOTAL_GROUP=null, IMPORTANCE_INDEX_GROUP=null, SENSITIVITY_INDEX_GROUP=null;
 var GEO_FOLDER=null;
 var LAYER=null, LAYER_SEG=null, LAYER_SEG_OUTLINE=null, LAYER_GROUPSTOTAL=null, LAYER_ASSETSTOTAL=null, LAYER_IMPORTANCE_INDEX=null, LAYER_SENSITIVITY_INDEX=null;
+var TILE_HIGHLIGHT_LAYER=null;
 var HOME_BOUNDS=null, COLOR_MAP={}, DESC_MAP={};
 var FILL_ALPHA = 0.8;
 var BING_KEY_JS = null;
@@ -1265,6 +1274,28 @@ function showTilePopup(latlng, info){
   L.popup({maxWidth:360}).setLatLng(latlng).setContent(html).openOn(MAP);
 }
 
+function clearTileHighlight(){
+  if (TILE_HIGHLIGHT_LAYER){
+    try { MAP.removeLayer(TILE_HIGHLIGHT_LAYER); } catch(e){}
+    TILE_HIGHLIGHT_LAYER = null;
+  }
+}
+
+function showTileHighlight(geometry){
+  clearTileHighlight();
+  if (!geometry) return;
+  try{
+    TILE_HIGHLIGHT_LAYER = L.geoJSON(geometry, {
+      pane:'tileHighlightPane',
+      interactive:false,
+      style:function(){
+        return {color:'#00c4ff', weight:3, opacity:1, fillOpacity:0, dashArray:'6,4'};
+      }
+    });
+    TILE_HIGHLIGHT_LAYER.addTo(MAP);
+  }catch(e){}
+}
+
 function handleMapClick(evt){
   try{
     if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.lookup_tile_info){
@@ -1274,11 +1305,17 @@ function handleMapClick(evt){
     var overlay = determineActiveOverlayKind();
     window.pywebview.api.lookup_tile_info(evt.latlng.lat, evt.latlng.lng, cat, overlay).then(function(res){
       if (!res || !res.ok || !res.info){
+        clearTileHighlight();
         if (res && res.error){
           setError(res.error);
           setTimeout(function(){ setError(''); }, 4000);
         }
         return;
+      }
+      if (res.info.geometry){
+        showTileHighlight(res.info.geometry);
+      } else {
+        clearTileHighlight();
       }
       showTilePopup(evt.latlng, res.info);
     }).catch(function(){});
@@ -1345,6 +1382,7 @@ function _normalize(val, vmin, vmax){ if (vmax===vmin){ return 1.0; } var t=(Num
 /* loaders – unchanged */
 
 function loadGeocodeIntoGroup(cat, preserveView){
+  clearTileHighlight();
   var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_geocode_layer(cat).then(function(res){
     if (!res.ok){ setError('Failed to load geocode: '+res.error); return; }
@@ -1685,6 +1723,7 @@ function boot(){
   L.control.zoom({ position:'topright' }).addTo(MAP);
   MAP.on('click', handleMapClick);
 
+  MAP.createPane('tileHighlightPane'); MAP.getPane('tileHighlightPane').style.zIndex=700;
   MAP.createPane('segmentsOutlinePane'); MAP.getPane('segmentsOutlinePane').style.zIndex=640;
   MAP.createPane('segmentsPane');        MAP.getPane('segmentsPane').style.zIndex=650;
   MAP.createPane('importanceIndexPane');    MAP.getPane('importanceIndexPane').style.zIndex=590;
