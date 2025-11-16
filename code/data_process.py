@@ -46,23 +46,6 @@ progress_var = None
 progress_label = None
 HEARTBEAT_SECS = 60
 
-INDEX_SETTING_DEFAULTS = {
-    "asset": {"group_weight": 6, "overlap_weight": 4, "normalize": False},
-    "sensitivity": {"group_weight": 6, "overlap_weight": 4, "normalize": False},
-}
-INDEX_CONFIG_KEYS = {
-    "asset": {
-        "group": "idx_asset_group_weight",
-        "overlap": "idx_asset_overlap_weight",
-        "normalize": "idx_asset_normalize",
-    },
-    "sensitivity": {
-        "group": "idx_sens_group_weight",
-        "overlap": "idx_sens_overlap_weight",
-        "normalize": "idx_sens_normalize",
-    },
-}
-
 def _mp_allowed() -> bool:
     """Multiprocessing Pool is unsafe from a non-main thread in frozen builds (PyInstaller/Windows).
     Return True only when it's safe to create a Pool.
@@ -106,6 +89,15 @@ _GEOD = Geod(ellps="WGS84")
 
 # Default basic mosaic group name (can be overridden in config.ini [DEFAULT] basic_group_name)
 _DEFAULT_BASIC_GROUP_NAME = "basic_mosaic"
+
+INDEX_WEIGHT_DEFAULTS = {
+    "importance": [1, 1, 2, 3, 3],
+    "sensitivity": [1, 1, 2, 3, 3],
+}
+INDEX_WEIGHT_KEYS = {
+    "importance": "index_importance_weights",
+    "sensitivity": "index_sensitivity_weights",
+}
 
 # ----------------------------
 # Paths & config helpers
@@ -362,7 +354,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     Run tiles subprocess, stream its output to the GUI, and update the shared progress bar.
     """
     try:
-        layers_per_group = 6  # sensitivity, env, groupstotal, assetstotal, index_asset, index_sensitivity
+        layers_per_group = 4  # sensitivity, env, groupstotal, assetstotal
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
@@ -1277,124 +1269,74 @@ def _write_area_stats_json(stats: dict):
     except Exception as e:
         log_to_gui(log_widget, f"Failed to write area_stats.json: {e}")
 
-def _load_index_settings_from_config(cfg: configparser.ConfigParser) -> dict:
-    def _lookup_option(option: str):
-        if not option:
-            return None
-        opt = option.lower()
-        defaults = cfg.defaults()
-        if opt in defaults:
-            return defaults[opt]
-        for section in cfg.sections():
-            section_proxy = cfg[section]
-            if opt in section_proxy:
-                return section_proxy[opt]
-        return None
+def _parse_index_weight_line(text: str, default: list[int]) -> list[int]:
+    try:
+        if not text:
+            return default.copy()
+        parts = [int(x.strip()) for x in str(text).replace(";", ",").split(",") if x.strip()]
+        values = [max(1, v) for v in parts[:5]]
+        while len(values) < 5:
+            values.append(default[len(values)])
+        return values
+    except Exception:
+        return default.copy()
 
-    settings = {}
-    missing_keys: list[str] = []
-    for key, meta in INDEX_CONFIG_KEYS.items():
-        base = INDEX_SETTING_DEFAULTS[key]
-        gw_raw = _lookup_option(meta["group"])
-        ow_raw = _lookup_option(meta["overlap"])
-        norm_raw = _lookup_option(meta["normalize"])
-        if gw_raw is None:
-            missing_keys.append(meta["group"])
-        if ow_raw is None:
-            missing_keys.append(meta["overlap"])
-        if norm_raw is None:
-            missing_keys.append(meta["normalize"])
-        try:
-            gw = int(gw_raw) if gw_raw is not None else base["group_weight"]
-        except Exception:
-            gw = base["group_weight"]
-        try:
-            ow = int(ow_raw) if ow_raw is not None else base["overlap_weight"]
-        except Exception:
-            ow = base["overlap_weight"]
-        gw = max(0, min(10, gw))
-        ow = max(0, min(10, ow))
-        if gw + ow != 10:
-            gw = base["group_weight"]
-            ow = base["overlap_weight"]
-        normalize_flag = str(norm_raw if norm_raw is not None else base["normalize"]).strip().lower()
-        normalize = normalize_flag in ("1", "true", "yes", "on")
-        settings[key] = {"group_weight": gw, "overlap_weight": ow, "normalize": normalize}
-    if missing_keys:
-        uniq = ", ".join(sorted(set(missing_keys)))
-        log_to_gui(log_widget, f"Index settings missing in config.ini for: {uniq}. Using defaults where needed.")
+def _load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, list[int]]:
+    settings: dict[str, list[int]] = {}
+    defaults = cfg.defaults()
+    for key, option in INDEX_WEIGHT_KEYS.items():
+        base = INDEX_WEIGHT_DEFAULTS[key]
+        raw = defaults.get(option, "")
+        settings[key] = _parse_index_weight_line(raw, base)
     return settings
 
-def _group_labels(df: pd.DataFrame) -> pd.Series:
-    if "ref_geocodegroup" in df.columns and df["ref_geocodegroup"].notna().any():
-        return df["ref_geocodegroup"].astype(str)
-    if "code" in df.columns:
-        return df["code"].astype(str)
-    return pd.Series(["__all__"] * len(df), index=df.index, dtype="object")
-
-def _per_group_normalized(series: pd.Series | None, labels: pd.Series) -> pd.Series:
-    if series is None:
-        return pd.Series(0.0, index=labels.index, dtype="float64")
-    vals = pd.to_numeric(series, errors="coerce").fillna(1.0).astype(float)
-    vals = np.maximum(vals, 1.0)
-    df = pd.DataFrame({"label": labels, "value": vals}, index=labels.index)
-    result = pd.Series(0.0, index=df.index, dtype="float64")
-    for label, idx in df.groupby("label").groups.items():
-        group_vals = vals.loc[idx]
-        max_val = float(np.nanmax(group_vals)) if len(group_vals) else 1.0
-        denom = max_val - 1.0
-        if not np.isfinite(denom) or denom <= 0:
+def _compute_index_scores_from_stacked(df: pd.DataFrame, value_col: str, weights: list[int]) -> pd.Series:
+    if df.empty or value_col not in df.columns or "code" not in df.columns:
+        return pd.Series(dtype="float64")
+    tmp = df[["code", value_col]].copy()
+    tmp = tmp.dropna(subset=["code", value_col])
+    if tmp.empty:
+        return pd.Series(dtype="float64")
+    vals = pd.to_numeric(tmp[value_col], errors="coerce").round()
+    tmp = tmp.assign(value=vals)
+    tmp = tmp.dropna(subset=["value"])
+    if tmp.empty:
+        return pd.Series(dtype="float64")
+    max_bucket = len(weights)
+    tmp["value"] = tmp["value"].clip(1, max_bucket).astype(int)
+    grouped = tmp.groupby(["code", "value"]).size().unstack(fill_value=0)
+    scores = pd.Series(0.0, index=grouped.index, dtype="float64")
+    for bucket, weight in enumerate(weights, start=1):
+        if weight <= 0:
             continue
-        result.loc[idx] = ((group_vals - 1.0) / denom).clip(0.0, 1.0)
-    return result.fillna(0.0)
-
-def _scale_base_values(series: pd.Series, base_min: float, base_max: float) -> pd.Series:
-    values = pd.to_numeric(series, errors="coerce").fillna(base_min).astype(float)
-    values = np.maximum(values, base_min)
-    span = max(base_max - base_min, 1.0)
-    scaled = 20.0 + ((values - base_min) / span) * 80.0
-    return pd.Series(scaled, index=series.index, dtype="float64")
-
-def _normalize_series_per_group(values: pd.Series, labels: pd.Series) -> pd.Series:
-    if values.empty:
-        return values
-    result = values.copy()
-    grouped = values.groupby(labels)
-    for _, group in grouped:
-        if group.empty:
+        col = grouped.get(bucket)
+        if col is None:
             continue
-        lo = group.min()
-        hi = group.max()
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            result.loc[group.index] = 100.0
-        else:
-            stretched = 1.0 + ((group - lo) / (hi - lo)) * 99.0
-            result.loc[group.index] = stretched
-    return result.clip(1.0, 100.0)
+        scores += bucket * weight * col
+    return scores
 
-def _compute_layer_index(df: pd.DataFrame,
-                         base_col: str,
-                         base_min: float,
-                         base_max: float,
-                         weights: dict,
-                         normalize: bool) -> pd.Series:
-    if df.empty:
-        return pd.Series(dtype="float64", index=df.index)
-    base_series = df.get(base_col)
-    if base_series is None:
-        base_series = pd.Series(base_min, index=df.index, dtype="float64")
+def _scale_index_scores(scores: pd.Series, labels: pd.Series | None = None) -> pd.Series:
+    if scores.empty:
+        return scores
+    df = pd.DataFrame({"score": scores})
+    if labels is not None:
+        df["label"] = labels.reindex(scores.index).fillna("__all__")
     else:
-        base_series = base_series.reindex(df.index)
-    scaled = _scale_base_values(base_series, base_min, base_max)
-    labels = _group_labels(df)
-    group_norm = _per_group_normalized(df.get("asset_groups_total"), labels)
-    overlap_norm = _per_group_normalized(df.get("assets_overlap_total"), labels)
-    weighted = (weights["group_weight"] * group_norm + weights["overlap_weight"] * overlap_norm) / 10.0
-    adjustment = (1.0 - weighted).clip(0.0, 1.0)
-    final = (scaled * adjustment).fillna(20.0)
-    if normalize:
-        final = _normalize_series_per_group(final, labels)
-    return final.clip(1.0, 100.0).round(2)
+        df["label"] = "__all__"
+    scaled = pd.Series(0.0, index=scores.index, dtype="float64")
+    for label, group in df.groupby("label"):
+        sc = group["score"]
+        max_val = float(sc.max())
+        if not np.isfinite(max_val) or max_val <= 0:
+            scaled.loc[group.index] = 0.0
+            continue
+        vals = (sc / max_val) * 100.0
+        vals = vals.where(sc > 0, 0.0)
+        vals = vals.round()
+        vals = vals.where(sc == 0, vals.clip(lower=1.0))
+        vals = vals.clip(upper=100.0)
+        scaled.loc[group.index] = vals
+    return scaled
 
 def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     log_to_gui(log_widget, "Building presentation table (tbl_flat)…")
@@ -1409,7 +1351,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_asset_layer_objects','index_sensitivity_layer_objects',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -1528,6 +1469,9 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     # read area projection from the same flat config we were given
     try:
         cfg_local = read_config(config_file)
+    except Exception:
+        cfg_local = configparser.ConfigParser()
+    try:
         area_epsg = normalize_area_epsg(cfg_local["DEFAULT"].get("area_projection_epsg","3035"))
     except Exception:
         area_epsg = "EPSG:3035"
@@ -1540,28 +1484,36 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         metric = tbl_flat.to_crs("EPSG:3035")
         tbl_flat["area_m2"] = metric.geometry.area.astype("float64").round().astype("Int64")
 
-    index_settings = _load_index_settings_from_config(cfg_local)
     for col in ("asset_groups_total", "assets_overlap_total"):
         if col not in tbl_flat.columns:
             tbl_flat[col] = 1
 
-    tbl_flat["index_asset_layer_objects"] = _compute_layer_index(
-        tbl_flat,
-        base_col="importance_max",
-        base_min=1.0,
-        base_max=5.0,
-        weights=index_settings["asset"],
-        normalize=index_settings["asset"]["normalize"],
-    )
-
-    tbl_flat["index_sensitivity_layer_objects"] = _compute_layer_index(
-        tbl_flat,
-        base_col="sensitivity_max",
-        base_min=1.0,
-        base_max=25.0,
-        weights=index_settings["sensitivity"],
-        normalize=index_settings["sensitivity"]["normalize"],
-    )
+    # New importance/sensitivity indexes based on tbl_stacked weights
+    try:
+        index_weights = _load_index_weight_settings(cfg_local)
+    except Exception:
+        index_weights = INDEX_WEIGHT_DEFAULTS.copy()
+    importance_scores = _compute_index_scores_from_stacked(stacked, "importance", index_weights["importance"])
+    sensitivity_scores = _compute_index_scores_from_stacked(stacked, "sensitivity", index_weights["sensitivity"])
+    group_map = None
+    try:
+        if "code" in tbl_flat.columns and "name_gis_geocodegroup" in tbl_flat.columns:
+            unique_groups = tbl_flat[["code", "name_gis_geocodegroup"]].drop_duplicates(subset=["code"])
+            group_map = unique_groups.set_index("code")["name_gis_geocodegroup"].astype("string")
+    except Exception:
+        group_map = None
+    importance_norm = _scale_index_scores(importance_scores, group_map).rename("index_importance")
+    sensitivity_norm = _scale_index_scores(sensitivity_scores, group_map).rename("index_sensitivity")
+    if not importance_norm.empty:
+        tbl_flat = tbl_flat.merge(importance_norm, left_on="code", right_index=True, how="left")
+    else:
+        tbl_flat["index_importance"] = 0
+    if not sensitivity_norm.empty:
+        tbl_flat = tbl_flat.merge(sensitivity_norm, left_on="code", right_index=True, how="left")
+    else:
+        tbl_flat["index_sensitivity"] = 0
+    for col in ("index_importance", "index_sensitivity"):
+        tbl_flat[col] = pd.to_numeric(tbl_flat[col], errors="coerce").fillna(0).round().astype("Int64")
 
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
@@ -1569,7 +1521,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
         'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
         'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-        'index_asset_layer_objects','index_sensitivity_layer_objects',
+        'index_importance','index_sensitivity',
         'geometry'
     ]
     for c in preferred:

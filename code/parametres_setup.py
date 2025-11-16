@@ -41,27 +41,15 @@ valid_input_values: list[int] = []
 classification: dict = {}
 entries_vuln = []
 FALLBACK_VULN = 3
-INDEX_SETTING_DEFAULTS = {
-    "asset": {"group_weight": 6, "overlap_weight": 4, "normalize": False},
-    "sensitivity": {"group_weight": 6, "overlap_weight": 4, "normalize": False},
+INDEX_WEIGHT_DEFAULTS = {
+    "importance": [1, 2, 5, 5, 10],
+    "sensitivity": [1, 2, 3, 5, 10],
 }
-INDEX_SETTING_LABELS = {
-    "asset": "Asset layer index (importance_max)",
-    "sensitivity": "Sensitivity layer index (sensitivity_max)",
+INDEX_WEIGHT_KEYS = {
+    "importance": "index_importance_weights",
+    "sensitivity": "index_sensitivity_weights",
 }
-INDEX_CONFIG_KEYS = {
-    "asset": {
-        "group": "idx_asset_group_weight",
-        "overlap": "idx_asset_overlap_weight",
-        "normalize": "idx_asset_normalize",
-    },
-    "sensitivity": {
-        "group": "idx_sens_group_weight",
-        "overlap": "idx_sens_overlap_weight",
-        "normalize": "idx_sens_normalize",
-    },
-}
-index_settings = {}
+index_weight_settings: dict[str, list[int]] = {}
 
 # paths set in __main__
 original_working_directory = ""
@@ -143,13 +131,13 @@ def find_base_dir(cli_arg: str | None) -> Path:
 # Config (theme/CRS + A–E bins)
 # -------------------------------
 def read_config(file_name: str) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(file_name, encoding="utf-8")
     return cfg
 
 def read_config_classification(file_name: str) -> dict:
     """Read A–E bins & descriptions from config.ini."""
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(file_name, encoding="utf-8")
     classification.clear()
     for section in cfg.sections():
@@ -246,70 +234,35 @@ def update_config_with_values(cfg_path: str, **kwargs) -> None:
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-def _coerce_weight(value, default):
+def _parse_weight_line(text: str, default: list[int]) -> list[int]:
     try:
-        return max(0, min(10, int(value)))
+        if not text:
+            return default.copy()
+        raw = [int(x.strip()) for x in str(text).replace(";", ",").split(",") if x.strip()]
+        cleaned = [max(1, v) for v in raw[:5]]
+        while len(cleaned) < 5:
+            cleaned.append(default[len(cleaned)])
+        return cleaned
     except Exception:
-        return default
+        return default.copy()
 
-def _coerce_bool(value, default):
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-def _lookup_config_option(cfg: configparser.ConfigParser, option: str) -> Optional[str]:
-    """Return the first matching option across DEFAULT and all sections (case-insensitive)."""
-    if not option:
-        return None
-    opt = option.lower()
-    defaults = cfg.defaults()
-    if opt in defaults:
-        return defaults[opt]
-    for section in cfg.sections():
-        section_proxy = cfg[section]
-        if opt in section_proxy:
-            return section_proxy[opt]
-    return None
-
-def load_index_settings_from_config(cfg: configparser.ConfigParser) -> dict:
-    settings = {}
-    missing_keys: list[str] = []
-    for key, meta in INDEX_CONFIG_KEYS.items():
-        dflt = INDEX_SETTING_DEFAULTS[key]
-        gw_raw = _lookup_config_option(cfg, meta["group"])
-        ow_raw = _lookup_config_option(cfg, meta["overlap"])
-        norm_raw = _lookup_config_option(cfg, meta["normalize"])
-        if gw_raw is None:
-            missing_keys.append(meta["group"])
-        if ow_raw is None:
-            missing_keys.append(meta["overlap"])
-        if norm_raw is None:
-            missing_keys.append(meta["normalize"])
-        gw = _coerce_weight(gw_raw, dflt["group_weight"])
-        ow = _coerce_weight(ow_raw, dflt["overlap_weight"])
-        if gw + ow != 10:
-            gw = dflt["group_weight"]
-            ow = dflt["overlap_weight"]
-        settings[key] = {
-            "group_weight": gw,
-            "overlap_weight": ow,
-            "normalize": _coerce_bool(norm_raw, dflt["normalize"]),
-        }
-    if missing_keys:
-        unique = ", ".join(sorted(set(missing_keys)))
-        log_to_file(f"Index settings missing in config.ini for: {unique}. Using defaults where needed.")
+def load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, list[int]]:
+    settings: dict[str, list[int]] = {}
+    for key, option in INDEX_WEIGHT_KEYS.items():
+        default = INDEX_WEIGHT_DEFAULTS[key]
+        raw = cfg["DEFAULT"].get(option, "")
+        settings[key] = _parse_weight_line(raw, default)
     return settings
 
-def persist_index_settings(cfg_path: str, settings: dict) -> None:
+def persist_index_weight_settings(cfg_path: str, settings: dict[str, list[int]]) -> None:
     payload = {}
-    for key, meta in INDEX_CONFIG_KEYS.items():
-        current = settings.get(key, INDEX_SETTING_DEFAULTS[key])
-        payload[meta["group"]] = current["group_weight"]
-        payload[meta["overlap"]] = current["overlap_weight"]
-        payload[meta["normalize"]] = str(bool(current["normalize"])).lower()
+    for key, weights in settings.items():
+        safe = [max(1, int(w)) for w in weights[:5]]
+        while len(safe) < 5:
+            safe.append(1)
+        payload[INDEX_WEIGHT_KEYS[key]] = ",".join(str(v) for v in safe)
     update_config_with_values(cfg_path, **payload)
+
 
 # -------------------------------
 # Type & vulnerability helpers
@@ -493,7 +446,6 @@ def load_all_from_excel(excel_path: str):
 # Start tab
 # -------------------------------
 def build_start_tab(parent):
-    global index_settings
     frm = ttkb.Frame(parent)
     frm.pack(fill='both', expand=True, padx=12, pady=12)
 
@@ -542,73 +494,66 @@ def build_start_tab(parent):
     ttkb.Button(btns, text="Load all from Excel", command=do_load_all_excel, bootstyle=INFO).pack(side='left', padx=6)
     ttkb.Button(btns, text="Save to Parquet", command=do_save_parquet, bootstyle=PRIMARY).pack(side='left', padx=6)
 
-    weights_box = ttkb.LabelFrame(frm, text="Layer object indexes (weights & normalization)", bootstyle="info")
-    weights_box.pack(fill='x', pady=(20, 0), padx=2)
+def build_indexes_tab(parent):
+    global index_weight_settings
+    frm = ttkb.Frame(parent)
+    frm.pack(fill='both', expand=True, padx=12, pady=12)
 
-    ttkb.Label(weights_box, text="Index", width=32, anchor='w').grid(row=0, column=0, padx=5, pady=(4, 2), sticky='w')
-    ttkb.Label(weights_box, text="Group weight", width=14).grid(row=0, column=1, padx=5, pady=(4, 2))
-    ttkb.Label(weights_box, text="Overlap weight", width=14).grid(row=0, column=2, padx=5, pady=(4, 2))
-    ttkb.Label(weights_box, text="Normalize 1–100", width=18).grid(row=0, column=3, padx=5, pady=(4, 2))
+    info = (
+        "Configure weighting for the new importance and sensitivity indexes.\n"
+        "Each value column corresponds to the input value (1–5) stored in tbl_stacked.\n"
+        "Weights must be positive integers; higher weights increase the contribution when\n"
+        "counting overlapping assets inside each mosaic cell."
+    )
+    ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0, 12))
 
-    weight_rows = {}
-    options = [str(i) for i in range(11)]
+    sections = [
+        ("importance", "Importance index weights"),
+        ("sensitivity", "Sensitivity index weights"),
+    ]
+    weight_vars: dict[str, list[tk.StringVar]] = {}
 
-    for row_idx, key in enumerate(INDEX_SETTING_LABELS.keys(), start=1):
-        cfg = index_settings.get(key, INDEX_SETTING_DEFAULTS[key])
-        ttkb.Label(weights_box, text=INDEX_SETTING_LABELS[key], anchor='w').grid(row=row_idx, column=0, padx=5, pady=2, sticky='w')
+    for key, title in sections:
+        box = ttkb.LabelFrame(frm, text=title, bootstyle="info")
+        box.pack(fill='x', pady=8)
+        ttkb.Label(box, text="Value", width=10, anchor='center').grid(row=0, column=0, padx=5, pady=(6, 4))
+        for v in range(1, 6):
+            ttkb.Label(box, text=str(v), width=6, anchor='center').grid(row=0, column=v, padx=2, pady=(6, 4))
+        ttkb.Label(box, text="Weight", width=10, anchor='center').grid(row=1, column=0, padx=5, pady=4)
 
-        group_var = tk.StringVar(value=str(cfg["group_weight"]))
-        overlap_var = tk.StringVar(value=str(cfg["overlap_weight"]))
-        normalize_var = tk.BooleanVar(value=cfg["normalize"])
-
-        grp_combo = ttkb.Combobox(weights_box, values=options, textvariable=group_var, state="readonly", width=6)
-        grp_combo.grid(row=row_idx, column=1, padx=5, pady=2)
-        ovl_combo = ttkb.Combobox(weights_box, values=options, textvariable=overlap_var, state="readonly", width=6)
-        ovl_combo.grid(row=row_idx, column=2, padx=5, pady=2)
-        ttkb.Checkbutton(weights_box, variable=normalize_var, bootstyle="round-toggle").grid(row=row_idx, column=3, padx=5, pady=2)
-
-        weight_rows[key] = {
-            "group": group_var,
-            "overlap": overlap_var,
-            "normalize": normalize_var,
-        }
-
-    ttkb.Label(
-        weights_box,
-        text="Weights are expressed in tenths and must sum to 10 per index (e.g., 6+4). "
-             "Normalization stretches results within each geocode group.",
-        justify='left',
-        wraplength=720
-    ).grid(row=len(INDEX_SETTING_LABELS) + 1, column=0, columnspan=4, padx=5, pady=(8, 4), sticky='w')
+        vars_for_key: list[tk.StringVar] = []
+        current = index_weight_settings.get(key, INDEX_WEIGHT_DEFAULTS[key])
+        for idx in range(5):
+            var = tk.StringVar(value=str(current[idx] if idx < len(current) else 1))
+            entry = ttkb.Entry(box, width=6, justify='center', textvariable=var)
+            entry.grid(row=1, column=idx + 1, padx=2, pady=4)
+            vars_for_key.append(var)
+        weight_vars[key] = vars_for_key
 
     def save_weight_settings():
-        updated = {}
-        for key, vars in weight_rows.items():
-            try:
-                g = int(vars["group"].get())
-                o = int(vars["overlap"].get())
-            except ValueError:
-                messagebox.showerror("Weights", "Weights must be numeric between 0 and 10.")
-                return
-            if g + o != 10:
-                messagebox.showerror("Weights", f"{INDEX_SETTING_LABELS[key]} weights must sum to 10 (currently {g + o}).")
-                return
-            updated[key] = {
-                "group_weight": g,
-                "overlap_weight": o,
-                "normalize": bool(vars["normalize"].get()),
-            }
+        updated: dict[str, list[int]] = {}
+        for key, vars_list in weight_vars.items():
+            values: list[int] = []
+            for idx, var in enumerate(vars_list, start=1):
+                txt = var.get().strip()
+                if not txt.isdigit():
+                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be a positive integer.")
+                    return
+                val = int(txt)
+                if val < 1:
+                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be at least 1.")
+                    return
+                values.append(val)
+            updated[key] = values
         try:
-            persist_index_settings(config_file, updated)
-            index_settings.update(updated)
-            messagebox.showinfo("Saved", "Index weights updated in config.ini.")
+            persist_index_weight_settings(config_file, updated)
+            index_weight_settings.update(updated)
+            messagebox.showinfo("Indexes", "Index weights saved to config.ini.")
         except Exception as err:
-            log_to_file(f"Failed saving index weights: {err}")
-            messagebox.showerror("Error", f"Could not save weights:\n{err}")
+            log_to_file(f"Failed to persist index weights: {err}")
+            messagebox.showerror("Indexes", f"Could not save index weights:\n{err}")
 
-    ttkb.Button(weights_box, text="Save weights", command=save_weight_settings, bootstyle=PRIMARY).grid(
-        row=len(INDEX_SETTING_LABELS) + 2, column=0, columnspan=4, pady=(4, 6)
-    )
+    ttkb.Button(frm, text="Save weights", bootstyle=PRIMARY, command=save_weight_settings).pack(anchor='w', pady=(12, 0))
 
 # -------------------------------
 # Vulnerability UI
@@ -736,10 +681,9 @@ if __name__ == "__main__":
     classification = read_config_classification(config_file)
     valid_input_values = get_valid_values(config)
     FALLBACK_VULN = get_fallback_value(config, valid_input_values)
+    index_weight_settings = load_index_weight_settings(config)
     ttk_bootstrap_theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
     workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
-    index_settings = load_index_settings_from_config(config)
-
     # Asset groups
     gdf_asset_group = load_asset_group(original_working_directory)
     print("[parametres_setup] asset grp:", _parquet_asset_group_path(original_working_directory))
@@ -763,6 +707,9 @@ if __name__ == "__main__":
     # Start
     tab_start = ttkb.Frame(nb); nb.add(tab_start, text="Start")
     build_start_tab(tab_start)
+
+    tab_idx = ttkb.Frame(nb); nb.add(tab_idx, text="Indexes")
+    build_indexes_tab(tab_idx)
 
     # Vulnerability
     tab_vuln = ttkb.Frame(nb); nb.add(tab_vuln, text="Sensitivity")
