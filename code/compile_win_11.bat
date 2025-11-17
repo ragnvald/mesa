@@ -19,13 +19,23 @@ if exist "%VENV_PY%" (
 
 set "BUILD_EXITCODE=%ERRORLEVEL%"
 
-REM Compute elapsed time (format HH:MM:SS, hours may exceed 24)
-for /f "usebackq delims=" %%I in (`
+REM Compute elapsed time (format HH:MM:SS, hours may exceed 24) alongside start/end timestamps
+for /f "usebackq tokens=1-3 delims=|" %%I in (`
   powershell -NoLogo -Command ^
-    "$start=[datetime]::FromFileTimeUtc([int64]$env:START_TICKS);" ^
-    "$span=New-TimeSpan -Start $start -End (Get-Date);" ^
-    "('{0:00}:{1:00}:{2:00}' -f [int][math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds)"
-`) do set "ELAPSED=%%I"
+    "$startUtc=[datetime]::FromFileTimeUtc([int64]$env:START_TICKS);" ^
+    "$endUtc=(Get-Date).ToUniversalTime();" ^
+    "$span=New-TimeSpan -Start $startUtc -End $endUtc;" ^
+    "$startLocal=$startUtc.ToLocalTime();" ^
+    "$endLocal=$endUtc.ToLocalTime();" ^
+    "'{0:yyyy-MM-dd HH:mm:ss}|{1:yyyy-MM-dd HH:mm:ss}|{2:00}:{3:00}:{4:00}' -f $startLocal, $endLocal, [int][math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds"
+`) do (
+  set "START_TIME=%%I"
+  set "END_TIME=%%J"
+  set "ELAPSED=%%K"
+)
+
+echo Build started at %START_TIME%
+echo Build finished at %END_TIME%
 
 if "%BUILD_EXITCODE%"=="0" (
   echo Build completed successfully in %ELAPSED%
