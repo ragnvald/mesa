@@ -39,6 +39,4 @@ The more detailed the geocode catalog, the more CPU, RAM, and SSD throughput the
 Behind each `.exe` sits a Python 3.11 script (for example `mesa.py`, `data_process.py`, `parametres_setup.py`). PyInstaller wraps those scripts together with all third-party libraries so end users never have to install Python themselves. Power users who want to automate or customize the workflow can open the matching `.py` files in the `code/` folder and run them directly, but compiled executables remain the primary delivery format.
 
 ## Additional resources
-- Method background: https://www.mesamethod.org/wiki/Main_Page
 - Download portal: https://zenodo.org/communities/mesatool/
-- Troubleshooting and automation tips: `code/instructions.md`
