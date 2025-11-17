@@ -1,64 +1,44 @@
-# MESA Tool (development workspace)
+# MESA Tool (compiled distribution)
 
 ## Overview
-The MESA (Methods for Environmental Sensitivity Assessment) tool is a Tkinter-based desktop application for evaluating and mapping environmental sensitivity, with a focus on marine pollution preparedness and land use planning. It bundles geospatial processing utilities (GeoPandas, Shapely, PyProj, GDAL) with a user-friendly GUI so emergency responders and planners can curate asset catalogues, run batch analyses, and export maps/reports without writing code. The same source drives the compiled `mesa.exe` that is distributed to Windows users via Zenodo; the most recent build footprint is roughly 1.7 GB on Windows 11 and 0.7 GB on Windows 10 due to the bundled GIS stack.
+MESA (Methods for Environmental Sensitivity Assessment) is delivered as a Windows desktop package composed of `mesa.exe` plus supporting helper executables. The bundle lets emergency response teams and planners score environmental sensitivity, run spatial analyses, and export maps without ever touching Python installs or GIS driver setups. Everything lives in one extracted folder, so simply unzip, launch, and start working.
 
-## Highlights
-- **Environmental sensitivity assessment** - structured scoring of coastal assets, ecosystems, and wildlife against importance/sensitivity indices.
-- **Integrated mapping** - Leaflet/pywebview minimaps, grid overlays, and QGIS templates offer quick visual validation of GeoParquet outputs.
-- **End-to-end workflow** - helper tools cover data import, parameter setup, raster/atlas generation, ad-hoc area analysis, and PDF reporting.
-- **User-friendly GUI** - ttkbootstrap-styled interfaces guide non-technical users through each processing stage and surface inline help links.
-- **Compiled executable** - PyInstaller builds (see `code/build_all.py`) produce a distributable `mesa.exe` plus helper executables for field teams.
-- **Customizable framework** - configuration is stored in `config.ini`, and helper tools persist user edits in `output/geoparquet` so datasets travel with the project directory.
+## Why executables?
+- **Self-contained delivery** - The archive ships with `input/`, `output/`, `qgis/`, `system_resources/`, logs, and configuration files so every helper can find the same datasets.
+- **Consistent launch story** - Users double-click `mesa.exe` for the main dashboard or open any helper `.exe` in `tools/` for focused tasks.
+- **Built-in GIS stack** - GDAL, GeoPandas, PyProj, PyArrow, and ttkbootstrap are already embedded, which explains the footprint (~1.7 GB on Windows 11, ~0.7 GB on Windows 10).
+- **Automatic folder preparation** - On startup the executables ensure `input/geocode`, `input/lines`, `output`, and `qgis` exist so data ingestion is predictable.
 
-## Repository layout
-| Path | Purpose |
-| --- | --- |
-| `/mesa.py` | Main GUI that orchestrates helper tools, logging, and telemetry. |
-| `/code` | Development sources, helper utilities, packaged resources, and this README. |
-| `/code/input` | Sample input templates (`geocode`, `lines`, etc.). Users drop raw data here. |
-| `/code/output` | Default location for GeoParquet layers, exported PDFs, and generated atlases. |
-| `/code/tools` | Standalone helper scripts (`data_process.py`, `parametres_setup.py`, `atlas_create.py`, ...) that can run independently or under `mesa.py`. |
-| `/code/system_resources` | Static assets (icons, HTML templates, docs) bundled into the executable. |
-| `/config.ini` | Central knobs (paths, CRS, classification bins). Copied next to `mesa.exe` at build time. |
+## Getting started with the packaged build
+1. Download the latest public release from Zenodo: https://zenodo.org/communities/mesatool/
+2. Extract the ZIP to a writable location (for example `C:\MESA`). Keep the folder structure intact.
+3. Launch `mesa.exe`. The home screen confirms which folders are detected, shows log activity, and provides buttons that open each helper `.exe`.
+4. Work through the guided steps (configure parameters, import data, run processing, review outputs). Leave the folder open while working so cross-launching helpers is seamless.
 
-At runtime, `mesa.py` detects its base directory automatically (preferring `MESA_BASE_DIR`, the folder that holds `config.ini`, or the directory that contains the executable) and ensures standard sub-folders exist (`input/geocode`, `input/lines`, `output`, `qgis`).
+## Helper executables at a glance
+- **Hub (`mesa.exe`)** - Launchpad that opens every helper, reports log activity, and exposes documentation links. Use it to keep context in one window while you bounce between tasks.
+- **Parameter setup (`tools\parametres_setup.exe`)** - Loads classification bins, valid ranges, and index weights from `config.ini`, enforces guard rails through dropdowns and fallback values, then writes the unified scoring matrices back to GeoParquet + JSON for all other executables to consume.
+- **Data prep (`tools\data_import.exe`, `tools\geocode*.exe`, `tools\lines_*.exe`)** - Wizard-style workflows that check encodings, CRS, geometry validity, and attribute completeness before anything reaches processing. They harmonize column headers, flag duplicates, and log every change so schema drift is caught early.
+- **Processing (`tools\data_process.exe`)** - The CPU/RAM-intensive engine that chunks intersections, spins up workers when safe, streams minimap snapshots, and persists both geometry and status metrics into `output/geoparquet`. Progress is logged continuously to `log.txt`, visible from the hub.
+- **Reporting (`tools\data_report.exe`, `tools\atlas_*.exe`, `tools\maps_overview.exe`)** - Transform GeoParquet data into PDF summaries, tiled atlases arranged by administrative units, and Leaflet-ready overview dashboards while reusing metadata captured during import and parameterization.
+- **Raster support (`tools\create_raster_tiles.exe`)** - Converts processed vectors into raster tiles or high-resolution imagery that align with the CRS/tiling scheme defined in `config.ini`, dropping outputs into `qgis/` for immediate use in GIS viewers.
 
-## Getting started
-### Using the packaged build
-1. Download the latest release from Zenodo: https://zenodo.org/communities/mesatool/
-2. Extract the archive and launch `mesa.exe`.
-3. Follow the on-screen prompts to configure parameters, import data, and start processing.
-4. Keep the extracted folder intact: helper executables expect `config.ini`, `input`, and `output` to live next to `mesa.exe`.
+All helpers can be opened directly from Windows Explorer, but most users launch them via `mesa.exe` so logs and context stay in one place.
 
-### Running from source (developers/power users)
-1. Create and activate a Python 3.11 virtual environment.
-2. Install dependencies: `pip install -r requirements.txt` (GDAL/OGR must be installed first on Windows).
-3. Configure `config.ini` at the repository root (copy the provided template if needed).
-4. Launch the main UI from either folder: `python mesa.py` (root) or `python code/mesa.py`.
-5. Optional: run helper utilities directly (e.g., `python code/data_process.py --help`) for batch pipelines or scripted workflows.
+## Typical executable workflow
+1. **Drop inputs** into `input/geocode` and `input/lines`, then use the import helpers to check formats and metadata.
+2. **Tune scoring** with `parametres_setup.exe`, saving vulnerability/importance settings to the shared GeoParquet store.
+3. **Process data** through `data_process.exe` to compute intersections, indices, and status grids. This is the heaviest step and may run for hours on complex geographies.
+4. **Generate outputs** with the atlas, report, or overview executables. PDF reports land in `output/` with timestamps.
+5. **Distribute results** by copying the entire folder (including GeoParquet files) to partners or to another workstation; the executables auto-detect the structure.
 
-## Data & tool workflow
-- **Parameter setup (`parametres_setup.py`)** - define vulnerability/importance bins, valid input ranges, index weights, and default fallbacks; values are saved to GeoParquet/JSON under `output/geoparquet`.
-- **Data import (`data_import.py`, `geocodes_create.py`, `lines_process.py`, `assetgroup_edit.py`, `geocodegroup_edit.py`)** - curate and QA source datasets before they enter the processing pipeline.
-- **Processing (`data_process.py`)** - performs the CPU/memory-aware spatial intersections, multi-threaded minimap updates, and writes consolidated GeoParquet layers used by every other tool.
-- **Analysis & reporting (`data_report.py`, `data_analysis_setup.py`, `data_analysis_presentation.py`, `maps_overview.py`, `atlas_create.py`, `atlas_edit.py`)** - create printable atlases, PDF summaries (`output/MESA_area_analysis_report_YYYY_MM_DD.pdf`), and overview maps for planners.
-- **Runtime helpers** - `create_raster_tiles.py`, `lines_admin.py`, and `system_resources/` provide auxiliary content for QGIS or other downstream viewers.
+## Performance considerations
+The more detailed the geocode catalog, the more CPU, RAM, and SSD throughput the executables need. Expect high resource use when handling thousands of polygons or when exporting large atlases. Keeping the project on a fast SSD and ensuring ample free disk space helps `data_process.exe` maintain smooth minimap updates.
 
-All helpers can be run as Python scripts, compiled executables (`tools/*.exe` when distributed), or "slave" processes controlled by `mesa.exe`. Data is exchanged through the standard folder layout and shared GeoParquet files so that edits made in one mode are available everywhere.
+## Under the hood (for the curious)
+Behind each `.exe` sits a Python 3.11 script (for example `mesa.py`, `data_process.py`, `parametres_setup.py`). PyInstaller wraps those scripts together with all third-party libraries so end users never have to install Python themselves. Power users who want to automate or customize the workflow can open the matching `.py` files in the `code/` folder and run them directly, but compiled executables remain the primary delivery format.
 
-## Building executables
-1. Activate the virtual environment used for development.
-2. Ensure PyInstaller and hooks are installed: `pip install -U pyinstaller _pyinstaller_hooks_contrib`.
-3. From the repo root run `python code/build_all.py`.
-4. The script cleans previous artifacts, builds every helper as a one-file executable, packages the main GUI as an onedir build, flattens it into `dist/mesa`, and copies `input`, `output`, `docs`, `qgis`, and `system_resources` alongside `mesa.exe`.
-
-Expect long build times (tens of minutes) because GDAL, GeoPandas, and PyProj are bundled. Final artifacts are large (~1.7 GB/0.7 GB for Win 11/Win 10) but self-contained.
-
-## Processing capacity requirements
-Throughput depends heavily on the volume and complexity of the input geocodes and linework. Dense coastal datasets with many polygons and overlapping buffers increase CPU, RAM, and disk consumption during `data_process.py` runs. Use SSD storage, allocate ample RAM, and allow additional time when exporting atlases or raster tiles.
-
-## Further reading
+## Additional resources
 - Method background: https://www.mesamethod.org/wiki/Main_Page
-- Support site & binary downloads: https://zenodo.org/communities/mesatool/
-- For troubleshooting or automation tips, inspect `code/instructions.md`.
+- Download portal: https://zenodo.org/communities/mesatool/
+- Troubleshooting and automation tips: `code/instructions.md`
