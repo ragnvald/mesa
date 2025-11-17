@@ -44,6 +44,8 @@ original_working_directory = None
 log_widget = None
 progress_var = None
 progress_label = None
+progress_stage_text = "Preparations"
+_progress_value = 0.0
 HEARTBEAT_SECS = 60
 
 def _mp_allowed() -> bool:
@@ -240,14 +242,54 @@ def cfg_get_float(cfg: configparser.ConfigParser, key: str, default: float) -> f
 # ----------------------------
 # Logging / UI helpers
 # ----------------------------
+def _current_progress_display() -> str:
+    stage = (progress_stage_text or "").strip()
+    pct_text = f"{int(_progress_value)}%"
+    return f"{stage}: {pct_text}" if stage else pct_text
+
+
+def _refresh_progress_label():
+    try:
+        if progress_label is not None:
+            progress_label.config(text=_current_progress_display())
+            progress_label.update_idletasks()
+    except Exception:
+        pass
+
+
+def set_progress_stage(stage_name: str):
+    """Set the descriptive stage text that prefixes the percentage label."""
+    global progress_stage_text
+    try:
+        progress_stage_text = (stage_name or "").strip()
+        _refresh_progress_label()
+    except Exception:
+        pass
+
+
+def _stage_from_phase(phase: str) -> str:
+    p = (phase or "").strip().lower()
+    if p == "intersect":
+        return "Processing"
+    if p in {"flatten_pending", "flatten", "writing", "done"}:
+        return "Cleanup"
+    if p in {"tiles", "tiling", "mbtiles"}:
+        return "Creating map tiles"
+    if p in {"completed"}:
+        return "Creating map tiles"
+    if p in {"error"}:
+        return "Attention required"
+    return "Preparations"
+
+
 def update_progress(new_value: float):
+    global _progress_value
     try:
         v = max(0.0, min(100.0, float(new_value)))
+        _progress_value = v
         if progress_var is not None:
             progress_var.set(v)
-        if progress_label is not None:
-            progress_label.config(text=f"{int(v)}%")
-            progress_label.update_idletasks()
+        _refresh_progress_label()
     except Exception:
         pass
 
@@ -353,13 +395,16 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     Run tiles subprocess, stream its output to the GUI, and update the shared progress bar.
     """
+    tile_ceiling = 100.0
     try:
         layers_per_group = 4  # sensitivity, env, groupstotal, assetstotal
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
         done_steps = 0
-        update_progress(92.0)
+        tile_floor = max(95.0, min(_progress_value, 100.0))
+        tile_span = max(1.0, tile_ceiling - tile_floor)
+        update_progress(tile_floor)
         log_to_gui(log_widget, "[Tiles] Stage 4/4 - integrating MBTiles build (create_raster_tiles)...")
 
         proc = _spawn_tiles_subprocess(minzoom=minzoom, maxzoom=maxzoom)
@@ -395,11 +440,11 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
 
             if re_building.search(line):
                 done_steps += 1
-                pct = min(99.0, (done_steps/total_steps)*100.0)
-                update_progress(pct)
+                pct = tile_floor + (done_steps / max(total_steps, 1)) * tile_span
+                update_progress(min(tile_ceiling, pct))
 
             if re_done.search(line):
-                update_progress(100.0)
+                update_progress(tile_ceiling)
 
         ret = proc.wait()
         if ret != 0:
@@ -409,7 +454,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     except Exception as e:
         log_to_gui(log_widget, f"[Tiles] Error: {e}")
     finally:
-        update_progress(100.0)
+        update_progress(tile_ceiling)
         # Tail the shared worker log file into the GUI while the worker runs
         try:
             _start_log_tailer(root)
@@ -421,6 +466,8 @@ def _auto_run_tiles_stage(minzoom, maxzoom):
     Trigger the MBTiles helper as part of the main processing workflow.
     """
     try:
+        set_progress_stage("Creating map tiles")
+        _update_status_phase("tiles")
         ok, counts = _has_big_polygon_group(threshold=0)
         if not counts:
             log_to_gui(log_widget, "[Tiles] tbl_flat not present or empty; skipping MBTiles generation.")
@@ -431,6 +478,8 @@ def _auto_run_tiles_stage(minzoom, maxzoom):
     except Exception as e:
         log_to_gui(log_widget, f"[Tiles] Skipped due to error: {e}")
         update_progress(100.0)
+    finally:
+        _update_status_phase("completed")
 
 # ----------------------------
 # A..E classification helpers
@@ -629,6 +678,31 @@ def _init_idle_status():
         "home_bounds": None
     }
     _write_status_atomic(payload)
+
+
+def _update_status_phase(new_phase: str):
+    """Adjust the shared status JSON to reflect a new high-level phase."""
+    try:
+        existing = {}
+        p = _status_path()
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+    except Exception:
+        existing = {}
+    try:
+        payload = {
+            "phase": (new_phase or "").strip().lower() or "idle",
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "chunks_total": int(existing.get("chunks_total", 0) or 0),
+            "done": int(existing.get("done", 0) or 0),
+            "running": existing.get("running", []),
+            "cells": existing.get("cells", []),
+            "home_bounds": existing.get("home_bounds"),
+        }
+        _write_status_atomic(payload)
+    except Exception:
+        pass
 
 # ----------------------------
 # Assign grid + tag and return tagged geocodes
@@ -1905,16 +1979,23 @@ def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> N
                 total = int(st.get("chunks_total", 0) or 0)
                 done = int(st.get("done", 0) or 0)
                 phase = (st.get("phase", "") or "").lower()
+                set_progress_stage(_stage_from_phase(phase))
                 # Map intersect progress to ~35..50% like the worker side uses
+                pct: float | None
                 if total > 0 and phase == "intersect":
                     pct = 35.0 + (done / max(total, 1)) * 15.0
                 elif phase in ("flatten_pending", "flatten", "writing"):
                     pct = 80.0
-                elif phase in ("completed", "done"):
+                elif phase == "done":
+                    pct = 95.0
+                elif phase in ("tiles", "tiling", "mbtiles"):
+                    pct = None  # tile stage drives its own progress updates
+                elif phase == "completed":
                     pct = 100.0
                 else:
                     pct = 10.0
-                update_progress(pct)
+                if pct is not None:
+                    update_progress(pct)
         except Exception:
             pass
         finally:
@@ -2365,10 +2446,11 @@ if __name__ == "__main__":
     progress_bar = tb.Progressbar(progress_frame, orient="horizontal", length=260,
                                   mode="determinate", variable=progress_var, bootstyle='info')
     progress_bar.pack(side=tk.LEFT)
-    progress_label = tk.Label(progress_frame, text="0%", bg="light grey"); progress_label.pack(side=tk.LEFT, padx=8)
+    progress_label = tk.Label(progress_frame, text=_current_progress_display(), bg="light grey")
+    progress_label.pack(side=tk.LEFT, padx=8)
 
     info = (f"This is where all calculations are made. Information is provided every {HEARTBEAT_SECS} seconds.\n"
-            "To start the processing press 'Process'. Then 'Open map' to keep an eye on\n"
+            "To start the processing press 'Process'. Then 'Progress map' to keep an eye on\n"
             "the progress of your calculations. Many assets and/or detailed geocodes will\n"
             "increase the processing time. All resulting data is saved in the GeoParquet\n"
             "vector data format. Raster MBTiles are generated automatically at the end for\n"
@@ -2388,6 +2470,7 @@ if __name__ == "__main__":
         _auto_run_tiles_stage(tiles_minzoom, tiles_maxzoom)
 
     def _run():
+        set_progress_stage("Preparations")
         update_progress(0.0)
         _start_processing_worker(cfg_path)
         # Kick off periodic GUI polling of the shared status file for progress updates
@@ -2409,7 +2492,7 @@ if __name__ == "__main__":
     tk.Label(right, text=("For more complex calculations this will give the user a better \n"
                           "understanding of the progress of when the calculation\n"),
              justify="left").pack(padx=10, anchor="w")
-    tb.Button(right, text="Open map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
+    tb.Button(right, text="Progress map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
 
     log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
     root.mainloop()
