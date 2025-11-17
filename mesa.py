@@ -19,6 +19,7 @@ import datetime
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import threading
 import sys
 from shapely import wkb
 import pyarrow.parquet as pq
@@ -41,6 +42,9 @@ PROJECT_BASE = _get_project_base()
 
 # Bundled resources (PyInstaller _MEIPASS) or project folder in dev
 RESOURCE_BASE = getattr(sys, "_MEIPASS", PROJECT_BASE)
+
+# Tk root reference (assigned when UI initializes)
+root = None
 
 # ---------------------------------------------------------------------
 # Path resolver
@@ -333,13 +337,6 @@ def get_status(geoparquet_dir):
                 return fp
         return None
 
-    def _env_json_candidates():
-        targets = []
-        for base in gpq_dirs:
-            parent = os.path.dirname(base)
-            targets.append(os.path.join(parent, "env_profile.json"))
-        return _dedup_paths(targets)
-
     def _parquet_has_rows(fp: str) -> bool:
         if not os.path.exists(fp):
             return False
@@ -378,23 +375,6 @@ def get_status(geoparquet_dir):
                 return None
 
     def read_setup_status():
-        env_messages = []
-        env_status = "missing"  # ok | empty | missing | json
-        env_table_path = _existing_table_path('tbl_env_profile')
-        if env_table_path:
-            if _parquet_has_rows(env_table_path):
-                env_status = "ok"
-            else:
-                env_status = "empty"
-                env_messages.append("tbl_env_profile exists but has no rows.")
-        else:
-            for json_candidate in _env_json_candidates():
-                if os.path.exists(json_candidate):
-                    env_status = "json"
-                    break
-            if env_status == "missing":
-                env_messages.append("tbl_env_profile is missing.")
-
         fp = ppath('tbl_asset_group')
         assets_ok = False
         missing_cols_msg = ""
@@ -412,20 +392,14 @@ def get_status(geoparquet_dir):
         except Exception as e:
             log_to_logfile(f"Error evaluating setup status on tbl_asset_group: {e}")
 
-        if assets_ok and env_status in ("ok", "json"):
-            return "+", "Set up ok. Feel free to adjust it."
         if assets_ok:
-            detail = env_messages[0] if env_messages else "ENV profile not detected."
-            return "+", f"Asset ratings are in place. {detail} Run 'Set up' if you need to regenerate it."
+            return "+", "Set up ok. Feel free to adjust it. Remember to rerun after adjustments."
 
         parts = []
-        if env_status in ("missing", "empty"):
-            parts.extend(env_messages)
-        if not assets_ok:
-            if missing_cols_msg:
-                parts.append(missing_cols_msg.strip())
-            else:
-                parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
+        if missing_cols_msg:
+            parts.append(missing_cols_msg.strip())
+        else:
+            parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
         detail = "; ".join([p for p in parts if p]) or "Incomplete setup."
         return "-", f"You need to set up the calculation. \nPress the 'Set up'-button to proceed. ({detail})"
 
@@ -436,8 +410,8 @@ def get_status(geoparquet_dir):
         asset_group_count = read_table_and_count('tbl_asset_group')
         has_asset_group_rows = asset_group_count is not None and asset_group_count > 0
         append_status("+" if has_asset_group_rows else "-",
-                      f"Asset layers: {asset_group_count}" if has_asset_group_rows else
-                      "Assets are missing or have no registrations.\nUse 'Set up' to register asset groups.",
+                      f"Asset layers imported: {asset_group_count}" if has_asset_group_rows else
+                      "Assets are missing.\nUse 'Set up' to register asset groups.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#assets")
 
         geocode_group_count = read_table_and_count('tbl_geocode_group')
@@ -457,9 +431,9 @@ def get_status(geoparquet_dir):
 
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if flat_original_count is not None else "-",
-                      "Processing completed. You may open the QGIS-project file in the output-folder."
+                      "Processing completed. You may choose to Show maps or open the QGIS-project file in the qgis-folder."
                       if flat_original_count is not None else
-                      "Processing incomplete. Press the \nprocessing button.",
+                      "Processing incomplete. Press the \nProcess area-button.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#processing")
 
         atlas_count = read_table_and_count('tbl_atlas')
@@ -488,6 +462,24 @@ def _sub_env():
     env["MESA_BASE_DIR"] = PROJECT_BASE
     return env
 
+def _schedule_stats_refresh(gpkg_file):
+    if not gpkg_file:
+        return
+    if root is None:
+        log_to_logfile("UI not initialized; skipping stats refresh")
+        return
+
+    def _do_refresh():
+        try:
+            update_stats(gpkg_file)
+        except Exception as exc:
+            log_to_logfile(f"Failed to refresh stats: {exc}")
+
+    try:
+        root.after(0, _do_refresh)
+    except Exception as exc:
+        log_to_logfile(f"Unable to schedule stats refresh: {exc}")
+
 def run_subprocess(command, fallback_command, gpkg_file):
     try:
         log_to_logfile(f"Attempting to run command: {command}")
@@ -502,7 +494,7 @@ def run_subprocess(command, fallback_command, gpkg_file):
         )
         log_to_logfile("Primary command executed successfully")
         log_to_logfile(f"stdout: {result.stdout}")
-        update_stats(gpkg_file)
+        _schedule_stats_refresh(gpkg_file)
     except subprocess.CalledProcessError as e:
         log_to_logfile(f"Primary command failed with error: {e}")
         log_to_logfile(f"Failed to execute command: {command}, error: {e.stderr}")
@@ -520,13 +512,22 @@ def run_subprocess(command, fallback_command, gpkg_file):
                 )
                 log_to_logfile("Fallback command executed successfully")
                 log_to_logfile(f"stdout: {result.stdout}")
-                update_stats(gpkg_file)
+                _schedule_stats_refresh(gpkg_file)
         except subprocess.CalledProcessError as e2:
             log_to_logfile(f"Failed to execute fallback command: {fallback_command}, error: {e2.stderr}")
         except FileNotFoundError as e2:
             log_to_logfile(f"File not found for fallback command: {fallback_command}, error: {e2}")
     except FileNotFoundError as e:
         log_to_logfile(f"File not found for command: {command}, error: {e}")
+
+def run_subprocess_async(command, fallback_command, gpkg_file):
+    primary = command[:] if command else None
+    fallback = fallback_command[:] if fallback_command else None
+
+    def _runner():
+        run_subprocess(primary, fallback, gpkg_file)
+
+    threading.Thread(target=_runner, daemon=True).start()
 
 def _resolve_tool_path(*rel_candidates: str) -> str:
     """Find the first existing helper path across system/, project root, or code/."""
@@ -708,9 +709,9 @@ def edit_atlas():
     python_script, exe_file = get_script_paths("atlas_edit")
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
+        run_subprocess_async([exe_file], [], gpkg_file)
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        run_subprocess_async([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def exit_program():
     root.destroy()
@@ -1002,25 +1003,25 @@ if __name__ == "__main__":
 
     operations = [
         ("Import", lambda: import_assets(gpkg_file),
-         "Opens the asset and polygon importer. Start here when preparing a new dataset.", None),
-        ("Geocodes", geocodes_grids,
-         "Creates or refreshes geocode grids (hexagons, tiles) that support the analysis.", None),
-        ("Atlas", make_atlas,
-         "Generates atlas tiles and artefacts for map visualisations.", None),
-        ("Set up", edit_processing_setup,
-         "Adjust processing parameters such as buffers and thresholds before running analysis.", None),
+         "Opens the data importer. Start here when preparing a new dataset.", None),
+        ("Create geocodes", geocodes_grids,
+         "Creates or refreshes geocode grids (hexagons, tiles) that are used in the analysis.", None),
+        ("Define atlas", make_atlas,
+         "Generates atlas polygons for map visualisations.", None),
+        ("Processing setup", edit_processing_setup,
+         "Adjust processing parameters before running analysis.", None),
         ("Process areas", lambda: process_data(gpkg_file),
-         "Runs the core processing pipeline to produce the GeoParquet outputs.", None),
+         "Runs the core processing pipeline to produce the outputs.", None),
         ("Process lines", process_lines,
-         "Processes transport or utility lines into analysis segments.", None),
-        ("Maps", open_maps_overview,
+         "Processes transport, river or utility lines into analysis segments.", None),
+        ("Show maps", open_maps_overview,
          "Opens the interactive map viewer with current background layers and assets.", None),
         ("Analysis setup", open_data_analysis_setup,
-         "Launches the area analysis tool used to define polygons and run clipping.", None),
+         "Launches the area analysis tool used to define study areas.", None),
         ("Analysis results", open_data_analysis_presentation,
-         "Opens the comparison dashboard for analysis groups.", None),
-        ("Report", open_present_files,
-         "Builds printable reports and map packages for sharing with partners.", None),
+         "Opens the comparison dashboard for study group results.", None),
+        ("Export reports", open_present_files,
+         "Builds PDF-reports.", None),
     ]
 
     for idx, (label, command, description, bootstyle) in enumerate(operations):
