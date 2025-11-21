@@ -1225,114 +1225,152 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
 # H3 writers
 # -----------------------------------------------------------------------------
 def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
-    if not levels:
-        log_to_gui("No H3 levels selected.", "WARN")
+    update_progress(0)
+    log_to_gui("Step [H3] STARTED")
+    status_detail = None
+    failed = False
+    try:
+        if not levels:
+            status_detail = "No H3 levels selected."
+            log_to_gui(status_detail, "WARN")
+            return 0
+        if h3 is None:
+            status_detail = "H3 Python package not available. Install with: pip install h3"
+            log_to_gui(status_detail, "WARN")
+            return 0
+
+        cfg = read_config(config_path(base_dir))
+        max_cells = float(cfg["DEFAULT"].get("h3_max_cells", "1200000")) if "DEFAULT" in cfg else 1_200_000.0
+        union_geom = union_from_asset_groups_or_objects(base_dir)
+        if union_geom is None:
+            status_detail = "No polygonal AOI found in tbl_asset_group/tbl_asset_object (consider polygons or set [DEFAULT] h3_union_buffer_m)."
+            log_to_gui(status_detail, "WARN")
+            return 0
+        log_to_gui(f"H3 version: {_h3_version()}", "INFO")
+
+        groups_rows = []
+        objects_parts = []
+        levels_sorted = sorted(set(int(r) for r in levels))
+        steps = max(1, len(levels_sorted))
+        bbox_poly = _bbox_polygon_from(union_geom)
+        if bbox_poly is None:
+            raise RuntimeError("Failed to compute bbox for H3 group.")
+
+        for i, r in enumerate(levels_sorted):
+            update_progress(5 + i * (80 / steps))
+            area_km2, approx_cells = estimate_cells_for(union_geom, r, cfg)
+            if approx_cells > max_cells:
+                log_to_gui(
+                    f"Skipping H3 R{r}: AOI ~{area_km2:,.1f} km² → ~{approx_cells:,.0f} cells exceeds cap ({max_cells:,.0f}).",
+                    "WARN",
+                )
+                continue
+            group_name = f"H3_R{r}"
+            gdf = h3_from_union(union_geom, r)
+            if gdf.empty:
+                log_to_gui(f"No H3 cells produced for resolution {r}.", "WARN")
+                continue
+            gdf = gdf.rename(columns={"h3_index": "code"})
+            if "attributes" not in gdf.columns: gdf["attributes"] = None
+            gdf["name_gis_geocodegroup"] = group_name
+            gdf = gdf[["code", "name_gis_geocodegroup", "attributes", "geometry"]]
+            objects_parts.append(gdf)
+            log_to_gui(f"H3 R{r}: prepared {len(gdf):,} cells.")
+            groups_rows.append({
+                "name": group_name, "name_gis_geocodegroup": group_name,
+                "title_user": f"H3 resolution {r}",
+                "description": f"H3 hexagons at resolution {r}",
+                "geometry": bbox_poly
+            })
+
+        if not groups_rows or not objects_parts:
+            status_detail = "No H3 output generated (all levels skipped/empty)."
+            log_to_gui(status_detail, "WARN")
+            out_dir = gpq_dir(base_dir)
+            if not (out_dir / "tbl_geocode_group.parquet").exists():
+                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
+            if not (out_dir / "tbl_geocode_object.parquet").exists():
+                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+            return 0
+
+        new_groups = gpd.GeoDataFrame(groups_rows, geometry="geometry", crs="EPSG:4326")
+        new_objects = gpd.GeoDataFrame(pd.concat(objects_parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
+
+        added_g, added_o, tot_g, tot_o = _merge_and_write_geocodes(
+            base_dir, new_groups, new_objects, refresh_group_names=[r["name_gis_geocodegroup"] for r in groups_rows]
+        )
+        log_to_gui(
+            f"Merged GeoParquet geocodes → {gpq_dir(base_dir)}  "
+            f"(added groups: {added_g}, added objects: {added_o:,}; totals => groups: {tot_g}, objects: {tot_o:,})"
+        )
+        status_detail = f"Generated H3 levels: {', '.join(str(r) for r in levels_sorted)} (objects added: {added_o:,})"
+        return added_o
+    except Exception as e:
+        failed = True
+        log_to_gui(f"Step [H3] FAILED: {e}", "ERROR")
         return 0
-    if h3 is None:
-        log_to_gui("H3 Python package not available. Install with: pip install h3", "WARN")
-        return 0
-    cfg = read_config(config_path(base_dir))
-    max_cells = float(cfg["DEFAULT"].get("h3_max_cells", "1200000")) if "DEFAULT" in cfg else 1_200_000.0
-    union_geom = union_from_asset_groups_or_objects(base_dir)
-    if union_geom is None:
-        log_to_gui("No polygonal AOI found in tbl_asset_group/tbl_asset_object (consider polygons or set [DEFAULT] h3_union_buffer_m).", "WARN")
-        return 0
-    log_to_gui(f"H3 version: {_h3_version()}", "INFO")
-
-    groups_rows = []
-    objects_parts = []
-    levels_sorted = sorted(set(int(r) for r in levels))
-    steps = max(1, len(levels_sorted))
-    bbox_poly = _bbox_polygon_from(union_geom)
-    if bbox_poly is None:
-        raise RuntimeError("Failed to compute bbox for H3 group.")
-
-    for i, r in enumerate(levels_sorted):
-        update_progress(5 + i * (80 / steps))
-        area_km2, approx_cells = estimate_cells_for(union_geom, r, cfg)
-        if approx_cells > max_cells:
-            log_to_gui(
-                f"Skipping H3 R{r}: AOI ~{area_km2:,.1f} km² → ~{approx_cells:,.0f} cells exceeds cap ({max_cells:,.0f}).",
-                "WARN",
-            )
-            continue
-        group_name = f"H3_R{r}"
-        gdf = h3_from_union(union_geom, r)
-        if gdf.empty:
-            log_to_gui(f"No H3 cells produced for resolution {r}.", "WARN")
-            continue
-        gdf = gdf.rename(columns={"h3_index": "code"})
-        if "attributes" not in gdf.columns: gdf["attributes"] = None
-        gdf["name_gis_geocodegroup"] = group_name
-        gdf = gdf[["code", "name_gis_geocodegroup", "attributes", "geometry"]]
-        objects_parts.append(gdf)
-        log_to_gui(f"H3 R{r}: prepared {len(gdf):,} cells.")
-        groups_rows.append({
-            "name": group_name, "name_gis_geocodegroup": group_name,
-            "title_user": f"H3 resolution {r}",
-            "description": f"H3 hexagons at resolution {r}",
-            "geometry": bbox_poly
-        })
-
-    if not groups_rows or not objects_parts:
-        log_to_gui("No H3 output generated (all levels skipped/empty).", "WARN")
-        out_dir = gpq_dir(base_dir)
-        if not (out_dir / "tbl_geocode_group.parquet").exists():
-            gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
-        if not (out_dir / "tbl_geocode_object.parquet").exists():
-            gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
-        return 0
-
-    new_groups = gpd.GeoDataFrame(groups_rows, geometry="geometry", crs="EPSG:4326")
-    new_objects = gpd.GeoDataFrame(pd.concat(objects_parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
-
-    added_g, added_o, tot_g, tot_o = _merge_and_write_geocodes(
-        base_dir, new_groups, new_objects, refresh_group_names=[r["name_gis_geocodegroup"] for r in groups_rows]
-    )
-    log_to_gui(
-        f"Merged GeoParquet geocodes → {gpq_dir(base_dir)}  "
-        f"(added groups: {added_g}, added objects: {added_o:,}; totals => groups: {tot_g}, objects: {tot_o:,})"
-    )
-    log_to_gui("Completed H3 generation")
-    return added_o
+    finally:
+        update_progress(100)
+        if not failed:
+            if status_detail:
+                log_to_gui(f"Step [H3] COMPLETED ({status_detail})")
+            else:
+                log_to_gui("Step [H3] COMPLETED")
 
 # -----------------------------------------------------------------------------
 # Mosaic runner
 # -----------------------------------------------------------------------------
 def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None):
-    cfg = read_config(config_path(base_dir))
-    # Optional force-serial (via config or ENV)
-    force_serial = False
+    update_progress(0)
+    log_to_gui("Step [Mosaic] STARTED")
+    success = False
+    status_detail = None
     try:
-        v = str(cfg["DEFAULT"].get("mosaic_force_serial", "false")).strip().lower()
-        force_serial = v in ("1", "true", "yes", "on")
-    except Exception:
-        pass
-    if os.environ.get("MESA_FORCE_SERIAL", "").strip() in ("1", "true", "yes", "on"):
-        force_serial = True
+        cfg = read_config(config_path(base_dir))
+        # Optional force-serial (via config or ENV)
+        force_serial = False
+        try:
+            v = str(cfg["DEFAULT"].get("mosaic_force_serial", "false")).strip().lower()
+            force_serial = v in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        if os.environ.get("MESA_FORCE_SERIAL", "").strip() in ("1", "true", "yes", "on"):
+            force_serial = True
 
-    try:
-        workers = int(cfg["DEFAULT"].get("mosaic_workers", "0"))
-    except Exception:
-        workers = 0
-    if force_serial:
-        workers = 1
+        try:
+            workers = int(cfg["DEFAULT"].get("mosaic_workers", "0"))
+        except Exception:
+            workers = 0
+        if force_serial:
+            workers = 1
 
-    faces = mosaic_faces_from_assets_parallel(base_dir, buffer_m, grid_size_m, workers)
-    if faces.empty:
-        log_to_gui("Mosaic produced no faces to publish.", "WARN")
-        update_progress(100)
+        faces = mosaic_faces_from_assets_parallel(base_dir, buffer_m, grid_size_m, workers)
+        if faces.empty:
+            status_detail = "No faces produced to publish."
+            log_to_gui(status_detail, "WARN")
+            if on_done:
+                try: on_done(False)
+                except Exception: pass
+            return
+
+        n = publish_mosaic_as_geocode(base_dir, faces)
+        status_detail = f"Mosaic published as geocode group '{BASIC_MOSAIC_GROUP}' with {n:,} objects."
+        log_to_gui(status_detail)
+        success = True
+        if on_done:
+            try: on_done(True)
+            except Exception: pass
+    except Exception as e:
+        log_to_gui(f"Step [Mosaic] FAILED: {e}", "ERROR")
         if on_done:
             try: on_done(False)
             except Exception: pass
-        return
-
-    n = publish_mosaic_as_geocode(base_dir, faces)
-    log_to_gui(f"Mosaic published as geocode group '{BASIC_MOSAIC_GROUP}' with {n:,} objects.")
-    update_progress(100)
-    if on_done:
-        try: on_done(True)
-        except Exception: pass
+    finally:
+        update_progress(100)
+        if success:
+            log_to_gui("Step [Mosaic] COMPLETED")
+        elif status_detail:
+            log_to_gui(f"Step [Mosaic] COMPLETED ({status_detail})")
 
 # -----------------------------------------------------------------------------
 # GUI helpers for H3 level suggestions
@@ -1419,6 +1457,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
 
         gen_btn.config(command=_generate_size_based, state=("normal" if levels else "disabled"))
         log_to_gui(f"Suggested H3 levels: {levels}" if levels else "No H3 levels for that size range.", "INFO")
+        log_to_gui("Step [Suggest H3] COMPLETED")
 
     sugg_btn = (ttk.Button(size_frame, text="Suggest H3", width=16, bootstyle=PRIMARY, command=_suggest_levels)
                 if ttk else tk.Button(size_frame, text="Suggest H3", width=16, command=_suggest_levels))
