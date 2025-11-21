@@ -1150,6 +1150,56 @@ def _process_chunks(chunks, max_workers, asset_data, geom_types, tmp_parts,
     return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
 
 # ----------------------------
+# Memory heuristics
+# ----------------------------
+def _estimate_worker_memory_gb(asset_df: gpd.GeoDataFrame,
+                               geocode_df: gpd.GeoDataFrame) -> tuple[float | None, float | None]:
+    """
+    Approximate memory footprint for one worker when dataframes are pickled
+    to child processes (Windows spawn). Returns (~GB per worker, ~GB of data).
+    """
+    def _estimate_gdf(gdf: gpd.GeoDataFrame) -> float:
+        if gdf is None or len(gdf) == 0:
+            return 0.0
+        try:
+            raw_bytes = float(gdf.memory_usage(deep=True).sum())
+        except Exception:
+            raw_bytes = 0.0
+        try:
+            geom = gdf.geometry
+        except Exception:
+            geom = None
+        if geom is not None:
+            try:
+                n = len(geom)
+                if n:
+                    sample = geom.head(min(n, 500))
+                    sizes = []
+                    for g in sample:
+                        try:
+                            sizes.append(len(g.wkb))
+                        except Exception:
+                            pass
+                    if sizes:
+                        avg = sum(sizes) / len(sizes)
+                        raw_bytes += avg * n  # scale sampled WKB sizes to full column
+            except Exception:
+                pass
+        return raw_bytes / (1024 ** 3)
+
+    try:
+        total_gb = _estimate_gdf(asset_df) + _estimate_gdf(geocode_df)
+    except Exception:
+        total_gb = 0.0
+
+    if total_gb <= 0:
+        return None, None
+
+    # Each worker holds full assets+geocodes; add overhead for spatial index/geometry copies
+    per_worker_gb = max(0.75, total_gb * 1.5)
+    return per_worker_gb, total_gb
+
+# ----------------------------
 # PROCESS: build tbl_stacked
 # ----------------------------
 def process_tbl_stacked(cfg: configparser.ConfigParser,
@@ -1187,6 +1237,15 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         if keep:
             assets = assets.merge(groups[keep], left_on='ref_asset_group', right_on='id', how='left')
 
+    est_worker_gb, est_data_gb = _estimate_worker_memory_gb(assets, geocodes)
+    effective_worker_gb = max(0.5, approx_gb_per_worker)
+    if est_worker_gb:
+        effective_worker_gb = max(effective_worker_gb, est_worker_gb)
+        try:
+            log_to_gui(log_widget, f"Memory estimate: data ~{est_data_gb:.2f} GB; using ~{effective_worker_gb:.2f} GB/worker cap.")
+        except Exception:
+            pass
+
     update_progress(20)
     _ = assets.sindex; _ = geocodes.sindex
 
@@ -1204,9 +1263,9 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
             vm = psutil.virtual_memory()
             avail_gb = vm.available / (1024**3)
             budget_gb = max(1.0, avail_gb * mem_target_frac)
-            allowed = max(1, int(budget_gb // max(0.5, approx_gb_per_worker)))
+            allowed = max(1, int(budget_gb // max(0.5, effective_worker_gb)))
             if allowed < max_workers:
-                log_to_gui(log_widget, f"Reducing workers from {max_workers} to {allowed} based on RAM (avail≈{avail_gb:.1f} GB, budget≈{budget_gb:.1f} GB, ~{approx_gb_per_worker:.1f} GB/worker).")
+                log_to_gui(log_widget, f"Reducing workers from {max_workers} to {allowed} based on RAM (avail~{avail_gb:.1f} GB, budget~{budget_gb:.1f} GB, ~{effective_worker_gb:.1f} GB/worker).")
                 max_workers = allowed
     except Exception:
         pass
