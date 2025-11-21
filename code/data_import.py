@@ -337,7 +337,8 @@ def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
     log_to_gui(f"Asset files found: {len(files)}")
 
     for i, fp in enumerate(files, start=1):
-        update_progress(5 + 55 * (i / max(1, len(files))))
+        # Scale progress toward 90%; final 100% is set by the caller after the step finishes.
+        update_progress(5 + 85 * (i / max(1, len(files))))
         filename = fp.stem
 
         if fp.suffix.lower() == ".gpkg":
@@ -492,7 +493,7 @@ def import_spatial_data_geocode(input_folder_geocode: Path, working_epsg: int):
     files.sort(key=_featcount, reverse=True)
 
     for i, fp in enumerate(files, start=1):
-        update_progress(5 + 55 * (i / max(1, len(files))))
+        update_progress(5 + 85 * (i / max(1, len(files))))
         if fp.suffix.lower() == ".gpkg":
             try:
                 for layer in fiona.listlayers(fp):
@@ -555,7 +556,7 @@ def import_spatial_data_lines(input_folder_lines: Path, working_epsg: int):
     log_to_gui(f"Line files found: {len(files)}")
 
     for i, fp in enumerate(files, start=1):
-        update_progress(5 + 55 * (i / max(1, len(files))))
+        update_progress(5 + 85 * (i / max(1, len(files))))
         if fp.suffix.lower() == ".gpkg":
             for layer in fiona.listlayers(fp):
                 gdf = read_and_reproject(fp, layer, working_epsg)
@@ -607,29 +608,47 @@ def finalize_lines(lines_original: gpd.GeoDataFrame,
 # Orchestration (thread targets)
 # ----------------------------
 def run_import_asset(input_folder_asset: Path, working_epsg: int):
-    log_to_gui("Importing assets…")
-    a_obj, a_grp = import_spatial_data_asset(input_folder_asset, working_epsg)
-    save_parquet("tbl_asset_object", a_obj)
-    save_parquet("tbl_asset_group",  a_grp)
-    update_progress(100)
-    log_to_gui("Assets import complete.")
+    update_progress(0)
+    log_to_gui("Step [Assets] STARTED")
+    try:
+        log_to_gui("Importing assets…")
+        a_obj, a_grp = import_spatial_data_asset(input_folder_asset, working_epsg)
+        save_parquet("tbl_asset_object", a_obj)
+        save_parquet("tbl_asset_group",  a_grp)
+        log_to_gui("Step [Assets] COMPLETED")
+    except Exception as e:
+        log_to_gui(f"Step [Assets] FAILED: {e}", level="ERROR")
+    finally:
+        update_progress(100)
 
 def run_import_geocode(input_folder_geocode: Path, working_epsg: int):
-    log_to_gui("Importing geocodes…")
-    g_grp, g_obj = import_spatial_data_geocode(input_folder_geocode, working_epsg)
-    save_parquet("tbl_geocode_group",  g_grp)
-    save_parquet("tbl_geocode_object", g_obj)
-    update_progress(100)
-    log_to_gui("Geocode import complete.")
+    update_progress(0)
+    log_to_gui("Step [Geocodes] STARTED")
+    try:
+        log_to_gui("Importing geocodes…")
+        g_grp, g_obj = import_spatial_data_geocode(input_folder_geocode, working_epsg)
+        save_parquet("tbl_geocode_group",  g_grp)
+        save_parquet("tbl_geocode_object", g_obj)
+        log_to_gui("Step [Geocodes] COMPLETED")
+    except Exception as e:
+        log_to_gui(f"Step [Geocodes] FAILED: {e}", level="ERROR")
+    finally:
+        update_progress(100)
 
 def run_import_lines(input_folder_lines: Path, working_epsg: int, segment_width: int, segment_length: int):
-    log_to_gui("Importing lines…")
-    l0, l1 = import_spatial_data_lines(input_folder_lines, working_epsg)
-    l0, l1 = finalize_lines(l0, l1, working_epsg, segment_width, segment_length)
-    save_parquet("tbl_lines_original", l0)
-    save_parquet("tbl_lines",          l1)
-    update_progress(100)
-    log_to_gui("Line import complete.")
+    update_progress(0)
+    log_to_gui("Step [Lines] STARTED")
+    try:
+        log_to_gui("Importing lines…")
+        l0, l1 = import_spatial_data_lines(input_folder_lines, working_epsg)
+        l0, l1 = finalize_lines(l0, l1, working_epsg, segment_width, segment_length)
+        save_parquet("tbl_lines_original", l0)
+        save_parquet("tbl_lines",          l1)
+        log_to_gui("Step [Lines] COMPLETED")
+    except Exception as e:
+        log_to_gui(f"Step [Lines] FAILED: {e}", level="ERROR")
+    finally:
+        update_progress(100)
 
 # ----------------------------
 # Entrypoint (GUI)
