@@ -636,11 +636,12 @@ def mbtiles_info(cat: str):
     }
 
 OVERLAY_LABELS = {
-    "sensitivity": "Sensitive areas",
-    "groupstotal": "Groups total",
-    "assetstotal": "Assets total",
+    "sensitivity": "Sensitivity (max)",
+    "importance_max": "Importance (max)",
     "importance_index": "Importance index",
     "sensitivity_index": "Sensitivity index",
+    "groupstotal": "Groups total",
+    "assetstotal": "Assets total",
 }
 
 GENERAL_METRIC_FIELDS = [
@@ -664,6 +665,9 @@ OVERLAY_INFO_FIELDS = {
     ],
     "assetstotal": [
         ("Assets overlap total", "assets_overlap_total", None, None),
+    ],
+    "importance_max": [
+        ("Importance (max)", "importance_max", None, None),
     ],
     "importance_index": [
         ("Importance index", "index_importance", None, None),
@@ -757,6 +761,8 @@ SEG_GDF      = to_epsg4326(load_parquet(SEGMENT_FILE), cfg)
 SEG_OUTLINE_GDF = to_epsg4326(load_parquet(SEGMENT_OUTLINE_FILE), cfg)
 LINES_GDF    = to_epsg4326(load_parquet(LINES_FILE), cfg)
 
+IMPORTANCE_MAX_AVAILABLE = False
+
 GEO_STR_TREE = None
 GEO_STR_LOOKUP: dict[int, int] = {}
 if not GDF.empty and "geometry" in GDF.columns and STRtree is not None:
@@ -773,6 +779,7 @@ if not GDF.empty and "geometry" in GDF.columns and STRtree is not None:
 GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.columns)
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 SEGMENT_OUTLINES_AVAILABLE = (not SEG_OUTLINE_GDF.empty) and ("geometry" in SEG_OUTLINE_GDF.columns)
+IMPORTANCE_MAX_AVAILABLE = (not GDF.empty) and ("importance_max" in GDF.columns)
 
 mb_cats   = list(MBTILES_INDEX.keys())
 vec_cats  = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
@@ -818,6 +825,7 @@ class Api:
             "segment_available": SEGMENTS_AVAILABLE,
             "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],
             "segment_line_names": LINE_NAMES,
+            "importance_max_available": IMPORTANCE_MAX_AVAILABLE,
             "importance_index_tiles_available": IMPORTANCE_INDEX_TILES_AVAILABLE,
             "sensitivity_index_tiles_available": SENSITIVITY_INDEX_TILES_AVAILABLE,
             "colors": COLS,
@@ -977,6 +985,23 @@ class Api:
                                     "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]},
                         "home_bounds": mb.get("bounds")}
             return {"ok": False, "error": "Importance index MBTiles not available."}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_importance_max_layer(self, geocode_category):
+        try:
+            if not IMPORTANCE_MAX_AVAILABLE:
+                return {"ok": False, "error": "Importance (max) data not available."}
+            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            if df.empty:
+                return {"ok": False, "error": "Importance (max) data not available for this geocode group."}
+            df = to_plot_crs(df, cfg)
+            # keep only needed fields
+            keep_cols = ["importance_max", "geometry"]
+            df = df[[c for c in keep_cols if c in df.columns]]
+            gj = gdf_to_geojson_min(df)
+            bnds = bounds_to_leaflet(df.total_bounds) if "geometry" in df.columns else [[0,0],[0,0]]
+            return {"ok": True, "geojson": gj, "range": {"min": float(df["importance_max"].min()), "max": float(df["importance_max"].max())}, "home_bounds": bnds}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -1184,9 +1209,9 @@ HTML_TEMPLATE = r"""
 
 <script>
 var MAP=null, BASE=null, BASE_SOURCES=null, CHART=null;
-var GEO_GROUP=null, SEG_GROUP=null, SEG_OUTLINE_GROUP=null, GROUPSTOTAL_GROUP=null, ASSETSTOTAL_GROUP=null, IMPORTANCE_INDEX_GROUP=null, SENSITIVITY_INDEX_GROUP=null;
+var GEO_GROUP=null, SEG_GROUP=null, SEG_OUTLINE_GROUP=null, GROUPSTOTAL_GROUP=null, ASSETSTOTAL_GROUP=null, IMPORTANCE_MAX_GROUP=null, IMPORTANCE_INDEX_GROUP=null, SENSITIVITY_INDEX_GROUP=null;
 var GEO_FOLDER=null;
-var LAYER=null, LAYER_SEG=null, LAYER_SEG_OUTLINE=null, LAYER_GROUPSTOTAL=null, LAYER_ASSETSTOTAL=null, LAYER_IMPORTANCE_INDEX=null, LAYER_SENSITIVITY_INDEX=null;
+var LAYER=null, LAYER_SEG=null, LAYER_SEG_OUTLINE=null, LAYER_GROUPSTOTAL=null, LAYER_ASSETSTOTAL=null, LAYER_IMPORTANCE_MAX=null, LAYER_IMPORTANCE_INDEX=null, LAYER_SENSITIVITY_INDEX=null;
 var TILE_HIGHLIGHT_LAYER=null;
 var HOME_BOUNDS=null, COLOR_MAP={}, DESC_MAP={};
 var FILL_ALPHA = 0.8;
@@ -1194,7 +1219,7 @@ var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
 var ZOOM_THRESHOLD_JS = 12;
 var HAS_SEGMENT_OUTLINES=false, SEG_OUTLINE_LOADED=false;
-var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, importance_index:null, sensitivity_index:null };
+var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, importance_max:null, importance_index:null, sensitivity_index:null };
 
 function logErr(m){ try{ window.pywebview.api.js_log(m); }catch(e){} }
 function setError(msg){
@@ -1218,11 +1243,12 @@ function currentGeocodeCategory(){
 
 function determineActiveOverlayKind(){
   var order=[
-    {id:'chkImportanceIndex', kind:'importance_index'},
+    {id:'chkGeoAreas',       kind:'sensitivity'},
+    {id:'chkImportanceMax',  kind:'importance_max'},
     {id:'chkSensitivityIndex', kind:'sensitivity_index'},
-    {id:'chkAssetsTotal', kind:'assetstotal'},
-    {id:'chkGroupsTotal', kind:'groupstotal'},
-    {id:'chkGeoAreas', kind:'sensitivity'}
+    {id:'chkImportanceIndex', kind:'importance_index'},
+    {id:'chkGroupsTotal',     kind:'groupstotal'},
+    {id:'chkAssetsTotal',     kind:'assetstotal'}
   ];
   for (var i=0;i<order.length;i++){
     var chk=document.getElementById(order[i].id);
@@ -1377,6 +1403,23 @@ function _hexToRgb(h){ h=h.replace('#',''); if(h.length===3){ h=h.split('').map(
 function _rgbToHex(r,g,b){ return '#'+[r,g,b].map(v=>{var s=v.toString(16); return s.length===1?'0'+s:s;}).join(''); }
 function _lerp(a,b,t){ return a+(b-a)*t; }
 function rampBlue(t){ var light=_hexToRgb('#dbeafe'), dark=_hexToRgb('#1e3a8a'); var r=Math.round(_lerp(light.r,dark.r,t)), g=Math.round(_lerp(light.g,dark.g,t)), b=Math.round(_lerp(light.b,dark.b,t)); return _rgbToHex(r,g,b); }
+function importanceColor(v, vmin, vmax){
+  // Discrete palette (Very Low..Very High) darkened per SLD reference.
+  var palette = {
+    1: '#7fbf7f',  // very low
+    2: '#5fbf5f',  // low
+    3: '#3e9f4e',  // moderate
+    4: '#1f7f3d',  // high
+    5: '#0f5f2c'   // very high
+  };
+  var rounded = Math.round(Number(v));
+  if (palette.hasOwnProperty(rounded)) return palette[rounded];
+  // fallback to linear dark green ramp if value outside 1-5
+  var t=_normalize(v, vmin, vmax);
+  var light=_hexToRgb('#7fbf7f'), dark=_hexToRgb('#0f5f2c');
+  var r=Math.round(_lerp(light.r,dark.r,t)), g=Math.round(_lerp(light.g,dark.g,t)), b=Math.round(_lerp(light.b,dark.b,t));
+  return _rgbToHex(r,g,b);
+}
 function _normalize(val, vmin, vmax){ if (vmax===vmin){ return 1.0; } var t=(Number(val)-vmin)/(vmax-vmin); if (!isFinite(t)) t=0; return Math.max(0, Math.min(1, t)); }
 
 /* loaders – unchanged */
@@ -1459,6 +1502,27 @@ function loadAssetstotalIntoGroup(cat, preserveView){
         }
       });
       ASSETSTOTAL_GROUP.addLayer(LAYER_ASSETSTOTAL);
+    }
+    if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
+  }).catch(function(err){ setError('API error: '+err); logErr(err); });
+}
+
+function loadImportanceMaxIntoGroup(cat, preserveView){
+  var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
+  window.pywebview.api.get_importance_max_layer(cat).then(function(res){
+    if (!res.ok){ setError('Failed to load importance (max): '+res.error); return; }
+    if (IMPORTANCE_MAX_GROUP) IMPORTANCE_MAX_GROUP.clearLayers();
+    if (res.geojson && res.geojson.features){
+      var vmin=(res.range&&isFinite(res.range.min))?res.range.min:1;
+      var vmax=(res.range&&isFinite(res.range.max))?res.range.max:5;
+      LAYER_IMPORTANCE_MAX=L.geoJSON(res.geojson, {
+        style:function(f){
+          var v=(f.properties && f.properties.importance_max!=null)?Number(f.properties.importance_max):null;
+          var col=importanceColor(v, vmin, vmax);
+          return {color:col, weight:0, opacity:0, fillOpacity:FILL_ALPHA, fillColor:col};
+        }
+      });
+      IMPORTANCE_MAX_GROUP.addLayer(LAYER_IMPORTANCE_MAX);
     }
     if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
@@ -1559,19 +1623,22 @@ function buildLayersControl(state){
   SEG_OUTLINE_GROUP=L.layerGroup();
   GEO_GROUP=L.layerGroup();
   GROUPSTOTAL_GROUP=L.layerGroup(); ASSETSTOTAL_GROUP=L.layerGroup();
-  IMPORTANCE_INDEX_GROUP=L.layerGroup(); SENSITIVITY_INDEX_GROUP=L.layerGroup();
+  IMPORTANCE_MAX_GROUP=L.layerGroup(); IMPORTANCE_INDEX_GROUP=L.layerGroup(); SENSITIVITY_INDEX_GROUP=L.layerGroup();
   GEO_FOLDER=L.layerGroup();
 
   var hasImportanceIndex = !!(state && state.importance_index_tiles_available);
   var hasSensitivityIndex = !!(state && state.sensitivity_index_tiles_available);
+  var hasImportanceMax = !!(state && state.importance_max_available);
+  var missingNotes = [];
 
   var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div>' +
                   '<div class="inlineChecks">' +
                   '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitive areas</label>' +
+                  '<label><input type="checkbox" id="chkImportanceMax"> Importance (max)</label>' +
+                  '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index</label>' +
+                  '<label><input type="checkbox" id="chkImportanceIndex"> Importance index</label>' +
                   '<label><input type="checkbox" id="chkGroupsTotal"> Groups total</label>' +
                   '<label><input type="checkbox" id="chkAssetsTotal"> Assets total</label>' +
-                  '<label><input type="checkbox" id="chkImportanceIndex"> Importance index</label>' +
-                  '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index</label>' +
                   '</div>';
 
   function disableCheckbox(chk){
@@ -1580,6 +1647,20 @@ function buildLayersControl(state){
     chk.disabled = true;
     var lbl = chk.closest && chk.closest('label');
     if (lbl) lbl.classList.add('disabled');
+  }
+
+  function flagMissing(chk, reason){
+    if (!chk) return;
+    disableCheckbox(chk);
+    var lbl = chk.closest && chk.closest('label');
+    if (lbl && !lbl.querySelector('.missing-note')){
+      var s=document.createElement('span');
+      s.className='missing-note';
+      s.style.color='#b91c1c';
+      s.textContent=' (missing)';
+      lbl.appendChild(s);
+    }
+    if (reason){ missingNotes.push(reason); }
   }
 
   var overlays={};
@@ -1636,26 +1717,41 @@ function buildLayersControl(state){
     var chkAreas=document.getElementById('chkGeoAreas');
     var chkGT   =document.getElementById('chkGroupsTotal');
     var chkAT   =document.getElementById('chkAssetsTotal');
+    var chkIM   =document.getElementById('chkImportanceMax');
     var chkII   =document.getElementById('chkImportanceIndex');
     var chkSI   =document.getElementById('chkSensitivityIndex');
 
-    if (!hasImportanceIndex && chkII){ disableCheckbox(chkII); }
-    if (!hasSensitivityIndex && chkSI){ disableCheckbox(chkSI); }
+    if (!hasImportanceMax && chkIM){ flagMissing(chkIM, "Importance (max) layer not available"); }
+    if (!hasImportanceIndex && chkII){ flagMissing(chkII, "Importance index layer not available"); }
+    if (!hasSensitivityIndex && chkSI){ flagMissing(chkSI, "Sensitivity index layer not available"); }
 
     if (chkAreas && chkAreas.checked){ ensureOnMap(GEO_GROUP); } else { ensureOffMap(GEO_GROUP); }
+    if (chkIM    && chkIM.checked && hasImportanceMax){ ensureOnMap(IMPORTANCE_MAX_GROUP); if (initialCat) loadImportanceMaxIntoGroup(initialCat, true); } else { ensureOffMap(IMPORTANCE_MAX_GROUP); }
+    if (chkSI    && chkSI.checked && hasSensitivityIndex){ ensureOnMap(SENSITIVITY_INDEX_GROUP); if (initialCat) loadSensitivityIndexIntoGroup(initialCat, true); } else { ensureOffMap(SENSITIVITY_INDEX_GROUP); }
+    if (chkII    && chkII.checked && hasImportanceIndex){ ensureOnMap(IMPORTANCE_INDEX_GROUP); if (initialCat) loadImportanceIndexIntoGroup(initialCat, true); } else { ensureOffMap(IMPORTANCE_INDEX_GROUP); }
     if (chkGT    && chkGT.checked)   { ensureOnMap(GROUPSTOTAL_GROUP); if (initialCat) loadGroupstotalIntoGroup(initialCat, true); } else { ensureOffMap(GROUPSTOTAL_GROUP); }
     if (chkAT    && chkAT.checked)   { ensureOnMap(ASSETSTOTAL_GROUP); if (initialCat) loadAssetstotalIntoGroup(initialCat, true); } else { ensureOffMap(ASSETSTOTAL_GROUP); }
-    if (chkII    && chkII.checked && hasImportanceIndex){ ensureOnMap(IMPORTANCE_INDEX_GROUP); if (initialCat) loadImportanceIndexIntoGroup(initialCat, true); } else { ensureOffMap(IMPORTANCE_INDEX_GROUP); }
-    if (chkSI    && chkSI.checked && hasSensitivityIndex){ ensureOnMap(SENSITIVITY_INDEX_GROUP); if (initialCat) loadSensitivityIndexIntoGroup(initialCat, true); } else { ensureOffMap(SENSITIVITY_INDEX_GROUP); }
+
+    if (missingNotes.length){
+      var info=document.getElementById('infoText');
+      if (info){
+        var p=document.createElement('p');
+        p.className='missing-note';
+        p.style.color='#b91c1c';
+        p.textContent='Missing layers: '+missingNotes.join(' | ');
+        info.insertBefore(p, info.firstChild);
+      }
+    }
 
     sel && sel.addEventListener('change', function(){
       var cat=sel.value||initialCat;
       setInitialGeocodeCategory(cat);
       loadGeocodeIntoGroup(cat, true);
-      if (chkGT  && chkGT.checked)  loadGroupstotalIntoGroup(cat, true);
-      if (chkAT  && chkAT.checked)  loadAssetstotalIntoGroup(cat, true);
+      if (chkIM && chkIM.checked && hasImportanceMax) loadImportanceMaxIntoGroup(cat, true);
       if (chkII && chkII.checked && hasImportanceIndex) loadImportanceIndexIntoGroup(cat, true);
       if (chkSI && chkSI.checked && hasSensitivityIndex) loadSensitivityIndexIntoGroup(cat, true);
+      if (chkGT  && chkGT.checked)  loadGroupstotalIntoGroup(cat, true);
+      if (chkAT  && chkAT.checked)  loadAssetstotalIntoGroup(cat, true);
     });
 
     var segsel=document.getElementById('segLineSel');
@@ -1677,6 +1773,13 @@ function buildLayersControl(state){
         var cat=currentGeocodeCategory();
         if (chkAreas.checked){ ensureOnMap(GEO_GROUP); if (cat) loadGeocodeIntoGroup(cat, true); }
         else { ensureOffMap(GEO_GROUP); GEO_GROUP.clearLayers(); }
+      });
+    }
+    if (chkIM){
+      chkIM.addEventListener('change', function(){
+        var cat=currentGeocodeCategory();
+        if (chkIM.checked){ ensureOnMap(IMPORTANCE_MAX_GROUP); if (cat) loadImportanceMaxIntoGroup(cat, true); }
+        else { ensureOffMap(IMPORTANCE_MAX_GROUP); IMPORTANCE_MAX_GROUP.clearLayers(); }
       });
     }
     if (chkGT){
@@ -1726,11 +1829,12 @@ function boot(){
   MAP.createPane('tileHighlightPane'); MAP.getPane('tileHighlightPane').style.zIndex=700;
   MAP.createPane('segmentsOutlinePane'); MAP.getPane('segmentsOutlinePane').style.zIndex=640;
   MAP.createPane('segmentsPane');        MAP.getPane('segmentsPane').style.zIndex=650;
-  MAP.createPane('importanceIndexPane');    MAP.getPane('importanceIndexPane').style.zIndex=590;
-  MAP.createPane('sensitivityIndexPane');   MAP.getPane('sensitivityIndexPane').style.zIndex=580;
-  MAP.createPane('groupsTotalPane');   MAP.getPane('groupsTotalPane').style.zIndex=560;
-  MAP.createPane('assetsTotalPane');   MAP.getPane('assetsTotalPane').style.zIndex=540;
-  MAP.createPane('geocodePane');       MAP.getPane('geocodePane').style.zIndex=550;
+  MAP.createPane('geocodePane');         MAP.getPane('geocodePane').style.zIndex=620;
+  MAP.createPane('importanceMaxPane');   MAP.getPane('importanceMaxPane').style.zIndex=610;
+  MAP.createPane('sensitivityIndexPane');MAP.getPane('sensitivityIndexPane').style.zIndex=600;
+  MAP.createPane('importanceIndexPane'); MAP.getPane('importanceIndexPane').style.zIndex=590;
+  MAP.createPane('groupsTotalPane');     MAP.getPane('groupsTotalPane').style.zIndex=580;
+  MAP.createPane('assetsTotalPane');     MAP.getPane('assetsTotalPane').style.zIndex=570;
 
   try {
     RENDERERS.segments    = L.canvas({ pane:'segmentsPane' });
