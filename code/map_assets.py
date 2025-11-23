@@ -1164,14 +1164,27 @@ function setLayerActive(layer, isActive, options){
       if (!MAP.hasLayer(layer)){
         layer.addTo(MAP);
       }
-      if (opts.fitBounds && layer.__meta && layer.__meta.bounds){
-        MAP.fitBounds(layer.__meta.bounds, { padding:[24,24] });
+      syncLayerStacking();
+      if (opts.fitBounds !== false){
+        const gid = layer.__meta && (layer.__meta.id || layer.__meta.ref_asset_group);
+        fitMapToActiveBounds(gid ? [String(gid)] : []);
       }
     }).catch(err => {
       console.error('Layer activation failed', err);
+      const gid = layer.__meta && (layer.__meta.id || layer.__meta.ref_asset_group);
+      if (gid){
+        ACTIVE_GROUPS.delete(String(gid));
+        refreshLayerCheckboxes();
+      }
     });
   } else if (MAP.hasLayer(layer)) {
     MAP.removeLayer(layer);
+    syncLayerStacking();
+    if (opts.fitBounds !== false){
+      fitMapToActiveBounds();
+    }
+  } else if (opts.fitBounds !== false) {
+    fitMapToActiveBounds();
   }
 }
 
@@ -1256,6 +1269,7 @@ function renderLayerTree(){
   }
   TREE_ROOTS.forEach(node => container.appendChild(renderTreeNode(node, 0)));
   ensureInitialActivation();
+  syncLayerStacking();
 }
 
 function renderTreeNode(node, depth){
@@ -1304,7 +1318,7 @@ function renderTreeNode(node, depth){
     checkbox.checked = ACTIVE_GROUPS.has(node.ref_asset_group);
     checkbox.addEventListener('click', evt => evt.stopPropagation());
     checkbox.addEventListener('change', () => {
-      const shouldFit = checkbox.checked && !MAP.hasLayer(LAYER_BY_GROUP.get(node.ref_asset_group));
+      const shouldFit = checkbox.checked;
       toggleGroupLayer(node.ref_asset_group, checkbox.checked, { fitBounds: shouldFit });
     });
     row.appendChild(checkbox);
@@ -1535,16 +1549,66 @@ function persistHierarchy(){
 function toggleGroupLayer(groupId, enable, options){
   const layer = LAYER_BY_GROUP.get(String(groupId));
   if (!layer) return;
-  setLayerActive(layer, enable, options);
   if (enable){
     ACTIVE_GROUPS.add(String(groupId));
   } else {
     ACTIVE_GROUPS.delete(String(groupId));
   }
+  setLayerActive(layer, enable, options);
 }
 
 function getActiveGroupIds(){
   return Array.from(ACTIVE_GROUPS.values());
+}
+
+function collectBoundsForGroups(groupIds){
+  let minLat = 90;
+  let minLng = 180;
+  let maxLat = -90;
+  let maxLng = -180;
+  let count = 0;
+  (groupIds || []).forEach(id => {
+    const layer = LAYER_BY_GROUP.get(String(id));
+    if (!layer || !layer.__meta || !Array.isArray(layer.__meta.bounds)){
+      return;
+    }
+    const [sw, ne] = layer.__meta.bounds;
+    if (!Array.isArray(sw) || !Array.isArray(ne)){
+      return;
+    }
+    const [south, west] = sw;
+    const [north, east] = ne;
+    if ([south, west, north, east].some(v => typeof v !== 'number' || Number.isNaN(v))){
+      return;
+    }
+    minLat = Math.min(minLat, south);
+    minLng = Math.min(minLng, west);
+    maxLat = Math.max(maxLat, north);
+    maxLng = Math.max(maxLng, east);
+    count += 1;
+  });
+  if (!count){
+    return null;
+  }
+  return [[minLat, minLng], [maxLat, maxLng]];
+}
+
+function fitMapToActiveBounds(extraIds){
+  if (!MAP){
+    return;
+  }
+  const ids = new Set(ACTIVE_GROUPS);
+  (extraIds || []).forEach(id => {
+    if (id !== undefined && id !== null){
+      ids.add(String(id));
+    }
+  });
+  const bounds = collectBoundsForGroups(Array.from(ids));
+  if (bounds){
+    MAP.fitBounds(bounds, { padding:[24,24] });
+  } else if (HOME_BOUNDS){
+    MAP.fitBounds(HOME_BOUNDS, { padding:[24,24] });
+  }
 }
 
 function refreshLayerCheckboxes(){
@@ -1561,6 +1625,14 @@ function setAllLayersActive(enable){
   const ids = (ASSET_LAYERS || []).map(entry => String(entry.id));
   ids.forEach(gid => toggleGroupLayer(gid, enable, { fitBounds:false }));
   refreshLayerCheckboxes();
+  syncLayerStacking();
+  if (enable){
+    fitMapToActiveBounds(ids);
+  } else if (HOME_BOUNDS){
+    MAP.fitBounds(HOME_BOUNDS, { padding:[24,24] });
+  } else {
+    fitMapToActiveBounds();
+  }
 }
 
 function handleSelectAllLayers(){
@@ -1690,6 +1762,34 @@ function ensureInitialActivation(){
     const checkbox = document.querySelector(`[data-node-id="${first.node_id}"] input[type=checkbox]`);
     if (checkbox){
       checkbox.checked = true;
+    }
+  }
+}
+
+function getGroupDisplayOrder(){
+  const order = [];
+  const walk = nodes => {
+    nodes.forEach(node => {
+      if (node.node_type === 'group' && node.ref_asset_group){
+        order.push(String(node.ref_asset_group));
+      }
+      if (node.children && node.children.length){
+        walk(node.children);
+      }
+    });
+  };
+  walk(TREE_ROOTS || []);
+  return order;
+}
+
+function syncLayerStacking(){
+  if (!MAP) return;
+  const order = getGroupDisplayOrder();
+  for (let idx = order.length - 1; idx >= 0; idx -= 1){
+    const gid = order[idx];
+    const layer = LAYER_BY_GROUP.get(gid);
+    if (layer && MAP.hasLayer(layer) && typeof layer.bringToFront === 'function'){
+      layer.bringToFront();
     }
   }
 }
