@@ -14,7 +14,7 @@ except Exception:
     except Exception:
         pass
 
-import os, argparse, configparser, datetime, tempfile
+import os, argparse, configparser, datetime, tempfile, json
 from pathlib import Path
 import pandas as pd
 
@@ -198,11 +198,16 @@ def write_to_log(base_dir: Path, message: str):
         pass
 
 # ------------------------ Data I/O ------------------------
+PURPOSE_COLUMN = "purpose_description"
+STYLING_COLUMN = "styling"
+
 REQUIRED_COLUMNS = [
     "id",
     "name_gis_assetgroup",
     "name_original",
     "title_fromuser",
+    PURPOSE_COLUMN,
+    STYLING_COLUMN,
     "importance", "susceptibility", "sensitivity",
     "sensitivity_code", "sensitivity_description",
     "total_asset_objects",
@@ -241,7 +246,16 @@ def load_asset_group_df(base_dir: Path) -> pd.DataFrame:
             df[col] = pd.NA
 
     # Coerce types for key presentation columns
-    for col in ["name_original", "title_fromuser", "name_gis_assetgroup", "sensitivity_code", "sensitivity_description"]:
+    str_cols = [
+        "name_original",
+        "title_fromuser",
+        "name_gis_assetgroup",
+        "sensitivity_code",
+        "sensitivity_description",
+        PURPOSE_COLUMN,
+        STYLING_COLUMN,
+    ]
+    for col in str_cols:
         if col in df.columns:
             df[col] = df[col].astype("string").fillna("")
 
@@ -275,6 +289,8 @@ class AssetGroupEditor:
         self.var_name_original = tk.StringVar(value="")
         self.var_title_fromuser = tk.StringVar(value="")
         self.var_counter = tk.StringVar(value="0 / 0")
+        self.txt_purpose = None
+        self.txt_style = None
 
         self.root.title("Edit asset groups (GeoParquet)")
         try:
@@ -299,27 +315,14 @@ class AssetGroupEditor:
     def _build_ui(self):
         pad = dict(padx=10, pady=8)
 
-        # Diagnostics
-        diag_txt = (
-            f"BASE_DIR: {self.base_dir}\n"
-            f"GeoParquet: {asset_group_parquet(self.base_dir)}\n"
-            f"Exists: {asset_group_parquet(self.base_dir).exists()}"
-        )
-        top = (tb.LabelFrame(self.root, text="Diagnostics", bootstyle=INFO)
-               if tb else ttk_std.LabelFrame(self.root, text="Diagnostics"))
-        top.grid(row=0, column=0, columnspan=4, sticky="ew", **pad)
-        diag = scrolledtext.ScrolledText(top, height=4)
-        diag.insert(tk.END, diag_txt)
-        diag.configure(state="disabled")
-        diag.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
-
         about = (tb.LabelFrame(self.root, text="About", bootstyle=INFO)
                  if tb else ttk_std.LabelFrame(self.root, text="About"))
-        about.grid(row=1, column=0, columnspan=4, sticky="ew", **pad)
+        about.grid(row=0, column=0, columnspan=4, sticky="ew", **pad)
         tk.Label(
             about,
             text=("Give asset groups nicer display names here.\n"
-                  "‘GIS name’ is the internal, system-generated name and cannot be edited."),
+                  "‘GIS name’ is the internal, system-generated name and cannot be edited.\n\n"
+                  "Detailed titles and purpose descriptions help the AI styling feature choose appropriate cartographic palettes."),
             justify="left", wraplength=640
         ).pack(anchor="w", padx=10, pady=8)
 
@@ -336,9 +339,17 @@ class AssetGroupEditor:
         entry_cls(self.root, textvariable=self.var_title_fromuser, width=62)\
             .grid(row=4, column=1, columnspan=3, sticky="ew", **pad)
 
-        tk.Label(self.root, textvariable=self.var_counter).grid(row=5, column=0, sticky="w", **pad)
+        tk.Label(self.root, text="Layer purpose / notes").grid(row=5, column=0, sticky="nw", **pad)
+        self.txt_purpose = scrolledtext.ScrolledText(self.root, height=6, wrap="word")
+        self.txt_purpose.grid(row=5, column=1, columnspan=3, sticky="ew", **pad)
 
-        nav = tk.Frame(self.root); nav.grid(row=5, column=1, columnspan=3, sticky="e", **pad)
+        tk.Label(self.root, text="Styling JSON (optional)").grid(row=6, column=0, sticky="nw", **pad)
+        self.txt_style = scrolledtext.ScrolledText(self.root, height=5, wrap="word")
+        self.txt_style.grid(row=6, column=1, columnspan=3, sticky="ew", **pad)
+
+        tk.Label(self.root, textvariable=self.var_counter).grid(row=7, column=0, sticky="w", **pad)
+
+        nav = tk.Frame(self.root); nav.grid(row=7, column=1, columnspan=3, sticky="e", **pad)
         def _btn(widget, text, style, cmd):
             if tb: return tb.Button(widget, text=text, bootstyle=style, command=cmd)
             return ttk_std.Button(widget, text=text, command=cmd)
@@ -357,16 +368,39 @@ class AssetGroupEditor:
         self.idx = max(0, min(self.idx, max(0, len(self.df) - 1)))
         self._update_counter()
         if len(self.df) == 0:
-            self.var_name_gis.set(""); self.var_name_original.set(""); self.var_title_fromuser.set(""); return
+            self.var_name_gis.set(""); self.var_name_original.set(""); self.var_title_fromuser.set("")
+            if self.txt_purpose:
+                self.txt_purpose.delete("1.0", tk.END)
+            if self.txt_style:
+                self.txt_style.delete("1.0", tk.END)
+            return
         row = self.df.iloc[self.idx]
         self.var_name_gis.set(str(row.get("name_gis_assetgroup", "") or ""))
         self.var_name_original.set(str(row.get("name_original", "") or ""))
         self.var_title_fromuser.set(str(row.get("title_fromuser", "") or ""))
+        if self.txt_purpose:
+            self.txt_purpose.delete("1.0", tk.END)
+            self.txt_purpose.insert(tk.END, str(row.get(PURPOSE_COLUMN, "") or ""))
+        if self.txt_style:
+            self.txt_style.delete("1.0", tk.END)
+            value = row.get(STYLING_COLUMN, "")
+            if isinstance(value, str):
+                text_value = value
+            else:
+                try:
+                    text_value = json.dumps(value, ensure_ascii=False)
+                except Exception:
+                    text_value = ""
+            self.txt_style.insert(tk.END, text_value)
 
     def _write_back_to_df(self):
         if len(self.df) == 0: return
         self.df.at[self.idx, "name_original"] = (self.var_name_original.get() or "").strip()
         self.df.at[self.idx, "title_fromuser"] = (self.var_title_fromuser.get() or "").strip()
+        if self.txt_purpose:
+            self.df.at[self.idx, PURPOSE_COLUMN] = (self.txt_purpose.get("1.0", tk.END).strip())
+        if self.txt_style:
+            self.df.at[self.idx, STYLING_COLUMN] = (self.txt_style.get("1.0", tk.END).strip())
 
     def _save_current(self) -> bool:
         try:
