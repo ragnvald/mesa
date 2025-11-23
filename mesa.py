@@ -439,7 +439,7 @@ def get_status(geoparquet_dir):
         atlas_count = read_table_and_count('tbl_atlas')
         append_status("+" if atlas_count is not None else "/",
                       f"Atlas pages: {atlas_count}" if atlas_count is not None else
-                      "Please create atlas.",
+                      "Please create map tile.",
                       "https://github.com/ragnvald/mesa/wiki/5-Definitions#atlas")
 
         segments_flat_count = read_table_and_count('tbl_segment_flat')
@@ -645,6 +645,19 @@ def open_maps_overview():
             subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
     except Exception as e:
         log_to_logfile(f"Failed to open maps overview: {e}")
+
+
+def open_asset_layers_viewer():
+    python_script, exe_file = get_script_paths("map_assets")
+    try:
+        if getattr(sys, "frozen", False):
+            log_to_logfile(f"Launching map_assets exe: {exe_file}")
+            subprocess.Popen([exe_file], cwd=PROJECT_BASE, env=_sub_env())
+        else:
+            python_exe = sys.executable or "python"
+            subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
+    except Exception as e:
+        log_to_logfile(f"Failed to open map_assets viewer: {e}")
 
 def open_present_files():
     python_script, exe_file = get_script_paths("data_report")
@@ -1004,17 +1017,19 @@ if __name__ == "__main__":
     operations = [
         ("Import", lambda: import_assets(gpkg_file),
          "Opens the data importer. Start here when preparing a new dataset.", None),
-        ("Create geocodes", geocodes_grids,
+        ("Grids", geocodes_grids,
          "Creates or refreshes geocode grids (hexagons, tiles) that are used in the analysis.", None),
-        ("Define atlas", make_atlas,
-         "Generates atlas polygons for map visualisations.", None),
+        ("Define map tiles", make_atlas,
+         "Generates map tiles polygons for detailed map presentations (atlas).", None),
         ("Processing setup", edit_processing_setup,
          "Adjust processing parameters before running analysis.", None),
         ("Process areas", lambda: process_data(gpkg_file),
          "Runs the core processing pipeline to produce the outputs.", None),
         ("Process lines", process_lines,
          "Processes transport, river or utility lines into analysis segments.", None),
-        ("Show maps", open_maps_overview,
+        ("Asset maps", open_asset_layers_viewer,
+         "Opens the asset-layer viewer with AI styling controls for faster presentation tweaks.", None),
+        ("Analysis maps", open_maps_overview,
          "Opens the interactive map viewer with current background layers and assets.", None),
         ("Analysis setup", open_data_analysis_setup,
          "Launches the area analysis tool used to define study areas.", None),
@@ -1070,8 +1085,8 @@ if __name__ == "__main__":
          "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
         ("Edit lines", edit_lines,
          "Remember to import lines before attempting to edit them. Adjust buffer/segment parameters per line as needed."),
-        ("Edit atlas", edit_atlas,
-         "Remember to import or create atlases before attempting to edit them. Atlases are polygons highlighted in the QGIS project."),
+        ("Edit map tiles", edit_atlas,
+         "Remember to import or create map tiles before attempting to edit them. Map tiles are polygons highlighted in the QGIS project."),
     ]
 
     for row, (label, command, description) in enumerate(settings_actions):
