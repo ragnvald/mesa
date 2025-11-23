@@ -7,13 +7,17 @@ from __future__ import annotations
 import base64
 import configparser
 import io
+import json
 import locale
 import os
 import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 import geopandas as gpd
 import pandas as pd
@@ -85,12 +89,35 @@ APP_DIR = base_dir()
 os.chdir(APP_DIR)
 
 CONFIG_FILE = APP_DIR / "config.ini"
+FALLBACK_CONFIG_FILE: Optional[Path] = None
+if APP_DIR.name.lower() == "code":
+  parent_config = APP_DIR.parent / "config.ini"
+  if parent_config.exists():
+    FALLBACK_CONFIG_FILE = parent_config
 OUTPUT_DIR = APP_DIR / "output"
 PARQUET_DIR = OUTPUT_DIR / "geoparquet"
 ASSET_OBJECT_FILE = PARQUET_DIR / "tbl_asset_object.parquet"
 ASSET_GROUP_FILE = PARQUET_DIR / "tbl_asset_group.parquet"
 ASSET_HIERARCHY_FILE = PARQUET_DIR / "tbl_asset_hierarchy.parquet"
 LOG_FILE = SCRIPT_DIR / "log.txt"
+STYLE_QUERY_FILE = SCRIPT_DIR / "style_query.txt"
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+
+STYLE_VALUE_LIMITS = {
+  "fill_opacity": (0.1, 0.9),
+  "border_weight": (0.3, 3.0),
+}
+
+GROUP_METADATA: Dict[str, Dict[str, Any]] = {}
+
+DEFAULT_STYLE_PAYLOAD: Dict[str, Any] = {
+    "fill_color": "#9fa4b0",
+    "border_color": "#2c3342",
+    "fill_opacity": 0.65,
+    "border_weight": 1.2,
+}
 
 
 def log_event(message: str) -> None:
@@ -184,8 +211,276 @@ def gdf_to_geojson_min(gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
     return {"type": "FeatureCollection", "features": features}
 
 
+def _normalize_hex_color(value: Any) -> Optional[str]:
+  if value is None:
+    return None
+  text = str(value).strip()
+  if not text:
+    return None
+  if text.startswith("#"):
+    text = text[1:]
+  if len(text) != 6:
+    return None
+  if not all(ch in "0123456789abcdefABCDEF" for ch in text):
+    return None
+  return f"#{text.upper()}"
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+  if value is None:
+    return None
+  try:
+    return float(value)
+  except (TypeError, ValueError):
+    return None
+
+
+def _sanitize_style_payload(payload: Any) -> Optional[Dict[str, Any]]:
+  if payload is None:
+    return None
+  if isinstance(payload, str):
+    text = payload.strip()
+    if not text:
+      return None
+    try:
+      payload = json.loads(text)
+    except Exception:
+      return None
+  if not isinstance(payload, dict):
+    return None
+
+  result: Dict[str, Any] = {}
+  fill_color = _normalize_hex_color(payload.get("fill_color") or payload.get("fill") or payload.get("color"))
+  border_color = _normalize_hex_color(payload.get("border_color") or payload.get("stroke_color"))
+  if fill_color:
+    result["fill_color"] = fill_color
+  if border_color:
+    result["border_color"] = border_color
+
+  fill_opacity = _coerce_float(payload.get("fill_opacity") or payload.get("opacity"))
+  if fill_opacity is not None:
+    low, high = STYLE_VALUE_LIMITS["fill_opacity"]
+    result["fill_opacity"] = max(low, min(high, fill_opacity))
+
+  border_weight = _coerce_float(payload.get("border_weight") or payload.get("stroke_weight") or payload.get("weight"))
+  if border_weight is not None:
+    low, high = STYLE_VALUE_LIMITS["border_weight"]
+    result["border_weight"] = max(low, min(high, border_weight))
+
+  dash_array = payload.get("dash_array") or payload.get("dashArray")
+  if isinstance(dash_array, str):
+    result["dash_array"] = dash_array.strip() or None
+
+  return result or None
+
+
+def _default_style_payload() -> Dict[str, Any]:
+  return dict(DEFAULT_STYLE_PAYLOAD)
+
+
+def _style_to_json(style: Optional[Dict[str, Any]]) -> Optional[str]:
+  if not style:
+    return None
+  payload = {k: v for k, v in style.items() if v not in (None, "")}
+  if not payload:
+    return None
+  return json.dumps(payload, ensure_ascii=False)
+
+
+def _set_group_style(group_id: str, style: Optional[Dict[str, Any]]) -> None:
+  normalized = _sanitize_style_payload(style) if style else None
+  meta = GROUP_METADATA.setdefault(group_id, {"title": f"Group {group_id}", "purpose": "", "styling": None})
+  meta["styling"] = normalized
+  for record in ASSET_LAYERS:
+    if str(record.get("id")) == group_id:
+      if normalized is None:
+        record.pop("styling", None)
+      else:
+        record["styling"] = normalized
+      break
+
+
+def _update_group_styles_on_disk(style_updates: Dict[str, Optional[Dict[str, Any]]]) -> bool:
+  if not style_updates:
+    return False
+  if not ASSET_GROUP_FILE.exists():
+    log_event("Asset group parquet missing; cannot update styling")
+    return False
+  try:
+    df = pd.read_parquet(ASSET_GROUP_FILE)
+  except Exception as exc:
+    log_event(f"Failed to read asset group parquet for styling update: {exc}")
+    return False
+  if "styling" not in df.columns:
+    df["styling"] = pd.NA
+  id_strings = df["id"].astype(str)
+  changed = False
+  for group_id, style in style_updates.items():
+    mask = id_strings == group_id
+    if not mask.any():
+      continue
+    serialized = _style_to_json(style)
+    df.loc[mask, "styling"] = serialized if serialized is not None else pd.NA
+    changed = True
+  if not changed:
+    return False
+  try:
+    df.to_parquet(ASSET_GROUP_FILE, index=False)
+    return True
+  except Exception as exc:
+    log_event(f"Failed to persist styling updates: {exc}")
+    return False
+
+
+def _build_style_prompt(layers: List[Dict[str, str]]) -> str:
+  header = (
+    "You are an assistant that designs coordinated map styles for a dark basemap. "
+    "Use cartographic cues so each thematic layer is recognisable: forest/woodland/vegetation layers should use deep greens with subtle dark speckles or dashed outlines; "
+    "wetlands, rivers, lagoons, and marine habitats should use bluish palettes with pale fill and darker strokes or stippling; urban/infrastructure layers can use warmer ambers/oranges; protected areas can use muted magentas/purples. "
+    "All layers must remain highly distinguishable when stacked, readable for colorblind users, and pass WCAG contrast guidelines against #0f172a. "
+    "Return only JSON matching {\"layers\":[{\"group_id\":\"string\",\"fill_color\":\"#RRGGBB\",\"border_color\":\"#RRGGBB\",\"fill_opacity\":0.15-0.9,\"border_weight\":0.4-2.5,\"dash_array\":\"pattern optional\"}]}. "
+    "Provide entries only for the layers listed below."
+  )
+  lines = [header, "", "Layers:"]
+  for layer in layers:
+    purpose = layer.get("purpose") or "No description provided."
+    lines.append(f"- id={layer['id']} title={layer['title']} purpose={purpose}")
+  lines.append("")
+  lines.append("Output JSON only with the schema above.")
+  return "\n".join(lines)
+
+
+def _write_style_query(prompt: str) -> None:
+  try:
+    STYLE_QUERY_FILE.write_text(prompt, encoding="utf-8")
+  except Exception as exc:
+    log_event(f"Failed to write style query file: {exc}")
+
+
+def _resolve_openai_key() -> Optional[str]:
+  if "DEFAULT" in cfg and cfg["DEFAULT"].get("openai_api_key"):
+    return cfg["DEFAULT"].get("openai_api_key")
+  if FALLBACK_CFG and "DEFAULT" in FALLBACK_CFG and FALLBACK_CFG["DEFAULT"].get("openai_api_key"):
+    return FALLBACK_CFG["DEFAULT"].get("openai_api_key")
+  return os.environ.get("OPENAI_API_KEY")
+
+
+def _resolve_openai_model() -> str:
+  if "DEFAULT" in cfg and cfg["DEFAULT"].get("openai_style_model"):
+    return cfg["DEFAULT"].get("openai_style_model")  # type: ignore[return-value]
+  if FALLBACK_CFG and "DEFAULT" in FALLBACK_CFG and FALLBACK_CFG["DEFAULT"].get("openai_style_model"):
+    return FALLBACK_CFG["DEFAULT"].get("openai_style_model")  # type: ignore[return-value]
+  return os.environ.get("OPENAI_STYLE_MODEL", DEFAULT_OPENAI_MODEL)
+
+
+def _call_openai(prompt: str, api_key: str, model: str) -> Optional[str]:
+  payload = json.dumps(
+    {
+      "model": model,
+      "temperature": 0.2,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Design distinctive, readable map styles. Respond with strict JSON only.",
+        },
+        {"role": "user", "content": prompt},
+      ],
+    }
+  ).encode("utf-8")
+  request = urlrequest.Request(
+    OPENAI_ENDPOINT,
+    data=payload,
+    headers={
+      "Content-Type": "application/json",
+      "Authorization": f"Bearer {api_key}",
+    },
+    method="POST",
+  )
+  try:
+    with urlrequest.urlopen(request, timeout=90) as response:
+      raw = response.read().decode("utf-8")
+  except urlerror.HTTPError as exc:
+    detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else str(exc)
+    log_event(f"OpenAI HTTP error: {detail}")
+    return None
+  except Exception as exc:
+    log_event(f"OpenAI request failed: {exc}")
+    return None
+  try:
+    parsed = json.loads(raw)
+  except Exception as exc:
+    log_event(f"Failed to parse OpenAI envelope: {exc}")
+    return None
+  choices = parsed.get("choices") or []
+  if not choices:
+    return None
+  message = choices[0].get("message") or {}
+  return message.get("content") if isinstance(message, dict) else None
+
+
+def _extract_json_blob(text: str) -> Optional[str]:
+  snippet = text.strip()
+  if not snippet:
+    return None
+  if snippet.startswith("```"):
+    parts = snippet.split("```")
+    snippet = parts[1] if len(parts) > 1 else snippet
+  start = snippet.find("{")
+  end = snippet.rfind("}")
+  if start == -1 or end == -1 or end <= start:
+    return None
+  return snippet[start : end + 1]
+
+
+def _parse_style_response(content: Optional[str]) -> Dict[str, Dict[str, Any]]:
+  if not content:
+    return {}
+  blob = _extract_json_blob(content) or content
+  try:
+    data = json.loads(blob)
+  except Exception:
+    return {}
+  layers = data.get("layers") if isinstance(data, dict) else None
+  if not isinstance(layers, list):
+    return {}
+  result: Dict[str, Dict[str, Any]] = {}
+  for entry in layers:
+    if not isinstance(entry, dict):
+      continue
+    group_id = entry.get("group_id") or entry.get("id")
+    if not group_id:
+      continue
+    sanitized = _sanitize_style_payload(entry)
+    if sanitized:
+      result[str(group_id)] = sanitized
+  return result
+
+
+def _collect_prompt_layers(group_ids: List[str]) -> List[Dict[str, str]]:
+  layers: List[Dict[str, str]] = []
+  for gid in group_ids:
+    meta = GROUP_METADATA.get(gid)
+    if not meta:
+      fallback = next((rec for rec in ASSET_LAYERS if str(rec.get("id")) == gid), None)
+      title = (fallback or {}).get("name") or f"Group {gid}"
+      meta = {"title": str(title), "purpose": "", "styling": None}
+      GROUP_METADATA[gid] = meta
+    title = meta.get("title") or f"Group {gid}"
+    purpose = meta.get("purpose") or ""
+    layers.append({"id": gid, "title": str(title), "purpose": str(purpose)})
+  return layers
+
+
+def _apply_style_updates(updates: Dict[str, Optional[Dict[str, Any]]]) -> None:
+  if not updates:
+    return
+  for gid, style in updates.items():
+    _set_group_style(gid, style)
+  _update_group_styles_on_disk(updates)
+
+
 def _load_asset_layers(
-    cfg: configparser.ConfigParser,
+  cfg: configparser.ConfigParser,
 ) -> Tuple[List[Dict[str, Any]], List[List[float]] | None, Dict[str, Dict[str, Any]]]:
     log_event("Loading asset layers from GeoParquet")
     if not ASSET_OBJECT_FILE.exists():
@@ -211,17 +506,36 @@ def _load_asset_layers(
         return [], None, {}
 
     group_names: Dict[str, str] = {}
+    global GROUP_METADATA
+    GROUP_METADATA = {}
     if ASSET_GROUP_FILE.exists():
-        try:
-            groups_df = pd.read_parquet(ASSET_GROUP_FILE)
-            if not groups_df.empty and "id" in groups_df.columns:
-                for _, row in groups_df.iterrows():
-                    key = str(row.get("id"))
-                    title = (row.get("title_fromuser") or row.get("name_user") or row.get("name_gis") or key)
-                    group_names[key] = str(title)
-        except Exception as exc:
-            sys.stderr.write(f"Failed to read asset groups (continuing without names): {exc}\n")
-            log_event(f"Failed to read asset group names: {exc}")
+      try:
+        groups_df = pd.read_parquet(ASSET_GROUP_FILE)
+        if not groups_df.empty and "id" in groups_df.columns:
+          for _, row in groups_df.iterrows():
+            key_raw = row.get("id")
+            if key_raw in (None, "", "None"):
+              continue
+            key = str(key_raw)
+            title = (
+              row.get("title_fromuser")
+              or row.get("name_user")
+              or row.get("name_gis")
+              or f"Group {key}"
+            )
+            purpose_raw = row.get("purpose_description") or row.get("description") or ""
+            purpose = str(purpose_raw).strip()
+            styling_payload = _sanitize_style_payload(row.get("styling"))
+            meta = {
+              "title": str(title),
+              "purpose": purpose,
+              "styling": styling_payload,
+            }
+            GROUP_METADATA[key] = meta
+            group_names[key] = meta["title"]
+      except Exception as exc:
+        sys.stderr.write(f"Failed to read asset groups (continuing without names): {exc}\n")
+        log_event(f"Failed to read asset group names: {exc}")
 
     if "ref_asset_group" not in asset_objects.columns:
         sys.stderr.write("Column 'ref_asset_group' missing in asset objects; cannot build per-group layers.\n")
@@ -235,7 +549,11 @@ def _load_asset_layers(
         if subset.empty:
             continue
         gid_key = str(group_id)
-        display_name = group_names.get(gid_key) or f"Group {gid_key}"
+        meta = GROUP_METADATA.setdefault(
+          gid_key,
+          {"title": f"Group {gid_key}", "purpose": "", "styling": None},
+        )
+        display_name = meta.get("title") or group_names.get(gid_key) or f"Group {gid_key}"
         geojson = gdf_to_geojson_min(subset)
         records.append(
             {
@@ -243,22 +561,14 @@ def _load_asset_layers(
                 "name": display_name,
                 "count": int(len(subset)),
                 "bounds": bounds_to_leaflet(tuple(subset.total_bounds)),
+            "styling": meta.get("styling"),
+            "purpose": meta.get("purpose"),
             }
         )
         geojson_by_group[gid_key] = geojson
 
     records.sort(key=lambda r: r["name"].lower())
     home_bounds = bounds_to_leaflet(tuple(asset_objects.total_bounds))
-    max_layers = 10
-    if len(records) > max_layers:
-        log_event(f"Limiting asset layers to first {max_layers} of {len(records)} groups for testing")
-        keep_ids = {rec["id"] for rec in records[:max_layers]}
-        records = records[:max_layers]
-        geojson_by_group = {gid: geojson_by_group[gid] for gid in keep_ids if gid in geojson_by_group}
-        filtered = asset_objects[asset_objects["ref_asset_group"].astype(str).isin(keep_ids)]
-        if not filtered.empty:
-            home_bounds = bounds_to_leaflet(tuple(filtered.total_bounds))
-
     log_event(f"Prepared {len(records)} asset layers (ids={[rec['id'] for rec in records]})")
     return records, home_bounds, geojson_by_group
 
@@ -398,6 +708,7 @@ def _sanitize_hierarchy_payload(payload: Any) -> List[Dict[str, Any]]:
 
 
 cfg = read_config(CONFIG_FILE)
+FALLBACK_CFG = read_config(FALLBACK_CONFIG_FILE) if FALLBACK_CONFIG_FILE else None
 COLOR_MAP = get_color_mapping(cfg)
 ASSET_LAYERS, HOME_BOUNDS, ASSET_GEOJSON = _load_asset_layers(cfg)
 ASSET_HIERARCHY = _ensure_group_hierarchy(ASSET_LAYERS, _read_hierarchy())
@@ -410,7 +721,8 @@ class Api:
             "asset_layers": ASSET_LAYERS,
             "home_bounds": HOME_BOUNDS,
             "colors": COLOR_MAP,
-          "hierarchy": ASSET_HIERARCHY,
+            "hierarchy": ASSET_HIERARCHY,
+            "style_query_file": str(STYLE_QUERY_FILE),
         }
 
     def get_asset_layer(self, group_id: str | int | None = None) -> Dict[str, Any]:
@@ -465,6 +777,70 @@ class Api:
             log_event(f"Failed to save asset hierarchy: {exc}")
             return {"ok": False, "error": str(exc)}
 
+    def generate_ai_styles(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+      group_ids_raw = (payload or {}).get("group_ids", [])
+      if not isinstance(group_ids_raw, list):
+        group_ids_raw = [group_ids_raw]
+      requested = []
+      seen: set[str] = set()
+      valid_ids = {str(rec.get("id")) for rec in ASSET_LAYERS}
+      for raw in group_ids_raw:
+        gid = str(raw)
+        if gid and gid in valid_ids and gid not in seen:
+          requested.append(gid)
+          seen.add(gid)
+      if not requested:
+        return {"ok": False, "error": "No active layers supplied"}
+      api_key = _resolve_openai_key()
+      if not api_key:
+        return {"ok": False, "error": "OpenAI API key missing"}
+      model = _resolve_openai_model()
+      prompt_layers = _collect_prompt_layers(requested)
+      prompt = _build_style_prompt(prompt_layers)
+      _write_style_query(prompt)
+      log_event(f"Requesting AI styles for groups={requested}")
+      response_text = _call_openai(prompt, api_key, model)
+      if not response_text:
+        return {"ok": False, "error": "No response from OpenAI"}
+      parsed = _parse_style_response(response_text)
+      updates: Dict[str, Optional[Dict[str, Any]]] = {}
+      missing: List[str] = []
+      for gid in requested:
+        style = parsed.get(gid)
+        if not style:
+          style = _default_style_payload()
+          missing.append(gid)
+        updates[gid] = style
+      if missing:
+        log_event(f"AI response missing groups {missing}; applied default styling")
+      _apply_style_updates(updates)
+      log_event(f"Applied AI styles to groups={requested}")
+      return {
+        "ok": True,
+        "styles": updates,
+        "prompt_file": str(STYLE_QUERY_FILE),
+        "raw": response_text,
+        "fallback_groups": missing,
+      }
+
+    def clear_styles(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+      group_ids_raw = (payload or {}).get("group_ids", [])
+      if not isinstance(group_ids_raw, list):
+        group_ids_raw = [group_ids_raw]
+      requested = []
+      seen: set[str] = set()
+      for raw in group_ids_raw:
+        gid = str(raw)
+        if gid and gid not in seen:
+          requested.append(gid)
+          seen.add(gid)
+      if not requested:
+        return {"ok": False, "error": "No layers specified"}
+      updates = {gid: None for gid in requested}
+      _apply_style_updates(updates)
+      log_event(f"Cleared styles for groups={requested}")
+      return {"ok": True, "cleared": requested, "styles": updates}
+
 
 def _ensure_stdio_utf8() -> None:
     try:
@@ -510,6 +886,7 @@ HTML_TEMPLATE = r"""
   .bar { grid-area: bar; display:flex; gap:12px; align-items:center; padding:8px 12px; flex-wrap:wrap; border-bottom: 2px solid #1f2b46; background:#111f38; }
   .layers { grid-area: layers; border-right:2px solid #1f2b46; background:#0b1222; display:flex; flex-direction:column; }
   .layer-header { padding:12px 16px; font-size:14px; font-weight:600; border-bottom:1px solid #1f2b4666; }
+  .layer-header .layer-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .layer-list { flex:1; overflow:auto; padding:6px 8px 10px; }
   .layer-item { display:flex; gap:8px; align-items:center; padding:6px 6px; cursor:pointer; margin-bottom:2px; border-radius:5px; }
   .layer-item:hover { background:#132445; }
@@ -541,8 +918,12 @@ HTML_TEMPLATE = r"""
   #map.exporting .leaflet-control-zoom { display:none !important; }
   .btn { padding:6px 10px; border:1px solid #354769; background:#1f2b46; border-radius:6px; cursor:pointer; color:#f8fafc; font-size:13px; }
   .btn:active { transform:translateY(1px); }
+  .btn[disabled] { opacity:0.45; cursor:not-allowed; }
   .slider { display:flex; align-items:center; gap:8px; }
   .slider input[type=range]{ width:160px; }
+  .bar .spacer { flex:1 1 auto; }
+  .ai-status { font-size:12px; min-height:18px; color:#94a3b8; }
+  .ai-status.error { color:#fca5a5; }
   .leaflet-control-layers { font-size:12px; }
   .leaflet-control-layers label { line-height:1.3; }
   .leaflet-popup-content-wrapper { border-radius:10px; }
@@ -559,13 +940,21 @@ HTML_TEMPLATE = r"""
       <input id="opacity" type="range" min="20" max="100" value="85">
       <span id="opacityValue">85%</span>
     </div>
+    <button id="aiStyleBtn" class="btn" title="Create styles for all active layers">Create AI styles</button>
+    <button id="clearStyleBtn" class="btn" title="Remove saved styles from active layers">Clear styles</button>
+    <div class="spacer"></div>
+    <span id="aiStatus" class="ai-status"></span>
     <button id="exportBtn" class="btn" title="Export current map view to PNG">Export PNG</button>
     <button id="exitBtn" class="btn">Exit</button>
   </div>
   <div class="layers">
     <div class="layer-header" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
       <span>Asset Layers</span>
-      <button id="addFolderBtn" class="btn btn-xs" title="Create a folder to organise layers">New Folder</button>
+      <div class="layer-actions">
+        <button id="selectAllLayers" class="btn btn-xs" title="Activate every layer">Select all</button>
+        <button id="clearAllLayers" class="btn btn-xs" title="Deactivate every layer">Clear all</button>
+        <button id="addFolderBtn" class="btn btn-xs" title="Create a folder to organise layers">New Folder</button>
+      </div>
     </div>
     <div class="info-block" style="padding:10px 16px; font-size:12px; color:#94a3b8; border-bottom:1px solid #1f2b4666;">
       Drag layers to reorder, drop them onto folders to organise, and use checkboxes to toggle visibility. Folders are saved between sessions.
@@ -597,8 +986,15 @@ let NODE_LOOKUP=new Map();
 let DRAG_STATE={ nodeId:null, dropRow:null, dropPosition:null, dropTarget:null };
 let PYWEBVIEW_API=null;
 let API_PROMISE=null;
-const NEUTRAL_FILL='#a3a7b1';
-const NEUTRAL_STROKE='#242b38';
+let STYLE_QUERY_PATH=null;
+let AI_BUSY=false;
+const BASE_OPACITY=0.85;
+const DEFAULT_STYLE=Object.freeze({
+  fill_color:'#9fa4b0',
+  border_color:'#2c3342',
+  fill_opacity:0.65,
+  border_weight:1.2,
+});
 
 function waitForApi(timeoutMs=12000){
   if (PYWEBVIEW_API){
@@ -650,14 +1046,41 @@ function escapeHtml(str){
   return String(str).replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
-function styleFeature(){
+function clamp(value, min, max){
+  if (!Number.isFinite(value)){
+    return min;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function computeLayerStyle(meta){
+  const styling = meta && meta.styling ? meta.styling : null;
+  const fillColor = (styling && styling.fill_color) || DEFAULT_STYLE.fill_color;
+  const borderColor = (styling && styling.border_color) || DEFAULT_STYLE.border_color;
+  const fillCandidate = Number(styling && styling.fill_opacity);
+  const baseFill = Number.isFinite(fillCandidate) ? fillCandidate : DEFAULT_STYLE.fill_opacity;
+  const fillOpacity = clamp(baseFill * (FILL_ALPHA / BASE_OPACITY), 0.05, 0.95);
+  const weightCandidate = Number(styling && styling.border_weight);
+  const borderWeight = clamp(Number.isFinite(weightCandidate) ? weightCandidate : DEFAULT_STYLE.border_weight, 0.3, 5.0);
+  const dashArray = styling && styling.dash_array ? String(styling.dash_array) : null;
   return {
-    color: NEUTRAL_STROKE,
-    weight: 0.6,
-    fillColor: NEUTRAL_FILL,
-    fillOpacity: FILL_ALPHA,
-    opacity: 0.8,
+    color: borderColor,
+    weight: borderWeight,
+    dashArray: dashArray || null,
+    fillColor,
+    fillOpacity,
+    opacity: 0.9,
   };
+}
+
+function layerStyleFactory(meta){
+  return () => computeLayerStyle(meta);
+}
+
+function reapplyLayerStyle(layer){
+  if (layer && typeof layer.setStyle === 'function'){
+    layer.setStyle(computeLayerStyle(layer.__meta || {}));
+  }
 }
 
 function bindFeature(feature, layer, groupMeta){
@@ -697,7 +1120,7 @@ function createAssetLayer(entry){
   const geoLayer = L.geoJSON(null, {
     pane: 'assetsPane',
     renderer: L.canvas({pane:'assetsPane'}),
-    style: styleFeature,
+    style: layerStyleFactory(entry),
     onEachFeature: (feature, layer) => bindFeature(feature, layer, entry),
   });
   geoLayer.__meta = entry;
@@ -871,6 +1294,7 @@ function renderTreeNode(node, depth){
     label.textContent = node.title || 'Folder';
     row.appendChild(label);
   } else {
+    row.dataset.groupId = node.ref_asset_group || '';
     const spacer = document.createElement('span');
     spacer.style.width = '18px';
     row.appendChild(spacer);
@@ -1119,6 +1543,132 @@ function toggleGroupLayer(groupId, enable, options){
   }
 }
 
+function getActiveGroupIds(){
+  return Array.from(ACTIVE_GROUPS.values());
+}
+
+function refreshLayerCheckboxes(){
+  document.querySelectorAll('.tree-node.group .tree-row').forEach(row => {
+    const checkbox = row.querySelector('input[type=checkbox]');
+    const gid = row.dataset.groupId;
+    if (checkbox && gid){
+      checkbox.checked = ACTIVE_GROUPS.has(gid);
+    }
+  });
+}
+
+function setAllLayersActive(enable){
+  const ids = (ASSET_LAYERS || []).map(entry => String(entry.id));
+  ids.forEach(gid => toggleGroupLayer(gid, enable, { fitBounds:false }));
+  refreshLayerCheckboxes();
+}
+
+function handleSelectAllLayers(){
+  setAllLayersActive(true);
+}
+
+function handleClearAllLayers(){
+  setAllLayersActive(false);
+}
+
+function applyStyleUpdates(updates){
+  if (!updates) return;
+  Object.keys(updates).forEach(key => {
+    const style = updates[key] || null;
+    const layer = LAYER_BY_GROUP.get(String(key));
+    if (layer){
+      layer.__meta = layer.__meta || {};
+      layer.__meta.styling = style;
+      reapplyLayerStyle(layer);
+    }
+    const entry = ASSET_LAYERS.find(item => String(item.id) === String(key));
+    if (entry){
+      entry.styling = style;
+    }
+  });
+}
+
+function setAiStatus(message, isError){
+  const node = document.getElementById('aiStatus');
+  if (!node) return;
+  node.textContent = message || '';
+  node.classList.toggle('error', Boolean(isError));
+}
+
+function setAiBusy(isBusy){
+  AI_BUSY = isBusy;
+  ['aiStyleBtn','clearStyleBtn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn){
+      btn.disabled = Boolean(isBusy);
+    }
+  });
+}
+
+function handleCreateAiStyles(){
+  if (AI_BUSY) return;
+  const active = getActiveGroupIds();
+  if (!active.length){
+    setAiStatus('Activate at least one layer before creating styles.', true);
+    return;
+  }
+  setAiBusy(true);
+  setAiStatus('Requesting styles…');
+  waitForApi().then(api => {
+    if (!api || !api.generate_ai_styles){
+      throw new Error('AI styling API unavailable.');
+    }
+    return api.generate_ai_styles({ group_ids: active });
+  }).then(res => {
+    if (!res || !res.ok){
+      throw new Error((res && res.error) || 'AI styling failed.');
+    }
+    applyStyleUpdates(res.styles || {});
+    if (res.prompt_file){
+      STYLE_QUERY_PATH = res.prompt_file;
+    }
+    const count = Object.keys(res.styles || {}).length;
+    const fallback = Array.isArray(res.fallback_groups) ? res.fallback_groups.length : 0;
+    const promptPath = STYLE_QUERY_PATH || 'style_query.txt';
+    let message = `Updated ${count} layer(s). Prompt saved to ${promptPath}.`;
+    if (fallback){
+      message += ` (${fallback} layer(s) used default styling.)`;
+    }
+    setAiStatus(message);
+  }).catch(err => {
+    setAiStatus(err && err.message ? err.message : 'AI styling failed.', true);
+  }).finally(() => {
+    setAiBusy(false);
+  });
+}
+
+function handleClearStyles(){
+  if (AI_BUSY) return;
+  const active = getActiveGroupIds();
+  if (!active.length){
+    setAiStatus('Activate at least one layer to clear styles.', true);
+    return;
+  }
+  setAiBusy(true);
+  setAiStatus('Clearing styles…');
+  waitForApi().then(api => {
+    if (!api || !api.clear_styles){
+      throw new Error('Clear styles API unavailable.');
+    }
+    return api.clear_styles({ group_ids: active });
+  }).then(res => {
+    if (!res || !res.ok){
+      throw new Error((res && res.error) || 'Failed to clear styles.');
+    }
+    applyStyleUpdates(res.styles || {});
+    setAiStatus(`Cleared styles for ${active.length} layer(s).`);
+  }).catch(err => {
+    setAiStatus(err && err.message ? err.message : 'Failed to clear styles.', true);
+  }).finally(() => {
+    setAiBusy(false);
+  });
+}
+
 function findFirstGroupNode(nodes){
   for (const node of nodes){
     if (node.node_type === 'group'){
@@ -1168,9 +1718,7 @@ function handleAddFolder(){
 
 function updateOpacity(){
   GROUP_LAYERS.forEach(layer => {
-    if (layer && typeof layer.setStyle === 'function'){
-      layer.setStyle(styleFeature);
-    }
+    reapplyLayerStyle(layer);
   });
 }
 
@@ -1254,6 +1802,14 @@ function boot(){
   if (addFolderBtn){
     addFolderBtn.addEventListener('click', handleAddFolder);
   }
+  const selectAllBtn = document.getElementById('selectAllLayers');
+  if (selectAllBtn){
+    selectAllBtn.addEventListener('click', handleSelectAllLayers);
+  }
+  const clearAllLayersBtn = document.getElementById('clearAllLayers');
+  if (clearAllLayersBtn){
+    clearAllLayersBtn.addEventListener('click', handleClearAllLayers);
+  }
 
   waitForApi().then(api => {
     if (!api || !api.get_state){
@@ -1264,6 +1820,7 @@ function boot(){
     COLOR_MAP = state.colors || {};
     HOME_BOUNDS = state.home_bounds || null;
     ASSET_LAYERS = state.asset_layers || [];
+    STYLE_QUERY_PATH = state.style_query_file || STYLE_QUERY_PATH;
     prepareLayerCollection(ASSET_LAYERS);
     initHierarchy(state.hierarchy || []);
     renderLayerTree();
@@ -1325,6 +1882,16 @@ function boot(){
       }
     }).catch(() => {});
   });
+
+  const aiBtn = document.getElementById('aiStyleBtn');
+  if (aiBtn){
+    aiBtn.addEventListener('click', handleCreateAiStyles);
+  }
+  const clearBtn = document.getElementById('clearStyleBtn');
+  if (clearBtn){
+    clearBtn.addEventListener('click', handleClearStyles);
+  }
+  setAiStatus('');
 }
 if (document.readyState === 'loading'){
   document.addEventListener('DOMContentLoaded', boot);
