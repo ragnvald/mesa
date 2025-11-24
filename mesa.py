@@ -718,6 +718,20 @@ def edit_lines():
             gpkg_file
         )
 
+
+def edit_main_config():
+    python_script, exe_file = get_script_paths("edit_config")
+    arg_tokens = ["--original_working_directory", original_working_directory]
+    if getattr(sys, "frozen", False):
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
+    else:
+        run_subprocess(
+            [sys.executable or "python", python_script, *arg_tokens],
+            [exe_file, *arg_tokens],
+            gpkg_file
+        )
+
 def edit_atlas():
     python_script, exe_file = get_script_paths("atlas_edit")
     if getattr(sys, "frozen", False):
@@ -1079,6 +1093,8 @@ if __name__ == "__main__":
     settings_grid.columnconfigure(1, weight=1)
 
     settings_actions = [
+        ("Edit config", edit_main_config,
+         "Open the config.ini editor to review or adjust global settings."),
         ("Edit assets", edit_assets,
          "This is where you can add titles to the different layers you have imported. You may also add a short descriptive text."),
         ("Edit geocodes", edit_geocodes,
