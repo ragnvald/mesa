@@ -248,6 +248,18 @@ def copy_resources() -> None:
     if cfg.exists():
         shutil.copy2(cfg, FINAL_DIST / "config.ini")
 
+    # Copy secrets/ (prefer repo root, fall back to code/ if present)
+    secrets_candidates = [
+        PROJECT_ROOT / "secrets",
+        CODE_DIR / "secrets",
+    ]
+    dst = FINAL_DIST / "secrets"
+    for src in secrets_candidates:
+        if src.exists():
+            log("Copying 'secrets/' ...")
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            break
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -275,10 +287,12 @@ def main() -> None:
         "data_report",
         "data_analysis_setup",
         "data_analysis_presentation",
+        "edit_config",
         "geocodegroup_edit",
         "geocodes_create",
         "lines_admin",
         "lines_process",
+        "map_assets",
         "maps_overview",
         "parametres_setup",
     ]
