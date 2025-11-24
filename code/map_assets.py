@@ -111,6 +111,8 @@ STYLE_VALUE_LIMITS = {
 }
 
 GROUP_METADATA: Dict[str, Dict[str, Any]] = {}
+GROUP_NAME_LOOKUP: Dict[str, str] = {}
+GROUP_ID_SET: set[str] = set()
 
 DEFAULT_STYLE_PAYLOAD: Dict[str, Any] = {
     "fill_color": "#9fa4b0",
@@ -118,6 +120,112 @@ DEFAULT_STYLE_PAYLOAD: Dict[str, Any] = {
     "fill_opacity": 0.65,
     "border_weight": 1.2,
 }
+
+
+def _cfg_default_get(config: Optional[configparser.ConfigParser], option: str) -> Optional[str]:
+  if not config or "DEFAULT" not in config:
+    return None
+  try:
+    value = config["DEFAULT"].get(option)
+  except Exception:
+    return None
+  return value.strip() if value else None
+
+
+def _read_secret_file(path_value: Optional[str]) -> Optional[str]:
+  if not path_value:
+    return None
+  raw = path_value.strip()
+  if not raw:
+    return None
+  candidate = Path(raw).expanduser()
+  candidates: List[Path] = [candidate]
+  if not candidate.is_absolute():
+    candidates.append(APP_DIR / candidate)
+    if APP_DIR.name.lower() == "code":
+      candidates.append(APP_DIR.parent / candidate)
+  seen: set[Path] = set()
+  for path in candidates:
+    try:
+      resolved = path.resolve()
+    except Exception:
+      resolved = path
+    if resolved in seen:
+      continue
+    seen.add(resolved)
+    if not resolved.exists():
+      continue
+    try:
+      secret = resolved.read_text(encoding="utf-8").strip()
+      if secret:
+        return secret
+    except Exception as exc:
+      log_event(f"Failed to read secret file {resolved}: {exc}")
+  return None
+
+
+def _normalize_identifier(value: Any) -> str:
+  if value is None:
+    return ""
+  text = str(value).strip().lower()
+  return "".join(ch for ch in text if ch.isalnum())
+
+
+def _refresh_group_name_lookup(records: List[Dict[str, Any]]) -> None:
+  global GROUP_NAME_LOOKUP, GROUP_ID_SET
+  lookup: Dict[str, str] = {}
+  ids: set[str] = set()
+  for rec in records:
+    gid_raw = rec.get("id")
+    gid = str(gid_raw).strip() if gid_raw not in (None, "", "None") else None
+    if not gid:
+      continue
+    ids.add(gid)
+    meta = GROUP_METADATA.get(gid)
+    candidates = [rec.get("name")]
+    if meta:
+      candidates.append(meta.get("title"))
+    for candidate in candidates:
+      key = _normalize_identifier(candidate)
+      if key and key not in lookup:
+        lookup[key] = gid
+  GROUP_NAME_LOOKUP = lookup
+  GROUP_ID_SET = ids
+
+
+def _resolve_group_identifier(identifier: Any) -> Optional[str]:
+  if identifier is None:
+    return None
+  gid = str(identifier).strip()
+  if not gid:
+    return None
+  if gid in GROUP_ID_SET:
+    return gid
+  key = _normalize_identifier(gid)
+  if key and key in GROUP_NAME_LOOKUP:
+    return GROUP_NAME_LOOKUP[key]
+  return None
+
+
+def _coerce_message_content(content: Any) -> str:
+  if content is None:
+    return ""
+  if isinstance(content, str):
+    return content
+  if isinstance(content, list):
+    parts: List[str] = []
+    for chunk in content:
+      if isinstance(chunk, str):
+        parts.append(chunk)
+        continue
+      if isinstance(chunk, dict):
+        text_field = chunk.get("text")
+        if isinstance(text_field, str):
+          parts.append(text_field)
+        elif isinstance(text_field, list):
+          parts.extend(str(item) for item in text_field if isinstance(item, str))
+    return "".join(parts)
+  return str(content)
 
 
 def log_event(message: str) -> None:
@@ -358,11 +466,23 @@ def _write_style_query(prompt: str) -> None:
 
 
 def _resolve_openai_key() -> Optional[str]:
-  if "DEFAULT" in cfg and cfg["DEFAULT"].get("openai_api_key"):
-    return cfg["DEFAULT"].get("openai_api_key")
-  if FALLBACK_CFG and "DEFAULT" in FALLBACK_CFG and FALLBACK_CFG["DEFAULT"].get("openai_api_key"):
-    return FALLBACK_CFG["DEFAULT"].get("openai_api_key")
-  return os.environ.get("OPENAI_API_KEY")
+  env_value = os.environ.get("OPENAI_API_KEY")
+  if env_value:
+    return env_value.strip()
+
+  cfg_env_key = _cfg_default_get(cfg, "openai_api_key_env") or _cfg_default_get(FALLBACK_CFG, "openai_api_key_env")
+  if cfg_env_key:
+    alt_env = os.environ.get(cfg_env_key.strip())
+    if alt_env:
+      return alt_env.strip()
+
+  file_setting = _cfg_default_get(cfg, "openai_api_key_file") or _cfg_default_get(FALLBACK_CFG, "openai_api_key_file")
+  secret_from_file = _read_secret_file(file_setting)
+  if secret_from_file:
+    return secret_from_file
+
+  inline = _cfg_default_get(cfg, "openai_api_key") or _cfg_default_get(FALLBACK_CFG, "openai_api_key")
+  return inline
 
 
 def _resolve_openai_model() -> str:
@@ -378,6 +498,7 @@ def _call_openai(prompt: str, api_key: str, model: str) -> Optional[str]:
     {
       "model": model,
       "temperature": 0.2,
+      "response_format": {"type": "json_object"},
       "messages": [
         {
           "role": "system",
@@ -415,7 +536,18 @@ def _call_openai(prompt: str, api_key: str, model: str) -> Optional[str]:
   if not choices:
     return None
   message = choices[0].get("message") or {}
-  return message.get("content") if isinstance(message, dict) else None
+  if not isinstance(message, dict):
+    return None
+  content = _coerce_message_content(message.get("content"))
+  text = content.strip()
+  if not text:
+    log_event("AI style response was empty after coercion")
+    return None
+  preview = text.replace("\n", " ")
+  if len(preview) > 240:
+    preview = preview[:240] + "…"
+  log_event(f"AI style response snippet={preview!r}")
+  return text
 
 
 def _extract_json_blob(text: str) -> Optional[str]:
@@ -447,12 +579,21 @@ def _parse_style_response(content: Optional[str]) -> Dict[str, Dict[str, Any]]:
   for entry in layers:
     if not isinstance(entry, dict):
       continue
-    group_id = entry.get("group_id") or entry.get("id")
-    if not group_id:
+    group_id = (
+      entry.get("group_id")
+      or entry.get("id")
+      or entry.get("layer_id")
+      or entry.get("layer")
+      or entry.get("name")
+      or entry.get("title")
+    )
+    resolved = _resolve_group_identifier(group_id)
+    if not resolved:
+      log_event(f"Skipping AI style entry with unknown group reference: {group_id!r}")
       continue
     sanitized = _sanitize_style_payload(entry)
     if sanitized:
-      result[str(group_id)] = sanitized
+      result[resolved] = sanitized
   return result
 
 
@@ -711,6 +852,7 @@ cfg = read_config(CONFIG_FILE)
 FALLBACK_CFG = read_config(FALLBACK_CONFIG_FILE) if FALLBACK_CONFIG_FILE else None
 COLOR_MAP = get_color_mapping(cfg)
 ASSET_LAYERS, HOME_BOUNDS, ASSET_GEOJSON = _load_asset_layers(cfg)
+_refresh_group_name_lookup(ASSET_LAYERS)
 ASSET_HIERARCHY = _ensure_group_hierarchy(ASSET_LAYERS, _read_hierarchy())
 
 
@@ -803,6 +945,9 @@ class Api:
       if not response_text:
         return {"ok": False, "error": "No response from OpenAI"}
       parsed = _parse_style_response(response_text)
+      if not parsed:
+        preview = response_text[:200].replace("\n", " ") if isinstance(response_text, str) else str(response_text)
+        log_event(f"AI style response unparsable; preview={preview!r}")
       updates: Dict[str, Optional[Dict[str, Any]]] = {}
       missing: List[str] = []
       for gid in requested:
@@ -929,6 +1074,8 @@ HTML_TEMPLATE = r"""
   .leaflet-popup-content-wrapper { border-radius:10px; }
   .leaflet-popup-content { font-size:13px; color:#111827; }
   .popup strong { display:block; font-size:14px; margin-bottom:4px; }
+  .empty-state { position:absolute; inset:16px; border:1px dashed #2f3b59; border-radius:14px; padding:24px; color:#cbd5f5; background:rgba(9,15,30,0.92); text-align:center; font-size:15px; line-height:1.4; display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity 0.25s ease; }
+  .empty-state.show { opacity:1; pointer-events:auto; }
 </style>
 </head>
 <body>
@@ -965,7 +1112,15 @@ HTML_TEMPLATE = r"""
       <div id="baseControls"></div>
     </div>
   </div>
-  <div class="map"><div id="map"></div></div>
+  <div class="map">
+    <div id="map"></div>
+    <div id="emptyStateOverlay" class="empty-state">
+      <div>
+        <div style="font-size:18px; font-weight:600; color:#f1f5f9; margin-bottom:8px;">No asset data found</div>
+        <div>Return to the Mesa window, open the <strong>Activities</strong> tab, and click the <strong>Import</strong> button to load asset data before using Asset maps.</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1259,17 +1414,28 @@ function initHierarchy(nodes){
   rebuildTree();
 }
 
+function updateEmptyState(){
+  const overlay = document.getElementById('emptyStateOverlay');
+  const hasLayers = Array.isArray(ASSET_LAYERS) && ASSET_LAYERS.length > 0;
+  if (overlay){
+    overlay.classList.toggle('show', !hasLayers);
+  }
+}
+
 function renderLayerTree(){
   const container = document.getElementById('layerControls');
   if (!container) return;
   container.innerHTML = '';
-  if (!TREE_ROOTS.length){
-    container.innerHTML = '<p style="font-size:13px; color:#94a3b8;">No asset layers available. Run the data pipeline to populate tbl_asset_object.parquet.</p>';
+  const hasGroupNodes = Boolean(findFirstGroupNode(TREE_ROOTS));
+  if (!hasGroupNodes){
+    container.innerHTML = '<p style="font-size:13px; color:#94a3b8;">No asset layers available. Return to the Mesa launcher, open the Activities tab, and click the <strong>Import</strong> button to load asset data before reopening Asset maps.</p>';
+    updateEmptyState();
     return;
   }
   TREE_ROOTS.forEach(node => container.appendChild(renderTreeNode(node, 0)));
   ensureInitialActivation();
   syncLayerStacking();
+  updateEmptyState();
 }
 
 function renderTreeNode(node, depth){
@@ -1935,6 +2101,7 @@ function boot(){
     if (fallback){
       fallback.innerHTML = '<p style="color:#94a3b8;">Could not load asset layers.<br>' + escapeHtml(err && err.message ? err.message : String(err)) + '</p>';
     }
+    updateEmptyState();
   });
 
   document.getElementById('homeBtn').addEventListener('click', () => {
