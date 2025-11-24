@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import configparser
+import hashlib
 import io
 import json
 import locale
@@ -132,6 +133,52 @@ def _cfg_default_get(config: Optional[configparser.ConfigParser], option: str) -
   return value.strip() if value else None
 
 
+def _derive_obfuscation_key() -> bytes:
+  current_cfg = globals().get("cfg")
+  fallback_cfg = globals().get("FALLBACK_CFG")
+  seed = _cfg_default_get(current_cfg, "id_uuid") or _cfg_default_get(fallback_cfg, "id_uuid")
+  if not seed:
+    seed = os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "mesa"
+  payload = (str(seed) + "|openai-style-salt").encode("utf-8")
+  return hashlib.sha256(payload).digest()
+
+
+def _xor_bytes(data: bytes, key: bytes) -> bytes:
+  if not data or not key:
+    return data
+  key_len = len(key)
+  return bytes(b ^ key[idx % key_len] for idx, b in enumerate(data))
+
+
+def _obfuscate_secret(value: str) -> str:
+  key = _derive_obfuscation_key()
+  payload = value.encode("utf-8")
+  obfuscated = _xor_bytes(payload, key)
+  return "ENC::" + base64.b64encode(obfuscated).decode("ascii")
+
+
+def _maybe_deobfuscate_secret(secret: str) -> str:
+  text = secret.strip()
+  if not text:
+    return text
+  if text.startswith("B64::"):
+    try:
+      return base64.b64decode(text[5:].strip()).decode("utf-8")
+    except Exception:
+      return text
+  if text.startswith("ENC::"):
+    payload = text[5:].strip()
+    try:
+      raw = base64.b64decode(payload)
+      key = _derive_obfuscation_key()
+      plain = _xor_bytes(raw, key)
+      return plain.decode("utf-8")
+    except Exception as exc:
+      log_event(f"Failed to deobfuscate OpenAI key: {exc}")
+      return ""
+  return text
+
+
 def _read_secret_file(path_value: Optional[str]) -> Optional[str]:
   if not path_value:
     return None
@@ -158,12 +205,10 @@ def _read_secret_file(path_value: Optional[str]) -> Optional[str]:
     try:
       secret = resolved.read_text(encoding="utf-8").strip()
       if secret:
-        return secret
+        return _maybe_deobfuscate_secret(secret)
     except Exception as exc:
       log_event(f"Failed to read secret file {resolved}: {exc}")
   return None
-
-
 def _normalize_identifier(value: Any) -> str:
   if value is None:
     return ""
@@ -480,6 +525,11 @@ def _resolve_openai_key() -> Optional[str]:
   secret_from_file = _read_secret_file(file_setting)
   if secret_from_file:
     return secret_from_file
+
+  # Default secret location bundled with builds
+  default_secret = _read_secret_file("secrets/openai.key")
+  if default_secret:
+    return default_secret
 
   inline = _cfg_default_get(cfg, "openai_api_key") or _cfg_default_get(FALLBACK_CFG, "openai_api_key")
   return inline
@@ -1019,7 +1069,7 @@ HTML_TEMPLATE = r"""
   .wrap {
     height:100%;
     display:grid;
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: 338px 1fr;
     grid-template-rows: 48px 1fr;
     grid-template-areas:
       "bar bar"
@@ -1095,8 +1145,7 @@ HTML_TEMPLATE = r"""
     <button id="exitBtn" class="btn">Exit</button>
   </div>
   <div class="layers">
-    <div class="layer-header" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-      <span>Asset Layers</span>
+    <div class="layer-header" style="display:flex; align-items:center; justify-content:flex-end; gap:8px;">
       <div class="layer-actions">
         <button id="selectAllLayers" class="btn btn-xs" title="Activate every layer">Select all</button>
         <button id="clearAllLayers" class="btn btn-xs" title="Deactivate every layer">Clear all</button>
@@ -1104,7 +1153,8 @@ HTML_TEMPLATE = r"""
       </div>
     </div>
     <div class="info-block" style="padding:10px 16px; font-size:12px; color:#94a3b8; border-bottom:1px solid #1f2b4666;">
-      Drag layers to reorder, drop them onto folders to organise, and use checkboxes to toggle visibility. Folders are saved between sessions.
+      <div style="color:#fcd34d; font-weight:600; margin-bottom:6px;">Showing original assets (no generalised geometries).</div>
+      <div>Drag layers to reorder, drop them onto folders to organise, and use checkboxes to toggle visibility. Folders are saved between sessions.</div>
     </div>
     <div id="layerControls" class="layer-list layer-tree"></div>
     <div class="layer-footer">
@@ -1240,8 +1290,12 @@ function reapplyLayerStyle(layer){
 
 function bindFeature(feature, layer, groupMeta){
   const props = feature && feature.properties ? feature.properties : {};
-  const title = (groupMeta && groupMeta.name) || props.name_asset_object || props.id_asset_object || 'Asset group';
-  let html = '<div class="popup"><strong>'+escapeHtml(title)+'</strong>';
+  const layerName = (groupMeta && (groupMeta.name || groupMeta.title || groupMeta.id)) || 'Asset layer';
+  const featureName = props.name_asset_object || props.id_asset_object || null;
+  let html = '<div class="popup"><strong>'+escapeHtml(String(layerName))+'</strong>';
+  if (featureName && featureName !== layerName){
+    html += '<div>Feature: '+escapeHtml(featureName)+'</div>';
+  }
   if (props.sensitivity_code_max || props.sensitivity_code){
     html += '<div>Code: '+escapeHtml(props.sensitivity_code_max || props.sensitivity_code)+'</div>';
   }
