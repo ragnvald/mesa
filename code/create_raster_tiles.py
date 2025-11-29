@@ -256,10 +256,20 @@ def read_ranges_map(cfg_path: Path) -> Dict[str, range]:
     return ranges
 
 def build_code_from_numeric_if_missing(val, ranges_map: Dict[str, range]) -> Optional[str]:
-    if val is None or not np.isfinite(val):
+    try:
+        if val is None or pd.isna(val):
+            return None
+    except Exception:
+        if val is None:
+            return None
+    try:
+        v_float = float(val)
+    except Exception:
+        return None
+    if not np.isfinite(v_float):
         return None
     try:
-        v = int(round(float(val)))
+        v = int(round(v_float))
     except Exception:
         return None
     for k, rr in ranges_map.items():
