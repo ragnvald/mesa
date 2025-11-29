@@ -27,6 +27,12 @@ Config (<base>/config.ini → [DEFAULT]) knobs (defaults shown):
   mosaic_task_order = interleave            # interleave | heavy_first | light_first
   heartbeat_secs = 10
 
+    # Auto worker sizing (used when mosaic_workers <= 0)
+    mosaic_auto_worker_fraction = 0.75        # fraction of detected CPUs
+    mosaic_auto_worker_min = 1
+    mosaic_auto_worker_max = 0                # 0 -> no upper bound
+    mosaic_auto_worker_mem_gb = 1.5           # approx GB per worker before capping
+
   # New identity-preserving speed knobs:
   mosaic_clip_before_buffer = true
   mosaic_clip_margin_m = 0.05               # tiny epsilon on top of buffer distance
@@ -310,6 +316,59 @@ def geoparquet_path(base_dir: Path, name: str) -> Path:
         return existing
     target = gpq_dir(base_dir) / f"{name}.parquet"
     return target
+
+def _auto_worker_count(cfg: configparser.ConfigParser | None) -> tuple[int, str]:
+    defaults = cfg["DEFAULT"] if (cfg is not None and "DEFAULT" in cfg) else {}
+
+    def _get_float(key: str, fallback: float) -> float:
+        try:
+            return float(defaults.get(key, str(fallback)))
+        except Exception:
+            return fallback
+
+    def _get_int(key: str, fallback: int) -> int:
+        try:
+            return int(defaults.get(key, str(fallback)))
+        except Exception:
+            return fallback
+
+    try:
+        cpu_total = max(1, mp.cpu_count())
+    except Exception:
+        cpu_total = 1
+
+    frac = min(1.0, max(0.1, _get_float("mosaic_auto_worker_fraction", 0.75)))
+    min_workers = max(1, _get_int("mosaic_auto_worker_min", 1))
+    max_workers = max(0, _get_int("mosaic_auto_worker_max", 0))
+    approx_mem_gb = max(0.1, _get_float("mosaic_auto_worker_mem_gb", 1.5))
+
+    cpu_based = max(1, int(cpu_total * frac))
+    target = max(min_workers, cpu_based)
+
+    reason_bits = [f"cpu={cpu_total}", f"fraction={frac:.2f}"]
+    if min_workers > 1:
+        reason_bits.append(f"min={min_workers}")
+    if max_workers > 0:
+        target = min(target, max_workers)
+        reason_bits.append(f"max={max_workers}")
+
+    avail_gb = None
+    mem_cap = 0
+    if psutil:
+        try:
+            avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            mem_cap = max(1, int(avail_gb // approx_mem_gb))
+        except Exception:
+            avail_gb = None
+            mem_cap = 0
+    if mem_cap:
+        if target > mem_cap:
+            reason_bits.append(f"mem_cap={mem_cap}")
+        target = min(target, mem_cap)
+        if avail_gb is not None:
+            reason_bits.append(f"mem≈{avail_gb:.1f}GB/{approx_mem_gb:.1f}GB per worker")
+
+    return max(1, target), ", ".join(reason_bits)
 
 # -----------------------------------------------------------------------------
 # Logging / progress
@@ -960,6 +1019,10 @@ def mosaic_faces_from_assets_parallel(
     if a.empty:
         log_to_gui("[Mosaic] No assets loaded; nothing to do.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    log_to_gui(
+        f"[Mosaic] Loaded {len(a):,} asset geometries; buffer={float(buffer_m):.2f} m; grid={float(grid_size_m):.2f} m.",
+        "INFO",
+    )
 
     # Optionally dedup identical geometries (unchanged behavior)
     try:
@@ -976,6 +1039,13 @@ def mosaic_faces_from_assets_parallel(
     t0 = time.time()
     a = a.to_crs(metric_crs)
     log_to_gui(f"[Mosaic] Reprojected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
+    try:
+        minx, miny, maxx, maxy = a.total_bounds
+        width_km = max(0.0, (maxx - minx) / 1000.0)
+        height_km = max(0.0, (maxy - miny) / 1000.0)
+        log_to_gui(f"[Mosaic] Asset extent ≈ {width_km:.1f} km × {height_km:.1f} km in metric CRS.")
+    except Exception:
+        pass
 
     # Spatial index
     sidx = a.sindex if hasattr(a, "sindex") else None
@@ -1095,6 +1165,10 @@ def mosaic_faces_from_assets_parallel(
         gdf.to_parquet(part, index=False)
         part_files.append(part)
         STATS.faces_total += len(gdf)
+        log_to_gui(
+            f"[Mosaic] Flushed {len(gdf):,} faces to {part.name}; cumulative faces {STATS.faces_total:,}.",
+            "INFO",
+        )
         face_batches = []
 
     # --- process tasks (NEW: warm-up + fallback) ---
@@ -1186,6 +1260,7 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
 
     group_name = BASIC_MOSAIC_GROUP
 
+    cfg: configparser.ConfigParser | None = None
     try:
         cfg = read_config(config_path(base_dir))
         metric_crs = working_metric_crs_for(faces, cfg)
@@ -1194,6 +1269,11 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
         faces = faces.iloc[order_idx].reset_index(drop=True)
     except Exception:
         faces = faces.reset_index(drop=True)
+    else:
+        log_to_gui(
+            f"[Mosaic] Publishing {len(faces):,} faces sorted by centroid in {metric_crs}.",
+            "INFO",
+        )
 
     codes = [f"{group_name}_{i:06d}" for i in range(1, len(faces) + 1)]
 
@@ -1204,6 +1284,20 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
     obj = obj[["code", "name_gis_geocodegroup", "attributes", "geometry"]]
 
     bbox_poly = _bbox_polygon_from(faces)
+    bbox_area_km2 = None
+    if cfg is not None:
+        try:
+            if bbox_poly is not None:
+                bbox_area_km2 = (
+                    gpd.GeoSeries([bbox_poly], crs="EPSG:4326").to_crs(area_projection(cfg)).area.iloc[0]
+                    / 1_000_000.0
+                )
+        except Exception:
+            bbox_area_km2 = None
+
+    if bbox_area_km2 is not None:
+        log_to_gui(f"[Mosaic] Bounding box area ≈ {bbox_area_km2:,.1f} km².", "INFO")
+
     groups = gpd.GeoDataFrame([{
         "name": group_name,
         "name_gis_geocodegroup": group_name,
@@ -1338,11 +1432,29 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
             force_serial = True
 
         try:
-            workers = int(cfg["DEFAULT"].get("mosaic_workers", "0"))
+            configured_workers = int(cfg["DEFAULT"].get("mosaic_workers", "0"))
         except Exception:
-            workers = 0
+            configured_workers = 0
+
+        auto_reason = None
+        workers = configured_workers
+        if workers <= 0:
+            workers, auto_reason = _auto_worker_count(cfg)
         if force_serial:
             workers = 1
+            if auto_reason:
+                auto_reason = f"force_serial overrides auto ({auto_reason})"
+            else:
+                auto_reason = "force_serial overrides auto"
+
+        cfg_label = configured_workers if configured_workers > 0 else "auto"
+        log_msg = (
+            f"[Mosaic] Parameters ⇒ buffer={float(buffer_m):.2f} m, grid={float(grid_size_m):.2f} m, "
+            f"force_serial={force_serial}, configured_workers={cfg_label}, effective_workers={workers}"
+        )
+        if auto_reason:
+            log_msg += f" [{auto_reason}]"
+        log_to_gui(log_msg, "INFO")
 
         faces = mosaic_faces_from_assets_parallel(base_dir, buffer_m, grid_size_m, workers)
         if faces.empty:
@@ -1352,6 +1464,11 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
                 try: on_done(False)
                 except Exception: pass
             return
+
+        log_to_gui(
+            f"[Mosaic] Received {len(faces):,} assembled faces; publishing group '{BASIC_MOSAIC_GROUP}'.",
+            "INFO",
+        )
 
         n = publish_mosaic_as_geocode(base_dir, faces)
         status_detail = f"Mosaic published as geocode group '{BASIC_MOSAIC_GROUP}' with {n:,} objects."
