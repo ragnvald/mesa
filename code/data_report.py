@@ -45,11 +45,17 @@ import threading
 from pathlib import Path
 import subprocess
 import io, math, time, urllib.request
+from docx import Document
+from docx.shared import Inches, Pt, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 
 # ---------------- UI / sizing constants ----------------
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
 MAX_MAP_CM_HEIGHT = 10.0           # map display cap inside PDF (cm)
 RIBBON_CM_HEIGHT   = 0.6           # ribbon display height inside PDF (cm)
+ATLAS_FIGURE_INCHES = (7.2, 7.2)   # atlas tiles render smaller to fit more per page
+ATLAS_DOC_WIDTH_SCALE = 0.75       # reduce displayed width of atlas images inside documents
 
 TILE_CACHE_MAX_AGE_DAYS = 30       # discard cached OSM tiles older than this (<=0 keeps forever)
 
@@ -118,12 +124,16 @@ class ReportEngine:
         groups = sorted(groups)
 
         counts = (flat_df.groupby('name_gis_geocodegroup')
-                  .size()
-                  .rename('count')
+                  .agg(total=('name_gis_geocodegroup', 'size'),
+                       populated=('geometry', lambda s: int(s.notna().sum())))
                   .reset_index())
-        intro_table = [["Geocode category", "Geocode objects"]]
+        intro_table = [["Geocode category", "Total objects", "With geometry"]]
         for _, row in counts.sort_values('name_gis_geocodegroup').iterrows():
-            intro_table.append([str(row['name_gis_geocodegroup']), int(row['count'])])
+            intro_table.append([
+                str(row['name_gis_geocodegroup']),
+                int(row['total']),
+                int(row['populated']),
+            ])
 
         fixed_bounds_3857 = compute_fixed_bounds_3857(flat_df, base_dir=self.base_dir)
 
@@ -241,7 +251,7 @@ class ReportEngine:
                 pages.append(('image', ("Sensitivity atlas map", sens_png)))
                 has_entries = True
             if has_entries:
-                pages.append(('new_page', None))
+                pages.append(('spacer', 1))
             else:
                 pages.pop()  # remove heading
                 pages.pop()  # remove text
@@ -1082,8 +1092,7 @@ def draw_atlas_map(tile_row: pd.Series,
                 write_to_log(f"[Atlas {tile_name}] Intersection failed: {e}", base_dir)
                 subset = gpd.GeoDataFrame()
 
-        fig_h_in = 10.0
-        fig_w_in = 10.0
+        fig_w_in, fig_h_in = ATLAS_FIGURE_INCHES
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
@@ -1646,6 +1655,9 @@ def line_up_to_pdf(order_list):
         name = os.path.basename(path).lower()
         return any(tok in name for tok in ['map_', '_segments_', '_context'])
 
+    def _is_atlas_image(path: str) -> bool:
+        return 'atlas' in os.path.basename(path).lower()
+
     for item in order_list:
         itype, ival = item
 
@@ -1679,11 +1691,16 @@ def line_up_to_pdf(order_list):
             img = Image(path)
             img.hAlign = 'CENTER'
 
-            # Dual constraint: width cap + height cap (maps only)
+            # Dual constraint: width + height caps (atlas images get narrower bounds)
             max_h_pts = map_max_height_pts if _is_map_image(path) else default_max_image_height_pts
+            width_cap_pts = max_image_width_pts
+            if _is_atlas_image(path):
+                width_cap_pts *= ATLAS_DOC_WIDTH_SCALE
+                if _is_map_image(path):
+                    max_h_pts = map_max_height_pts * ATLAS_DOC_WIDTH_SCALE
             w0, h0 = float(getattr(img, 'imageWidth', 0) or 0), float(getattr(img, 'imageHeight', 0) or 0)
             if w0 > 0 and h0 > 0:
-                scale = min(max_image_width_pts / w0, max_h_pts / h0, 1.0)
+                scale = min(width_cap_pts / w0, max_h_pts / h0, 1.0)
                 img.drawWidth = w0 * scale
                 img.drawHeight = h0 * scale
 
@@ -1782,6 +1799,111 @@ def compile_pdf(output_pdf, elements):
         canvas.restoreState()
 
     doc.build(elements, onFirstPage=add_header_footer, onLaterPages=add_header_footer)
+
+def _clean_docx_text(txt: str) -> str:
+    if txt is None:
+        return ""
+    s = str(txt)
+    s = s.replace("<br/>", "\n").replace("<br>", "\n")
+    s = re.sub(r"</?b>", "", s)
+    s = re.sub(r"</?i>", "", s)
+    s = re.sub(r"</?code>", "", s)
+    return s
+
+def compile_docx(output_docx: str, order_list: list):
+    """
+    Lightweight Word export to reduce memory footprint compared to PDF.
+    Consumes the same order_list produced for PDF composition.
+    """
+    doc = Document()
+    doc.core_properties.title = "MESA Report"
+    body_style = doc.styles["Normal"]
+    body_style.font.name = "Segoe UI"
+    body_style.font.size = Pt(10)
+    # Ensure font mapping works in Word
+    body_style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Segoe UI')
+
+    def add_heading(level: int, text: str):
+        clean = _clean_docx_text(text)
+        lvl = max(1, min(4, level))
+        doc.add_heading(clean, level=lvl)
+
+    def add_text(text: str):
+        clean = _clean_docx_text(text)
+        para = doc.add_paragraph(clean)
+        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    def add_rule():
+        run = doc.add_paragraph().add_run("―" * 40)
+        run.font.size = Pt(9)
+
+    def add_table(data):
+        if not data:
+            return
+        rows = len(data)
+        cols = len(data[0])
+        table = doc.add_table(rows=rows, cols=cols)
+        table.style = "Table Grid"
+        for r in range(rows):
+            for c in range(cols):
+                table.cell(r, c).text = _clean_docx_text(data[r][c])
+        # Bold header row
+        for cell in table.rows[0].cells:
+            for p in cell.paragraphs:
+                for run in p.runs:
+                    run.font.bold = True
+
+    usable_width_cm = 16  # approximate usable width with default margins
+
+    for kind, payload in order_list:
+        if kind.startswith("heading"):
+            level = int(kind[-2])
+            add_heading(level, payload)
+        elif kind in ("text",):
+            add_text(payload)
+        elif kind in ("table", "table_data", "table_data_small"):
+            if kind == "table":
+                title = None
+                data = None
+                if isinstance(payload, str) and os.path.exists(payload):
+                    try:
+                        df = pd.read_excel(payload)
+                        data = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
+                    except Exception:
+                        data = None
+                else:
+                    data = payload
+            else:
+                title, data = payload
+            if title:
+                add_heading(3, title)
+            if data:
+                add_table(data)
+            else:
+                add_text("(table data unavailable)")
+        elif kind == "image" or kind == "image_ribbon":
+            heading, path = payload
+            add_heading(3, heading)
+            if os.path.exists(path):
+                try:
+                    width_cm = usable_width_cm
+                    if 'atlas' in os.path.basename(path).lower():
+                        width_cm *= ATLAS_DOC_WIDTH_SCALE
+                    doc.add_picture(path, width=Cm(width_cm))
+                except Exception:
+                    add_text(f"(image unavailable: {os.path.basename(path)})")
+            else:
+                add_text(f"(image missing: {os.path.basename(path)})")
+        elif kind == "rule":
+            add_rule()
+        elif kind == "spacer":
+            doc.add_paragraph("")
+        elif kind == "new_page":
+            doc.add_page_break()
+        else:
+            add_text(str(payload))
+
+    doc.save(output_docx)
 
 def set_progress(pct: float, message: str | None = None):
     try:
@@ -1970,7 +2092,6 @@ def generate_report(base_dir: str,
             if atlas_geocode_selected:
                 atlas_intro += f" Geocode level shown: <b>{atlas_geocode_selected}</b>."
             order_list.append(('text', atlas_intro))
-            order_list.append(('rule', None))
             order_list.extend(atlas_pages)
 
         if pages_lines:
@@ -1982,20 +2103,20 @@ def generate_report(base_dir: str,
             order_list.append(('new_page', None))
             order_list.extend(pages_lines)
 
-        set_progress(86, "Composing PDF …")
+        set_progress(86, "Composing Word report …")
         elements = line_up_to_pdf(order_list)
 
-        ts_pdf = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
-        output_pdf_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_pdf}.pdf")
-        output_pdf = str(output_pdf_path)
-        compile_pdf(output_pdf, elements)
+        ts_docx = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+        output_docx_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_docx}.docx")
+        output_docx = str(output_docx_path)
+        compile_docx(output_docx, order_list)
         engine.cleanup()
         engine = None
         set_progress(100, "Report completed.")
 
         global last_report_path
-        last_report_path = output_pdf
-        write_to_log(f"PDF report created: {output_pdf}", base_dir)
+        last_report_path = output_docx
+        write_to_log(f"Word report created: {output_docx}", base_dir)
 
         try:
             if link_var:
