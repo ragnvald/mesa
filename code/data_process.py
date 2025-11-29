@@ -80,6 +80,10 @@ _MAP_PROC = None
 # processing worker process (to keep GUI responsive and allow true multiprocessing in frozen builds)
 _PROC = None
 
+# Memory logging snapshot state
+_LAST_MEM_LOG_TS = 0.0
+_LAST_MEM_RSS_GB: float | None = None
+
 # grid meta for minimap
 _GRID_BBOX_MAP: dict[int, list[float]] = {}   # grid_cell -> [S,W,N,E]
 
@@ -309,6 +313,46 @@ def log_to_gui(widget, message: str):
         pass
     if widget is None:
         print(formatted, flush=True)
+
+
+def _log_memory_snapshot(context: str, extra: dict | None = None, force: bool = False):
+    """Emit a throttled log line with process/system memory stats."""
+    global _LAST_MEM_LOG_TS, _LAST_MEM_RSS_GB
+    if psutil is None:
+        return
+    try:
+        now = time.time()
+        proc = psutil.Process()
+        mem_info = proc.memory_info()
+        rss_gb = mem_info.rss / (1024 ** 3)
+        vms_gb = mem_info.vms / (1024 ** 3)
+        delta = None if _LAST_MEM_RSS_GB is None else rss_gb - _LAST_MEM_RSS_GB
+        if not force and _LAST_MEM_LOG_TS and (now - _LAST_MEM_LOG_TS) < 30:
+            if delta is None or abs(delta) < 0.25:
+                return
+
+        vm = psutil.virtual_memory()
+        avail_gb = vm.available / (1024 ** 3)
+        used_pct = vm.percent
+
+        msg = f"[mem] {context}: proc RSS ~{rss_gb:.2f} GB"
+        if delta is not None:
+            msg += f" (Δ{delta:+.2f} GB)"
+        msg += f" • VMS ~{vms_gb:.2f} GB • System avail ~{avail_gb:.2f} GB ({used_pct:.0f}% used)"
+
+        if extra:
+            try:
+                extra_bits = ", ".join(f"{k}={v}" for k, v in extra.items())
+                if extra_bits:
+                    msg += f" • {extra_bits}"
+            except Exception:
+                pass
+
+        log_to_gui(log_widget, msg)
+        _LAST_MEM_LOG_TS = now
+        _LAST_MEM_RSS_GB = rss_gb
+    except Exception:
+        pass
 
 # ----------------------------
 # Raster tiles integration helpers
@@ -737,7 +781,34 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
     tmp_in.mkdir(parents=True, exist_ok=True)
     tmp_out.mkdir(parents=True, exist_ok=True)
 
-    rows_per_chunk = calculate_rows_per_chunk(len(geodata))
+    rows_per_chunk_est = calculate_rows_per_chunk(len(geodata))
+    rows_per_chunk = rows_per_chunk_est
+    chunk_size_cfg = None
+    try:
+        cfg = _ensure_cfg()
+        chunk_size_cfg = cfg_get_int(cfg, "chunk_size", 0)
+        if chunk_size_cfg <= 0:
+            chunk_size_cfg = None
+    except Exception:
+        chunk_size_cfg = None
+    if chunk_size_cfg is not None:
+        rows_per_chunk = max(1, min(rows_per_chunk, chunk_size_cfg))
+
+    cfg_chunk_display = f"{chunk_size_cfg:,}" if chunk_size_cfg else "auto"
+    log_to_gui(
+        log_widget,
+        f"[grid-assign] rows_per_chunk={rows_per_chunk:,} (config chunk_size={cfg_chunk_display}, est_limit={rows_per_chunk_est:,})",
+    )
+    _log_memory_snapshot(
+        "grid-assign",
+        {
+            "geocodes": f"{len(geodata):,}",
+            "grid_cells": f"{len(grid_cells):,}",
+            "rows_per_chunk": f"{rows_per_chunk:,}",
+        },
+        force=True,
+    )
+
     total_chunks = int(math.ceil(len(geodata) / rows_per_chunk))
     input_parts = []
     for i in range(0, len(geodata), rows_per_chunk):
@@ -837,13 +908,16 @@ def _morton16(ix: int, iy: int) -> int:
     return (_part1by1(ix) << 1) | _part1by1(iy)
 
 def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, multiplier: int = 18):
-    """
-    Groups cells into spatially-coherent chunks using a Morton (Z-order) sort
-    of per-cell centroids. Keeps the same target chunk count and returns
-    GeoDataFrame slices exactly like before.
-    """
+    """Group tagged geocodes into spatially coherent chunks sized by config."""
     if geocode_tagged is None or geocode_tagged.empty or 'grid_cell' not in geocode_tagged.columns:
         return [geocode_tagged]
+
+    cfg = _ensure_cfg()
+    target_geocodes = cfg_get_int(cfg, "target_geocodes_per_chunk", 5000)
+    chunk_cells_min = max(1, cfg_get_int(cfg, "chunk_cells_min", 3))
+    chunk_cells_max = max(chunk_cells_min, cfg_get_int(cfg, "chunk_cells_max", 90))
+    backlog_multiplier = max(1.0, cfg_get_float(cfg, "chunk_backlog_multiplier", 2.5))
+    overshoot_factor = max(1.0, cfg_get_float(cfg, "chunk_overshoot_factor", 1.25))
 
     # One representative centroid per grid_cell (fast via bounds midpoints)
     try:
@@ -866,10 +940,8 @@ def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, mult
     centroids = centroids.dropna(subset=['__cx','__cy']).drop_duplicates(subset=['grid_cell'])
 
     if centroids.empty:
-        # Fall back to old behavior (deterministic, no shuffle)
         cell_ids = sorted(geocode_tagged['grid_cell'].unique().tolist())
     else:
-        # Normalize to [0..65535] and compute Morton index
         xmin, ymin = float(centroids['__cx'].min()), float(centroids['__cy'].min())
         xmax, ymax = float(centroids['__cx'].max()), float(centroids['__cy'].max())
         dx = max(1e-9, xmax - xmin)
@@ -877,21 +949,90 @@ def make_spatial_chunks(geocode_tagged: gpd.GeoDataFrame, max_workers: int, mult
 
         xi = ((centroids['__cx'] - xmin) / dx * 65535.0).clip(0, 65535).astype('uint16')
         yi = ((centroids['__cy'] - ymin) / dy * 65535.0).clip(0, 65535).astype('uint16')
-        z = [ _morton16(int(x), int(y)) for x, y in zip(xi.values, yi.values) ]
-        centroids['__z'] = z
-
-        # Spatially coherent ordering
+        centroids['__z'] = [_morton16(int(x), int(y)) for x, y in zip(xi.values, yi.values)]
         cell_ids = centroids.sort_values('__z')['grid_cell'].tolist()
 
-    # Target chunking identical to before
-    target_chunks = max(1, min(len(cell_ids), max_workers * multiplier))
-    cells_per_chunk = max(1, math.ceil(len(cell_ids) / target_chunks))
+    # Historical fallback when user disables target chunk sizing
+    if target_geocodes <= 0:
+        target_chunks = max(1, min(len(cell_ids), max_workers * multiplier))
+        cells_per_chunk = max(1, math.ceil(len(cell_ids) / target_chunks))
+        return [geocode_tagged[geocode_tagged['grid_cell'].isin(set(cell_ids[i:i + cells_per_chunk]))]
+                for i in range(0, len(cell_ids), cells_per_chunk)]
+
+    cell_counts = geocode_tagged.groupby('grid_cell').size().to_dict()
+    total_geocodes = int(sum(cell_counts.get(cid, 0) for cid in cell_ids))
+    if total_geocodes <= 0:
+        return [geocode_tagged]
+
+    min_chunks = max(1, max_workers or 1)
+    chunks_from_target = max(1, math.ceil(total_geocodes / max(target_geocodes, 1)))
+    backlog_chunks = max(chunks_from_target, int(chunks_from_target * backlog_multiplier))
+    max_reasonable_chunks = max(min_chunks, math.ceil(total_geocodes / max(int(target_geocodes * 0.33), 1)))
+    target_chunks = min(len(cell_ids), max(min_chunks, min(backlog_chunks, max_reasonable_chunks)))
+    target_cells_per_chunk = max(
+        chunk_cells_min,
+        min(chunk_cells_max, math.ceil(len(cell_ids) / max(target_chunks, 1)))
+    )
 
     chunks = []
-    for i in range(0, len(cell_ids), cells_per_chunk):
-        sel = set(cell_ids[i:i + cells_per_chunk])
-        # Keep same return shape: GeoDataFrame slice per chunk
-        chunks.append(geocode_tagged[geocode_tagged['grid_cell'].isin(sel)])
+    chunk_sizes = []
+    current_cells = []
+    current_geocode_count = 0
+    overshoot_limit = max(target_geocodes, int(target_geocodes * overshoot_factor))
+
+    def _flush(reason: str):
+        nonlocal current_cells, current_geocode_count
+        if not current_cells:
+            return
+        sel = set(current_cells)
+        chunk = geocode_tagged[geocode_tagged['grid_cell'].isin(sel)]
+        chunks.append(chunk)
+        chunk_sizes.append(len(chunk))
+        current_cells = []
+        current_geocode_count = 0
+
+    for idx, cid in enumerate(cell_ids):
+        current_cells.append(cid)
+        current_geocode_count += int(cell_counts.get(cid, 0))
+
+        remaining_cells = len(cell_ids) - (idx + 1)
+        chunks_remaining = max(1, target_chunks - len(chunks))
+        must_flush = False
+
+        if current_geocode_count >= overshoot_limit:
+            must_flush = True
+        elif current_geocode_count >= target_geocodes and len(current_cells) >= chunk_cells_min:
+            must_flush = True
+        elif len(current_cells) >= chunk_cells_max:
+            must_flush = True
+        elif len(current_cells) >= target_cells_per_chunk and len(current_cells) >= chunk_cells_min:
+            must_flush = True
+
+        # Ensure we can still produce the desired number of chunks with remaining cells
+        if not must_flush and remaining_cells <= max(0, chunks_remaining - 1):
+            must_flush = True
+
+        if must_flush:
+            _flush("limit")
+
+    if current_cells:
+        _flush("tail")
+
+    if not chunks:
+        chunks = [geocode_tagged]
+        chunk_sizes = [len(geocode_tagged)]
+
+    try:
+        avg_chunk = total_geocodes / max(1, len(chunks))
+        log_to_gui(
+            log_widget,
+            (
+                f"[chunks] planned {len(chunks):,} chunks; avg geocodes ~{avg_chunk:,.0f}; "
+                f"max chunk {max(chunk_sizes or [0]):,}; backlog x{backlog_multiplier:.1f}"
+            ),
+        )
+    except Exception:
+        pass
 
     return chunks
 
@@ -1096,59 +1237,6 @@ def _intersection_worker(args):
                 pass
         return (idx, 0, None, err_msg, logs)
 
-def _process_chunks(chunks, max_workers, asset_data, geom_types, tmp_parts,
-                    asset_soft_limit, geocode_soft_limit,
-                    chunk_cells, cells_meta, home_bounds, total_chunks,
-                    progress_state, files, written):
-    """
-    Run intersection either with a multiprocessing Pool (safe contexts)
-    or serially (when running from a background thread in frozen builds).
-    Returns (done_count, written, files, error_msg).
-    """
-    done_count = progress_state.get('done', 0)
-    error_msg = None
-    started_at = progress_state.get('started_at', 0.0)
-    last_ping = started_at if started_at else 0.0
-    done_count, written, files, error_msg = _process_chunks(
-            chunks, max_workers, asset_data, geom_types, tmp_parts,
-            asset_soft_limit, geocode_soft_limit,
-            chunk_cells, cells_meta, home_bounds, total_chunks,
-            progress_state, files, written)
-
-
-
-    hb_stop.set()
-    hb_thread.join(timeout=1.5)
-
-    # final status
-    try:
-        for c in cells_meta:
-            c["state"] = "done"
-        _write_status_atomic({
-            "phase": "flatten_pending" if error_msg is None else "error",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
-            "chunks_total": total_chunks,
-            "done": done_count,
-            "running": [],
-            "cells": cells_meta,
-            "home_bounds": home_bounds
-        })
-    except Exception:
-        pass
-
-    if error_msg:
-        raise RuntimeError(error_msg)
-
-    if not files:
-        log_to_gui(log_widget, "No intersections; tbl_stacked is empty.")
-        return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
-
-    final_ds = _dataset_dir("tbl_stacked")
-    _rm_rf(final_ds)
-    tmp_parts.rename(final_ds)
-    log_to_gui(log_widget, f"tbl_stacked dataset written as folder with {len(files)} parts and ~{written:,} rows: {final_ds}")
-    return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
-
 # ----------------------------
 # Memory heuristics
 # ----------------------------
@@ -1225,6 +1313,12 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         log_to_gui(log_widget, "ERROR: Missing or empty tbl_geocode_object.parquet; aborting stacked build.")
         return
 
+    _log_memory_snapshot(
+        "tbl_stacked:start",
+        {"assets": f"{len(assets):,}", "geocodes": f"{len(geocodes):,}"},
+        force=True,
+    )
+
     if assets.crs is None:
         assets.set_crs(f"EPSG:{working_epsg}", inplace=True)
     if geocodes.crs is None:
@@ -1249,26 +1343,55 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     update_progress(20)
     _ = assets.sindex; _ = geocodes.sindex
 
+    cpu_cap = 4
+    try:
+        cpu_cap = max(1, multiprocessing.cpu_count())
+    except Exception:
+        pass
+
     if max_workers == 0:
-        try:
-            max_workers = multiprocessing.cpu_count()
-            log_to_gui(log_widget, f"Number of workers determined by system: {max_workers}")
-        except NotImplementedError:
-            max_workers = 4
+        max_workers = cpu_cap
+        log_to_gui(log_widget, f"Number of workers determined by system: {max_workers}")
     else:
+        max_workers = max(1, max_workers)
         log_to_gui(log_widget, f"Number of workers set in config: {max_workers}")
+
+    auto_min_workers = max(1, cfg_get_int(cfg, "auto_workers_min", 1))
+    auto_max_override = cfg_get_int(cfg, "auto_workers_max", 0)
+    auto_max_workers = max(auto_min_workers, auto_max_override) if auto_max_override > 0 else max_workers
+
+    target_chunk_rows = cfg_get_int(cfg, "target_geocodes_per_chunk", 5000)
+    backlog_multiplier = max(1.0, cfg_get_float(cfg, "chunk_backlog_multiplier", 2.5))
+    est_chunk_count = None
+    if target_chunk_rows > 0:
+        est_chunk_count = max(1, math.ceil(len(geocodes) / max(target_chunk_rows, 1)))
+        est_chunk_count = max(est_chunk_count, int(est_chunk_count * backlog_multiplier))
 
     try:
         if psutil is not None:
             vm = psutil.virtual_memory()
             avail_gb = vm.available / (1024**3)
-            budget_gb = max(1.0, avail_gb * mem_target_frac)
+            headroom_gb = max(0.5, cfg_get_float(cfg, "mem_headroom_gb", 1.5))
+            avail_after_headroom = max(0.5, avail_gb - headroom_gb)
+            budget_gb = max(0.5, avail_after_headroom * mem_target_frac)
             allowed = max(1, int(budget_gb // max(0.5, effective_worker_gb)))
-            if allowed < max_workers:
-                log_to_gui(log_widget, f"Reducing workers from {max_workers} to {allowed} based on RAM (avail~{avail_gb:.1f} GB, budget~{budget_gb:.1f} GB, ~{effective_worker_gb:.1f} GB/worker).")
-                max_workers = allowed
+            log_to_gui(
+                log_widget,
+                f"[workers] RAM avail ~{avail_gb:.1f} GB -> budget ~{budget_gb:.1f} GB (headroom {headroom_gb:.1f} GB, {effective_worker_gb:.1f} GB/worker) => {allowed} workers",
+            )
+            max_workers = min(max_workers, allowed)
     except Exception:
         pass
+
+    if est_chunk_count is not None:
+        max_workers = min(max_workers, max(est_chunk_count, auto_min_workers))
+
+    max_workers = min(max_workers, auto_max_workers)
+    if max_workers < auto_min_workers and (auto_max_override == 0 or auto_min_workers <= cpu_cap):
+        max_workers = auto_min_workers
+
+    max_workers = max(1, min(max_workers, cpu_cap))
+    log_to_gui(log_widget, f"[workers] final count: {max_workers}")
 
     _ = intersect_assets_geocodes(assets, geocodes, cell_size_m, max_workers,
                                   asset_soft_limit, geocode_soft_limit)
@@ -1511,6 +1634,10 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         else:
             stacked[b] = pd.Series(pd.NA, index=stacked.index, dtype="Float64")
 
+    if "name_gis_assetgroup" not in stacked.columns:
+        # Keep downstream aggregations happy even when legacy datasets lack the name column
+        stacked["name_gis_assetgroup"] = pd.Series(pd.NA, index=stacked.index, dtype="string")
+
     # --------- Category/Rank helpers for choosing winners ---------
     ranges_map, desc_map, _order = read_class_ranges(config_file)
 
@@ -1748,11 +1875,26 @@ def process_all(config_file: Path):
         working_epsg = str(cfg["DEFAULT"].get("workingprojection_epsg","4326")).strip()
         max_workers = cfg_get_int(cfg, "max_workers", 0)
         cell_size   = cfg_get_int(cfg, "cell_size", 18000)
+        chunk_size  = cfg_get_int(cfg, "chunk_size", 40000)
 
         approx_gb_per_worker = cfg_get_float(cfg, "approx_gb_per_worker", 8.0)
         mem_target_frac      = cfg_get_float(cfg, "mem_target_frac", 0.75)
         asset_soft_limit     = cfg_get_int(cfg, "asset_soft_limit", 200000)
         geocode_soft_limit   = cfg_get_int(cfg,  "geocode_soft_limit", 160)
+
+        chunk_display = f"{chunk_size:,}" if chunk_size > 0 else "auto"
+        worker_display = "auto" if max_workers == 0 else f"{max_workers}"
+        log_to_gui(log_widget,
+             ("Config snapshot -> cell_size=%s m, chunk_size=%s rows, max_workers=%s, "
+                "approx_gb_per_worker=%.2f, mem_target_frac=%.2f, asset_soft_limit=%s, geocode_soft_limit=%s") %
+               (f"{cell_size:,}", chunk_display, worker_display, approx_gb_per_worker, mem_target_frac,
+                f"{asset_soft_limit:,}", f"{geocode_soft_limit:,}"))
+        _log_memory_snapshot("config-loaded",
+                     {"cell_m": cell_size,
+                      "chunk_size": chunk_display,
+                      "max_workers": worker_display,
+                      "approx_gb_per_worker": f"{approx_gb_per_worker:.2f}"},
+                     force=True)
 
         log_to_gui(log_widget, "[Stage 1/4] Preparing workspace and status files…")
         cleanup_outputs(); update_progress(5)
@@ -2289,6 +2431,21 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     try: _ = geocode_data.sindex
     except Exception: pass
     meters_cell = int(max(100, meters_cell))
+    log_to_gui(
+        log_widget,
+        f"[intersect] Assets={len(asset_data):,}, geocodes={len(geocode_data):,}, cell_size={meters_cell:,} m, "
+        f"asset_soft_limit={asset_soft_limit:,}, geocode_soft_limit={geocode_soft_limit:,}"
+    )
+    _log_memory_snapshot(
+        "intersect:init",
+        {
+            "assets": f"{len(asset_data):,}",
+            "geocodes": f"{len(geocode_data):,}",
+            "cell_m": meters_cell,
+            "workers": max_workers,
+        },
+        force=True,
+    )
     tagged = assign_geocodes_to_grid(geocode_data, meters_cell, max_workers)
     if tagged is None or tagged.empty or "grid_cell" not in tagged.columns:
         log_to_gui(log_widget, "Grid tagging failed or returned empty; aborting intersection.")
@@ -2324,11 +2481,18 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
         while not hb_stop.wait(HEARTBEAT_SECS):
             try:
                 vm_used = None
+                rss_gb = None
                 if psutil is not None:
                     vm = psutil.virtual_memory(); vm_used = f"{int(vm.percent)}%"
+                    try:
+                        rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+                    except Exception:
+                        rss_gb = None
                 pct = (progress_state["done"] / max(1, total_chunks)) * 100.0
                 msg = f"[heartbeat] {progress_state['done']}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {progress_state['rows']:,}"
                 if vm_used: msg += f" • RAM used {vm_used}"
+                if rss_gb is not None:
+                    msg += f" • proc RSS ~{rss_gb:.2f} GB"
                 msg += " • ETA ?"
                 log_to_gui(log_widget, msg)
             except Exception: pass
@@ -2360,6 +2524,11 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                 if dd>0: eta += f" (+{dd}d)"
             log_to_gui(log_widget, f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {written:,} • ETA {eta}")
             update_progress(35.0 + (done_count / max(1,total_chunks)) * 15.0)
+            _log_memory_snapshot(
+                "intersect:progress",
+                {"done": done_count, "total": total_chunks, "rows": f"{written:,}"},
+                force=False,
+            )
         except Exception: pass
     files = []; written = 0; error_msg = None; iterable = ((i, ch) for i, ch in enumerate(chunks, start=1))
     if _mp_allowed() and max_workers > 1:
