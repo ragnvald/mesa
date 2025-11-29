@@ -2489,7 +2489,12 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                     except Exception:
                         rss_gb = None
                 pct = (progress_state["done"] / max(1, total_chunks)) * 100.0
-                msg = f"[heartbeat] {progress_state['done']}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {progress_state['rows']:,}"
+                active_workers = min(max_workers, max(0, total_chunks - progress_state["done"]))
+                msg = (
+                    f"[heartbeat] {progress_state['done']}/{total_chunks} chunks (~{pct:.2f}%)"
+                    f" • rows written: {progress_state['rows']:,}"
+                    f" • active workers {active_workers}/{max_workers}"
+                )
                 if vm_used: msg += f" • RAM used {vm_used}"
                 if rss_gb is not None:
                     msg += f" • proc RSS ~{rss_gb:.2f} GB"
@@ -2522,7 +2527,14 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                 eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed)); eta = eta_ts.strftime("%H:%M:%S")
                 dd = (eta_ts.date() - datetime.now().date()).days
                 if dd>0: eta += f" (+{dd}d)"
-            log_to_gui(log_widget, f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {written:,} • ETA {eta}")
+            active_workers = min(max_workers, max(0, total_chunks - done_count))
+            log_to_gui(
+                log_widget,
+                f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%)"
+                f" • rows written: {written:,}"
+                f" • active workers {active_workers}/{max_workers}"
+                f" • ETA {eta}",
+            )
             update_progress(35.0 + (done_count / max(1,total_chunks)) * 15.0)
             _log_memory_snapshot(
                 "intersect:progress",
