@@ -12,7 +12,7 @@ try:
 except Exception:
     pass
 
-import os, sys, argparse, threading, datetime, configparser
+import os, sys, argparse, threading, datetime, configparser, time
 from collections import defaultdict
 from pathlib import Path
 
@@ -325,20 +325,37 @@ def _rglob_many(folder: Path, patterns: tuple[str, ...]) -> list[Path]:
         files.extend(folder.rglob(pat))
     return files
 
+def _scan_for_files(label: str, folder: Path, patterns: tuple[str, ...]) -> list[Path]:
+    if not folder.exists():
+        log_to_gui(f"{label} folder does not exist: {folder}", "WARN")
+        return []
+    pat_list = ", ".join(patterns)
+    log_to_gui(f"{label}: scanning {folder} for {pat_list} …")
+    t0 = time.time()
+    files = _rglob_many(folder, patterns)
+    duration = time.time() - t0
+    log_to_gui(f"{label}: scan finished in {duration:.1f}s → {len(files)} file(s).")
+    if files:
+        preview = ", ".join(p.name for p in files[:3])
+        if len(files) > 3:
+            preview += ", ..."
+        log_to_gui(f"{label}: first files → {preview}")
+    return files
+
 def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
     asset_objects, asset_groups = [], []
     group_id, object_id = 1, 1
 
-    files: list[Path] = []
-    if input_folder_asset.exists():
-        files = _rglob_many(input_folder_asset, ("*.shp", "*.gpkg", "*.parquet"))
-    else:
-        log_to_gui(f"Assets folder does not exist: {input_folder_asset}", "WARN")
+    patterns = ("*.shp", "*.gpkg", "*.parquet")
+    files = _scan_for_files("Assets", input_folder_asset, patterns)
     log_to_gui(f"Asset files found: {len(files)}")
+    update_progress(2)
 
     for i, fp in enumerate(files, start=1):
         # Scale progress toward 90%; final 100% is set by the caller after the step finishes.
         update_progress(5 + 85 * (i / max(1, len(files))))
+        if i == 1 or i % 25 == 0:
+            log_to_gui(f"Assets: processing {fp.name} ({i}/{max(1, len(files))})")
         filename = fp.stem
 
         if fp.suffix.lower() == ".gpkg":
@@ -477,12 +494,10 @@ def import_spatial_data_geocode(input_folder_geocode: Path, working_epsg: int):
     geocode_groups, geocode_objects = [], []
     group_id, object_id = 1, 1
 
-    files: list[Path] = []
-    if input_folder_geocode.exists():
-        files = _rglob_many(input_folder_geocode, ("*.shp", "*.gpkg", "*.parquet"))
-    else:
-        log_to_gui(f"Geocode folder does not exist: {input_folder_geocode}", "WARN")
+    patterns = ("*.shp", "*.gpkg", "*.parquet")
+    files = _scan_for_files("Geocodes", input_folder_geocode, patterns)
     log_to_gui(f"Geocode files found: {len(files)}")
+    update_progress(2)
 
     # sort larger first (nice for progress feel)
     def _featcount(fp: Path):
@@ -490,10 +505,16 @@ def import_spatial_data_geocode(input_folder_geocode: Path, working_epsg: int):
             return len(gpd.read_file(fp))
         except Exception:
             return 0
-    files.sort(key=_featcount, reverse=True)
+    if len(files) > 1:
+        log_to_gui(f"Geocodes: estimating feature counts for ordering ({len(files)} files)…")
+        t0 = time.time()
+        files.sort(key=_featcount, reverse=True)
+        log_to_gui(f"Geocodes: ordering completed in {time.time()-t0:.1f}s.")
 
     for i, fp in enumerate(files, start=1):
         update_progress(5 + 85 * (i / max(1, len(files))))
+        if i == 1 or i % 20 == 0:
+            log_to_gui(f"Geocodes: processing {fp.name} ({i}/{max(1, len(files))})")
         if fp.suffix.lower() == ".gpkg":
             try:
                 for layer in fiona.listlayers(fp):
@@ -548,15 +569,15 @@ def _process_line_layer(data: gpd.GeoDataFrame,
 def import_spatial_data_lines(input_folder_lines: Path, working_epsg: int):
     line_objects: list[dict] = []
     line_id = 1
-    files: list[Path] = []
-    if input_folder_lines.exists():
-        files = _rglob_many(input_folder_lines, ("*.shp", "*.gpkg", "*.parquet"))
-    else:
-        log_to_gui(f"Lines folder does not exist: {input_folder_lines}", "WARN")
+    patterns = ("*.shp", "*.gpkg", "*.parquet")
+    files = _scan_for_files("Lines", input_folder_lines, patterns)
     log_to_gui(f"Line files found: {len(files)}")
+    update_progress(2)
 
     for i, fp in enumerate(files, start=1):
         update_progress(5 + 85 * (i / max(1, len(files))))
+        if i == 1 or i % 25 == 0:
+            log_to_gui(f"Lines: processing {fp.name} ({i}/{max(1, len(files))})")
         if fp.suffix.lower() == ".gpkg":
             for layer in fiona.listlayers(fp):
                 gdf = read_and_reproject(fp, layer, working_epsg)
