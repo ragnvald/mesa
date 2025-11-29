@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from typing import Optional
+from shapely import wkb as _shapely_wkb
+from shapely import wkt as _shapely_wkt
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -356,6 +358,56 @@ def _empty_asset_group_frame() -> gpd.GeoDataFrame:
     ]
     return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
 
+
+def _coerce_geometry_series(raw: pd.Series):
+    def _to_geom(val):
+        if val is None:
+            return None
+        if isinstance(val, float) and np.isnan(val):
+            return None
+        try:
+            if isinstance(val, (bytes, bytearray, memoryview)):
+                return _shapely_wkb.loads(bytes(val))
+            text = str(val).strip()
+            if not text:
+                return None
+            # Try WKB hex first (starts with 0/1)
+            try:
+                return _shapely_wkb.loads(bytes.fromhex(text))
+            except Exception:
+                return _shapely_wkt.loads(text)
+        except Exception:
+            return None
+
+    return raw.apply(_to_geom)
+
+
+def _load_asset_group_without_geo_metadata(target: Path) -> gpd.GeoDataFrame:
+    try:
+        df = pd.read_parquet(target)
+    except Exception as err:
+        log_to_file(f"Fallback pandas.read_parquet failed for tbl_asset_group: {err}")
+        return _empty_asset_group_frame()
+
+    geom_col = None
+    for candidate in ("geometry", "geometry_wkb", "geometry_wkt"):
+        if candidate in df.columns:
+            geom_col = candidate
+            break
+
+    if geom_col is None:
+        log_to_file("tbl_asset_group fallback could not find a geometry column; showing empty form.")
+        return _empty_asset_group_frame()
+
+    geoms = _coerce_geometry_series(df[geom_col])
+    data = df.drop(columns=[geom_col])
+    gdf = gpd.GeoDataFrame(data, geometry=geoms, crs=f"EPSG:{workingprojection_epsg}")
+    try:
+        gdf = gdf[gdf.geometry.notna()]
+    except Exception:
+        pass
+    return gdf
+
 def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
     candidates = _candidate_asset_group_paths(base_dir)
     target: Optional[Path] = None
@@ -380,14 +432,29 @@ def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
 
     try:
         gdf = gpd.read_parquet(target)
-        if gdf.crs is None:
-            gdf.set_crs(epsg=int(workingprojection_epsg), inplace=True)
-        gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
-        enforce_vuln_dtypes_inplace(gdf)
-        return gdf
+    except ValueError as err:
+        msg = str(err)
+        if "Missing geo metadata" in msg or "Use pandas.read_parquet" in msg:
+            log_to_file("Geo metadata missing in tbl_asset_group; reconstructing geometry via pandas fallback.")
+            gdf = _load_asset_group_without_geo_metadata(target)
+        else:
+            log_to_file(f"Failed reading asset group parquet: {err}")
+            return _empty_asset_group_frame()
     except Exception as e:
         log_to_file(f"Failed reading asset group parquet: {e}")
         return _empty_asset_group_frame()
+
+    if gdf is None or gdf.empty:
+        return _empty_asset_group_frame()
+
+    if gdf.crs is None:
+        try:
+            gdf.set_crs(epsg=int(workingprojection_epsg), inplace=True)
+        except Exception:
+            gdf.set_crs(f"EPSG:{workingprojection_epsg}", inplace=True, allow_override=True)
+    gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
+    enforce_vuln_dtypes_inplace(gdf)
+    return gdf
 
 def save_asset_group_to_parquet(gdf: gpd.GeoDataFrame, base_dir: str):
     try:
