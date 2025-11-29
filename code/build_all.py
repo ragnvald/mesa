@@ -102,7 +102,7 @@ HELPER_COLLECTS = [
     "--collect-data", "pyarrow",     # data only, avoid tests
     "--collect-submodules", "ttkbootstrap",
     "--collect-all", "h3",
-    "--collect-all", "pywebview",
+    "--collect-all", "webview",
 ]
 HELPER_EXCLUDES = [
     "--exclude-module", "cupy",
