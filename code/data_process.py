@@ -398,13 +398,14 @@ def _find_tiles_script() -> Path | None:
     Backward-compatible search for the raster-tiles helper:
       1) <base>/create_raster_tiles.py
       2) <base>/system/create_raster_tiles.py
+      3) <base>/code/create_raster_tiles.py
     """
     cand1 = base_dir() / "create_raster_tiles.py"
     cand2 = base_dir() / "system" / "create_raster_tiles.py"
-    if cand1.exists():
-        return cand1
-    if cand2.exists():
-        return cand2
+    cand3 = base_dir() / "code" / "create_raster_tiles.py"
+    for cand in (cand1, cand2, cand3):
+        if cand.exists():
+            return cand
     return None
 
 def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
@@ -423,6 +424,11 @@ def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
     # ensure UTF-8 stdout/stderr inside the child process
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # Pin the mesa root so helper scripts never confuse code/output with the real output folder
+    try:
+        env["MESA_BASE_DIR"] = str(base_dir())
+    except Exception:
+        env.setdefault("MESA_BASE_DIR", os.getcwd())
 
     return subprocess.Popen(
         args,
@@ -1956,8 +1962,8 @@ MAP_HTML = r"""<!doctype html>
 <!-- Legend -->
 <div class="legend">
   <div><span class="swatch" style="background: rgba(34,197,94,0.22); border-color: transparent;"></span>Done</div>
-  <div><span class="swatch" style="background: rgba(249,115,22,0.22); border-color: transparent;"></span>Running</div>
-  <div><span class="swatch" style="background: transparent; border-color: #f97316;"></span>Queued</div>
+    <div><span class="swatch" style="background: rgba(255,138,0,0.28); border-color: transparent;"></span>Running</div>
+    <div><span class="swatch" style="background: transparent; border-color: #ff8c00;"></span>Queued</div>
 </div>
 
 <script>
@@ -1995,9 +2001,9 @@ function styleFor(state){
     return { stroke:false, fill:true,  fillColor:'#22c55e', fillOpacity:0.25 };
   }
   if (state === 'running') {
-    return { stroke:false, fill:true,  fillColor:'#f97316', fillOpacity:0.25 };
+        return { stroke:false, fill:true,  fillColor:'#ff8c00', fillOpacity:0.28 };
   }
-  return { stroke:true, color:'#f97316', weight:1, opacity:0.8, fill:false };
+    return { stroke:true, color:'#ff8c00', weight:1, opacity:0.85, fill:false };
 }
 
 function summarize(status){
