@@ -15,6 +15,8 @@ except Exception:
 from pyproj import Geod
 from pathlib import Path
 
+original_working_directory: str | None = None
+
 # ---------- Optional shapely make_valid ----------
 try:
     from shapely.validation import make_valid as _make_valid
@@ -153,14 +155,23 @@ def get_desc_mapping(cfg: configparser.ConfigParser) -> dict:
 # ===============================
 # Geo helpers & stats
 # ===============================
+def _empty_geodf() -> gpd.GeoDataFrame:
+    return gpd.GeoDataFrame(geometry=[])
+
+
 def load_parquet(path: str) -> gpd.GeoDataFrame:
     try:
         if not os.path.exists(path):
-            return gpd.GeoDataFrame()
-        return gpd.read_parquet(path)
+            print(f"[maps_overview] Missing dataset: {path}", file=sys.stderr)
+            return _empty_geodf()
+        gdf = gpd.read_parquet(path)
+        if "geometry" not in gdf.columns:
+            print(f"[maps_overview] Dataset lacks geometry column: {path}", file=sys.stderr)
+            return _empty_geodf()
+        return gdf
     except Exception as e:
         print(f"Failed to read parquet {path}: {e}", file=sys.stderr)
-        return gpd.GeoDataFrame()
+        return _empty_geodf()
 
 def only_A_to_E(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if gdf.empty: return gdf
@@ -192,7 +203,19 @@ def to_plot_crs(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.Ge
                 gdf = gdf.set_crs(PLOT_CRS, allow_override=True)
     return gdf
 
+def _has_active_geometry(gdf: gpd.GeoDataFrame) -> bool:
+    try:
+        _ = gdf.geometry
+        return True
+    except Exception:
+        return False
+
+
 def to_epsg4326(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
+    if gdf is None or not isinstance(gdf, gpd.GeoDataFrame):
+        return _empty_geodf()
+    if not _has_active_geometry(gdf):
+        return gdf
     if gdf.empty:
         return gdf.set_crs(4326, allow_override=True) if gdf.crs is None else gdf.to_crs(4326)
     g = gdf.copy()
