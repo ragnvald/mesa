@@ -748,6 +748,54 @@ def _load_existing_geocodes(base_dir: Path) -> tuple[gpd.GeoDataFrame, gpd.GeoDa
         g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326"); o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
     return g, o
 
+
+def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
+    names = sorted({(n or "").strip() for n in group_names if (n or "").strip()})
+    if not names:
+        return
+    existing_g, existing_o = _load_existing_geocodes(base_dir)
+    if existing_g.empty or "name_gis_geocodegroup" not in existing_g.columns:
+        log_to_gui(f"No existing geocode data to clear for {', '.join(names)}.")
+        return
+
+    mask = existing_g["name_gis_geocodegroup"].astype(str).isin(names)
+    if not mask.any():
+        log_to_gui(f"No matching geocode groups to clear for {', '.join(names)}.")
+        return
+
+    removed_groups = existing_g.loc[mask].copy()
+    remaining_groups = existing_g.loc[~mask].copy()
+    remaining_objects = existing_o.copy()
+
+    removed_ids: set[int] = set()
+    if "id" in removed_groups.columns:
+        try:
+            removed_ids = set(removed_groups["id"].astype(int).tolist())
+        except Exception:
+            removed_ids = set()
+
+    if not remaining_objects.empty:
+        if removed_ids and "ref_geocodegroup" in remaining_objects.columns:
+            try:
+                remaining_objects = remaining_objects.loc[
+                    ~remaining_objects["ref_geocodegroup"].astype(int).isin(removed_ids)
+                ].copy()
+            except Exception:
+                pass
+        if "name_gis_geocodegroup" in remaining_objects.columns:
+            remaining_objects = remaining_objects.loc[
+                ~remaining_objects["name_gis_geocodegroup"].astype(str).isin(names)
+            ].copy()
+
+    out_dir = gpq_dir(base_dir)
+    ensure_wgs84(remaining_groups).to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
+    ensure_wgs84(remaining_objects).to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+
+    log_to_gui(
+        f"Cleared existing geocode groups: {', '.join(names)} (removed {len(removed_groups)} group record(s)).",
+        "INFO",
+    )
+
 def load_geocode_groups(base_dir: Path) -> gpd.GeoDataFrame:
     pg = gpq_dir(base_dir) / "tbl_geocode_group.parquet"
     if pg.exists():
@@ -1345,6 +1393,8 @@ def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
         groups_rows = []
         objects_parts = []
         levels_sorted = sorted(set(int(r) for r in levels))
+        if levels_sorted:
+            _clear_geocode_groups(base_dir, [f"H3_R{r}" for r in levels_sorted])
         steps = max(1, len(levels_sorted))
         bbox_poly = _bbox_polygon_from(union_geom)
         if bbox_poly is None:
@@ -1420,6 +1470,7 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
     success = False
     status_detail = None
     try:
+        _clear_geocode_groups(base_dir, [BASIC_MOSAIC_GROUP])
         cfg = read_config(config_path(base_dir))
         # Optional force-serial (via config or ENV)
         force_serial = False
