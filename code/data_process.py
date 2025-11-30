@@ -275,12 +275,16 @@ def _stage_from_phase(phase: str) -> str:
     p = (phase or "").strip().lower()
     if p == "intersect":
         return "Processing"
-    if p in {"flatten_pending", "flatten", "writing", "done"}:
+    if p in {"flatten_pending", "flatten", "writing"}:
         return "Cleanup"
+    if p in {"done"}:
+        return "Finalizing datasets"
     if p in {"tiles", "tiling", "mbtiles"}:
         return "Creating map tiles"
+    if p in {"tiles_finalizing"}:
+        return "Finalizing map tiles"
     if p in {"completed"}:
-        return "Creating map tiles"
+        return "Completed"
     if p in {"error"}:
         return "Attention required"
     return "Preparations"
@@ -445,7 +449,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     Run tiles subprocess, stream its output to the GUI, and update the shared progress bar.
     """
-    tile_ceiling = 100.0
+    tile_ceiling = 99.0  # keep headroom for explicit "completed" phase to own 100%
     try:
         layers_per_group = 4  # sensitivity, env, groupstotal, assetstotal
         ok, counts = _has_big_polygon_group()
@@ -495,6 +499,11 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
 
             if re_done.search(line):
                 update_progress(tile_ceiling)
+                log_to_gui(log_widget, "[Tiles] Rendering finished; finalizing MBTiles (can take a few minutes)…")
+                try:
+                    _update_status_phase("tiles_finalizing")
+                except Exception:
+                    pass
 
         ret = proc.wait()
         if ret != 0:
@@ -2001,7 +2010,7 @@ function styleFor(state){
     return { stroke:false, fill:true,  fillColor:'#22c55e', fillOpacity:0.25 };
   }
   if (state === 'running') {
-        return { stroke:false, fill:true,  fillColor:'#ff8c00', fillOpacity:0.28 };
+        return { stroke:false, fill:true,  fillColor:'#ff8c00', fillOpacity:0.9 };
   }
     return { stroke:true, color:'#ff8c00', weight:1, opacity:0.85, fill:false };
 }
@@ -2195,7 +2204,7 @@ def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> N
                     pct = 80.0
                 elif phase == "done":
                     pct = 95.0
-                elif phase in ("tiles", "tiling", "mbtiles"):
+                elif phase in ("tiles", "tiling", "mbtiles", "tiles_finalizing"):
                     pct = None  # tile stage drives its own progress updates
                 elif phase == "completed":
                     pct = 100.0
