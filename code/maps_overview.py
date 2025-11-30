@@ -46,50 +46,48 @@ except Exception:
 # ===============================
 
 def base_dir() -> Path:
-    """Resolve the mesa root folder whether running as .py or frozen .exe in tools/.
-    Searches: original_working_directory (if provided), executable/script folder,
-    current working dir; normalizes tools/system/code to parent; then climbs up
-    a few levels to find a folder containing output/ and input/ or tools/ + config.ini.
-    """
-    candidates = []
+    """Resolve the mesa root folder in all modes (.py, frozen, tools/ launch)."""
+    candidates: list[Path] = []
+
+    # 1) explicit hint (mesa.exe usually passes this)
     try:
         if 'original_working_directory' in globals() and original_working_directory:
             candidates.append(Path(original_working_directory))
     except Exception:
         pass
+
+    # 2) frozen exe location
     if getattr(sys, "frozen", False):
         candidates.append(Path(sys.executable).resolve().parent)
     else:
+        # 3) script location (dev)
         if "__file__" in globals():
             candidates.append(Path(__file__).resolve().parent)
+
+    # 4) last resort: CWD
     candidates.append(Path(os.getcwd()).resolve())
 
     def normalize(p: Path) -> Path:
         p = p.resolve()
+        # Normalize typical subfolders to the mesa root
         if p.name.lower() in ("tools", "system", "code"):
-            if not ((p / "config.ini").exists() or (p / "output").exists()):
-                p = p.parent
+            p = p.parent
+        # Try climbing up a few levels to find a folder that looks like mesa root
         q = p
         for _ in range(4):
             if (q / "output").exists() and (q / "input").exists():
                 return q
             if (q / "tools").exists() and (q / "config.ini").exists():
                 return q
-            code_candidate = q / "code"
-            if code_candidate.exists() and (code_candidate / "config.ini").exists():
-                return code_candidate
             q = q.parent
-        if (p / "config.ini").exists():
-            return p
-        code_alt = p / "code"
-        if code_alt.exists() and (code_alt / "config.ini").exists():
-            return code_alt
         return p
 
     for c in candidates:
         root = normalize(c)
         if (root / "tools").exists() or ((root / "output").exists() and (root / "input").exists()):
             return root
+
+    # Fallback: normalized first candidate
     return normalize(candidates[0])
 
 # Tame stdio encoding so printing unicode from pywebview handlers is safe on Windows
@@ -521,10 +519,19 @@ def scan_mbtiles(dir_path: str):
         rev[_norm_key(cat)] = cat
     return idx, rev
 
-MBTILES_INDEX, MBTILES_REV = scan_mbtiles(MBTILES_DIR)
-IMPORTANCE_INDEX_TILES_AVAILABLE = any(rec.get("importance_index") for rec in MBTILES_INDEX.values())
-SENSITIVITY_INDEX_TILES_AVAILABLE = any(rec.get("sensitivity_index") for rec in MBTILES_INDEX.values())
-_MB_META_CACHE = {}
+def _mbtiles_snapshot(dir_path: str) -> tuple[str, ...]:
+    try:
+        return tuple(sorted(fn for fn in os.listdir(dir_path) if fn.lower().endswith(".mbtiles")))
+    except Exception:
+        return ()
+
+MBTILES_INDEX: dict[str, dict[str, str | None]] = {}
+MBTILES_REV: dict[str, str] = {}
+IMPORTANCE_INDEX_TILES_AVAILABLE = False
+SENSITIVITY_INDEX_TILES_AVAILABLE = False
+MBTILES_BASE_URL: str | None = None
+_MB_META_CACHE: dict[str, dict] = {}
+_MBTILES_SNAPSHOT: tuple[str, ...] | None = None
 
 def _mb_meta(path: str):
     if path in _MB_META_CACHE:
@@ -625,9 +632,31 @@ def start_mbtiles_server():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return f"http://127.0.0.1:{port}"
 
-MBTILES_BASE_URL = start_mbtiles_server()
+def _refresh_mbtiles_index():
+    global MBTILES_INDEX, MBTILES_REV
+    global IMPORTANCE_INDEX_TILES_AVAILABLE, SENSITIVITY_INDEX_TILES_AVAILABLE
+    global MBTILES_BASE_URL, _MBTILES_SNAPSHOT
+
+    snapshot = _mbtiles_snapshot(MBTILES_DIR)
+    if snapshot == _MBTILES_SNAPSHOT:
+        return
+
+    MBTILES_INDEX, MBTILES_REV = scan_mbtiles(MBTILES_DIR)
+    IMPORTANCE_INDEX_TILES_AVAILABLE = any(
+        rec.get("importance_index") for rec in MBTILES_INDEX.values()
+    )
+    SENSITIVITY_INDEX_TILES_AVAILABLE = any(
+        rec.get("sensitivity_index") for rec in MBTILES_INDEX.values()
+    )
+    _MBTILES_SNAPSHOT = snapshot
+
+    if MBTILES_INDEX and MBTILES_BASE_URL is None:
+        MBTILES_BASE_URL = start_mbtiles_server()
+
+_refresh_mbtiles_index()
 
 def mbtiles_info(cat: str):
+    _refresh_mbtiles_index()
     disp, rec = _resolve_cat(cat)
     if not rec or not MBTILES_BASE_URL:
         return {
@@ -742,6 +771,22 @@ def _geom_matches_point(geom, point):
     except Exception:
         return False
 
+def _filter_df_by_bounds(df: gpd.GeoDataFrame, point: Point, pad: float = 0.0) -> gpd.GeoDataFrame:
+    if df.empty or "geometry" not in df.columns:
+        return df
+    try:
+        bounds = GDF_BOUNDS.loc[df.index] if GDF_BOUNDS is not None else df.geometry.bounds
+        px, py = float(point.x), float(point.y)
+        mask = (
+            (bounds["minx"] - pad <= px) &
+            (bounds["maxx"] + pad >= px) &
+            (bounds["miny"] - pad <= py) &
+            (bounds["maxy"] + pad >= py)
+        )
+        return df[mask]
+    except Exception:
+        return df
+
 def _build_tile_metrics(row: pd.Series, overlay_kind: str) -> list[dict]:
     metrics: list[dict] = []
     for label, col, transformer, unit in GENERAL_METRIC_FIELDS:
@@ -783,6 +828,7 @@ GDF          = to_epsg4326(load_parquet(PARQUET_FILE), cfg)
 SEG_GDF      = to_epsg4326(load_parquet(SEGMENT_FILE), cfg)
 SEG_OUTLINE_GDF = to_epsg4326(load_parquet(SEGMENT_OUTLINE_FILE), cfg)
 LINES_GDF    = to_epsg4326(load_parquet(LINES_FILE), cfg)
+GDF_BOUNDS   = GDF.geometry.bounds if (not GDF.empty and "geometry" in GDF.columns) else None
 
 IMPORTANCE_MAX_AVAILABLE = False
 
@@ -804,9 +850,14 @@ SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 SEGMENT_OUTLINES_AVAILABLE = (not SEG_OUTLINE_GDF.empty) and ("geometry" in SEG_OUTLINE_GDF.columns)
 IMPORTANCE_MAX_AVAILABLE = (not GDF.empty) and ("importance_max" in GDF.columns)
 
-mb_cats   = list(MBTILES_INDEX.keys())
-vec_cats  = sorted(GDF["name_gis_geocodegroup"].dropna().unique().tolist()) if GEOCODE_AVAILABLE else []
-CATS      = sorted(set(mb_cats) | set(vec_cats), key=lambda s: (str(s).lower()))
+def _current_geocode_categories() -> list[str]:
+    cats = set(MBTILES_INDEX.keys())
+    if GEOCODE_AVAILABLE:
+        try:
+            cats.update(GDF["name_gis_geocodegroup"].dropna().unique().tolist())
+        except Exception:
+            pass
+    return sorted(cats, key=lambda s: (str(s).lower()))
 
 if SEGMENTS_AVAILABLE and "name_gis_geocodegroup" in SEG_GDF.columns:
     SEG_CATS = sorted(SEG_GDF["name_gis_geocodegroup"].dropna().unique().tolist())
@@ -842,9 +893,11 @@ class Api:
         except Exception: pass
 
     def get_state(self):
+        _refresh_mbtiles_index()
+        cats = _current_geocode_categories()
         return {
             "geocode_available": GEOCODE_AVAILABLE or bool(MBTILES_INDEX),
-            "geocode_categories": CATS,
+            "geocode_categories": cats,
             "segment_available": SEGMENTS_AVAILABLE,
             "segment_categories": SEG_CATS if SEGMENTS_AVAILABLE else [],
             "segment_line_names": LINE_NAMES,
@@ -853,7 +906,7 @@ class Api:
             "sensitivity_index_tiles_available": SENSITIVITY_INDEX_TILES_AVAILABLE,
             "colors": COLS,
             "descriptions": DESC,
-            "initial_geocode": (CATS[0] if CATS else None),
+            "initial_geocode": (cats[0] if cats else None),
             "has_segments": SEGMENTS_AVAILABLE,
             "has_segment_outlines": SEGMENT_OUTLINES_AVAILABLE,
             "bing_key": BING_KEY,
@@ -959,22 +1012,13 @@ class Api:
                     df = df[df["name_gis_geocodegroup"].astype(str).str.strip().str.lower() == geocode_norm]
                 if df.empty:
                     return {"ok": False, "error": "No data for the selected geocode group."}
+                df = _filter_df_by_bounds(df, point, pad=0.0005)
+                if df.empty:
+                    return {"ok": False, "error": "No mosaic tile at that location."}
                 matches = df[df.geometry.apply(lambda g: _geom_matches_point(g, point))]
                 if matches.empty:
-                    try:
-                        distances = df.geometry.distance(point)
-                        distances = pd.to_numeric(distances, errors="coerce")
-                        distances = distances.where(distances.notna(), np.inf)
-                        nearest_idx = distances.idxmin()
-                        nearest_dist = float(distances.loc[nearest_idx])
-                        if np.isfinite(nearest_dist) and nearest_dist <= 0.05:
-                            candidate_rows.append(df.loc[nearest_idx])
-                        else:
-                            return {"ok": False, "error": "No mosaic tile at that location."}
-                    except Exception:
-                        return {"ok": False, "error": "No mosaic tile at that location."}
-                else:
-                    candidate_rows.append(matches.iloc[0])
+                    return {"ok": False, "error": "No mosaic tile at that location."}
+                candidate_rows.append(matches.iloc[0])
 
             row = candidate_rows[0]
             kind = (overlay_kind or "sensitivity").lower()
@@ -988,7 +1032,7 @@ class Api:
                 "metrics": _build_tile_metrics(row, kind),
                 "geometry": None,
             }
-            geom = row.geometry
+            geom = _valid_geom(row.geometry)
             if geom is not None:
                 try:
                     if not geom.is_empty:
