@@ -2,11 +2,12 @@
 """
 Raster MBTiles generator (PNG) from tbl_flat.parquet — no GDAL/Tippecanoe.
 
-Per group in name_gis_geocodegroup, produces six MBTiles:
+Per group in name_gis_geocodegroup, produces seven MBTiles:
   <group>_sensitivity.mbtiles   (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
   <group>_envindex.mbtiles      (yellow->red ramp from env_index 1..100)
   <group>_groupstotal.mbtiles   (light->dark blue, linear ramp of asset_groups_total per group)
   <group>_assetstotal.mbtiles   (light->dark blue, linear ramp of assets_overlap_total per group)
+    <group>_importance_max.mbtiles (discrete green ramp for importance_max 1..5)
   <group>_importance_index.mbtiles   (1..100 gradient from the importance index)
   <group>_sensitivity_index.mbtiles  (1..100 gradient from the sensitivity index)
 
@@ -56,8 +57,48 @@ from PIL import Image, ImageDraw  # Pillow
 
 # ----------------------- Paths -----------------------
 def base_dir() -> Path:
-    cwd = Path(os.getcwd())
-    return cwd.parent if cwd.name.lower() == "system" else cwd
+    """Resolve the mesa root folder in dev, frozen, or tools/ launches."""
+    candidates: list[Path] = []
+
+    env_hint = os.environ.get("MESA_BASE_DIR")
+    if env_hint:
+        candidates.append(Path(env_hint))
+
+    try:
+        if 'original_working_directory' in globals() and original_working_directory:
+            candidates.append(Path(original_working_directory))
+    except Exception:
+        pass
+
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        if "__file__" in globals():
+            candidates.append(Path(__file__).resolve().parent)
+
+    candidates.append(Path(os.getcwd()).resolve())
+
+    def normalize(p: Path) -> Path:
+        p = p.resolve()
+        if p.name.lower() in ("tools", "system", "code"):
+            p = p.parent
+        q = p
+        for _ in range(4):
+            if (q / "output").exists() and (q / "input").exists():
+                return q
+            if (q / "tools").exists() and (q / "config.ini").exists():
+                return q
+            q = q.parent
+        return p
+
+    for cand in candidates:
+        root = normalize(cand)
+        if (root / "output").exists() and (root / "input").exists():
+            return root
+        if (root / "tools").exists() and (root / "config.ini").exists():
+            return root
+
+    return normalize(candidates[0])
 
 def gpq_dir() -> Path:
     out = base_dir() / "output" / "geoparquet"
@@ -223,6 +264,30 @@ def index_layer_color(v: Optional[float], gradient: List[Tuple[int,int,int,int]]
     idx = max(0, min(len(gradient) - 1, idx))
     return gradient[idx]
 
+IMPORTANCE_MAX_HEX = {
+    1: "#7fbf7f",
+    2: "#5fbf5f",
+    3: "#3e9f4e",
+    4: "#1f7f3d",
+    5: "#0f5f2c",
+}
+
+def build_importance_max_palette(alpha: float = 0.8) -> Dict[str, Tuple[int,int,int,int]]:
+    pal: Dict[str, Tuple[int,int,int,int]] = {}
+    for level, hx in IMPORTANCE_MAX_HEX.items():
+        pal[level] = hex_to_rgba(hx, alpha)
+    pal["fallback"] = hex_to_rgba("#7fbf7f", alpha)
+    return pal
+
+def importance_max_color(val: Optional[float], palette: Dict) -> Tuple[int,int,int,int]:
+    if val is None:
+        return (0, 0, 0, 0)
+    try:
+        v = int(round(float(val)))
+    except Exception:
+        return (0, 0, 0, 0)
+    return palette.get(v, palette.get("fallback", (0, 0, 0, 0)))
+
 def read_sensitivity_palette_from_config(cfg_path: Path, alpha: float = 1.0) -> Dict[str, Tuple[int,int,int,int]]:
     import configparser
     # IMPORTANT: don't treat '#' as comment (colors like #ff0000)
@@ -329,6 +394,7 @@ def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int, bounds: Tuple[
         "minzoom": str(minzoom),
         "maxzoom": str(maxzoom),
         "bounds": f"{minlon},{minlat},{maxlon},{maxlat}",
+        # Tiles are stored using the MBTiles default (TMS/Y origin at the south)
         "scheme": "tms"
     }
     cur.executemany("INSERT INTO metadata (name, value) VALUES (?,?)", list(md.items()))
@@ -386,7 +452,7 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
 _G_GEOMS: List = []
 _G_SENS_CODES: List[Optional[str]] = []
 _G_NUMVALS: List[Optional[float]] = []   # used by env/groupstotal/assetstotal
-_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal" | "importance_index" | "sensitivity_index"
+_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal" | "importance_max" | "importance_index" | "sensitivity_index"
 _G_PALETTE: Dict[str, Tuple[int,int,int,int]] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
@@ -430,6 +496,9 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
             elif _G_FILL_MODE in ("groupstotal", "assetstotal"):
                 alpha = _G_PALETTE.get("blue_alpha", 0.70)
                 fill_rgba = blue_ramp_rgba(_G_NUMVALS[i], _G_NUM_MIN, _G_NUM_MAX, alpha=alpha)
+            elif _G_FILL_MODE == "importance_max":
+                imp_pal = _G_PALETTE.get("importance_max_colors", {})
+                fill_rgba = importance_max_color(_G_NUMVALS[i], imp_pal)
             elif _G_FILL_MODE in ("importance_index", "sensitivity_index"):
                 gradient = _G_PALETTE.get("gradient", [])
                 fill_rgba = index_layer_color(_G_NUMVALS[i], gradient)
@@ -552,6 +621,12 @@ def run_one_layer(group_name: str,
         vmax = float(np.nanmax(numvals.values)) if len(numvals) else 1.0
         if not np.isfinite(vmin): vmin = 0.0
         if not np.isfinite(vmax): vmax = 1.0
+    elif layer_mode == "importance_max":
+        numvals = pd.to_numeric(gdf.get("importance_max", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
+        mbt_name = f"{group_name}_importance_max"
+        out_path = out_dir / f"{mbt_name}.mbtiles"
+        vmin = 1.0; vmax = 5.0
     elif layer_mode == "importance_index":
         numvals = pd.to_numeric(gdf.get("index_importance", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
         sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
@@ -625,6 +700,7 @@ def main():
     ap.add_argument("--env-alpha", type=float, default=None, help="Fill alpha for envindex tiles (0..1)")
     ap.add_argument("--blue-alpha", type=float, default=None, help="Fill alpha for *_total tiles (0..1)")
     ap.add_argument("--index-alpha", type=float, default=None, help="Fill alpha for index tiles (0..1)")
+    ap.add_argument("--importance-max-alpha", type=float, default=None, help="Fill alpha for importance_max tiles (0..1)")
     ap.add_argument("--stroke-width", type=float, default=0.0, help="Stroke width px")
     args = ap.parse_args()
 
@@ -641,6 +717,7 @@ def main():
         "env_index",
         "asset_groups_total", "assets_overlap_total",
         "index_importance", "index_sensitivity",
+        "importance_max",
     ]
     try:
         schema_cols = set(pq.ParquetFile(parquet).schema.names)
@@ -717,6 +794,8 @@ def main():
     index_palette_src   = read_sensitivity_palette_from_config(cfg_path, alpha=index_alpha)
     index_gradient      = build_index_gradient_from_palette(index_palette_src, steps=25)
     index_palette       = {"gradient": index_gradient}
+    importance_max_alpha = _get_alpha("tiles_importance_max_alpha", args.importance_max_alpha, sens_alpha)
+    importance_max_palette = {"importance_max_colors": build_importance_max_palette(importance_max_alpha)}
     ranges_map = read_ranges_map(cfg_path)
     stroke_rgba = hex_to_rgba(args.stroke, args.stroke_alpha)
     env_available = "env_index" in gdf_all.columns
@@ -724,6 +803,7 @@ def main():
     assets_total_available = "assets_overlap_total" in gdf_all.columns
     importance_index_available = "index_importance" in gdf_all.columns
     sensitivity_index_available = "index_sensitivity" in gdf_all.columns
+    importance_max_available = "importance_max" in gdf_all.columns
     blue_palette = {"blue_alpha": blue_alpha}
 
     out_dir = mbtiles_dir()
@@ -816,6 +896,24 @@ def main():
             )
         else:
             log("  → skipping assetstotal tiles (assets_overlap_total column missing)")
+
+        if importance_max_available:
+            log(f"  → building {slug}_importance_max.mbtiles …")
+            run_one_layer(
+                group_name=slug,
+                gdf=gdf,
+                layer_mode="importance_max",
+                palette=importance_max_palette,
+                ranges_map=ranges_map,
+                out_dir=out_dir,
+                minzoom=args.minzoom,
+                maxzoom=args.maxzoom,
+                stroke_rgba=stroke_rgba,
+                stroke_w=args.stroke_width,
+                procs=args.procs
+            )
+        else:
+            log("  → skipping importance_max tiles (importance_max column missing)")
 
         if importance_index_available:
             log(f"  → building {slug}_importance_index.mbtiles …")
