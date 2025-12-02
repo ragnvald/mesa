@@ -574,7 +574,8 @@ def run_one_layer(group_name: str,
                   maxzoom: int,
                   stroke_rgba: Tuple[int,int,int,int],
                   stroke_w: float,
-                  procs: int):
+                  procs: int,
+                  tasks: List[Tuple[int,int,int, List[int]]]):
     """
     Prepare MBTiles writer, enumerate tiles, use worker pool to render, stream to writer.
     """
@@ -647,12 +648,6 @@ def run_one_layer(group_name: str,
     miny = clamp_lat(miny); maxy = clamp_lat(maxy)
     bounds = (float(minx), float(miny), float(maxx), float(maxy))
 
-    # Spatial index
-    try:
-        sindex = gdf.sindex
-    except Exception:
-        sindex = None
-
     # Writer process
     in_q = mp.Queue(maxsize=1000)
     done_q = mp.Queue()
@@ -666,17 +661,18 @@ def run_one_layer(group_name: str,
     numlst  = list(numvals.values)
     init_args = (geoms, senslst, numlst, layer_mode, palette, stroke_rgba, stroke_w, vmin, vmax)
 
-    # Plan tasks (also prints per-zoom schedule summary)
-    tasks = plan_tile_tasks(bounds, minzoom, maxzoom, sindex, gdf)
+    # Use pre-calculated tasks
     total_tiles = len(tasks)
     written = 0
 
     procs = max(1, int(procs))
     with mp.get_context("spawn").Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
-        for out in pool.imap_unordered(_render_one_tile, tasks, chunksize=64):
+        for i, out in enumerate(pool.imap_unordered(_render_one_tile, tasks, chunksize=64), 1):
             if out is not None:
                 in_q.put(out)
                 written += 1
+            if i % 100 == 0 or i == total_tiles:
+                log(f"[progress] {mbt_name}: {i}/{total_tiles}")
 
     # Close writer and confirm
     in_q.put("__CLOSE__")
@@ -823,6 +819,18 @@ def main():
         minx, miny, maxx, maxy = gdf.total_bounds
         log(f"[prep] group='{gv}' bounds=({minx:.3f},{miny:.3f},{maxx:.3f},{maxy:.3f}) rows={len(gdf):,}")
 
+        # Pre-calculate tasks for this group (shared across all layers)
+        miny_c = clamp_lat(miny); maxy_c = clamp_lat(maxy)
+        bounds_c = (float(minx), float(miny_c), float(maxx), float(maxy_c))
+        
+        try:
+            sindex = gdf.sindex
+        except Exception:
+            sindex = None
+
+        tasks = plan_tile_tasks(bounds_c, args.minzoom, args.maxzoom, sindex, gdf)
+        log(f"  → planned {len(tasks):,} tiles (shared across layers)")
+
         # SENSITIVITY layer
         log(f"  → building {slug}_sensitivity.mbtiles …")
         run_one_layer(
@@ -836,7 +844,8 @@ def main():
             maxzoom=args.maxzoom,
             stroke_rgba=stroke_rgba,
             stroke_w=args.stroke_width,
-            procs=args.procs
+            procs=args.procs,
+            tasks=tasks
         )
 
         # ENV INDEX layer
@@ -854,7 +863,8 @@ def main():
                 maxzoom=args.maxzoom,
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
-                procs=args.procs
+                procs=args.procs,
+                tasks=tasks
             )
         else:
             log("  → skipping envindex tiles (env_index column missing)")
@@ -873,7 +883,8 @@ def main():
                 maxzoom=args.maxzoom,
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
-                procs=args.procs
+                procs=args.procs,
+                tasks=tasks
             )
         else:
             log("  → skipping groupstotal tiles (asset_groups_total column missing)")
@@ -892,7 +903,8 @@ def main():
                 maxzoom=args.maxzoom,
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
-                procs=args.procs
+                procs=args.procs,
+                tasks=tasks
             )
         else:
             log("  → skipping assetstotal tiles (assets_overlap_total column missing)")
@@ -910,7 +922,8 @@ def main():
                 maxzoom=args.maxzoom,
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
-                procs=args.procs
+                procs=args.procs,
+                tasks=tasks
             )
         else:
             log("  → skipping importance_max tiles (importance_max column missing)")
@@ -928,7 +941,8 @@ def main():
                 maxzoom=args.maxzoom,
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
-                procs=args.procs
+                procs=args.procs,
+                tasks=tasks
             )
         else:
             log("  → skipping importance_index tiles (index_importance column missing)")
@@ -946,7 +960,8 @@ def main():
                 maxzoom=args.maxzoom,
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
-                procs=args.procs
+                procs=args.procs,
+                tasks=tasks
             )
         else:
             log("  → skipping sensitivity_index tiles (index_sensitivity column missing)")
