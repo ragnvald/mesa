@@ -237,16 +237,19 @@ def flatten_onedir_output() -> None:
 def copy_resources() -> None:
     # Copy runtime dirs next to mesa.exe (recursive)
     for folder in ["qgis", "docs", "input", "output", "system_resources"]:
-        src = CODE_DIR / folder
+        candidates = [CODE_DIR / folder, PROJECT_ROOT / folder]
+        src = next((c for c in candidates if c.exists()), None)
+        if not src:
+            continue
         dst = FINAL_DIST / folder
-        if src.exists():
-            log(f"Copying '{folder}/' ...")
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+        log(f"Copying '{folder}/' from {src} ...")
+        shutil.copytree(src, dst, dirs_exist_ok=True)
 
     # Copy config.ini next to mesa.exe
-    cfg = CODE_DIR / "config.ini"
-    if cfg.exists():
-        shutil.copy2(cfg, FINAL_DIST / "config.ini")
+    for cfg in [CODE_DIR / "config.ini", PROJECT_ROOT / "config.ini"]:
+        if cfg.exists():
+            shutil.copy2(cfg, FINAL_DIST / "config.ini")
+            break
 
     # Copy secrets/ (prefer repo root, fall back to code/ if present)
     secrets_candidates = [
