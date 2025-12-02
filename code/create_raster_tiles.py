@@ -3,17 +3,18 @@
 Raster MBTiles generator (PNG) from tbl_flat.parquet — no GDAL/Tippecanoe.
 
 Per group in name_gis_geocodegroup, produces seven MBTiles:
-  <group>_sensitivity.mbtiles   (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
-  <group>_envindex.mbtiles      (yellow->red ramp from env_index 1..100)
-  <group>_groupstotal.mbtiles   (light->dark blue, linear ramp of asset_groups_total per group)
-  <group>_assetstotal.mbtiles   (light->dark blue, linear ramp of assets_overlap_total per group)
-    <group>_importance_max.mbtiles (discrete green ramp for importance_max 1..5)
+  <group>_sensitivity.mbtiles        (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
+  <group>_envindex.mbtiles           (yellow->red ramp from env_index 1..100)
+  <group>_groupstotal.mbtiles        (light->dark blue, linear ramp of asset_groups_total per group)
+  <group>_assetstotal.mbtiles        (light->dark blue, linear ramp of assets_overlap_total per group)
+  <group>_importance_max.mbtiles     (discrete green ramp for importance_max 1..5)
   <group>_importance_index.mbtiles   (1..100 gradient from the importance index)
   <group>_sensitivity_index.mbtiles  (1..100 gradient from the sensitivity index)
 
 - EPSG:4326 input expected.
 - Transparent background, polygon fill + optional stroke.
 - Multiprocessing: worker pool renders tiles, single writer process inserts into SQLite.
+- Optimization: Calculates tile tasks once per group and reuses the plan across all 7 layers to reduce overhead.
 - Dependencies: geopandas, shapely, pandas, numpy, pillow (lightweight), sqlite3 (stdlib).
 
 Usage examples:
