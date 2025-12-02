@@ -451,7 +451,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     tile_ceiling = 99.0  # keep headroom for explicit "completed" phase to own 100%
     try:
-        layers_per_group = 4  # sensitivity, env, groupstotal, assetstotal
+        layers_per_group = 7  # sensitivity, env, groupstotal, assetstotal, importance_max, importance_index, sensitivity_index
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
@@ -468,7 +468,9 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
             return
 
         re_groups = re.compile(r"^Groups:\s*\[(.*)\]\s*$")
-        re_building = re.compile(r"\u2192\s*building|building\s+.+\.\.\.")
+        # Match both "building" and "skipping" to advance the step counter
+        re_step = re.compile(r"\u2192\s*(building|skipping)|(building|skipping)\s+.+\.\.\.")
+        re_progress = re.compile(r"\[progress\]\s+.*:\s+(\d+)/(\d+)")
         re_done = re.compile(r"All done\.")
 
         for line in proc.stdout:
@@ -492,10 +494,26 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
                     total_groups = max(total_groups, len([s for s in inside.split(",") if s.strip()]))
                     total_steps = max(1, total_groups*layers_per_group)
 
-            if re_building.search(line):
+            if re_step.search(line):
                 done_steps += 1
                 pct = tile_floor + (done_steps / max(total_steps, 1)) * tile_span
                 update_progress(min(tile_ceiling, pct))
+
+            pm = re_progress.search(line)
+            if pm:
+                try:
+                    curr, tot = int(pm.group(1)), int(pm.group(2))
+                    # Granular progress within the current step
+                    step_fraction = curr / max(1, tot)
+                    # Base progress for current step
+                    base_pct = tile_floor + (done_steps / max(total_steps, 1)) * tile_span
+                    # Next step progress
+                    next_pct = tile_floor + ((done_steps + 1) / max(total_steps, 1)) * tile_span
+                    # Interpolate
+                    current_pct = base_pct + (next_pct - base_pct) * step_fraction * 0.9 # 0.9 to leave room for "building" msg
+                    update_progress(min(tile_ceiling, current_pct))
+                except Exception:
+                    pass
 
             if re_done.search(line):
                 update_progress(tile_ceiling)
@@ -1609,13 +1627,176 @@ def _scale_index_scores(scores: pd.Series, labels: pd.Series | None = None) -> p
         scaled.loc[group.index] = vals
     return scaled
 
+# ----------------------------
+# Parallel Flattening Workers
+# ----------------------------
+def _flatten_worker(args):
+    """
+    Process one tbl_stacked parquet file and return aggregated stats per code.
+    args: (parquet_path, ranges_map, desc_map, index_weights)
+    """
+    path, ranges_map, desc_map, index_weights = args
+    try:
+        df = gpd.read_parquet(path)
+    except Exception:
+        return None
+    
+    if df.empty:
+        return None
+
+    # Ensure numeric bases
+    bases = ["importance","sensitivity","susceptibility"]
+    for b in bases:
+        if b in df.columns:
+            df[b] = pd.to_numeric(df[b], errors="coerce")
+        else:
+            df[b] = pd.Series(pd.NA, index=df.index, dtype="Float64")
+
+    if "name_gis_assetgroup" not in df.columns:
+        df["name_gis_assetgroup"] = pd.Series(pd.NA, index=df.index, dtype="string")
+
+    # Helpers (same as original)
+    def _pick_base_category(d, base):
+        if f"{base}_code" in d.columns:
+            return d[f"{base}_code"].astype("string").str.strip().str.upper()
+        elif "category" in d.columns:
+            return d["category"].astype("string").str.strip().str.upper()
+        else:
+            return d[base].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string").str.upper()
+
+    def _pick_rank(d, base):
+        if f"{base}_category_rank" in d.columns:
+            return pd.to_numeric(d[f"{base}_category_rank"], errors="coerce").fillna(0.0)
+        elif "category_rank" in d.columns:
+            return pd.to_numeric(d["category_rank"], errors="coerce").fillna(0.0)
+        return pd.Series(0.0, index=d.index, dtype="float64")
+
+    def _select_extreme_local(d, base, pick):
+        val = pd.to_numeric(d[base], errors="coerce")
+        cat = _pick_base_category(d, base)
+        rnk = _pick_rank(d, base)
+        tmp = pd.DataFrame({"code": d["code"], "val": val, "cat": cat, "rnk": rnk})
+        if pick == "max":
+            tmp["sv"] = tmp["val"].fillna(-np.inf)
+            tmp = tmp.sort_values(["code","sv","rnk","cat"], ascending=[True, False, False, True], kind="mergesort")
+        else:
+            tmp["sv"] = tmp["val"].fillna(np.inf)
+            tmp = tmp.sort_values(["code","sv","rnk","cat"], ascending=[True, True, False, True], kind="mergesort")
+        return tmp.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].rename(
+            columns={"val": f"{base}_{pick}", "cat": f"{base}_code_{pick}"}
+        )
+
+    # 1. Basic Meta (first)
+    # We'll take the first geometry/names found. Since code is unique per geocode, this is stable.
+    keys = ["code"]
+    # For asset groups, we need sets to merge later
+    # But passing sets is heavy. 
+    # Optimization: If we assume code is mostly in one file, we can just take the list.
+    # But to be safe, we'll aggregate sets.
+    
+    # Group by code within this file
+    grouped = df.groupby("code", as_index=False)
+    
+    # Meta: first
+    meta = grouped.first()[["code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"]]
+    
+    # Counts
+    sz = grouped.size()
+    if isinstance(sz, pd.Series):
+        counts = sz.to_frame("assets_overlap_total").reset_index()
+    else:
+        counts = sz.rename(columns={"size": "assets_overlap_total"})
+    
+    # Asset Groups (unique IDs)
+    # We'll store them as a list/string to be merged? 
+    # Actually, let's just return the raw 'ref_asset_group' and 'name_gis_assetgroup' columns 
+    # associated with the code, but that's too much data.
+    # Let's do: set of ref_asset_group, set of name_gis_assetgroup
+    # This might be slow if many groups.
+    # Alternative: Just count unique here. If a code is split, the sum of unique counts is WRONG.
+    # Correct way: Union of sets.
+    # Let's try to be efficient.
+    
+    asset_info = df.groupby("code")[["ref_asset_group", "name_gis_assetgroup"]].agg({
+        "ref_asset_group": lambda x: list(set(x.dropna())),
+        "name_gis_assetgroup": lambda x: list(set(x.dropna().astype(str)))
+    }).reset_index()
+
+    # Min/Max
+    extremes = []
+    for b in bases:
+        extremes.append(_select_extreme_local(df, b, "min"))
+        extremes.append(_select_extreme_local(df, b, "max"))
+
+    # Raw Scores
+    # We compute sum(weight * count) per bucket
+    raw_scores = {}
+    for idx_name in ["importance", "sensitivity"]:
+        w = index_weights.get(idx_name, [])
+        if not w: continue
+        # bucket logic
+        val_col = idx_name
+        tmp = df[["code", val_col]].dropna()
+        vals = pd.to_numeric(tmp[val_col], errors="coerce").round().clip(1, len(w)).astype(int)
+        tmp = tmp.assign(bucket=vals)
+        # group by code, bucket -> count
+        g = tmp.groupby(["code", "bucket"]).size().reset_index(name="count")
+        # map bucket to weight
+        g["weight"] = g["bucket"].map(lambda x: w[x-1] if 0 < x <= len(w) else 0)
+        g["score_part"] = g["count"] * g["weight"]
+        # sum per code
+        score_sums = g.groupby("code")["score_part"].sum().reset_index(name=f"{idx_name}_raw_score")
+        raw_scores[idx_name] = score_sums
+
+    # Merge all partials
+    res = meta
+    res = res.merge(counts, on="code", how="left")
+    res = res.merge(asset_info, on="code", how="left")
+    for e in extremes:
+        res = res.merge(e, on="code", how="left")
+    for k, v in raw_scores.items():
+        res = res.merge(v, on="code", how="left")
+        
+    return res
+
+def _backfill_worker(args):
+    """
+    Backfill area_m2 to a single tbl_stacked parquet file.
+    args: (parquet_path, area_map_df)
+    """
+    path, area_map = args
+    try:
+        part = gpd.read_parquet(path)
+        if 'code' not in part.columns:
+            return 0
+        part['code'] = part['code'].astype(str)
+        # area_map has ['code', 'area_m2']
+        merged = part.merge(area_map, on='code', how='left', suffixes=('','_flat'))
+        if 'area_m2_flat' in merged.columns:
+            merged['area_m2'] = merged['area_m2_flat']
+            merged.drop(columns=['area_m2_flat'], inplace=True)
+        gpd.GeoDataFrame(merged, geometry=part.geometry.name, crs=part.crs).to_parquet(path, index=False)
+        return len(part)
+    except Exception:
+        return 0
+
 def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     log_to_gui(log_widget, "Building presentation table (tbl_flat)…")
 
-    stacked = read_parquet_or_empty("tbl_stacked")
-    log_to_gui(log_widget, f"tbl_stacked rows: {len(stacked):,}")
+    # 1. Identify input files
+    ds_dir = _dataset_dir("tbl_stacked")
+    if not ds_dir.exists():
+        # Fallback to single file if exists
+        single = gpq_dir() / "tbl_stacked.parquet"
+        if single.exists():
+            files = [single]
+        else:
+            files = []
+    else:
+        files = sorted([p for p in ds_dir.glob("*.parquet")])
 
-    if stacked.empty:
+    if not files:
+        # Handle empty case (same as before)
         empty_cols = [
             'ref_geocodegroup','name_gis_geocodegroup','code',
             'importance_min','importance_max','importance_code_min','importance_description_min','importance_code_max','importance_description_max',
@@ -1626,126 +1807,184 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
         write_parquet("tbl_flat", gdf_empty)
-
-        # NEW: produce a zeroed area_stats.json as well
         try:
             stats = {"labels": list("ABCDE"), "values": [0,0,0,0,0], "message": f'The geocode/partition "{_basic_group_name()}" is missing.'}
-            log_to_gui(log_widget, "Computing area stats (empty dataset)…")
-            update_progress(87)
             _write_area_stats_json(stats)
-            update_progress(89)
-        except Exception as e:
-            log_to_gui(log_widget, f"Area stats (empty) failed: {e}")
+        except Exception: pass
         return
 
-    if stacked.crs is None:
-        stacked.set_crs(f"EPSG:{working_epsg}", inplace=True)
-
-    # Ensure numeric bases exist
-    bases = ["importance","sensitivity","susceptibility"]
-    for b in bases:
-        if b in stacked.columns:
-            stacked[b] = pd.to_numeric(stacked[b], errors="coerce")
-        else:
-            stacked[b] = pd.Series(pd.NA, index=stacked.index, dtype="Float64")
-
-    if "name_gis_assetgroup" not in stacked.columns:
-        # Keep downstream aggregations happy even when legacy datasets lack the name column
-        stacked["name_gis_assetgroup"] = pd.Series(pd.NA, index=stacked.index, dtype="string")
-
-    # --------- Category/Rank helpers for choosing winners ---------
-    ranges_map, desc_map, _order = read_class_ranges(config_file)
-
-    def _pick_base_category(df: pd.DataFrame, base: str) -> pd.Series:
-        """
-        Preferred category source (per-row):
-          1) base-specific code column: f"{base}_code"
-          2) generic 'category' column
-          3) derive from numeric via ranges map
-        """
-        if f"{base}_code" in df.columns:
-            cat = df[f"{base}_code"].astype("string").str.strip().str.upper()
-        elif "category" in df.columns:
-            cat = df["category"].astype("string").str.strip().str.upper()
-        else:
-            cat = df[base].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string").str.upper()
-        return cat
-
-    def _pick_rank(df: pd.DataFrame, base: str) -> pd.Series:
-        """
-        Tie-break rank (higher is better), only if available:
-          1) per-base rank f"{base}_category_rank"
-          2) global 'category_rank'
-        If none exist -> all zeros (so we fall back to alphabetical category).
-        """
-        if f"{base}_category_rank" in df.columns:
-            rnk = pd.to_numeric(df[f"{base}_category_rank"], errors="coerce")
-        elif "category_rank" in df.columns:
-            rnk = pd.to_numeric(df["category_rank"], errors="coerce")
-        else:
-            rnk = pd.Series(0.0, index=df.index, dtype="float64")
-        return rnk.fillna(0.0)
-
-    def _select_extreme(df: pd.DataFrame, base: str, pick: str) -> pd.DataFrame:
-        val = pd.to_numeric(df[base], errors="coerce")
-        cat = _pick_base_category(df, base)
-        rnk = _pick_rank(df, base)
-        tmp = pd.DataFrame({
-            "code": df["code"],
-            "val":  val,
-            "cat":  cat,
-            "rnk":  rnk
-        })
-        if pick == "max":
-            tmp["sv"] = tmp["val"].fillna(-np.inf)  # ignore NaNs for maxima
-            tmp = tmp.sort_values(["code","sv","rnk","cat"],
-                                  ascending=[True, False, False, True],
-                                  kind="mergesort")
-        else:  # "min"
-            tmp["sv"] = tmp["val"].fillna(np.inf)   # ignore NaNs for minima
-            tmp = tmp.sort_values(["code","sv","rnk","cat"],
-                                  ascending=[True, True, False, True],
-                                  kind="mergesort")
-        win = tmp.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].copy()
-        return win.rename(columns={"val": f"{base}_{pick}", "cat": f"{base}_code_{pick}"})
-
-    # --------- Per-tile metadata (sum/concat-like behavior stays) ---------
-    keys = ["code"]
-    gmeta = stacked.groupby(keys, dropna=False).agg({
-        "ref_geocodegroup": "first",
-        "name_gis_geocodegroup": "first",
-        "geometry": "first",
-        "ref_asset_group": pd.Series.nunique,
-        "name_gis_assetgroup": (lambda s: ", ".join(pd.Series(s).dropna().astype(str).unique()))
-    }).rename(columns={"ref_asset_group":"asset_groups_total",
-                       "name_gis_assetgroup":"asset_group_names"}).reset_index()
-
-    goverlap = stacked.groupby(keys, dropna=False).size().to_frame("assets_overlap_total").reset_index()
-
-    # --------- Build winners for each base and extreme ---------
-    pieces = [gmeta, goverlap]
-    for b in bases:
-        pieces.append(_select_extreme(stacked, b, "min"))
-        pieces.append(_select_extreme(stacked, b, "max"))
-
-    # Merge to single row per tile
-    tbl_flat = pieces[0]
-    for p in pieces[1:]:
-        tbl_flat = tbl_flat.merge(p, on="code", how="left")
-
-    # Descriptions from chosen categories
-    for b in bases:
-        tbl_flat[f"{b}_description_min"] = tbl_flat[f"{b}_code_min"].map(lambda k: desc_map.get(k, None))
-        tbl_flat[f"{b}_description_max"] = tbl_flat[f"{b}_code_max"].map(lambda k: desc_map.get(k, None))
-
-    # GeoDataFrame and area
-    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=stacked.crs)
-
-    # read area projection from the same flat config we were given
+    # 2. Prepare config/maps
+    ranges_map, desc_map, _ = read_class_ranges(config_file)
     try:
         cfg_local = read_config(config_file)
     except Exception:
         cfg_local = configparser.ConfigParser()
+    index_weights = _load_index_weight_settings(cfg_local)
+
+    # 3. Run Parallel Map
+    log_to_gui(log_widget, f"Flattening {len(files)} partitions in parallel…")
+    partials = []
+    
+    # Determine workers
+    try:
+        max_workers = cfg_get_int(cfg_local, "max_workers", 0)
+        if max_workers <= 0: max_workers = max(1, multiprocessing.cpu_count())
+    except:
+        max_workers = 4
+
+    if _mp_allowed() and max_workers > 1:
+        with multiprocessing.get_context("spawn").Pool(max_workers) as pool:
+            args = [(f, ranges_map, desc_map, index_weights) for f in files]
+            for res in pool.imap_unordered(_flatten_worker, args):
+                if res is not None:
+                    partials.append(res)
+    else:
+        for f in files:
+            res = _flatten_worker((f, ranges_map, desc_map, index_weights))
+            if res is not None:
+                partials.append(res)
+
+    if not partials:
+        log_to_gui(log_widget, "No data found in partitions.")
+        return
+
+    # 4. Reduce (Concatenate & Final Aggregation)
+    log_to_gui(log_widget, "Merging partial results…")
+    full = pd.concat(partials, ignore_index=True)
+    
+    # If a code was split across files, we need to aggregate again
+    # Group by code
+    # Aggregations:
+    # geometry: first
+    # ref_geocodegroup: first
+    # name_gis_geocodegroup: first
+    # assets_overlap_total: sum
+    # ref_asset_group (list): sum (concat lists) -> then set -> len
+    # name_gis_assetgroup (list): sum (concat lists) -> then set -> join
+    # min columns: min
+    # max columns: max
+    # raw_score columns: sum
+    
+    agg_rules = {
+        "geometry": "first",
+        "ref_geocodegroup": "first",
+        "name_gis_geocodegroup": "first",
+        "assets_overlap_total": "sum",
+        "ref_asset_group": "sum", # concats lists
+        "name_gis_assetgroup": "sum", # concats lists
+    }
+    
+    bases = ["importance","sensitivity","susceptibility"]
+    for b in bases:
+        agg_rules[f"{b}_min"] = "min"
+        agg_rules[f"{b}_max"] = "max"
+        # For codes/cats, we need to re-evaluate if min/max changed?
+        # Actually, if we have local min/max, the global min is min(local_mins).
+        # The corresponding code/cat for the global min is the code/cat of the local min that won.
+        # This is tricky with standard groupby.agg.
+        # But we can just take the min/max of the values.
+        # What about the *codes* associated with them?
+        # We need to keep the (val, code) pair to pick the right code.
+        # _flatten_worker returned val and cat.
+        # If we just take min(val), we lose the cat.
+        # We can sort and take first.
+    
+    # Custom reducer for min/max with associated category
+    # We'll do a custom apply or just iterate.
+    # Since most codes won't be split, maybe we can optimize.
+    # Check duplicates
+    if full["code"].duplicated().any():
+        log_to_gui(log_widget, "Resolving split geocodes…")
+        # We need a more complex reduction for the winners
+        # Let's do it manually for the complex columns
+        
+        # 1. Simple sums/firsts
+        simple_agg = {k:v for k,v in agg_rules.items() if k not in ["ref_asset_group", "name_gis_assetgroup"]}
+        for k in ["importance_raw_score", "sensitivity_raw_score"]:
+            if k in full.columns:
+                simple_agg[k] = "sum"
+        
+        grouped = full.groupby("code")
+        res_simple = grouped.agg(simple_agg).reset_index()
+        
+        # 2. Lists (sets)
+        # This is slow if we do apply on all.
+        # Only do it for duplicated codes? No, easier to do all.
+        # Optimization: Vectorized list concat is hard.
+        # Let's use a custom apply for the lists
+        def merge_sets(series):
+            s = set()
+            for x in series:
+                s.update(x)
+            return s
+            
+        # Actually, we can just explode and nunique?
+        # ref_asset_group is list of IDs.
+        # We want count of unique.
+        # full.explode("ref_asset_group").groupby("code")["ref_asset_group"].nunique()
+        # This is memory intensive if lists are long.
+        # But it's robust.
+        
+        asset_counts = full[["code", "ref_asset_group"]].explode("ref_asset_group").groupby("code")["ref_asset_group"].nunique().reset_index(name="asset_groups_total")
+        
+        # For names, we want joined string
+        def join_names(x):
+            return ", ".join(sorted(set(x.dropna())))
+        
+        asset_names = full[["code", "name_gis_assetgroup"]].explode("name_gis_assetgroup").groupby("code")["name_gis_assetgroup"].apply(join_names).reset_index(name="asset_group_names")
+        
+        # 3. Min/Max with categories
+        # We need to pick the row with the global min/max val
+        # For each base, we have local min/max rows.
+        # We want to pick the best among them.
+        # We can use sort_values + drop_duplicates logic again!
+        
+        # For Min:
+        # We have columns: base_min, base_code_min
+        # We want row with min(base_min). Tie break?
+        # We don't have rank here. We assume local winner was best.
+        # If tie, pick any.
+        
+        merged_extremes = []
+        for b in bases:
+            # Min
+            cols = ["code", f"{b}_min", f"{b}_code_min"]
+            if all(c in full.columns for c in cols):
+                sub = full[cols].sort_values([f"{b}_min", f"{b}_code_min"]) # sort by val asc
+                win = sub.drop_duplicates(subset=["code"], keep="first")
+                merged_extremes.append(win)
+            
+            # Max
+            cols = ["code", f"{b}_max", f"{b}_code_max"]
+            if all(c in full.columns for c in cols):
+                sub = full[cols].sort_values([f"{b}_max", f"{b}_code_max"], ascending=[False, True]) # sort by val desc
+                win = sub.drop_duplicates(subset=["code"], keep="first")
+                merged_extremes.append(win)
+                
+        # Merge everything back
+        tbl_flat = res_simple
+        tbl_flat = tbl_flat.merge(asset_counts, on="code", how="left")
+        tbl_flat = tbl_flat.merge(asset_names, on="code", how="left")
+        for df_ex in merged_extremes:
+            tbl_flat = tbl_flat.merge(df_ex, on="code", how="left")
+            
+    else:
+        # No duplicates, just clean up the list columns
+        tbl_flat = full
+        tbl_flat["asset_groups_total"] = tbl_flat["ref_asset_group"].apply(lambda x: len(set(x)))
+        tbl_flat["asset_group_names"] = tbl_flat["name_gis_assetgroup"].apply(lambda x: ", ".join(sorted(set(x))))
+        # Drop the list columns
+        tbl_flat = tbl_flat.drop(columns=["ref_asset_group", "name_gis_assetgroup"])
+
+    # 5. Final Descriptions & Area
+    for b in bases:
+        if f"{b}_code_min" in tbl_flat.columns:
+            tbl_flat[f"{b}_description_min"] = tbl_flat[f"{b}_code_min"].map(lambda k: desc_map.get(k, None))
+        if f"{b}_code_max" in tbl_flat.columns:
+            tbl_flat[f"{b}_description_max"] = tbl_flat[f"{b}_code_max"].map(lambda k: desc_map.get(k, None))
+
+    tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=f"EPSG:{working_epsg}")
+
     try:
         area_epsg = normalize_area_epsg(cfg_local["DEFAULT"].get("area_projection_epsg","3035"))
     except Exception:
@@ -1759,17 +1998,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         metric = tbl_flat.to_crs("EPSG:3035")
         tbl_flat["area_m2"] = metric.geometry.area.astype("float64").round().astype("Int64")
 
-    for col in ("asset_groups_total", "assets_overlap_total"):
-        if col not in tbl_flat.columns:
-            tbl_flat[col] = 1
-
-    # New importance/sensitivity indexes based on tbl_stacked weights
-    try:
-        index_weights = _load_index_weight_settings(cfg_local)
-    except Exception:
-        index_weights = INDEX_WEIGHT_DEFAULTS.copy()
-    importance_scores = _compute_index_scores_from_stacked(stacked, "importance", index_weights["importance"])
-    sensitivity_scores = _compute_index_scores_from_stacked(stacked, "sensitivity", index_weights["sensitivity"])
+    # 6. Final Scores Scaling
     group_map = None
     try:
         if "code" in tbl_flat.columns and "name_gis_geocodegroup" in tbl_flat.columns:
@@ -1777,19 +2006,23 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             group_map = unique_groups.set_index("code")["name_gis_geocodegroup"].astype("string")
     except Exception:
         group_map = None
-    importance_norm = _scale_index_scores(importance_scores, group_map).rename("index_importance")
-    sensitivity_norm = _scale_index_scores(sensitivity_scores, group_map).rename("index_sensitivity")
-    if not importance_norm.empty:
+
+    if "importance_raw_score" in tbl_flat.columns:
+        importance_norm = _scale_index_scores(tbl_flat.set_index("code")["importance_raw_score"], group_map).rename("index_importance")
         tbl_flat = tbl_flat.merge(importance_norm, left_on="code", right_index=True, how="left")
     else:
         tbl_flat["index_importance"] = 0
-    if not sensitivity_norm.empty:
+
+    if "sensitivity_raw_score" in tbl_flat.columns:
+        sensitivity_norm = _scale_index_scores(tbl_flat.set_index("code")["sensitivity_raw_score"], group_map).rename("index_sensitivity")
         tbl_flat = tbl_flat.merge(sensitivity_norm, left_on="code", right_index=True, how="left")
     else:
         tbl_flat["index_sensitivity"] = 0
+
     for col in ("index_importance", "index_sensitivity"):
         tbl_flat[col] = pd.to_numeric(tbl_flat[col], errors="coerce").fillna(0).round().astype("Int64")
 
+    # 7. Select Columns & Write
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
         'importance_min','importance_max','importance_code_min','importance_description_min','importance_code_max','importance_description_max',
@@ -1807,67 +2040,51 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     write_parquet("tbl_flat", tbl_flat)
     log_to_gui(log_widget, f"tbl_flat saved with {len(tbl_flat):,} rows.")
 
-    # NEW: area stats JSON (geodesic, WGS84) for the map UI
+    # 8. Area Stats
     try:
-        log_to_gui(log_widget, "Computing geodesic area stats for basic mosaic (A–E)…")
-        update_progress(87)
+        log_to_gui(log_widget, "Computing geodesic area stats…")
         stats = _compute_area_stats_from_tbl_flat(tbl_flat)
         _write_area_stats_json(stats)
-        update_progress(89)
     except Exception as e:
         log_to_gui(log_widget, f"Area stats computation failed: {e}")
 
-    # Backfill area_m2 to stacked parts
+    # 9. Parallel Backfill
     try:
+        log_to_gui(log_widget, "Backfilling area_m2 to tbl_stacked partitions…")
         area_map = tbl_flat[['code','area_m2']].dropna().drop_duplicates(subset=['code'])
         area_map['code'] = area_map['code'].astype(str)
-        ds_dir = _dataset_dir("tbl_stacked")
-        if ds_dir.exists() and ds_dir.is_dir():
-            part_files = sorted([p for p in ds_dir.iterdir() if p.suffix.lower()=='.parquet'])
+        
+        if files:
             touched = 0
-            started_at = time.time()
-            for i, pp in enumerate(part_files, start=1):
-                try:
-                    part = gpd.read_parquet(pp)
-                    if 'code' not in part.columns:
-                        continue
-                    part['code'] = part['code'].astype(str)
-                    merged = part.merge(area_map, on='code', how='left', suffixes=('','_flat'))
-                    if 'area_m2_flat' in merged.columns:
-                        merged['area_m2'] = merged['area_m2_flat']
-                        merged.drop(columns=['area_m2_flat'], inplace=True)
-                    gpd.GeoDataFrame(merged, geometry=part.geometry.name, crs=part.crs).to_parquet(pp, index=False)
-                    touched += len(part)
-                except Exception as e:
-                    log_to_gui(log_widget, f"[Backfill] Part {pp.name} skipped: {e}")
-                if i % 25 == 0 or i == len(part_files):
-                    elapsed = time.time() - started_at
-                    log_to_gui(log_widget, f"[Backfill] {i}/{len(part_files)} parts updated • rows seen: {touched:,} • elapsed {elapsed/60:.1f} min")
-            log_to_gui(log_widget, f"Backfilled area_m2 to tbl_stacked dataset ({len(part_files)} parts).")
+            if _mp_allowed() and max_workers > 1:
+                with multiprocessing.get_context("spawn").Pool(max_workers) as pool:
+                    args = [(f, area_map) for f in files]
+                    for count in pool.imap_unordered(_backfill_worker, args):
+                        touched += count
+            else:
+                for f in files:
+                    touched += _backfill_worker((f, area_map))
+            
+            log_to_gui(log_widget, f"Backfilled area_m2 to {len(files)} parts ({touched:,} rows).")
     except Exception as e:
-        log_to_gui(log_widget, f"Backfill to tbl_stacked failed: {e}")
+        log_to_gui(log_widget, f"Backfill failed: {e}")
 
     update_progress(90)
     try:
-        # Keep the last snapshot of cells/home_bounds so the map still shows tiles after finishing
         prev = {}
         try:
             with open(_status_path(), "r", encoding="utf-8") as f:
                 prev = json.load(f) or {}
         except Exception:
             prev = {}
-
-        chunks_total = int(prev.get("chunks_total", 0) or 0)
-        done = int(prev.get("done", chunks_total) or 0)
-
         _write_status_atomic({
             "phase": "done",
             "updated_at": datetime.utcnow().isoformat() + "Z",
-            "chunks_total": chunks_total,
-            "done": done,
+            "chunks_total": int(prev.get("chunks_total", 0) or 0),
+            "done": int(prev.get("done", 0) or 0),
             "running": [],
-            "cells": prev.get("cells", []),           # <-- preserve
-            "home_bounds": prev.get("home_bounds")    # <-- preserve
+            "cells": prev.get("cells", []),
+            "home_bounds": prev.get("home_bounds")
         })
     except Exception:
         pass
