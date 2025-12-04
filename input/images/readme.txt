@@ -1,0 +1,1 @@
+Place images in this folder. Legal formats are jpg/png. The files can later be embedded as logos or contextual images when you create the atlases based on the atlas file.
