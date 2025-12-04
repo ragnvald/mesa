@@ -1579,6 +1579,8 @@ LINES_GDF    = to_epsg4326(load_parquet(LINES_FILE), cfg)
 GDF_BOUNDS   = GDF.geometry.bounds if (not GDF.empty and "geometry" in GDF.columns) else None
 
 IMPORTANCE_MAX_AVAILABLE = False
+IMPORTANCE_INDEX_AVAILABLE = False
+IMPORTANCE_INDEX_AVAILABLE = False
 
 GEO_STR_TREE = None
 GEO_STR_LOOKUP: dict[int, int] = {}
@@ -1597,6 +1599,8 @@ GEOCODE_AVAILABLE   = (not GDF.empty) and ("name_gis_geocodegroup" in GDF.column
 SEGMENTS_AVAILABLE  = (not SEG_GDF.empty) and ("geometry" in SEG_GDF.columns)
 SEGMENT_OUTLINES_AVAILABLE = (not SEG_OUTLINE_GDF.empty) and ("geometry" in SEG_OUTLINE_GDF.columns)
 IMPORTANCE_MAX_AVAILABLE = (not GDF.empty) and ("importance_max" in GDF.columns)
+IMPORTANCE_INDEX_AVAILABLE = (not GDF.empty) and ("index_importance" in GDF.columns)
+IMPORTANCE_INDEX_AVAILABLE = (not GDF.empty) and ("index_importance" in GDF.columns)
 
 def _current_geocode_categories() -> list[str]:
     cats = set(MBTILES_INDEX.keys())
@@ -1651,6 +1655,7 @@ class Api:
             "segment_line_names": LINE_NAMES,
             "importance_max_available": IMPORTANCE_MAX_AVAILABLE,
             "importance_max_tiles_available": IMPORTANCE_MAX_TILES_AVAILABLE,
+            "importance_index_available": IMPORTANCE_INDEX_AVAILABLE,
             "importance_index_tiles_available": IMPORTANCE_INDEX_TILES_AVAILABLE,
             "sensitivity_index_tiles_available": SENSITIVITY_INDEX_TILES_AVAILABLE,
             "colors": COLS,
@@ -1800,7 +1805,28 @@ class Api:
                         "mbtiles": {"importance_index_url": mb["importance_index_url"],
                                     "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]},
                         "home_bounds": mb.get("bounds")}
-            return {"ok": False, "error": "Importance index MBTiles not available."}
+            if not IMPORTANCE_INDEX_AVAILABLE:
+                return {"ok": False, "error": "Importance index data not available."}
+            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            if df.empty:
+                return {"ok": False, "error": "Importance index data not available for this geocode group."}
+            if "index_importance" not in df.columns:
+                return {"ok": False, "error": "Importance index column missing."}
+            df = to_plot_crs(df, cfg)
+            keep_cols = ["index_importance", "geometry"]
+            df = df[[c for c in keep_cols if c in df.columns]]
+            vals = pd.to_numeric(df["index_importance"], errors="coerce")
+            valid = vals.dropna()
+            vmin = float(valid.min()) if len(valid) else 0.0
+            vmax = float(valid.max()) if len(valid) else 0.0
+            gj = gdf_to_geojson_min(df)
+            bnds = bounds_to_leaflet(df.total_bounds) if "geometry" in df.columns else [[0,0],[0,0]]
+            return {
+                "ok": True,
+                "geojson": gj,
+                "range": {"min": vmin, "max": vmax},
+                "home_bounds": bnds,
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -2252,6 +2278,21 @@ function importanceColor(v, vmin, vmax){
   var r=Math.round(_lerp(light.r,dark.r,t)), g=Math.round(_lerp(light.g,dark.g,t)), b=Math.round(_lerp(light.b,dark.b,t));
   return _rgbToHex(r,g,b);
 }
+function importanceIndexColor(v, vmin, vmax){
+    if (v===null || v===undefined) return null;
+    var stops=['#7fbf7f','#5fbf5f','#3e9f4e','#1f7f3d','#0f5f2c'];
+    var t=_normalize(v, vmin, vmax);
+    var pos=t*(stops.length-1);
+    var idx=Math.floor(pos);
+    var frac=pos-idx;
+    if (idx>=stops.length-1) return stops[stops.length-1];
+    var c1=_hexToRgb(stops[idx]);
+    var c2=_hexToRgb(stops[idx+1]);
+    var r=Math.round(_lerp(c1.r,c2.r,frac));
+    var g=Math.round(_lerp(c1.g,c2.g,frac));
+    var b=Math.round(_lerp(c1.b,c2.b,frac));
+    return _rgbToHex(r,g,b);
+}
 function _normalize(val, vmin, vmax){ if (vmax===vmin){ return 1.0; } var t=(Number(val)-vmin)/(vmax-vmin); if (!isFinite(t)) t=0; return Math.max(0, Math.min(1, t)); }
 
 /* loaders – unchanged */
@@ -2378,7 +2419,21 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
     if (res.mbtiles && res.mbtiles.importance_index_url){
       var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
       LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.importance_index_url, opts); IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
-    }
+        } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+            var vmin=(res.range&&isFinite(res.range.min))?res.range.min:1;
+            var vmax=(res.range&&isFinite(res.range.max))?res.range.max:100;
+            LAYER_IMPORTANCE_INDEX=L.geoJSON(res.geojson, {
+                style:function(f){
+                    var v=(f.properties && f.properties.index_importance!=null)?Number(f.properties.index_importance):null;
+                    if (v===null || !isFinite(v)){
+                        return {color:'transparent', weight:0, opacity:0, fillOpacity:0, fillColor:'transparent'};
+                    }
+                    var col=importanceIndexColor(v, vmin, vmax);
+                    return {color:col, weight:0, opacity:0, fillOpacity:FILL_ALPHA, fillColor:col};
+                }
+            });
+            IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
+        }
     if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
@@ -2467,7 +2522,9 @@ function buildLayersControl(state){
   IMPORTANCE_MAX_GROUP=L.layerGroup(); IMPORTANCE_INDEX_GROUP=L.layerGroup(); SENSITIVITY_INDEX_GROUP=L.layerGroup();
   GEO_FOLDER=L.layerGroup();
 
-    var hasImportanceIndex = !!(state && state.importance_index_tiles_available);
+    var hasImportanceIndexTiles = !!(state && state.importance_index_tiles_available);
+    var hasImportanceIndexVector = !!(state && state.importance_index_available);
+    var hasImportanceIndex = hasImportanceIndexTiles || hasImportanceIndexVector;
     var hasSensitivityIndex = !!(state && state.sensitivity_index_tiles_available);
     var hasImportanceMaxTiles = !!(state && state.importance_max_tiles_available);
     var hasImportanceMaxVector = !!(state && state.importance_max_available);
@@ -3039,6 +3096,7 @@ class Api:
             "segment_line_names": LINE_NAMES,
             "importance_max_available": IMPORTANCE_MAX_AVAILABLE,
             "importance_max_tiles_available": IMPORTANCE_MAX_TILES_AVAILABLE,
+            "importance_index_available": IMPORTANCE_INDEX_AVAILABLE,
             "importance_index_tiles_available": IMPORTANCE_INDEX_TILES_AVAILABLE,
             "sensitivity_index_tiles_available": SENSITIVITY_INDEX_TILES_AVAILABLE,
             "colors": COLS,
@@ -3188,7 +3246,28 @@ class Api:
                         "mbtiles": {"importance_index_url": mb["importance_index_url"],
                                     "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]},
                         "home_bounds": mb.get("bounds")}
-            return {"ok": False, "error": "Importance index MBTiles not available."}
+            if not IMPORTANCE_INDEX_AVAILABLE:
+                return {"ok": False, "error": "Importance index data not available."}
+            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            if df.empty:
+                return {"ok": False, "error": "Importance index data not available for this geocode group."}
+            if "index_importance" not in df.columns:
+                return {"ok": False, "error": "Importance index column missing."}
+            df = to_plot_crs(df, cfg)
+            keep_cols = ["index_importance", "geometry"]
+            df = df[[c for c in keep_cols if c in df.columns]]
+            vals = pd.to_numeric(df["index_importance"], errors="coerce")
+            valid = vals.dropna()
+            vmin = float(valid.min()) if len(valid) else 0.0
+            vmax = float(valid.max()) if len(valid) else 0.0
+            gj = gdf_to_geojson_min(df)
+            bnds = bounds_to_leaflet(df.total_bounds) if "geometry" in df.columns else [[0,0],[0,0]]
+            return {
+                "ok": True,
+                "geojson": gj,
+                "range": {"min": vmin, "max": vmax},
+                "home_bounds": bnds,
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -3640,6 +3719,21 @@ function importanceColor(v, vmin, vmax){
   var r=Math.round(_lerp(light.r,dark.r,t)), g=Math.round(_lerp(light.g,dark.g,t)), b=Math.round(_lerp(light.b,dark.b,t));
   return _rgbToHex(r,g,b);
 }
+function importanceIndexColor(v, vmin, vmax){
+    if (v===null || v===undefined) return null;
+    var stops=['#7fbf7f','#5fbf5f','#3e9f4e','#1f7f3d','#0f5f2c'];
+    var t=_normalize(v, vmin, vmax);
+    var pos=t*(stops.length-1);
+    var idx=Math.floor(pos);
+    var frac=pos-idx;
+    if (idx>=stops.length-1) return stops[stops.length-1];
+    var c1=_hexToRgb(stops[idx]);
+    var c2=_hexToRgb(stops[idx+1]);
+    var r=Math.round(_lerp(c1.r,c2.r,frac));
+    var g=Math.round(_lerp(c1.g,c2.g,frac));
+    var b=Math.round(_lerp(c1.b,c2.b,frac));
+    return _rgbToHex(r,g,b);
+}
 function _normalize(val, vmin, vmax){ if (vmax===vmin){ return 1.0; } var t=(Number(val)-vmin)/(vmax-vmin); if (!isFinite(t)) t=0; return Math.max(0, Math.min(1, t)); }
 
 /* loaders – unchanged */
@@ -3766,7 +3860,21 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
     if (res.mbtiles && res.mbtiles.importance_index_url){
       var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
       LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.importance_index_url, opts); IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
-    }
+        } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+            var vmin=(res.range&&isFinite(res.range.min))?res.range.min:1;
+            var vmax=(res.range&&isFinite(res.range.max))?res.range.max:100;
+            LAYER_IMPORTANCE_INDEX=L.geoJSON(res.geojson, {
+                style:function(f){
+                    var v=(f.properties && f.properties.index_importance!=null)?Number(f.properties.index_importance):null;
+                    if (v===null || !isFinite(v)){
+                        return {color:'transparent', weight:0, opacity:0, fillOpacity:0, fillColor:'transparent'};
+                    }
+                    var col=importanceIndexColor(v, vmin, vmax);
+                    return {color:col, weight:0, opacity:0, fillOpacity:FILL_ALPHA, fillColor:col};
+                }
+            });
+            IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
+        }
     if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
   }).catch(function(err){ setError('API error: '+err); logErr(err); });
 }
@@ -3855,7 +3963,9 @@ function buildLayersControl(state){
   IMPORTANCE_MAX_GROUP=L.layerGroup(); IMPORTANCE_INDEX_GROUP=L.layerGroup(); SENSITIVITY_INDEX_GROUP=L.layerGroup();
   GEO_FOLDER=L.layerGroup();
 
-    var hasImportanceIndex = !!(state && state.importance_index_tiles_available);
+    var hasImportanceIndexTiles = !!(state && state.importance_index_tiles_available);
+    var hasImportanceIndexVector = !!(state && state.importance_index_available);
+    var hasImportanceIndex = hasImportanceIndexTiles || hasImportanceIndexVector;
     var hasSensitivityIndex = !!(state && state.sensitivity_index_tiles_available);
     var hasImportanceMaxTiles = !!(state && state.importance_max_tiles_available);
     var hasImportanceMaxVector = !!(state && state.importance_max_available);

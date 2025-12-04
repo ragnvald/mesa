@@ -1199,6 +1199,7 @@ const DEFAULT_STYLE=Object.freeze({
   border_color:'#2c3342',
   fill_opacity:0.65,
   border_weight:1.2,
+  point_radius:8,
 });
 
 function waitForApi(timeoutMs=12000){
@@ -1267,6 +1268,12 @@ function computeLayerStyle(meta){
   const fillOpacity = clamp(baseFill * (FILL_ALPHA / BASE_OPACITY), 0.05, 0.95);
   const weightCandidate = Number(styling && styling.border_weight);
   const borderWeight = clamp(Number.isFinite(weightCandidate) ? weightCandidate : DEFAULT_STYLE.border_weight, 0.3, 5.0);
+  const radiusCandidate = Number(styling && styling.point_radius);
+  const pointRadius = clamp(
+    Number.isFinite(radiusCandidate) ? radiusCandidate : (DEFAULT_STYLE.point_radius || 4),
+    1,
+    20
+  );
   const dashArray = styling && styling.dash_array ? String(styling.dash_array) : null;
   return {
     color: borderColor,
@@ -1275,6 +1282,7 @@ function computeLayerStyle(meta){
     fillColor,
     fillOpacity,
     opacity: 0.9,
+    radius: pointRadius,
   };
 }
 
@@ -1330,6 +1338,10 @@ function createAssetLayer(entry){
     pane: 'assetsPane',
     renderer: L.canvas({pane:'assetsPane'}),
     style: layerStyleFactory(entry),
+    pointToLayer: (feature, latlng) => {
+      const style = computeLayerStyle(entry);
+      return L.circleMarker(latlng, style);
+    },
     onEachFeature: (feature, layer) => bindFeature(feature, layer, entry),
   });
   geoLayer.__meta = entry;
