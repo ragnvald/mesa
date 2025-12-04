@@ -245,6 +245,24 @@ def copy_resources() -> None:
         log(f"Copying '{folder}/' from {src} ...")
         shutil.copytree(src, dst, dirs_exist_ok=True)
 
+    # Also include legacy QGIS packages if they live outside the repo (e.g. "qgis older")
+    qgis_older_names = ["qgis older", "qgis_older"]
+    qgis_older_roots = [CODE_DIR, PROJECT_ROOT, PARENT_DIR]
+    copied_qgis_older = False
+    for root in qgis_older_roots:
+        for name in qgis_older_names:
+            candidate = root / name
+            if candidate.exists():
+                dst = FINAL_DIST / name
+                log(f"Copying '{name}/' from {candidate} ...")
+                shutil.copytree(candidate, dst, dirs_exist_ok=True)
+                copied_qgis_older = True
+                break
+        if copied_qgis_older:
+            break
+    if not copied_qgis_older:
+        log("[NOTE] 'qgis older' folder not found in code/, repo root, or parent; skipping.")
+
     # Copy config.ini next to mesa.exe
     for cfg in [CODE_DIR / "config.ini", PROJECT_ROOT / "config.ini"]:
         if cfg.exists():
