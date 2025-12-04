@@ -14,7 +14,7 @@ except Exception:
     except Exception:
         pass
 
-import os, argparse, configparser, datetime, tempfile, json
+import os, sys, argparse, configparser, datetime, tempfile, json
 from pathlib import Path
 import pandas as pd
 
@@ -45,31 +45,54 @@ def _exists(p: Path) -> bool:
 def _has_config_at(root: Path) -> bool:
     return _exists(root / "config.ini") or _exists(root / "system" / "config.ini")
 
-def resolve_base_dir(cli_workdir: str | None) -> Path:
+def find_base_dir(cli_workdir: str | None = None) -> Path:
     """
-    Priority:
-      1) env MESA_BASE_DIR
-      2) --original_working_directory (CLI)
-      3) script folder & parents (prefer repo/code root)
-      4) CWD (treat cwd/system -> parent)
+    Choose a canonical project base folder that actually contains config.
+    Priority matches atlas_edit.py to stay consistent across tools.
     """
+    candidates: list[Path] = []
+
+    def _add(path_like):
+        if not path_like:
+            return
+        try:
+            candidates.append(Path(path_like))
+        except Exception:
+            pass
+
     env_base = os.environ.get("MESA_BASE_DIR")
     if env_base:
-        return Path(env_base).resolve()
-
+        _add(env_base)
     if cli_workdir:
-        return Path(cli_workdir).resolve()
+        _add(cli_workdir)
+
+    exe_path: Path | None = None
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = None
+    if exe_path:
+        _add(exe_path.parent)
+        _add(exe_path.parent.parent)
+        _add(exe_path.parent.parent.parent)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _add(meipass)
 
     here = Path(__file__).resolve()
-    candidates = [
-        here.parent,                # .../system
-        here.parent.parent,         # .../code
-        here.parent.parent.parent,  # repo root (if any)
-        Path(os.getcwd()),
-        Path(os.getcwd()) / "code",
-    ]
+    _add(here.parent)
+    _add(here.parent.parent)
+    _add(here.parent.parent.parent)
 
-    seen, uniq = set(), []
+    cwd = Path.cwd()
+    _add(cwd)
+    _add(cwd / "code")
+    _add(cwd.parent)
+    _add(cwd.parent / "code")
+
+    seen = set()
+    uniq: list[Path] = []
     for c in candidates:
         try:
             r = c.resolve()
@@ -83,9 +106,12 @@ def resolve_base_dir(cli_workdir: str | None) -> Path:
         if _has_config_at(c):
             return c
 
-    # Fallback heuristics
     if here.parent.name.lower() == "system":
         return here.parent.parent
+    if exe_path:
+        return exe_path.parent
+    if env_base:
+        return Path(env_base)
     return here.parent
 
 def _ensure_cfg() -> configparser.ConfigParser:
@@ -131,36 +157,48 @@ def config_path(base_dir: Path) -> Path:
 def _parquet_dir_candidates(base_dir: Path) -> list[Path]:
     cfg = _ensure_cfg()
     sub = cfg["DEFAULT"].get("parquet_folder", _PARQUET_SUBDIR)
-    if os.path.isabs(sub):
-        return [Path(sub)]
-    rel = Path(sub)
-    cands = [(base_dir / rel).resolve()]
-    if base_dir.name.lower() != "code":
-        cands.append((base_dir / "code" / rel).resolve())
-    else:
-        parent = base_dir.parent
-        if parent:
-            cands.append((parent / rel).resolve())
-    return cands
+    sub_path = Path(sub)
+    if sub_path.is_absolute():
+        return [sub_path.resolve()]
 
-def gpq_dir(base_dir: Path, target_file: str | None = None) -> Path:
+    rel = sub_path
+    base = base_dir.resolve()
+    dirs: list[Path] = []
+    if base.name.lower() == "code":
+        parent = base.parent
+        if parent:
+            dirs.append((parent / rel).resolve())
+        dirs.append((base / rel).resolve())
+    else:
+        dirs.append((base / rel).resolve())
+        dirs.append((base / "code" / rel).resolve())
+
+    uniq: list[Path] = []
+    seen = set()
+    for d in dirs:
+        if d in seen:
+            continue
+        seen.add(d)
+        uniq.append(d)
+    return uniq
+
+def gpq_dir(base_dir: Path) -> Path:
     global _PARQUET_OVERRIDE
     if _PARQUET_OVERRIDE is None:
         candidates = _parquet_dir_candidates(base_dir)
-        chosen = None
-        if target_file:
-            for cand in candidates:
-                if (cand / target_file).exists():
-                    chosen = cand
-                    break
-        if chosen is None:
-            chosen = candidates[0]
-        chosen.mkdir(parents=True, exist_ok=True)
-        _PARQUET_OVERRIDE = chosen
+        _PARQUET_OVERRIDE = candidates[0]
+    _PARQUET_OVERRIDE.mkdir(parents=True, exist_ok=True)
     return _PARQUET_OVERRIDE
 
-def asset_group_parquet(base_dir: Path) -> Path:
-    return gpq_dir(base_dir, ASSET_GROUP_FILE_NAME) / ASSET_GROUP_FILE_NAME
+def asset_group_parquet(base_dir: Path, *, for_write: bool = False) -> Path:
+    if for_write:
+        return gpq_dir(base_dir) / ASSET_GROUP_FILE_NAME
+
+    for cand in _parquet_dir_candidates(base_dir):
+        candidate_path = cand / ASSET_GROUP_FILE_NAME
+        if candidate_path.exists():
+            return candidate_path
+    return gpq_dir(base_dir) / ASSET_GROUP_FILE_NAME
 
 # ------------------------ Stats / logging ------------------------
 def increment_stat_value(cfg_path: Path | str, stat_name: str, increment_value: int):
@@ -266,7 +304,7 @@ def load_asset_group_df(base_dir: Path) -> pd.DataFrame:
     return df
 
 def save_asset_group_df(base_dir: Path, df: pd.DataFrame) -> bool:
-    pq = asset_group_parquet(base_dir)
+    pq = asset_group_parquet(base_dir, for_write=True)
     try:
         _atomic_write_parquet(df, pq)
         write_to_log(base_dir, f"Saved {pq.relative_to(base_dir)} ({len(df)} rows)")
@@ -435,7 +473,7 @@ if __name__ == "__main__":
     parser.add_argument("--original_working_directory", required=False, help="Path to running folder")
     args = parser.parse_args()
 
-    BASE_DIR = resolve_base_dir(args.original_working_directory)
+    BASE_DIR = find_base_dir(args.original_working_directory)
     _ensure_cfg()
     cfg_used = _CFG_PATH if _CFG_PATH else config_path(BASE_DIR)
 
