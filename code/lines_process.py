@@ -116,10 +116,49 @@ def increment_stat_value(config_path: str, stat_name: str, increment_value: int)
 _PARQUET_SUBDIR = Path("output") / "geoparquet"
 
 def base_dir() -> Path:
-    bd = Path(original_working_directory or os.getcwd())
-    if bd.name.lower() == "system":
-        return bd.parent
-    return bd
+    """Resolve the mesa root folder in all modes (.py, frozen, tools/ launch)."""
+    candidates: list[Path] = []
+
+    # 1) explicit hint (mesa.exe usually passes this)
+    try:
+        if 'original_working_directory' in globals() and original_working_directory:
+            candidates.append(Path(original_working_directory))
+    except Exception:
+        pass
+
+    # 2) frozen exe location
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        # 3) script location (dev)
+        if "__file__" in globals():
+            candidates.append(Path(__file__).resolve().parent)
+
+    # 4) last resort: CWD
+    candidates.append(Path(os.getcwd()).resolve())
+
+    def normalize(p: Path) -> Path:
+        p = p.resolve()
+        # Normalize typical subfolders to the mesa root
+        if p.name.lower() in ("tools", "system", "code"):
+            p = p.parent
+        # Try climbing up a few levels to find a folder that looks like mesa root
+        q = p
+        for _ in range(4):
+            if (q / "output").exists() and (q / "input").exists():
+                return q
+            if (q / "tools").exists() and (q / "config.ini").exists():
+                return q
+            q = q.parent
+        return p
+
+    for c in candidates:
+        root = normalize(c)
+        if (root / "tools").exists() or ((root / "output").exists() and (root / "input").exists()):
+            return root
+
+    # Fallback: normalized first candidate
+    return normalize(candidates[0])
 
 def gpq_dir() -> Path:
     out = base_dir() / _PARQUET_SUBDIR

@@ -272,41 +272,30 @@ def config_path(base_dir: Path) -> Path:
     # FLAT: <base>/config.ini
     return base_dir / "config.ini"
 
-def _set_parquet_override(target_dir: Path):
-    global _PARQUET_OVERRIDE
-    if _PARQUET_OVERRIDE is None:
-        _PARQUET_OVERRIDE = target_dir
-
-def _detect_code_override(base_dir: Path):
-    if _PARQUET_OVERRIDE is not None:
-        return
-    if base_dir.name.lower() == "code":
-        return
-    code_dir = (base_dir / "code" / _PARQUET_SUBDIR).resolve()
-    if code_dir.exists():
-        try:
-            next(code_dir.glob("*.parquet"))
-            _set_parquet_override(code_dir)
-        except StopIteration:
-            pass
+def _primary_geoparquet_dir(base_dir: Path) -> Path:
+    sub = Path(_PARQUET_SUBDIR)
+    if sub.is_absolute():
+        return sub.resolve()
+    return (base_dir / sub).resolve()
 
 def gpq_dir(base_dir: Path) -> Path:
-    _detect_code_override(base_dir)
-    base = _PARQUET_OVERRIDE or (base_dir / _PARQUET_SUBDIR)
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    global _PARQUET_OVERRIDE
+    if _PARQUET_OVERRIDE is None:
+        _PARQUET_OVERRIDE = _primary_geoparquet_dir(base_dir)
+    _PARQUET_OVERRIDE.mkdir(parents=True, exist_ok=True)
+    return _PARQUET_OVERRIDE
 
 def _existing_parquet_path(base_dir: Path, name: str) -> Path | None:
-    primary = (base_dir / _PARQUET_SUBDIR / f"{name}.parquet").resolve()
+    primary = (_primary_geoparquet_dir(base_dir) / f"{name}.parquet").resolve()
     if primary.exists():
         return primary
 
-    if base_dir.name.lower() != "code":
-        code_dir = (base_dir / "code" / _PARQUET_SUBDIR).resolve()
+    rel = Path(_PARQUET_SUBDIR)
+    if not rel.is_absolute() and base_dir.name.lower() != "code":
+        code_dir = (base_dir / "code" / rel).resolve()
         alt = code_dir / f"{name}.parquet"
         if alt.exists():
             log_to_gui(f"Using fallback GeoParquet copy for {name}: {alt}", "WARN")
-            _set_parquet_override(code_dir)
             return alt
     return None
 
@@ -644,6 +633,20 @@ def _read_parquet_gdf(path: Path, default_crs: str = "EPSG:4326") -> gpd.GeoData
                 gdf.set_crs(default_crs, inplace=True)
             return gdf
         except Exception as e:
+            # Fallback for missing geo metadata (common in some compiled/mixed envs)
+            try:
+                df = pd.read_parquet(path)
+                if "geometry" in df.columns:
+                    # Attempt to recover geometry from WKB bytes if present
+                    if not df.empty and isinstance(df["geometry"].iloc[0], bytes):
+                        df["geometry"] = df["geometry"].apply(lambda b: shp_wkb.loads(b) if b else None)
+                    
+                    gdf = gpd.GeoDataFrame(df, geometry="geometry")
+                    if gdf.crs is None:
+                        gdf.set_crs(default_crs, inplace=True)
+                    return gdf
+            except Exception:
+                pass
             log_to_gui(f"Failed reading {path.name}: {e}", "WARN")
     return gpd.GeoDataFrame(geometry=[], crs=default_crs)
 

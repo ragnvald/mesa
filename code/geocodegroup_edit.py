@@ -19,11 +19,87 @@ import os
 from pathlib import Path
 import tempfile
 
+import sys
+
 DEFAULT_PARQUET_SUBDIR = "output/geoparquet"
 GEOCODE_GROUP_FILE = "tbl_geocode_group.parquet"
 
 # # # # # # # # # # # # # # 
 # Shared/general functions
+
+def find_base_dir(cli_workdir: str | None = None) -> Path:
+    """
+    Choose a canonical project base folder that actually contains config.
+    Priority:
+      1) env MESA_BASE_DIR
+      2) --original_working_directory (CLI)
+      3) folder of the running binary / interpreter (and its parents)
+      4) script folder & its parents (handles PyInstaller _MEIPASS)
+      5) CWD, CWD/code and their parents
+    """
+    candidates: list[Path] = []
+
+    def _add(path_like):
+        if not path_like:
+            return
+        try:
+            candidates.append(Path(path_like))
+        except Exception:
+            pass
+
+    env_base = os.environ.get("MESA_BASE_DIR")
+    if env_base:
+        _add(env_base)
+    if cli_workdir:
+        _add(cli_workdir)
+
+    exe_path: Path | None = None
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = None
+    if exe_path:
+        _add(exe_path.parent)
+        _add(exe_path.parent.parent)
+        _add(exe_path.parent.parent.parent)
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        _add(meipass)
+
+    here = Path(__file__).resolve()
+    _add(here.parent)
+    _add(here.parent.parent)
+    _add(here.parent.parent.parent)
+
+    cwd = Path.cwd()
+    _add(cwd)
+    _add(cwd / "code")
+    _add(cwd.parent)
+    _add(cwd.parent / "code")
+
+    seen = set()
+    uniq = []
+    for c in candidates:
+        try:
+            r = c.resolve()
+        except Exception:
+            r = c
+        if r not in seen:
+            seen.add(r)
+            uniq.append(r)
+
+    for c in uniq:
+        if (c / "config.ini").exists() or (c / "system" / "config.ini").exists():
+            return c
+
+    if here.parent.name.lower() == "system":
+        return here.parent.parent
+    if exe_path:
+        return exe_path.parent
+    if env_base:
+        return Path(env_base)
+    return here.parent
 
 def read_config(file_name: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -53,7 +129,7 @@ def config_path(base_dir: str) -> str:
     """Flat config: <base>/config.ini"""
     return os.path.join(base_dir, "config.ini")
 
-def parquet_dir_from_cfg(base_dir: str, cfg: configparser.ConfigParser, target_file: str | None = None) -> Path:
+def parquet_dir_from_cfg(base_dir: str, cfg: configparser.ConfigParser, target_file: str | None = None, *, for_write: bool = False) -> Path:
     base = Path(base_dir).resolve()
     sub = cfg["DEFAULT"].get("parquet_folder", DEFAULT_PARQUET_SUBDIR)
     candidates: list[Path]
@@ -69,18 +145,29 @@ def parquet_dir_from_cfg(base_dir: str, cfg: configparser.ConfigParser, target_f
             if parent:
                 candidates.append((parent / rel).resolve())
 
+    if for_write:
+        chosen = candidates[0]
+        chosen.mkdir(parents=True, exist_ok=True)
+        return chosen
+
     if target_file:
         for cand in candidates:
             if (cand / target_file).exists():
-                cand.mkdir(parents=True, exist_ok=True)
                 return cand
 
-    chosen = candidates[0]
-    chosen.mkdir(parents=True, exist_ok=True)
-    return chosen
+    for cand in candidates:
+        if cand.exists() and any(cand.glob("*.parquet")):
+            return cand
 
-def gpq_path_geocode_group(base_dir: str, cfg: configparser.ConfigParser) -> str:
-    root = parquet_dir_from_cfg(base_dir, cfg, GEOCODE_GROUP_FILE)
+    return candidates[0]
+
+def gpq_path_geocode_group(base_dir: str, cfg: configparser.ConfigParser, *, for_write: bool = False) -> str:
+    root = parquet_dir_from_cfg(
+        base_dir,
+        cfg,
+        None if for_write else GEOCODE_GROUP_FILE,
+        for_write=for_write,
+    )
     return str(root / GEOCODE_GROUP_FILE)
 
 def atomic_write_geoparquet(gdf: gpd.GeoDataFrame, path: str):
@@ -149,9 +236,9 @@ def save_spatial_data():
     """
     Save the in-memory GeoDataFrame back to the same GeoParquet (atomic write).
     """
-    global df, gpq_file
+    global df, gpq_file_write
     try:
-        atomic_write_geoparquet(df, gpq_file)
+        atomic_write_geoparquet(df, gpq_file_write)
         write_to_log("Spatial data saved (GeoParquet)")
         messagebox.showinfo("Saved", "Changes saved to GeoParquet.")
     except Exception as e:
@@ -167,18 +254,16 @@ def exit_application():
 parser = argparse.ArgumentParser(description='Edit geocodes (GeoParquet)')
 parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
 args = parser.parse_args()
-original_working_directory = args.original_working_directory
 
-if not original_working_directory:
-    original_working_directory = os.getcwd()
-    # When running from /system subfolder, go up one level.
-    if Path(original_working_directory).name.lower() == "system":
-        original_working_directory = str(Path(original_working_directory).parent)
+# Robust base dir resolution
+base_path = find_base_dir(args.original_working_directory)
+original_working_directory = str(base_path)
 
 # Config & paths (flat)
-config_file = config_path(original_working_directory)
-config      = read_config(config_file)
-gpq_file    = gpq_path_geocode_group(original_working_directory, config)
+config_file     = config_path(original_working_directory)
+config          = read_config(config_file)
+gpq_file        = gpq_path_geocode_group(original_working_directory, config)
+gpq_file_write  = gpq_path_geocode_group(original_working_directory, config, for_write=True)
 
 ttk_bootstrap_theme    = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
