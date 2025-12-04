@@ -397,28 +397,89 @@ def _has_big_polygon_group(threshold: int = 50000, group_col: str = "name_gis_ge
         log_to_gui(log_widget, f"[Tiles] Eligibility check failed: {e}")
         return (False, {})
 
-def _find_tiles_script() -> Path | None:
+def _find_tiles_runner() -> tuple[Path | None, bool]:
     """
-    Backward-compatible search for the raster-tiles helper:
-      1) <base>/create_raster_tiles.py
-      2) <base>/system/create_raster_tiles.py
-      3) <base>/code/create_raster_tiles.py
-    """
-    cand1 = base_dir() / "create_raster_tiles.py"
-    cand2 = base_dir() / "system" / "create_raster_tiles.py"
-    cand3 = base_dir() / "code" / "create_raster_tiles.py"
-    for cand in (cand1, cand2, cand3):
-        if cand.exists():
-            return cand
-    return None
+    Locate the raster-tiles helper.
 
-def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
-    script_path = _find_tiles_script()
-    if not script_path:
-        log_to_gui(log_widget, f"[Tiles] Missing script: create_raster_tiles.py (looked in base and system/)")
+    Returns (path, is_executable).
+    - When this process is frozen (data_process.exe), prefer create_raster_tiles.exe.
+    - Otherwise prefer the .py script but fall back to the .exe if needed.
+    """
+
+    base = base_dir()
+    frozen = bool(getattr(sys, "frozen", False))
+
+    def _dedup(seq):
+        out: list[Path] = []
+        seen: set[Path] = set()
+        for item in seq:
+            if item is None:
+                continue
+            try:
+                resolved = item.resolve()
+            except Exception:
+                resolved = item
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(resolved)
+        return out
+
+    exe_candidates = _dedup([
+        base / "tools" / "create_raster_tiles.exe",
+        base / "create_raster_tiles.exe",
+        base / "code" / "create_raster_tiles.exe",
+        base / "system" / "create_raster_tiles.exe",
+        Path(sys.executable).resolve().parent / "create_raster_tiles.exe" if frozen else None,
+    ])
+    py_candidates = _dedup([
+        base / "create_raster_tiles.py",
+        base / "system" / "create_raster_tiles.py",
+        base / "code" / "create_raster_tiles.py",
+        (Path(__file__).resolve().parent / "create_raster_tiles.py") if '__file__' in globals() else None,
+    ])
+
+    exe_candidates = [p for p in exe_candidates if p is not None]
+    py_candidates = [p for p in py_candidates if p is not None]
+
+    def _pick(paths: list[Path]) -> Path | None:
+        for cand in paths:
+            try:
+                if cand.exists():
+                    return cand
+            except Exception:
+                continue
         return None
 
-    args = [sys.executable, str(script_path)]
+    if frozen:
+        exe_path = _pick(exe_candidates)
+        if exe_path:
+            return exe_path, True
+        script_path = _pick(py_candidates)
+        if script_path:
+            return script_path, False
+        return None, False
+
+    script_path = _pick(py_candidates)
+    if script_path:
+        return script_path, False
+
+    exe_path = _pick(exe_candidates)
+    if exe_path:
+        return exe_path, True
+
+    return None, False
+
+def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
+    runner_path, is_exe = _find_tiles_runner()
+    if not runner_path:
+        log_to_gui(log_widget, "[Tiles] Missing raster-tiles helper (looked for create_raster_tiles.py/.exe)")
+        return None
+
+    if is_exe:
+        args = [str(runner_path)]
+    else:
+        args = [sys.executable, str(runner_path)]
     if isinstance(minzoom, int):
         args += ["--minzoom", str(minzoom)]
     if isinstance(maxzoom, int):
@@ -434,9 +495,12 @@ def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
     except Exception:
         env.setdefault("MESA_BASE_DIR", os.getcwd())
 
+    if not getattr(sys, "frozen", False) and is_exe:
+        log_to_gui(log_widget, "[Tiles] create_raster_tiles.py not found; using bundled executable instead.")
+
     return subprocess.Popen(
         args,
-        cwd=str(script_path.parent),
+        cwd=str(runner_path.parent),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
