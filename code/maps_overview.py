@@ -2074,10 +2074,10 @@ function currentGeocodeCategory(){
 }
 
 function determineActiveOverlayKind(){
-  var order=[
-    {id:'chkGeoAreas',       kind:'sensitivity'},
-    {id:'chkImportanceMax',  kind:'importance_max'},
-    {id:'chkSensitivityIndex', kind:'sensitivity_index'},
+    var order=[
+        {id:'chkGeoAreas',       kind:'sensitivity'},
+        {id:'chkSensitivityIndex', kind:'sensitivity_index'},
+        {id:'chkImportanceMax',  kind:'importance_max'},
     {id:'chkImportanceIndex', kind:'importance_index'},
     {id:'chkGroupsTotal',     kind:'groupstotal'},
     {id:'chkAssetsTotal',     kind:'assetstotal'}
@@ -2477,8 +2477,8 @@ function buildLayersControl(state){
   var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div>' +
                   '<div class="inlineChecks">' +
                   '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitive areas</label>' +
-                  '<label><input type="checkbox" id="chkImportanceMax"> Importance (max)</label>' +
                   '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index</label>' +
+                  '<label><input type="checkbox" id="chkImportanceMax"> Importance</label>' +
                   '<label><input type="checkbox" id="chkImportanceIndex"> Importance index</label>' +
                   '<label><input type="checkbox" id="chkGroupsTotal"> Groups total</label>' +
                   '<label><input type="checkbox" id="chkAssetsTotal"> Assets total</label>' +
@@ -3462,10 +3462,10 @@ function currentGeocodeCategory(){
 }
 
 function determineActiveOverlayKind(){
-  var order=[
-    {id:'chkGeoAreas',       kind:'sensitivity'},
-    {id:'chkImportanceMax',  kind:'importance_max'},
-    {id:'chkSensitivityIndex', kind:'sensitivity_index'},
+    var order=[
+        {id:'chkGeoAreas',       kind:'sensitivity'},
+        {id:'chkSensitivityIndex', kind:'sensitivity_index'},
+        {id:'chkImportanceMax',  kind:'importance_max'},
     {id:'chkImportanceIndex', kind:'importance_index'},
     {id:'chkGroupsTotal',     kind:'groupstotal'},
     {id:'chkAssetsTotal',     kind:'assetstotal'}
@@ -3865,8 +3865,8 @@ function buildLayersControl(state){
   var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div>' +
                   '<div class="inlineChecks">' +
                   '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitive areas</label>' +
-                  '<label><input type="checkbox" id="chkImportanceMax"> Importance (max)</label>' +
                   '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index</label>' +
+                  '<label><input type="checkbox" id="chkImportanceMax"> Importance (max)</label>' +
                   '<label><input type="checkbox" id="chkImportanceIndex"> Importance index</label>' +
                   '<label><input type="checkbox" id="chkGroupsTotal"> Groups total</label>' +
                   '<label><input type="checkbox" id="chkAssetsTotal"> Assets total</label>' +
