@@ -1,0 +1,5 @@
+Publish your code early, they say. 
+
+Over the last few years I have been involved in designing different versions of the MESA tool. We have moved from version 1 to 3. Currently I am working on a version 4. I am pleased to be able to publish version 4.0.0-alpha. This is a test version for those interested in trying out the tool. It should however not be used for production purposes. For that I suggest waiting a month or so more.
+
+Where we earlier have had help from #norkart I have now decided that starting the development by myself was within reach. The recent developments in AI has made it possible to move from intent to running code much faster than earlier. ChatGPT as a supporting programmer made this possible within around 70 hours of coding. Admittedly the code could be better documented, memory handling is probably a small disaster - but it runs and does the job. For that it is awarded alpha status. This means some functionality is in place. Feedback and follow ups are welcome at GitHub here: https://github.com/ragnvald/mesa/discussions/2 
