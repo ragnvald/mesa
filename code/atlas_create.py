@@ -253,58 +253,81 @@ def _parquet_candidate_dirs() -> list[Path]:
     sub_path = Path(sub_cfg)
     dirs: list[Path] = []
     if sub_path.is_absolute():
-        dirs.append(sub_path.resolve())
-        return dirs
+        return [sub_path.resolve()]
 
     base = BASE_DIR.resolve()
-    dirs.append((base / sub_path).resolve())
-    if base.name.lower() != "code":
+    if base.name.lower() == "code":
+        parent = base.parent
+        if parent:
+            dirs.append((parent / sub_path).resolve())
+        dirs.append((base / sub_path).resolve())
+    else:
+        dirs.append((base / sub_path).resolve())
         dirs.append((base / "code" / sub_path).resolve())
-    return dirs
 
-def _select_parquet_dir(prefer_file: str | None = None) -> Path:
+    uniq: list[Path] = []
+    seen = set()
+    for d in dirs:
+        if d in seen:
+            continue
+        seen.add(d)
+        uniq.append(d)
+    return uniq
+
+def _select_parquet_dir(prefer_file: str | None = None, *, for_write: bool = False) -> Path:
+    """Pick the GeoParquet folder.
+
+    Writes always target the primary directory (first candidate) so tbl_*.parquet
+    ends up under <BASE>/output/geoparquet (or the config override). Reads can fall
+    back to legacy locations (e.g. code/output/…) without redirecting future writes.
+    """
     global _PARQUET_OVERRIDE
-    if _PARQUET_OVERRIDE is not None:
-        return _PARQUET_OVERRIDE
 
     candidates = _parquet_candidate_dirs()
+    primary = candidates[0]
+
+    if _PARQUET_OVERRIDE is None:
+        _PARQUET_OVERRIDE = primary
+
+    if for_write:
+        try:
+            _PARQUET_OVERRIDE.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return _PARQUET_OVERRIDE
 
     if prefer_file:
         for idx, cand in enumerate(candidates):
             if (cand / prefer_file).exists():
-                _PARQUET_OVERRIDE = cand
                 if idx > 0:
                     log_to_gui(log_widget, f"Using GeoParquet fallback dir: {cand}")
-                return _PARQUET_OVERRIDE
+                return cand
 
     for idx, cand in enumerate(candidates):
         try:
             if cand.exists() and any(cand.glob("*.parquet")):
-                _PARQUET_OVERRIDE = cand
                 if idx > 0:
                     log_to_gui(log_widget, f"Using GeoParquet fallback dir: {cand}")
-                return _PARQUET_OVERRIDE
+                return cand
         except Exception:
             pass
 
-    _PARQUET_OVERRIDE = candidates[0]
-    return _PARQUET_OVERRIDE
+    return primary
 
-def _parquet_path(name: str) -> Path:
-    directory = _select_parquet_dir(name)
-    directory.mkdir(parents=True, exist_ok=True)
+def _parquet_path(name: str, *, for_write: bool = False) -> Path:
+    directory = _select_parquet_dir(None if for_write else name, for_write=for_write)
+    if for_write:
+        directory.mkdir(parents=True, exist_ok=True)
     return directory / name
 
 # ----------------------------
 # GeoParquet helpers
 # ----------------------------
 def geoparquet_dir() -> Path:
-    directory = _select_parquet_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
+    return _select_parquet_dir(for_write=True)
 
 def atlas_parquet_path() -> Path:
-    return _parquet_path("tbl_atlas.parquet")
+    return _parquet_path("tbl_atlas.parquet", for_write=True)
 
 def read_flat_parquet() -> gpd.GeoDataFrame:
     p = _parquet_path("tbl_flat.parquet")

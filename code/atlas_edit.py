@@ -271,24 +271,24 @@ def _parquet_dir_candidates(base_dir: Path) -> list[Path]:
             cands.append((parent / rel).resolve())
     return cands
 
-def geoparquet_dir(base_dir: Path, target_file: str | None = None) -> Path:
+def geoparquet_dir(base_dir: Path) -> Path:
+    """Directory used for writes (primary output/geoparquet or config override)."""
     global _PARQUET_OVERRIDE
     if _PARQUET_OVERRIDE is None:
         candidates = _parquet_dir_candidates(base_dir)
-        chosen = None
-        if target_file:
-            for cand in candidates:
-                if (cand / target_file).exists():
-                    chosen = cand
-                    break
-        if chosen is None:
-            chosen = candidates[0]
-        chosen.mkdir(parents=True, exist_ok=True)
-        _PARQUET_OVERRIDE = chosen
+        _PARQUET_OVERRIDE = candidates[0]
+    _PARQUET_OVERRIDE.mkdir(parents=True, exist_ok=True)
     return _PARQUET_OVERRIDE
 
-def atlas_parquet_path(base_dir: Path, layer_file: str) -> Path:
-    return geoparquet_dir(base_dir, layer_file) / layer_file
+def atlas_parquet_path(base_dir: Path, layer_file: str, *, for_write: bool = False) -> Path:
+    if for_write:
+        return geoparquet_dir(base_dir) / layer_file
+
+    for cand in _parquet_dir_candidates(base_dir):
+        candidate_path = cand / layer_file
+        if candidate_path.exists():
+            return candidate_path
+    return geoparquet_dir(base_dir) / layer_file
 
 def _empty_gdf() -> gpd.GeoDataFrame:
     cols = [
@@ -355,12 +355,12 @@ def save_row_to_parquet(base_dir: Path, layer_file: str, row_dict):
         messagebox.showerror("Error", "Missing name_gis for row update.")
         return
 
-    gpq_path = atlas_parquet_path(base_dir, layer_file)
-    if not gpq_path.exists():
-        messagebox.showerror("Error", f"File not found:\n{gpq_path}")
+    read_path = atlas_parquet_path(base_dir, layer_file)
+    if not read_path.exists():
+        messagebox.showerror("Error", f"File not found:\n{read_path}")
         return
 
-    gdf_local = gpd.read_parquet(gpq_path)
+    gdf_local = gpd.read_parquet(read_path)
 
     if 'name_gis' not in gdf_local.columns:
         messagebox.showerror("Error", "GeoParquet does not contain a 'name_gis' column.")
@@ -380,7 +380,8 @@ def save_row_to_parquet(base_dir: Path, layer_file: str, row_dict):
         if c in gdf_local.columns and c in row_dict:
             gdf_local.loc[idx, c] = row_dict[c]
 
-    atomic_write_geoparquet(gdf_local, gpq_path)
+    write_path = atlas_parquet_path(base_dir, layer_file, for_write=True)
+    atomic_write_geoparquet(gdf_local, write_path)
 
 # -----------------------------
 # UI helpers
