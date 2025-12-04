@@ -18,10 +18,12 @@ Per group in name_gis_geocodegroup, produces seven MBTiles:
 - Dependencies: geopandas, shapely, pandas, numpy, pillow (lightweight), sqlite3 (stdlib).
 
 Usage examples:
-  python create_raster_tiles.py --minzoom 6 --maxzoom 12
-  python create_raster_tiles.py --only-groups "geocode_001,H3_R8"
-  python create_raster_tiles.py --procs 8 --stroke-alpha 0.6
+    python create_raster_tiles.py --minzoom 6 --maxzoom 12
+    python create_raster_tiles.py --only-groups "geocode_001,H3_R8"
+    python create_raster_tiles.py --procs 8 --stroke-alpha 0.6
 """
+
+INDEX_GRADIENT_STEPS = 100  # number of discrete colors for 1..100 index layers
 
 import argparse, math, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
@@ -227,27 +229,49 @@ def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.
     b = int(round(255 + t * (107 - 255)))
     return (r, g, b, int(max(0.0, min(1.0, alpha))*255))
 
-def build_index_gradient_from_palette(palette: Dict[str, Tuple[int,int,int,int]],
-                                      steps: int = 25) -> List[Tuple[int,int,int,int]]:
-    """
-    Build a 25-step gradient (1..100) using the sensitivity palette colors
-    ordered from low (E) to high (A).
-    """
-    order = ["E", "D", "C", "B", "A"]
-    stops = []
-    fallback = (255, 255, 178, 255)  # light yellow default
-    for code in order:
-        stops.append(palette.get(code, fallback))
-    gradient: List[Tuple[int,int,int,int]] = []
+def build_index_gradient_from_palette(
+    palette: Dict[str, Tuple[int,int,int,int]],
+    steps: int = 25,
+    order: Optional[List[str | int]] = None,
+    fallback: Optional[Tuple[int,int,int,int]] = None,
+) -> List[Tuple[int,int,int,int]]:
+    """Build a gradient sampled along the provided palette order."""
+    if order is None:
+        order = ["E", "D", "C", "B", "A"]
+    if fallback is None:
+        fallback = (255, 255, 178, 255)  # light yellow default
+    stops: List[Tuple[int,int,int,int]] = []
+    for key in order:
+        value = palette.get(key)
+        if value is None and isinstance(key, str):
+            # allow case-insensitive lookups and numeric strings
+            value = palette.get(key.upper()) or palette.get(key.lower())
+        if value is None:
+            # int↔str fallbacks
+            if isinstance(key, int):
+                value = palette.get(str(key))
+            else:
+                try:
+                    ikey = int(key)
+                    value = palette.get(ikey)
+                except (ValueError, TypeError):
+                    value = None
+        stops.append(value or fallback)
+
     if steps <= 1:
-        gradient.append(stops[-1])
-        return gradient
+        return [stops[-1]]
+
+    gradient: List[Tuple[int,int,int,int]] = []
+    max_idx = len(stops) - 1
+    if max_idx <= 0:
+        return [stops[0]] * steps
+
     for i in range(steps):
         t = i / (steps - 1)
-        pos = t * (len(stops) - 1)
+        pos = t * max_idx
         idx = int(pos)
         frac = pos - idx
-        if idx >= len(stops) - 1:
+        if idx >= max_idx:
             gradient.append(stops[-1])
         else:
             c1 = stops[idx]
@@ -789,8 +813,18 @@ def main():
 
     sensitivity_palette = read_sensitivity_palette_from_config(cfg_path, alpha=sens_alpha)
     index_palette_src   = read_sensitivity_palette_from_config(cfg_path, alpha=index_alpha)
-    index_gradient      = build_index_gradient_from_palette(index_palette_src, steps=25)
-    index_palette       = {"gradient": index_gradient}
+    sensitivity_index_gradient = build_index_gradient_from_palette(
+        index_palette_src,
+        steps=INDEX_GRADIENT_STEPS,
+    )
+    importance_index_gradient = build_index_gradient_from_palette(
+        build_importance_max_palette(alpha=index_alpha),
+        steps=INDEX_GRADIENT_STEPS,
+        order=[1, 2, 3, 4, 5],
+        fallback=hex_to_rgba(IMPORTANCE_MAX_HEX[1], index_alpha),
+    )
+    sensitivity_index_palette = {"gradient": sensitivity_index_gradient}
+    importance_index_palette = {"gradient": importance_index_gradient}
     importance_max_alpha = _get_alpha("tiles_importance_max_alpha", args.importance_max_alpha, sens_alpha)
     importance_max_palette = {"importance_max_colors": build_importance_max_palette(importance_max_alpha)}
     ranges_map = read_ranges_map(cfg_path)
@@ -935,7 +969,7 @@ def main():
                 group_name=slug,
                 gdf=gdf,
                 layer_mode="importance_index",
-                palette=index_palette,
+                palette=importance_index_palette,
                 ranges_map=ranges_map,
                 out_dir=out_dir,
                 minzoom=args.minzoom,
@@ -954,7 +988,7 @@ def main():
                 group_name=slug,
                 gdf=gdf,
                 layer_mode="sensitivity_index",
-                palette=index_palette,
+                palette=sensitivity_index_palette,
                 ranges_map=ranges_map,
                 out_dir=out_dir,
                 minzoom=args.minzoom,
