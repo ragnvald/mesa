@@ -117,6 +117,11 @@ def resolve_base_dir(cli_path: Optional[str] = None) -> Path:
     if cli_path:
         candidates.append(Path(cli_path))
 
+    # Frozen exe check
+    if getattr(sys, "frozen", False):
+        exe_path = Path(sys.executable).resolve()
+        candidates.extend([exe_path.parent, exe_path.parent.parent])
+
     here = Path(__file__).resolve()
     candidates.extend([here.parent, here.parent.parent, here.parent.parent.parent])
     cwd = Path(os.getcwd())
