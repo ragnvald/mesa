@@ -23,6 +23,7 @@ import threading
 import sys
 from shapely import wkb
 import pyarrow.parquet as pq
+import math
 
 # ---------------------------------------------------------------------
 # Project/base resolution (works in dev and when frozen)
@@ -962,111 +963,229 @@ if __name__ == "__main__":
         root.iconbitmap(resolve_path(os.path.join("system_resources", "mesa.ico")))
     except Exception:
         pass
-    root.geometry("900x660")
+
+    TARGET_ASPECT_RATIO = 5 / 3
+    DEFAULT_WIDTH = 1050
+    DEFAULT_HEIGHT = int(DEFAULT_WIDTH / TARGET_ASPECT_RATIO)
+    MIN_WIDTH = 930
+    MIN_HEIGHT = int(MIN_WIDTH / TARGET_ASPECT_RATIO)
+
+    root.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}")
+    root.minsize(MIN_WIDTH, MIN_HEIGHT)
+
+    aspect_guard = {"active": False}
+
+    def enforce_aspect(event):
+        if event.widget is not root or aspect_guard["active"]:
+            return
+        width, height = max(event.width, MIN_WIDTH), max(event.height, MIN_HEIGHT)
+        if height == 0:
+            return
+        ratio = width / height
+        if abs(ratio - TARGET_ASPECT_RATIO) < 0.01:
+            return
+        aspect_guard["active"] = True
+        if ratio > TARGET_ASPECT_RATIO:
+            width = int(height * TARGET_ASPECT_RATIO)
+        else:
+            height = int(width / TARGET_ASPECT_RATIO)
+        width = max(width, MIN_WIDTH)
+        height = max(height, MIN_HEIGHT)
+        root.geometry(f"{width}x{height}")
+        root.after_idle(lambda: aspect_guard.update(active=False))
+
+    root.bind("<Configure>", enforce_aspect)
 
     intro_text = (
-        "Welcome to the MESA desktop. The Statistics tab is your live status board, while the Operations tab "
-        "launches the main workflows for preparing and analysing data."
+        "Launch core jobs from Workflows, then review the live counters in Status to confirm imports, processing, "
+        "and publishing have completed."
     )
-    ttk.Label(
-        root,
+
+    header = ttk.Frame(root, padding=(12, 10))
+    header.pack(fill="x", padx=12, pady=(12, 6))
+
+    intro_label = ttk.Label(
+        header,
         text=intro_text,
-        wraplength=780,
+        wraplength=760,
         justify="left",
-        padding=(12, 8)
-    ).pack(fill="x", padx=12, pady=(12, 6))
+        padding=(14, 10),
+        bootstyle="inverse-primary"
+    )
+    intro_label.pack(side="left", fill="x", expand=True)
+
+    ttk.Button(
+        header,
+        text="Exit",
+        command=root.destroy,
+        bootstyle="danger-outline",
+        width=12
+    ).pack(side="right", padx=(12, 0))
 
     notebook = ttk.Notebook(root, bootstyle=SECONDARY)
     notebook.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
     # ------------------------------------------------------------------
-    # Statistics tab
+    # Workflows tab
+    # ------------------------------------------------------------------
+    workflows_tab = ttk.Frame(notebook)
+    notebook.add(workflows_tab, text="Workflows")
+
+    workflows_container = ttk.Frame(workflows_tab, padding=12)
+    workflows_container.pack(fill="both", expand=True)
+
+    ttk.Label(
+        workflows_container,
+        text="Launch the workflows grouped by phase. Pick the task that matches what you are trying to achieve, "
+             "then glance at the Status tab to confirm progress.",
+        justify="left",
+        wraplength=780
+    ).pack(anchor="w", pady=(0, 10))
+
+    workflow_grid = ttk.Frame(workflows_container)
+    workflow_grid.pack(fill="both", expand=True)
+    workflow_grid.columnconfigure(0, weight=1)
+    workflow_grid.columnconfigure(1, weight=1)
+
+    workflow_section_frames = []
+    SINGLE_COLUMN_BREAKPOINT = 900
+
+    workflow_sections = [
+        ("Prepare data", "Import new sources and generate supporting geometry.", [
+            ("Import data", lambda: import_assets(gpkg_file),
+             "Start here when preparing a new dataset or refreshing existing inputs."),
+            ("Build geocode grids", geocodes_grids,
+             "Create or refresh the hexagon/tile grids that support analysis."),
+            ("Define map tiles", make_atlas,
+             "Generate map tile polygons used in the QGIS atlas and presentations."),
+        ]),
+        ("Configure analysis", "Tune processing parameters and study areas before running heavy jobs.", [
+            ("Processing settings", edit_processing_setup,
+             "Adjust weights, thresholds and other processing rules."),
+            ("Define study areas", open_data_analysis_setup,
+             "Launch the area analysis tool to pick the study groups."),
+        ]),
+        ("Run processing", "Execute the automated steps that build fresh outputs.", [
+            ("Run area processing", lambda: process_data(gpkg_file),
+             "Runs the main area pipeline to refresh GeoParquet, MBTiles and stats."),
+            ("Run line processing", process_lines,
+             "Processes line assets (transport, rivers, utilities) into analysis-ready segments."),
+        ]),
+        ("Review & publish", "Open the interactive viewers and export the deliverables.", [
+            ("Asset map studio", open_asset_layers_viewer,
+             "Inspect layers with AI-assisted styling controls."),
+            ("Analysis map viewer", open_maps_overview,
+             "Review current background layers together with processed assets."),
+            ("Compare study areas", open_data_analysis_presentation,
+             "Open the dashboard for comparing study groups."),
+            ("Export reports", open_present_files,
+             "Render PDF reports based on the latest results."),
+        ]),
+    ]
+
+    two_column_sections = {"Prepare data", "Review & publish"}
+
+    for idx, (section_title, section_description, actions) in enumerate(workflow_sections):
+        row = idx // 2
+        col = idx % 2
+        section_frame = ttk.LabelFrame(workflow_grid, text=section_title.title(), padding=(12, 10))
+        section_frame.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+        workflow_section_frames.append(section_frame)
+        ttk.Label(
+            section_frame,
+            text=section_description,
+            wraplength=320,
+            justify="left"
+        ).pack(anchor="w", fill="x")
+        actions_container = ttk.Frame(section_frame)
+        actions_container.pack(fill="x", pady=(10, 0))
+        is_two_column = section_title in two_column_sections
+        if is_two_column:
+            actions_container.columnconfigure(0, weight=1)
+            actions_container.columnconfigure(1, weight=1)
+        for action_index, (action_label, action_command, action_description) in enumerate(actions):
+            if is_two_column:
+                col_idx = action_index % 2
+                row_idx = action_index // 2
+                action_block = ttk.Frame(actions_container)
+                action_block.grid(row=row_idx, column=col_idx, padx=4, pady=(10, 4), sticky="nsew")
+            else:
+                action_block = ttk.Frame(actions_container)
+                action_block.pack(fill="x", pady=(10, 4))
+            ttk.Button(
+                action_block,
+                text=action_label,
+                command=action_command,
+                width=20
+            ).pack(anchor="w")
+            ttk.Label(
+                action_block,
+                text=action_description,
+                wraplength=300 if is_two_column else 320,
+                justify="left"
+            ).pack(anchor="w", pady=(2, 0))
+
+    def relayout_workflow_sections(event=None):
+        if event is not None and event.widget is not workflow_grid:
+            return
+        available_width = workflow_grid.winfo_width()
+        if not available_width:
+            available_width = workflows_container.winfo_width() or DEFAULT_WIDTH
+        columns = 2 if available_width >= SINGLE_COLUMN_BREAKPOINT else 1
+        if columns <= 0:
+            columns = 1
+        for col_index in range(2):
+            workflow_grid.columnconfigure(col_index, weight=1 if col_index < columns else 0)
+        for idx, frame in enumerate(workflow_section_frames):
+            row = idx // columns
+            col = idx % columns
+            frame.grid_configure(row=row, column=col, padx=8, pady=8, sticky="nsew")
+
+    def resize_window_to_fit_contents():
+        root.update_idletasks()
+        required_height = root.winfo_reqheight()
+        required_width = root.winfo_reqwidth()
+        width_for_height = math.ceil(required_height * TARGET_ASPECT_RATIO)
+        width_needed = max(DEFAULT_WIDTH, required_width, width_for_height)
+        height_needed = int(width_needed / TARGET_ASPECT_RATIO)
+        current_width = root.winfo_width()
+        current_height = root.winfo_height()
+        if width_needed <= current_width and height_needed <= current_height:
+            return
+        aspect_guard["active"] = True
+        root.geometry(f"{width_needed}x{height_needed}")
+        root.after_idle(lambda: aspect_guard.update(active=False))
+
+    workflow_grid.bind("<Configure>", relayout_workflow_sections)
+
+    root.update_idletasks()
+    relayout_workflow_sections()
+    resize_window_to_fit_contents()
+
+    # ------------------------------------------------------------------
+    # Status tab
     # ------------------------------------------------------------------
     stats_tab = ttk.Frame(notebook)
-    notebook.add(stats_tab, text="Statistics")
+    notebook.add(stats_tab, text="Status")
 
     stats_container = ttk.Frame(stats_tab, padding=12)
     stats_container.pack(fill="both", expand=True)
 
     ttk.Label(
         stats_container,
-        text="This overview updates automatically when you import data or run helper tools.",
+        text="Live counters and helper tips update automatically when you run any workflow.",
         justify="left"
     ).pack(anchor="w", pady=(0, 8))
 
     global info_labelframe
-    info_labelframe = ttk.LabelFrame(stats_container, text="Statistics and help", bootstyle='info')
+    info_labelframe = ttk.LabelFrame(stats_container, text="Status and help", bootstyle='info')
     info_labelframe.pack(fill="both", expand=True)
     info_labelframe.grid_columnconfigure(0, weight=1)
     info_labelframe.grid_columnconfigure(1, weight=3)
     info_labelframe.grid_columnconfigure(2, weight=2)
 
     update_stats(gpkg_file)
-    log_to_logfile("User interface, statistics updated.")
-
-    # ------------------------------------------------------------------
-    # Operations tab
-    # ------------------------------------------------------------------
-    operations_tab = ttk.Frame(notebook)
-    notebook.add(operations_tab, text="Activities")
-
-    operations_container = ttk.Frame(operations_tab, padding=12)
-    operations_container.pack(fill="both", expand=True)
-
-    ttk.Label(
-        operations_container,
-        text="Launch the main workflows from here. Each button has a short description of when to use it.",
-        justify="left",
-        wraplength=800
-    ).pack(anchor="w", pady=(0, 10))
-
-    button_width = 20
-    button_padx = 6
-    button_pady = 4
-
-    operations_grid = ttk.Frame(operations_container)
-    operations_grid.pack(fill="both", expand=True)
-    operations_grid.columnconfigure(1, weight=1)
-
-    operations = [
-        ("Import", lambda: import_assets(gpkg_file),
-         "Opens the data importer. Start here when preparing a new dataset.", None),
-        ("Grids", geocodes_grids,
-         "Creates or refreshes geocode grids (hexagons, tiles) that are used in the analysis.", None),
-        ("Define map tiles", make_atlas,
-         "Generates map tiles polygons for detailed map presentations (atlas).", None),
-        ("Processing setup", edit_processing_setup,
-         "Adjust processing parameters before running analysis.", None),
-        ("Process areas", lambda: process_data(gpkg_file),
-         "Runs the core processing pipeline to produce the outputs.", None),
-        ("Process lines", process_lines,
-         "Processes transport, river or utility lines into analysis segments.", None),
-        ("Asset maps", open_asset_layers_viewer,
-         "Opens the asset-layer viewer with AI styling controls for faster presentation tweaks.", None),
-        ("Analysis maps", open_maps_overview,
-         "Opens the interactive map viewer with current background layers and assets.", None),
-        ("Analysis setup", open_data_analysis_setup,
-         "Launches the area analysis tool used to define study areas.", None),
-        ("Analysis results", open_data_analysis_presentation,
-         "Opens the comparison dashboard for study group results.", None),
-        ("Export reports", open_present_files,
-         "Builds PDF-reports.", None),
-    ]
-
-    for idx, (label, command, description, bootstyle) in enumerate(operations):
-        btn_kwargs = {"text": label, "command": command, "width": button_width}
-        if bootstyle:
-            btn_kwargs["bootstyle"] = bootstyle
-        ttk.Button(
-            operations_grid,
-            **btn_kwargs
-        ).grid(row=idx, column=0, padx=(0, 12), pady=(button_pady, 2), sticky="w")
-        ttk.Label(
-            operations_grid,
-            text=description,
-            wraplength=520,
-            justify="left"
-        ).grid(row=idx, column=1, padx=(0, 4), pady=(button_pady, 2), sticky="w")
+    log_to_logfile("User interface, status updated.")
 
     # ------------------------------------------------------------------
     # Settings tab
@@ -1148,67 +1267,12 @@ if __name__ == "__main__":
     ).pack(fill='x', expand=False, padx=10, pady=10)
 
     # ------------------------------------------------------------------
-    # Registration tab
-    # ------------------------------------------------------------------
-    registration_tab = ttk.Frame(notebook)
-    notebook.add(registration_tab, text="Register")
-
-    registration_container = ttk.Frame(registration_tab, padding=12)
-    registration_container.pack(fill='both', expand=True)
-
-    id_uuid_ok = tk.BooleanVar(value=id_uuid_ok_value)
-    id_personalinfo_ok = tk.BooleanVar(value=id_personalinfo_ok_value)
-
-    registration_labelframe = ttk.LabelFrame(
-        registration_container,
-        text="Licensing and personal information",
-        bootstyle='secondary'
-    )
-    registration_labelframe.pack(fill='both', expand=False, padx=5, pady=5)
-
-    mesa_text = (
-        "MESA is open source software available under the GNU GPLv3 license."
-        " A unique random identifier (UUID) is generated to count how many times the system has been used."
-        " It is not associated with who or where you are, and you can opt out by unticking the box below.\n\n"
-        "You may also register your name and email for our reference. This information could be used to send "
-        "you questionnaires or notifications about future updates. The values are stored locally in config.ini."
-    )
-    add_text_to_labelframe(registration_labelframe, mesa_text)
-
-    grid_frame = ttk.Frame(registration_container, padding=(10, 10))
-    grid_frame.pack(fill='both', expand=True, padx=5, pady=5)
-    grid_frame.columnconfigure(2, weight=1)
-
-    ttk.Checkbutton(grid_frame, text="", variable=id_uuid_ok).grid(row=0, column=0, padx=10, pady=5, sticky="w")
-    ttk.Checkbutton(grid_frame, text="", variable=id_personalinfo_ok).grid(row=1, column=0, padx=10, pady=5, sticky="w")
-
-    ttk.Label(grid_frame, text="UUID:").grid(row=0, column=1, padx=10, pady=5, sticky="w")
-    ttk.Label(grid_frame, text="Name:").grid(row=1, column=1, padx=10, pady=5, sticky="w")
-    ttk.Label(grid_frame, text="Email:").grid(row=2, column=1, padx=10, pady=5, sticky="w")
-
-    ttk.Label(grid_frame, text=id_uuid).grid(row=0, column=2, padx=10, pady=5, sticky="w")
-
-    global name_entry, email_entry
-    name_entry = ttk.Entry(grid_frame)
-    name_entry.grid(row=1, column=2, padx=10, pady=5, sticky="we")
-    name_entry.insert(0, id_name)
-
-    email_entry = ttk.Entry(grid_frame)
-    email_entry.grid(row=2, column=2, padx=10, pady=5, sticky="we")
-    email_entry.insert(0, id_email)
-
-    ttk.Button(grid_frame, text="Save", command=submit_form, bootstyle=SUCCESS).grid(
-        row=2, column=3, padx=10, pady=5, sticky="e"
-    )
-
-    # ------------------------------------------------------------------
     # Footer
     # ------------------------------------------------------------------
     footer = ttk.Frame(root, padding=(10, 5))
     footer.pack(fill='x', padx=12, pady=(0, 6))
 
     ttk.Label(footer, text=mesa_version, font=("Calibri", 8)).pack(side='left')
-    ttk.Button(footer, text="Exit", command=root.destroy, bootstyle="warning").pack(side='right')
 
     notebook.select(0)
     root.update_idletasks()
