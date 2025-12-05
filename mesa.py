@@ -294,12 +294,12 @@ def update_stats(_unused_gpkg_path):
 
     if not os.path.isdir(geoparquet_dir):
         status_label = ttk.Label(info_labelframe, text='\u26AB', bootstyle='danger')
-        status_label.grid(row=1, column=0, padx=5, pady=5)
+        status_label.grid(row=0, column=0, padx=5, pady=5)
         message_label = ttk.Label(info_labelframe,
                                   text="No data imported.\nStart with importing data.",
                                   wraplength=380, justify="left")
-        message_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
+        message_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 0, 2, 5, 5)
     else:
         my_status = get_status(geoparquet_dir)
         if not my_status.empty and {'Status', 'Message', 'Link'}.issubset(my_status.columns):
@@ -313,13 +313,13 @@ def update_stats(_unused_gpkg_path):
                 create_link_icon(info_labelframe, row['Link'], idx, 2, 5, 5)
         else:
             status_label = ttk.Label(info_labelframe, text='\u26AB', bootstyle='danger')
-            status_label.grid(row=1, column=0, padx=5, pady=5)
+            status_label.grid(row=0, column=0, padx=5, pady=5)
             message_label = ttk.Label(info_labelframe,
                                       text="To initiate the system please import assets.\n"
                                            "Press the Import button.",
                                       wraplength=380, justify="left")
-            message_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-            create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 1, 2, 5, 5)
+            message_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+            create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 0, 2, 5, 5)
 
     root.update_idletasks()
     root.update()
@@ -1177,14 +1177,131 @@ if __name__ == "__main__":
         justify="left"
     ).pack(anchor="w", pady=(0, 8))
 
+    summary_labels = {}
+
+    status_columns = ttk.Frame(stats_container)
+    status_columns.pack(fill="both", expand=True, pady=(0, 12))
+    status_columns.columnconfigure(0, weight=1)
+    status_columns.columnconfigure(1, weight=1)
+    status_columns.rowconfigure(0, weight=1)
+
     global info_labelframe
-    info_labelframe = ttk.LabelFrame(stats_container, text="Status and help", bootstyle='info')
-    info_labelframe.pack(fill="both", expand=True)
+    info_labelframe = ttk.LabelFrame(status_columns, text="Status and help", bootstyle='info')
+    info_labelframe.grid(row=0, column=0, padx=(0, 8), pady=(0, 8), sticky="nsew")
     info_labelframe.grid_columnconfigure(0, weight=1)
     info_labelframe.grid_columnconfigure(1, weight=3)
     info_labelframe.grid_columnconfigure(2, weight=2)
 
+    timeline_frame = ttk.Frame(status_columns)
+    timeline_frame.grid(row=0, column=1, padx=(8, 0), pady=(0, 8), sticky="nsew")
+    ttk.Label(timeline_frame, text="Recent activity", font=("Segoe UI", 10, "bold"), justify="left").pack(anchor="w")
+    timeline_canvas = ttk.Frame(timeline_frame)
+    timeline_canvas.pack(fill="both", expand=True, pady=(6, 0))
+    timeline_entries = []
+    for _ in range(4):
+        entry = ttk.Frame(timeline_canvas)
+        entry.pack(fill="x", pady=4)
+        color_bar = ttk.Label(entry, text=" ", width=2, bootstyle="success")
+        color_bar.grid(row=0, column=0, padx=(0, 6), sticky="ns")
+        title_label = ttk.Label(entry, text="Event", justify="left")
+        title_label.grid(row=0, column=1, sticky="w")
+        time_label = ttk.Label(entry, text="--", width=18, anchor="e")
+        time_label.grid(row=0, column=2, sticky="e")
+        entry.columnconfigure(1, weight=1)
+        timeline_entries.append((color_bar, title_label, time_label))
+
+    summary_stack = ttk.Frame(stats_container)
+    summary_stack.pack(fill="x", pady=(0, 8))
+
+    card_layout = [
+        {"title": "Assets", "key": "assets_imported", "helper": "Import data to unlock maps"},
+        {"title": "Processing", "key": "mesa_stat_process", "helper": "Run processing to refresh outputs"},
+        {"title": "Reports", "key": "mesa_stat_create_atlas", "helper": "Export updated PDF summaries"}
+    ]
+
+    for card_spec in card_layout:
+        card = ttk.LabelFrame(summary_stack, text=card_spec["title"], bootstyle="secondary")
+        card.pack(fill="x", pady=4)
+        value_label = ttk.Label(card, text="--", font=("Segoe UI", 16, "bold"), justify="left")
+        value_label.pack(anchor="w", padx=12, pady=(10, 2))
+        summary_labels[card_spec["key"]] = value_label
+        ttk.Label(
+            card,
+            text=card_spec["helper"],
+            wraplength=460,
+            justify="left"
+        ).pack(anchor="w", padx=12, pady=(0, 12))
+
+    def update_summary_cards():
+        config_snapshot = read_config(config_file)['DEFAULT']
+        for spec in card_layout:
+            lbl = summary_labels.get(spec["key"])
+            if not lbl:
+                continue
+            value = config_snapshot.get(spec["key"], "--")
+            lbl.config(text=value)
+
+    def _fmt_timestamp(ts: float | None) -> str:
+        if not ts:
+            return "--"
+        try:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "--"
+
+    def _path_mtime(path: str) -> float | None:
+        try:
+            return os.path.getmtime(path)
+        except Exception:
+            return None
+
+    def _last_flat_timestamp():
+        geoparquet_dir = _detect_geoparquet_dir()
+        flat_path = os.path.join(geoparquet_dir, "tbl_flat.parquet")
+        ts = _path_mtime(flat_path)
+        if ts:
+            return _fmt_timestamp(ts)
+        return config['DEFAULT'].get('last_process_run', '--')
+
+    def _last_line_processing_timestamp():
+        geoparquet_dir = _detect_geoparquet_dir()
+        segment_path = os.path.join(geoparquet_dir, "tbl_segment_flat.parquet")
+        ts = _path_mtime(segment_path)
+        if ts:
+            return _fmt_timestamp(ts)
+        return config['DEFAULT'].get('last_lines_process_run', '--')
+
+    def _latest_report_timestamp():
+        reports_dir = os.path.join(original_working_directory, "output")
+        newest_ts = None
+        if os.path.isdir(reports_dir):
+            for entry in os.scandir(reports_dir):
+                if entry.is_file() and entry.name.lower().endswith(".pdf"):
+                    ts = _path_mtime(entry.path)
+                    if ts and (newest_ts is None or ts > newest_ts):
+                        newest_ts = ts
+        if newest_ts:
+            return _fmt_timestamp(newest_ts)
+        return config['DEFAULT'].get('last_report_export', '--')
+
+    def update_timeline():
+        events = [
+            ("Import assets", config['DEFAULT'].get('log_date_lastupdate', '--'), 'success'),
+            ("Processing", _last_flat_timestamp(), 'info'),
+            ("Line processing", _last_line_processing_timestamp(), 'warning'),
+            ("Newest report export", _latest_report_timestamp(), 'secondary')
+        ]
+        for idx, (title, timestamp, bootstyle) in enumerate(events):
+            if idx >= len(timeline_entries):
+                break
+            color_bar, title_label, time_label = timeline_entries[idx]
+            color_bar.config(bootstyle=bootstyle)
+            title_label.config(text=title)
+            time_label.config(text=timestamp)
+
     update_stats(gpkg_file)
+    update_summary_cards()
+    update_timeline()
     log_to_logfile("User interface, status updated.")
 
     # ------------------------------------------------------------------
