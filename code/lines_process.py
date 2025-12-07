@@ -168,15 +168,26 @@ def gpq_dir() -> Path:
 def parquet_path(name: str) -> Path:
     return gpq_dir() / f"{name}.parquet"
 
-def read_parquet_or_none(name: str):
+def read_parquet_or_none(name: str, columns=None):
     p = parquet_path(name)
     if not p.exists():
         return None
     try:
-        return gpd.read_parquet(p)
+        return gpd.read_parquet(p, columns=columns)
     except Exception as e:
-        log_to_gui(log_widget, f"Failed reading {p.name}: {e}")
-        return None
+        log_to_gui(log_widget, f"Failed reading {p.name}: {e} (falling back to pandas)")
+        try:
+            df = pd.read_parquet(p, columns=columns)
+            if 'geometry' in df.columns:
+                try:
+                    crs_guess = globals().get('workingprojection_epsg')
+                    return gpd.GeoDataFrame(df, geometry='geometry', crs=crs_guess)
+                except Exception as geo_exc:
+                    log_to_gui(log_widget, f"GeoDataFrame coercion failed for {p.name}: {geo_exc}")
+            return df
+        except Exception as e2:
+            log_to_gui(log_widget, f"Fallback read failed for {p.name}: {e2}")
+            return None
 
 def write_parquet(name: str, gdf: gpd.GeoDataFrame):
     p = parquet_path(name)
