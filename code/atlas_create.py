@@ -66,6 +66,7 @@ tile_lat_var = None
 tile_overlap_var = None
 tile_count_var = None
 tile_tolerance_var = None
+tile_count_overlap_var = None
 custom_option_entries: list = []
 count_option_entries: list = []
 
@@ -329,6 +330,20 @@ def geoparquet_dir() -> Path:
 def atlas_parquet_path() -> Path:
     return _parquet_path("tbl_atlas.parquet", for_write=True)
 
+def read_asset_group_parquet() -> gpd.GeoDataFrame:
+    p = _parquet_path("tbl_asset_group.parquet")
+    if not p.exists():
+        log_to_gui(log_widget, f"Missing tbl_asset_group.parquet at {p}")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    try:
+        gdf = gpd.read_parquet(p)
+        if gdf.crs is None:
+            gdf.set_crs("EPSG:4326", inplace=True)
+        return gdf
+    except Exception as e:
+        log_to_gui(log_widget, f"Failed reading tbl_asset_group.parquet: {e}")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
 def read_flat_parquet() -> gpd.GeoDataFrame:
     p = _parquet_path("tbl_flat.parquet")
     if not p.exists():
@@ -347,6 +362,31 @@ def write_atlas_parquet(gdf: gpd.GeoDataFrame):
     p = atlas_parquet_path()
     gdf.to_parquet(p, index=False)
     log_to_gui(log_widget, f"Saved atlas GeoParquet -> {p} (rows={len(gdf)})")
+
+def atlas_bounds_from_asset_groups() -> tuple[float, float, float, float] | None:
+    ag = read_asset_group_parquet()
+    if ag.empty or "geometry" not in ag:
+        return None
+    try:
+        geom = ag.geometry
+        mask = geom.notna()
+        if hasattr(geom, "is_empty"):
+            try:
+                mask &= ~geom.is_empty
+            except Exception:
+                pass
+        if hasattr(geom, "geom_type"):
+            try:
+                mask &= geom.geom_type.isin(["Polygon", "MultiPolygon", "GeometryCollection"])
+            except Exception:
+                pass
+        valid = geom[mask]
+        if valid.empty:
+            return None
+        minx, miny, maxx, maxy = valid.total_bounds
+        return (minx, miny, maxx, maxy)
+    except Exception:
+        return None
 
 # ----------------------------
 # App helpers
@@ -368,7 +408,7 @@ def close_application(root):
 def run_create_atlas(log_widget_, progress_var_):
     main_create_atlas(log_widget_, progress_var_)
 
-def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
+def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat: gpd.GeoDataFrame | None):
     log_to_gui(log_widget, "Filtering and updating atlas geometries...")
     atlas_gdf = gpd.GeoDataFrame(
         atlas_geometries,
@@ -376,22 +416,27 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
                  'image_name_1', 'image_desc_1', 'image_name_2', 'image_desc_2']
     )
     atlas_gdf.set_geometry('geom', inplace=True)
+    target_crs = None
+    if tbl_flat is not None and hasattr(tbl_flat, "crs"):
+        target_crs = tbl_flat.crs
     try:
-        # Ensure CRS match
-        if atlas_gdf.crs is None and tbl_flat.crs is not None:
-            atlas_gdf.set_crs(tbl_flat.crs, inplace=True)
-        elif atlas_gdf.crs != tbl_flat.crs and tbl_flat.crs is not None:
-            atlas_gdf = atlas_gdf.to_crs(tbl_flat.crs)
+        if target_crs is not None:
+            if atlas_gdf.crs is None:
+                atlas_gdf.set_crs(target_crs, inplace=True)
+            elif atlas_gdf.crs != target_crs:
+                atlas_gdf = atlas_gdf.to_crs(target_crs)
     except Exception:
         pass
 
-    try:
-        filtered_indices = atlas_gdf.geometry.apply(lambda geom: tbl_flat.intersects(geom).any())
-    except Exception:
-        # Fallback: keep all if intersection fails
-        filtered_indices = [True] * len(atlas_gdf)
-
-    intersecting_geometries = atlas_gdf[filtered_indices].copy()
+    if tbl_flat is None or tbl_flat.empty:
+        log_to_gui(log_widget, "tbl_flat unavailable; skipping data intersection filter.")
+        intersecting_geometries = atlas_gdf.copy()
+    else:
+        try:
+            filtered_indices = atlas_gdf.geometry.apply(lambda geom: tbl_flat.intersects(geom).any())
+        except Exception:
+            filtered_indices = [True] * len(atlas_gdf)
+        intersecting_geometries = atlas_gdf[filtered_indices].copy()
     id_counter = 1
     for idx in intersecting_geometries.index:
         intersecting_geometries.loc[idx, 'name_gis'] = f'atlas_{id_counter:03d}'
@@ -401,20 +446,20 @@ def filter_and_update_atlas_geometries(atlas_geometries, tbl_flat):
     intersecting_geometries = intersecting_geometries.rename(columns={'geom': 'geometry'}).set_geometry('geometry')
     return intersecting_geometries
 
-def generate_atlas_geometries(tbl_flat, lon_km, lat_km, overlap_pct):
+def generate_atlas_geometries(bounds, lon_km, lat_km, overlap_pct):
     log_to_gui(log_widget, "Generating atlas geometries...")
-    # crude degree conversion; acceptable for page tiling use
     lon_size_deg = float(lon_km) / 111.0
     lat_size_deg = float(lat_km) / 111.0
     overlap = float(overlap_pct) / 100.0
 
-    if tbl_flat is None or tbl_flat.empty:
+    if not bounds:
         return []
 
-    try:
-        minx, miny, maxx, maxy = tbl_flat.total_bounds
-    except Exception:
-        return []
+    minx, miny, maxx, maxy = bounds
+    if maxx <= minx:
+        maxx = minx + 1e-6
+    if maxy <= miny:
+        maxy = miny + 1e-6
 
     atlas_geometries = []
     id_counter = 1
@@ -442,17 +487,17 @@ def generate_atlas_geometries(tbl_flat, lon_km, lat_km, overlap_pct):
         y += step_y
     return atlas_geometries
 
-def generate_atlas_geometries_by_count(tbl_flat, tile_count: int, tolerance_pct: float):
-    log_to_gui(log_widget, f"Generating atlas geometries for {tile_count} tiles (tolerance {tolerance_pct}%).")
-    if tbl_flat is None or tbl_flat.empty:
+def generate_atlas_geometries_by_count(bounds, tile_count: int, tolerance_pct: float, overlap_pct: float):
+    log_to_gui(log_widget, f"Generating atlas geometries for {tile_count} tiles (tolerance {tolerance_pct}%, overlap {overlap_pct}%).")
+    if not bounds:
         log_to_gui(log_widget, "No data available to derive atlas extent.")
         return []
 
-    try:
-        minx, miny, maxx, maxy = tbl_flat.total_bounds
-    except Exception:
-        log_to_gui(log_widget, "Failed to compute bounds from data.")
-        return []
+    minx, miny, maxx, maxy = bounds
+    if maxx <= minx:
+        maxx = minx + 1e-6
+    if maxy <= miny:
+        maxy = miny + 1e-6
 
     width = maxx - minx
     height = maxy - miny
@@ -467,6 +512,7 @@ def generate_atlas_geometries_by_count(tbl_flat, tile_count: int, tolerance_pct:
 
     tile_count = max(2, int(tile_count))
     tolerance_pct = max(0.0, float(tolerance_pct))
+    overlap_pct = max(0.0, float(overlap_pct))
 
     pad_x = width * (tolerance_pct / 100.0) / 2.0
     pad_y = height * (tolerance_pct / 100.0) / 2.0
@@ -502,6 +548,10 @@ def generate_atlas_geometries_by_count(tbl_flat, tile_count: int, tolerance_pct:
     )
 
     id_counter = 1
+    overlap_fraction = min(overlap_pct / 100.0, 0.9)
+    expand_x = tile_width * overlap_fraction * 0.5
+    expand_y = tile_height * overlap_fraction * 0.5
+
     for row in range(rows):
         y0 = expanded_miny + row * tile_height
         y1 = expanded_miny + (row + 1) * tile_height
@@ -512,7 +562,12 @@ def generate_atlas_geometries_by_count(tbl_flat, tile_count: int, tolerance_pct:
             x1 = expanded_minx + (col + 1) * tile_width
             if col == cols - 1:
                 x1 = expanded_maxx
-            geom = box(x0, y0, x1, y1)
+            geom = box(
+                max(expanded_minx, x0 - expand_x),
+                max(expanded_miny, y0 - expand_y),
+                min(expanded_maxx, x1 + expand_x),
+                min(expanded_maxy, y1 + expand_y)
+            )
             atlas_geometries.append({
                 'id': id_counter,
                 'name_gis': f'atlas{id_counter:03d}',
@@ -528,6 +583,21 @@ def generate_atlas_geometries_by_count(tbl_flat, tile_count: int, tolerance_pct:
 
     return atlas_geometries
 
+def determine_atlas_bounds(tbl_flat: gpd.GeoDataFrame | None) -> tuple[float, float, float, float] | None:
+    bounds = atlas_bounds_from_asset_groups()
+    if bounds:
+        log_to_gui(log_widget, "Atlas extent derived from tbl_asset_group polygons.")
+        return bounds
+    if tbl_flat is not None and not tbl_flat.empty:
+        try:
+            minx, miny, maxx, maxy = tbl_flat.total_bounds
+            log_to_gui(log_widget, "tbl_asset_group unavailable; using tbl_flat extent.")
+            return (minx, miny, maxx, maxy)
+        except Exception:
+            pass
+    log_to_gui(log_widget, "No extent available from tbl_asset_group or tbl_flat.")
+    return None
+
 def main_create_atlas(log_widget_, progress_var_):
 
     log_to_gui(log_widget_, "Starting atlas generation (GeoParquet).")
@@ -535,7 +605,14 @@ def main_create_atlas(log_widget_, progress_var_):
 
     tbl_flat = read_flat_parquet()
     if tbl_flat.empty:
-        log_to_gui(log_widget_, "tbl_flat.parquet empty or missing; aborting.")
+        log_to_gui(log_widget_, "tbl_flat.parquet empty or missing; proceeding without data filter.")
+        tbl_flat_data = None
+    else:
+        tbl_flat_data = tbl_flat
+
+    bounds = determine_atlas_bounds(tbl_flat_data)
+    if not bounds:
+        log_to_gui(log_widget_, "Cannot derive atlas extent (need tbl_asset_group polygons or tbl_flat bounds).")
         update_progress(100)
         return
 
@@ -561,7 +638,7 @@ def main_create_atlas(log_widget_, progress_var_):
             return
         overlap = max(0.0, min(overlap, 90.0))
         log_to_gui(log_widget_, f"Tile mode: custom size {lon_km} km x {lat_km} km with {overlap}% overlap.")
-        atlas_geometries = generate_atlas_geometries(tbl_flat, lon_km, lat_km, overlap)
+        atlas_geometries = generate_atlas_geometries(bounds, lon_km, lat_km, overlap)
 
     elif mode == "count":
         if tile_count_var is None:
@@ -582,8 +659,13 @@ def main_create_atlas(log_widget_, progress_var_):
             update_progress(100)
             return
         tolerance = max(0.0, tolerance)
+        try:
+            overlap_pct = float(tile_count_overlap_var.get()) if tile_count_overlap_var is not None else atlas_overlap_percent
+        except Exception:
+            overlap_pct = atlas_overlap_percent
+        overlap_pct = max(0.0, min(overlap_pct, 90.0))
         log_to_gui(log_widget_, f"Tile mode: distribute {requested_tiles} tiles across data extent (tolerance {tolerance}%).")
-        atlas_geometries = generate_atlas_geometries_by_count(tbl_flat, requested_tiles, tolerance)
+        atlas_geometries = generate_atlas_geometries_by_count(bounds, requested_tiles, tolerance, overlap_pct)
         if atlas_geometries:
             log_to_gui(log_widget_, f"Generated {len(atlas_geometries)} tiles to cover the dataset.")
 
@@ -592,7 +674,7 @@ def main_create_atlas(log_widget_, progress_var_):
             log_widget_,
             f"Tile mode: config defaults ({atlas_lon_size_km} km x {atlas_lat_size_km} km, overlap {atlas_overlap_percent}%)."
         )
-        atlas_geometries = generate_atlas_geometries(tbl_flat, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
+        atlas_geometries = generate_atlas_geometries(bounds, atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent)
 
     if not atlas_geometries:
         log_to_gui(log_widget_, "No atlas tiles were generated; aborting.")
@@ -601,17 +683,18 @@ def main_create_atlas(log_widget_, progress_var_):
 
     update_progress(60)
 
-    updated = filter_and_update_atlas_geometries(atlas_geometries, tbl_flat)
+    updated = filter_and_update_atlas_geometries(atlas_geometries, tbl_flat_data)
     update_progress(80)
 
     if not updated.empty:
         log_to_gui(log_widget_, f"Atlas tiles intersecting data: {len(updated)}.")
         write_atlas_parquet(updated)
     else:
+        fallback_crs = tbl_flat_data.crs if tbl_flat_data is not None else "EPSG:4326"
         empty = gpd.GeoDataFrame(
             columns=['id','name_gis','title_user','description',
                      'image_name_1','image_desc_1','image_name_2','image_desc_2','geometry'],
-            geometry='geometry', crs=tbl_flat.crs
+            geometry='geometry', crs=fallback_crs
         )
         write_atlas_parquet(empty)
         log_to_gui(log_widget_, "No intersecting atlas tiles; wrote empty atlas table.")
@@ -801,6 +884,7 @@ if __name__ == "__main__":
     tile_overlap_var = tk.StringVar(value=f"{atlas_overlap_percent:.2f}")
     tile_count_var = tk.StringVar(value="4")
     tile_tolerance_var = tk.StringVar(value="5")
+    tile_count_overlap_var = tk.StringVar(value=f"{atlas_overlap_percent:.2f}")
     custom_option_entries = []
     count_option_entries = []
 
@@ -884,21 +968,32 @@ if __name__ == "__main__":
     entry_tol = (tb.Entry(options_frame, textvariable=tile_tolerance_var, width=8)
                  if tb is not None else tk.Entry(options_frame, textvariable=tile_tolerance_var, width=8))
     entry_tol.grid(row=5, column=3, sticky="w")
-    count_option_entries.extend([entry_count, entry_tol])
+
+    if tb is not None:
+        lbl_count_overlap = tb.Label(options_frame, text="Overlap % (between count tiles):")
+    else:
+        lbl_count_overlap = tk.Label(options_frame, text="Overlap % (between count tiles):")
+    lbl_count_overlap.grid(row=6, column=0, sticky="w", padx=(20, 4))
+
+    entry_count_overlap = (tb.Entry(options_frame, textvariable=tile_count_overlap_var, width=8)
+                           if tb is not None else tk.Entry(options_frame, textvariable=tile_count_overlap_var, width=8))
+    entry_count_overlap.grid(row=6, column=1, sticky="w")
+
+    count_option_entries.extend([entry_count, entry_tol, entry_count_overlap])
 
     if tb is not None:
         note_label = tb.Label(
             options_frame,
-            text="Overlap applies to custom tiles; padding expands the extent for tile-count mode.",
+            text="Overlap controls tile spacing; padding expands the extent for tile-count mode.",
             bootstyle="secondary"
         )
     else:
         note_label = tk.Label(
             options_frame,
-            text="Overlap applies to custom tiles; padding expands the extent for tile-count mode.",
+            text="Overlap controls tile spacing; padding expands the extent for tile-count mode.",
             font=("Segoe UI", 9), fg="#555555"
         )
-    note_label.grid(row=6, column=0, columnspan=4, sticky="w", padx=(20, 0), pady=(4, 0))
+    note_label.grid(row=7, column=0, columnspan=4, sticky="w", padx=(20, 0), pady=(4, 0))
 
     tile_mode_var.trace_add("write", lambda *args: update_tile_mode_ui())
     update_tile_mode_ui()
