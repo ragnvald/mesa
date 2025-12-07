@@ -1049,29 +1049,30 @@ if __name__ == "__main__":
 
     workflow_section_frames = []
     SINGLE_COLUMN_BREAKPOINT = 900
+    ACTION_COLUMNS = 2
 
     workflow_sections = [
-        ("Prepare data", "Import new sources and generate supporting geometry.", [
+        ("Prepare data (step 1)", "Import new sources and generate supporting geometry.", [
             ("Import data", lambda: import_assets(gpkg_file),
              "Start here when preparing a new dataset or refreshing existing inputs."),
             ("Build geocode grids", geocodes_grids,
              "Create or refresh the hexagon/tile grids that support analysis."),
-            ("Define map tiles", make_atlas,
-             "Generate map tile polygons used in the QGIS atlas and presentations."),
+            ("Define atlas tiles", make_atlas,
+             "Generate atlas tile polygons used in the QGIS atlas and the report engine."),
         ]),
-        ("Configure analysis", "Tune processing parameters and study areas before running heavy jobs.", [
+        ("Configure analysis (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
             ("Processing settings", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
             ("Define study areas", open_data_analysis_setup,
              "Launch the area analysis tool to pick the study groups."),
         ]),
-        ("Run processing", "Execute the automated steps that build fresh outputs.", [
+        ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Run area processing", lambda: process_data(gpkg_file),
              "Runs the main area pipeline to refresh GeoParquet, MBTiles and stats."),
             ("Run line processing", process_lines,
              "Processes line assets (transport, rivers, utilities) into analysis-ready segments."),
         ]),
-        ("Review & publish", "Open the interactive viewers and export the deliverables.", [
+        ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map studio", open_asset_layers_viewer,
              "Inspect layers with AI-assisted styling controls."),
             ("Analysis map viewer", open_maps_overview,
@@ -1083,12 +1084,10 @@ if __name__ == "__main__":
         ]),
     ]
 
-    two_column_sections = {"Prepare data", "Review & publish"}
-
     for idx, (section_title, section_description, actions) in enumerate(workflow_sections):
         row = idx // 2
         col = idx % 2
-        section_frame = ttk.LabelFrame(workflow_grid, text=section_title.title(), padding=(12, 10))
+        section_frame = ttk.LabelFrame(workflow_grid, text=section_title, padding=(12, 10))
         section_frame.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
         workflow_section_frames.append(section_frame)
         ttk.Label(
@@ -1099,19 +1098,13 @@ if __name__ == "__main__":
         ).pack(anchor="w", fill="x")
         actions_container = ttk.Frame(section_frame)
         actions_container.pack(fill="x", pady=(10, 0))
-        is_two_column = section_title in two_column_sections
-        if is_two_column:
-            actions_container.columnconfigure(0, weight=1)
-            actions_container.columnconfigure(1, weight=1)
+        for col_index in range(ACTION_COLUMNS):
+            actions_container.columnconfigure(col_index, weight=1)
         for action_index, (action_label, action_command, action_description) in enumerate(actions):
-            if is_two_column:
-                col_idx = action_index % 2
-                row_idx = action_index // 2
-                action_block = ttk.Frame(actions_container)
-                action_block.grid(row=row_idx, column=col_idx, padx=4, pady=(10, 4), sticky="nsew")
-            else:
-                action_block = ttk.Frame(actions_container)
-                action_block.pack(fill="x", pady=(10, 4))
+            col_idx = action_index % ACTION_COLUMNS
+            row_idx = action_index // ACTION_COLUMNS
+            action_block = ttk.Frame(actions_container)
+            action_block.grid(row=row_idx, column=col_idx, padx=4, pady=(10, 4), sticky="nsew")
             ttk.Button(
                 action_block,
                 text=action_label,
@@ -1121,7 +1114,7 @@ if __name__ == "__main__":
             ttk.Label(
                 action_block,
                 text=action_description,
-                wraplength=300 if is_two_column else 320,
+                wraplength=300,
                 justify="left"
             ).pack(anchor="w", pady=(2, 0))
 
@@ -1177,8 +1170,6 @@ if __name__ == "__main__":
         justify="left"
     ).pack(anchor="w", pady=(0, 8))
 
-    summary_labels = {}
-
     status_columns = ttk.Frame(stats_container)
     status_columns.pack(fill="both", expand=True, pady=(0, 12))
     status_columns.columnconfigure(0, weight=1)
@@ -1210,36 +1201,26 @@ if __name__ == "__main__":
         entry.columnconfigure(1, weight=1)
         timeline_entries.append((color_bar, title_label, time_label))
 
-    summary_stack = ttk.Frame(stats_container)
-    summary_stack.pack(fill="x", pady=(0, 8))
+    # insight boxes container (below Status and help)
+    insights_frame = ttk.Frame(stats_container)
+    insights_frame.pack(fill="x", pady=(4, 8))
+    insights_frame.columnconfigure((0, 1, 2), weight=1)
 
-    card_layout = [
-        {"title": "Assets", "key": "assets_imported", "helper": "Import data to unlock maps"},
-        {"title": "Processing", "key": "mesa_stat_process", "helper": "Run processing to refresh outputs"},
-        {"title": "Reports", "key": "mesa_stat_create_atlas", "helper": "Export updated PDF summaries"}
-    ]
+    geocode_box = ttk.LabelFrame(insights_frame, text="Objects per geocode", bootstyle="secondary")
+    geocode_box.grid(row=0, column=0, padx=5, sticky="nsew")
+    geocode_box.columnconfigure(0, weight=1)
+    geocode_summary = ttk.Label(geocode_box, text="--", justify="left", wraplength=220)
+    geocode_summary.pack(anchor="w", padx=10, pady=8)
 
-    for card_spec in card_layout:
-        card = ttk.LabelFrame(summary_stack, text=card_spec["title"], bootstyle="secondary")
-        card.pack(fill="x", pady=4)
-        value_label = ttk.Label(card, text="--", font=("Segoe UI", 16, "bold"), justify="left")
-        value_label.pack(anchor="w", padx=12, pady=(10, 2))
-        summary_labels[card_spec["key"]] = value_label
-        ttk.Label(
-            card,
-            text=card_spec["helper"],
-            wraplength=460,
-            justify="left"
-        ).pack(anchor="w", padx=12, pady=(0, 12))
+    assets_box = ttk.LabelFrame(insights_frame, text="Assets overview", bootstyle="secondary")
+    assets_box.grid(row=0, column=1, padx=5, sticky="nsew")
+    assets_summary = ttk.Label(assets_box, text="--", justify="left", wraplength=220)
+    assets_summary.pack(anchor="w", padx=10, pady=8)
 
-    def update_summary_cards():
-        config_snapshot = read_config(config_file)['DEFAULT']
-        for spec in card_layout:
-            lbl = summary_labels.get(spec["key"])
-            if not lbl:
-                continue
-            value = config_snapshot.get(spec["key"], "--")
-            lbl.config(text=value)
+    lines_box = ttk.LabelFrame(insights_frame, text="Lines & segments", bootstyle="secondary")
+    lines_box.grid(row=0, column=2, padx=5, sticky="nsew")
+    lines_summary = ttk.Label(lines_box, text="--", justify="left", wraplength=220)
+    lines_summary.pack(anchor="w", padx=10, pady=8)
 
     def _fmt_timestamp(ts: float | None) -> str:
         if not ts:
@@ -1299,9 +1280,55 @@ if __name__ == "__main__":
             title_label.config(text=title)
             time_label.config(text=timestamp)
 
+    def fetch_geocode_objects_summary():
+        geoparquet_dir = _detect_geoparquet_dir()
+        flat_path = os.path.join(geoparquet_dir, "tbl_flat.parquet")
+        if not os.path.exists(flat_path):
+            return "No processing results yet."
+        try:
+            df = pd.read_parquet(flat_path, columns=["geocode_category"])
+            counts = df["geocode_category"].value_counts(dropna=False).head(5)
+            lines = [f"{idx}: {val}" for idx, val in counts.items()]
+            if df["geocode_category"].nunique() > 5:
+                lines.append("…")
+            return "\n".join(lines) if lines else "No records found."
+        except Exception as exc:
+            return f"Unable to read tbl_flat: {exc}"[:200]
+
+    def fetch_asset_summary():
+        geoparquet_dir = _detect_geoparquet_dir()
+        asset_group_path = os.path.join(geoparquet_dir, "tbl_asset_group.parquet")
+        assets_path = os.path.join(geoparquet_dir, "tbl_assets.parquet")
+        if not os.path.exists(asset_group_path) or not os.path.exists(assets_path):
+            return "Assets not imported yet."
+        try:
+            layers = pd.read_parquet(asset_group_path).shape[0]
+            objects = pd.read_parquet(assets_path).shape[0]
+            return f"Layers: {layers}\nObjects: {objects}"
+        except Exception as exc:
+            return f"Unable to read assets: {exc}"[:200]
+
+    def fetch_lines_summary():
+        geoparquet_dir = _detect_geoparquet_dir()
+        lines_path = os.path.join(geoparquet_dir, "tbl_lines.parquet")
+        segments_path = os.path.join(geoparquet_dir, "tbl_segment_flat.parquet")
+        if not os.path.exists(lines_path):
+            return "Lines not processed yet."
+        try:
+            lines_count = pd.read_parquet(lines_path).shape[0]
+            segments_count = pd.read_parquet(segments_path).shape[0] if os.path.exists(segments_path) else 0
+            return f"Lines: {lines_count}\nSegments: {segments_count}"
+        except Exception as exc:
+            return f"Unable to read lines: {exc}"[:200]
+
+    def update_insight_boxes():
+        geocode_summary.config(text=fetch_geocode_objects_summary())
+        assets_summary.config(text=fetch_asset_summary())
+        lines_summary.config(text=fetch_lines_summary())
+
     update_stats(gpkg_file)
-    update_summary_cards()
     update_timeline()
+    update_insight_boxes()
     log_to_logfile("User interface, status updated.")
 
     # ------------------------------------------------------------------
