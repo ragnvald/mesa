@@ -1626,12 +1626,13 @@ if not LINES_GDF.empty and ("name_gis" in LINES_GDF.columns):
                 name_col = c
                 break
     if name_col:
-        tmp = LINES_GDF[[name_col, "name_gis"]].dropna()
+        tmp = LINES_GDF[[name_col, "name_gis"]].dropna(subset=["name_gis"])
         tmp[name_col] = tmp[name_col].astype(str).str.strip()
         tmp["name_gis"] = tmp["name_gis"].astype(str).str.strip()
-        for nm, ng in tmp.itertuples(index=False):
-            if nm and ng:
-                LINE_USER_TO_GIS.setdefault(nm, set()).add(ng)
+        for user_label, gis_name in tmp.itertuples(index=False):
+            display_name = user_label or gis_name
+            if display_name and gis_name:
+                LINE_USER_TO_GIS.setdefault(display_name, set()).add(gis_name)
         LINE_NAMES = sorted(LINE_USER_TO_GIS.keys())
 
 BING_KEY = cfg["DEFAULT"].get("bing_maps_key", "").strip()
