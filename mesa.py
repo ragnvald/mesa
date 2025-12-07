@@ -23,6 +23,7 @@ import threading
 import sys
 from shapely import wkb
 import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 import math
 
 # ---------------------------------------------------------------------
@@ -271,6 +272,47 @@ def _detect_geoparquet_dir() -> str:
             return candidate
 
     return unique_candidates[0] if unique_candidates else os.path.join(PROJECT_BASE, "output", "geoparquet")
+
+
+def _geoparquet_search_paths() -> list[str]:
+    """Ordered list of geoparquet folders to probe for specific tables."""
+    detect_dir = _detect_geoparquet_dir()
+    ordered = [detect_dir, *_geoparquet_base_candidates()]
+    return _dedup_paths([path for path in ordered if path])
+
+
+def _locate_geoparquet_file(layer_name: str) -> str | None:
+    normalized = layer_name.strip()
+    file_candidate = normalized if normalized.lower().endswith(".parquet") else f"{normalized}.parquet"
+    dir_candidate = normalized[:-8] if normalized.lower().endswith(".parquet") else normalized
+    search_names = [file_candidate]
+    if dir_candidate:
+        search_names.append(dir_candidate)
+    for folder in _geoparquet_search_paths():
+        for name in search_names:
+            candidate = os.path.join(folder, name)
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
+def _parquet_row_count(parquet_path: str | None) -> int | None:
+    if not parquet_path:
+        return None
+    try:
+        if os.path.isdir(parquet_path):
+            try:
+                dataset = ds.dataset(parquet_path, format="parquet")
+                return dataset.count_rows()
+            except Exception:
+                return len(pd.read_parquet(parquet_path))
+        metadata = pq.ParquetFile(parquet_path).metadata
+        return metadata.num_rows if metadata else None
+    except Exception:
+        try:
+            return len(pd.read_parquet(parquet_path))
+        except Exception:
+            return None
 
 def _preferred_lines_base_dir() -> str:
     """Infer the base directory whose output/geoparquet folder is currently in use."""
@@ -1204,7 +1246,7 @@ if __name__ == "__main__":
     # insight boxes container (below Status and help)
     insights_frame = ttk.Frame(stats_container)
     insights_frame.pack(fill="x", pady=(4, 8))
-    insights_frame.columnconfigure((0, 1, 2), weight=1)
+    insights_frame.columnconfigure((0, 1, 2, 3), weight=1)
 
     geocode_box = ttk.LabelFrame(insights_frame, text="Objects per geocode", bootstyle="secondary")
     geocode_box.grid(row=0, column=0, padx=5, sticky="nsew")
@@ -1221,6 +1263,11 @@ if __name__ == "__main__":
     lines_box.grid(row=0, column=2, padx=5, sticky="nsew")
     lines_summary = ttk.Label(lines_box, text="--", justify="left", wraplength=220)
     lines_summary.pack(anchor="w", padx=10, pady=8)
+
+    analysis_box = ttk.LabelFrame(insights_frame, text="Analysis layer", bootstyle="secondary")
+    analysis_box.grid(row=0, column=3, padx=5, sticky="nsew")
+    analysis_summary = ttk.Label(analysis_box, text="--", justify="left", wraplength=220)
+    analysis_summary.pack(anchor="w", padx=10, pady=8)
 
     def _fmt_timestamp(ts: float | None) -> str:
         if not ts:
@@ -1281,50 +1328,84 @@ if __name__ == "__main__":
             time_label.config(text=timestamp)
 
     def fetch_geocode_objects_summary():
-        geoparquet_dir = _detect_geoparquet_dir()
-        flat_path = os.path.join(geoparquet_dir, "tbl_flat.parquet")
-        if not os.path.exists(flat_path):
+        flat_path = _locate_geoparquet_file("tbl_flat")
+        if not flat_path or not os.path.exists(flat_path):
             return "No processing results yet."
         try:
-            df = pd.read_parquet(flat_path, columns=["geocode_category"])
-            counts = df["geocode_category"].value_counts(dropna=False).head(5)
+            preferred_cols = ["geocode_category", "name_gis_geocodegroup", "ref_geocodegroup"]
+            available_cols = []
+            try:
+                available_cols = pq.ParquetFile(flat_path).schema.names
+            except Exception:
+                pass
+            target_col = next((col for col in preferred_cols if col in available_cols), None)
+            if not target_col:
+                df_all = pd.read_parquet(flat_path)
+                target_col = next((col for col in preferred_cols if col in df_all.columns), None)
+                if not target_col:
+                    return "No geocode identifiers found in tbl_flat."
+                data = df_all[target_col]
+            else:
+                data = pd.read_parquet(flat_path, columns=[target_col])[target_col]
+            counts = data.value_counts(dropna=False).head(5)
             lines = [f"{idx}: {val}" for idx, val in counts.items()]
-            if df["geocode_category"].nunique() > 5:
+            if data.nunique(dropna=False) > 5:
                 lines.append("…")
             return "\n".join(lines) if lines else "No records found."
         except Exception as exc:
             return f"Unable to read tbl_flat: {exc}"[:200]
 
     def fetch_asset_summary():
-        geoparquet_dir = _detect_geoparquet_dir()
-        asset_group_path = os.path.join(geoparquet_dir, "tbl_asset_group.parquet")
-        assets_path = os.path.join(geoparquet_dir, "tbl_assets.parquet")
-        if not os.path.exists(asset_group_path) or not os.path.exists(assets_path):
+        asset_group_path = _locate_geoparquet_file("tbl_asset_group")
+        if not asset_group_path:
             return "Assets not imported yet."
         try:
-            layers = pd.read_parquet(asset_group_path).shape[0]
-            objects = pd.read_parquet(assets_path).shape[0]
-            return f"Layers: {layers}\nObjects: {objects}"
+            asset_groups = pd.read_parquet(asset_group_path)
+            layers = asset_groups.shape[0]
+            objects = None
+            assets_path = _locate_geoparquet_file("tbl_assets")
+            if assets_path:
+                objects = pd.read_parquet(assets_path).shape[0]
+            elif "total_asset_objects" in asset_groups.columns:
+                objects = int(asset_groups["total_asset_objects"].fillna(0).sum())
+            detail = f"Layers: {layers}"
+            if objects is None:
+                detail += "\nObjects: --"
+            else:
+                detail += f"\nObjects: {objects}"
+            return detail
         except Exception as exc:
             return f"Unable to read assets: {exc}"[:200]
 
     def fetch_lines_summary():
-        geoparquet_dir = _detect_geoparquet_dir()
-        lines_path = os.path.join(geoparquet_dir, "tbl_lines.parquet")
-        segments_path = os.path.join(geoparquet_dir, "tbl_segment_flat.parquet")
-        if not os.path.exists(lines_path):
+        lines_path = _locate_geoparquet_file("tbl_lines")
+        if not lines_path:
             return "Lines not processed yet."
+        segments_path = _locate_geoparquet_file("tbl_segment_flat")
         try:
             lines_count = pd.read_parquet(lines_path).shape[0]
-            segments_count = pd.read_parquet(segments_path).shape[0] if os.path.exists(segments_path) else 0
+            segments_count = pd.read_parquet(segments_path).shape[0] if segments_path and os.path.exists(segments_path) else 0
             return f"Lines: {lines_count}\nSegments: {segments_count}"
         except Exception as exc:
             return f"Unable to read lines: {exc}"[:200]
+
+    def fetch_analysis_summary():
+        stacked_path = _locate_geoparquet_file("tbl_stacked")
+        if not stacked_path:
+            return "Analysis layer missing."
+        try:
+            row_count = _parquet_row_count(stacked_path)
+            if row_count is None:
+                return "Unable to read tbl_stacked."
+            return f"Objects: {row_count}"
+        except Exception as exc:
+            return f"Unable to read tbl_stacked: {exc}"[:200]
 
     def update_insight_boxes():
         geocode_summary.config(text=fetch_geocode_objects_summary())
         assets_summary.config(text=fetch_asset_summary())
         lines_summary.config(text=fetch_lines_summary())
+        analysis_summary.config(text=fetch_analysis_summary())
 
     update_stats(gpkg_file)
     update_timeline()
