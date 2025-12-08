@@ -716,11 +716,12 @@ def open_present_files():
 
 def open_data_analysis_setup():
     python_script, exe_file = get_script_paths("data_analysis_setup")
+    arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def open_data_analysis_presentation():
     python_script, exe_file = get_script_paths("data_analysis_presentation")
@@ -953,19 +954,6 @@ id_uuid_ok_value = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('tru
 id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't', 'yes')
 
 has_run_update_stats = False
-
-def submit_form():
-    global id_name, id_email
-    id_name = name_entry.get()
-    id_email = email_entry.get()
-    id_uuid_ok_str = str(id_uuid_ok.get())
-    id_personalinfo_ok_str = str(id_personalinfo_ok.get())
-    update_config_with_values(config_file,
-                              id_uuid=id_uuid,
-                              id_name=id_name,
-                              id_email=id_email,
-                              id_uuid_ok=id_uuid_ok_str,
-                              id_personalinfo_ok=id_personalinfo_ok_str)
 
 if not id_uuid:
     id_uuid = str(uuid.uuid4())
