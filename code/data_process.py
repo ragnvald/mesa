@@ -2086,6 +2086,15 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     for col in ("index_importance", "index_sensitivity"):
         tbl_flat[col] = pd.to_numeric(tbl_flat[col], errors="coerce").fillna(0).round().astype("Int64")
 
+    try:
+        env_base = (
+            pd.to_numeric(tbl_flat.get("index_importance"), errors="coerce").fillna(0) +
+            pd.to_numeric(tbl_flat.get("index_sensitivity"), errors="coerce").fillna(0)
+        ) / 2.0
+    except Exception:
+        env_base = pd.Series([0] * len(tbl_flat), index=tbl_flat.index, dtype="float64")
+    tbl_flat["env_index"] = env_base.clip(lower=0, upper=100).round().astype("Int64")
+
     # 7. Select Columns & Write
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
@@ -2093,7 +2102,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
         'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
         'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-        'index_importance','index_sensitivity',
+        'index_importance','index_sensitivity','env_index',
         'geometry'
     ]
     for c in preferred:
