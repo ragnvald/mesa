@@ -1105,7 +1105,7 @@ if __name__ == "__main__":
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map studio", open_asset_layers_viewer,
              "Inspect layers with AI-assisted styling controls."),
-            ("Analysis map viewer", open_maps_overview,
+            ("Analysis map studio", open_maps_overview,
              "Review current background layers together with processed assets."),
             ("Compare study areas", open_data_analysis_presentation,
              "Open the dashboard for comparing study groups."),
