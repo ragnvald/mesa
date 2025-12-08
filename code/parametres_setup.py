@@ -52,6 +52,8 @@ INDEX_WEIGHT_KEYS = {
     "sensitivity": "index_sensitivity_weights",
 }
 index_weight_settings: dict[str, list[int]] = {}
+index_weight_vars: dict[str, list[tk.StringVar]] = {}
+status_message_var: Optional[tk.StringVar] = None
 
 # paths set in __main__
 original_working_directory = ""
@@ -191,6 +193,19 @@ def log_to_file(message: str) -> None:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         with open(dest, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def _set_status_message(message: str) -> None:
+    """Update the inline status label (if available) and log the message."""
+    text = (message or "").strip()
+    if not text:
+        return
+    log_to_file(text)
+    try:
+        if status_message_var is not None:
+            status_message_var.set(text)
     except Exception:
         pass
 
@@ -479,7 +494,7 @@ def save_all_to_excel(gdf: pd.DataFrame, excel_path: str):
         vuln = gdf[vcols].copy() if vcols else pd.DataFrame(columns=vuln_cols)
         with pd.ExcelWriter(excel_path, engine='openpyxl') as xw:
             vuln.to_excel(xw, sheet_name='vulnerability', index=False)
-        messagebox.showinfo("Saved", "Saved all tabs to Excel.")
+        _set_status_message(f"Saved Excel workbook: {excel_path}")
     except Exception as e:
         log_to_file(f"Excel save failed: {e}")
         messagebox.showerror("Error", f"Failed saving to Excel:\n{e}")
@@ -512,7 +527,7 @@ def load_all_from_excel(excel_path: str):
         x = pd.read_excel(excel_path, sheet_name=None)
         if 'vulnerability' in x: _apply_vulnerability_from_df(x['vulnerability'])
         refresh_vulnerability_grid_from_df()
-        messagebox.showinfo("Loaded", "All settings and values were loaded from Excel.")
+        _set_status_message(f"Loaded Excel workbook: {excel_path}")
     except Exception as e:
         log_to_file(f"Excel load failed: {e}")
         messagebox.showerror("Error", f"Failed reading Excel:\n{e}")
@@ -563,14 +578,73 @@ def build_start_tab(parent):
         enforce_vuln_dtypes_inplace(gdf_asset_group)
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
         save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        messagebox.showinfo("Saved", "Saved asset-group layer to GeoParquet.")
+        persist_index_weights_from_ui(strict=False, silent=True)
+        _set_status_message("Saved asset-group layer to GeoParquet.")
 
     ttkb.Button(btns, text="Save all to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(side='left', padx=6)
     ttkb.Button(btns, text="Load all from Excel", command=do_load_all_excel, bootstyle=INFO).pack(side='left', padx=6)
     ttkb.Button(btns, text="Save to Parquet", command=do_save_parquet, bootstyle=PRIMARY).pack(side='left', padx=6)
 
+    global status_message_var
+    status_message_var = tk.StringVar(value="Ready")
+    status_label = ttkb.Label(frm, textvariable=status_message_var, justify='left', bootstyle="secondary")
+    status_label.pack(anchor='w', pady=(8, 0))
+
+
+def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list[int]]]:
+    """Read the current entry widgets and coerce them to positive integers."""
+    if not index_weight_vars:
+        return {}
+    collected: dict[str, list[int]] = {}
+    for key, vars_list in index_weight_vars.items():
+        defaults = INDEX_WEIGHT_DEFAULTS.get(key, INDEX_WEIGHT_DEFAULTS['importance'])
+        values: list[int] = []
+        for idx, var in enumerate(vars_list, start=1):
+            txt = (var.get() or "").strip()
+            if txt.isdigit():
+                val = int(txt)
+            else:
+                if strict:
+                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be a positive integer.")
+                    return None
+                try:
+                    val = int(float(txt))
+                except Exception:
+                    fallback_idx = idx - 1
+                    val = defaults[fallback_idx] if fallback_idx < len(defaults) else 1
+            if val < 1:
+                if strict:
+                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be at least 1.")
+                    return None
+                val = 1
+            values.append(val)
+        collected[key] = values
+    return collected
+
+
+def persist_index_weights_from_ui(strict: bool = True, silent: bool = False) -> bool:
+    updated = _collect_index_weight_values(strict=strict)
+    if updated is None:
+        return False
+    if not updated:
+        return True
+    try:
+        persist_index_weight_settings(config_file, updated)
+        index_weight_settings.update(updated)
+        if not silent:
+            _set_status_message("Index weights saved to config.ini")
+        return True
+    except Exception as err:
+        log_to_file(f"Failed to persist index weights: {err}")
+        if strict and not silent:
+            messagebox.showerror("Indexes", f"Could not save index weights:\n{err}")
+        elif not silent:
+            _set_status_message("Index weights could not be saved (see log).")
+        return False
+
+
 def build_indexes_tab(parent):
-    global index_weight_settings
+    global index_weight_settings, index_weight_vars
     frm = ttkb.Frame(parent)
     frm.pack(fill='both', expand=True, padx=12, pady=12)
 
@@ -605,28 +679,11 @@ def build_indexes_tab(parent):
             vars_for_key.append(var)
         weight_vars[key] = vars_for_key
 
+    index_weight_vars = weight_vars
+
     def save_weight_settings():
-        updated: dict[str, list[int]] = {}
-        for key, vars_list in weight_vars.items():
-            values: list[int] = []
-            for idx, var in enumerate(vars_list, start=1):
-                txt = var.get().strip()
-                if not txt.isdigit():
-                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be a positive integer.")
-                    return
-                val = int(txt)
-                if val < 1:
-                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be at least 1.")
-                    return
-                values.append(val)
-            updated[key] = values
-        try:
-            persist_index_weight_settings(config_file, updated)
-            index_weight_settings.update(updated)
-            messagebox.showinfo("Indexes", "Index weights saved to config.ini.")
-        except Exception as err:
-            log_to_file(f"Failed to persist index weights: {err}")
-            messagebox.showerror("Indexes", f"Could not save index weights:\n{err}")
+        if persist_index_weights_from_ui(strict=True, silent=False):
+            _set_status_message("Index weights saved to config.ini")
 
     ttkb.Button(frm, text="Save weights", bootstyle=PRIMARY, command=save_weight_settings).pack(anchor='w', pady=(12, 0))
 
@@ -729,6 +786,7 @@ def close_application():
         update_all_vuln_rows(entries_vuln, gdf_asset_group)
         enforce_vuln_dtypes_inplace(gdf_asset_group)
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+        persist_index_weights_from_ui(strict=False, silent=True)
         save_asset_group_to_parquet(gdf_ready, original_working_directory)
     finally:
         root.destroy()
@@ -757,6 +815,13 @@ if __name__ == "__main__":
     valid_input_values = get_valid_values(config)
     FALLBACK_VULN = get_fallback_value(config, valid_input_values)
     index_weight_settings = load_index_weight_settings(config)
+    missing_weight_keys = [opt for opt in INDEX_WEIGHT_KEYS.values() if opt not in config['DEFAULT']]
+    if missing_weight_keys:
+        try:
+            persist_index_weight_settings(config_file, index_weight_settings)
+            log_to_file("Seeded default index weights in config.ini")
+        except Exception as err:
+            log_to_file(f"Unable to seed index weights: {err}")
     ttk_bootstrap_theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
     workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
     # Asset groups
