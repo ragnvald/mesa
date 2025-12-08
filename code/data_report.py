@@ -1570,11 +1570,16 @@ def calculate_group_statistics(asset_object_df: gpd.GeoDataFrame, asset_group_df
         gdf = gdf.to_crs('ESRI:54009')
     except Exception:
         pass
-    polys = gdf[gdf.geometry.type.isin(['Polygon','MultiPolygon'])].copy()
-    others = gdf[~gdf.geometry.type.isin(['Polygon','MultiPolygon'])].copy()
-    polys.loc[:, 'area'] = polys['geometry'].area
-    others.loc[:, 'area'] = np.nan
-    gdf2 = pd.concat([polys, others], ignore_index=True)
+
+    gdf = gdf.copy()
+    gdf['area'] = np.nan
+    poly_mask = gdf['geometry_type'].isin(['Polygon', 'MultiPolygon'])
+    if poly_mask.any():
+        try:
+            gdf.loc[poly_mask, 'area'] = gdf.loc[poly_mask, 'geometry'].area
+        except Exception:
+            gdf.loc[poly_mask, 'area'] = gdf.loc[poly_mask, 'geometry'].area
+    gdf2 = gdf
 
     stats = gdf2.groupby(
         ['title_fromuser','sensitivity_code','sensitivity_description','geometry_type'],
