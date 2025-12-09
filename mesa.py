@@ -464,10 +464,12 @@ def get_status(geoparquet_dir):
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#geocodes")
 
         lines_original_count = read_table_and_count('tbl_lines_original')
-        append_status("+" if lines_original_count is not None else "/",
-                      f"Lines: {lines_original_count}" if lines_original_count is not None else
-                      "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
-                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines")
+        lines_processed_count = read_table_and_count('tbl_lines')
+        visible_lines_count = lines_original_count if lines_original_count is not None else lines_processed_count
+        append_status("+" if visible_lines_count is not None else "/",
+                  f"Lines: {visible_lines_count}" if visible_lines_count is not None else
+                  "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
+                  "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines")
 
         symbol, message = read_setup_status()
         append_status(symbol, message, "https://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
@@ -486,9 +488,10 @@ def get_status(geoparquet_dir):
                       "https://github.com/ragnvald/mesa/wiki/5-Definitions#atlas")
 
         segments_flat_count = read_table_and_count('tbl_segment_flat')
-        lines_count = read_table_and_count('tbl_lines')
+        lines_count = lines_processed_count if lines_processed_count is not None else visible_lines_count
+        lines_count_label = lines_count if lines_count is not None else "--"
         append_status("+" if segments_flat_count is not None else "/",
-                      f"Segments are in place with {segments_flat_count} segments along {lines_count} lines."
+                  f"Segments are in place with {segments_flat_count} segments along {lines_count_label} lines."
                       if segments_flat_count is not None else
                       "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
                       "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines-and-segments")
@@ -1094,7 +1097,7 @@ if __name__ == "__main__":
             ("Processing settings", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
             ("Define study areas", open_data_analysis_setup,
-             "Launch the area analysis tool to pick the study groups."),
+             "Launch the area analysis tool to pick the study areas."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Run area processing", lambda: process_data(gpkg_file),
