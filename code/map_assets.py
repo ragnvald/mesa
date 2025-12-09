@@ -1126,6 +1126,22 @@ HTML_TEMPLATE = r"""
   .popup strong { display:block; font-size:14px; margin-bottom:4px; }
   .empty-state { position:absolute; inset:16px; border:1px dashed #2f3b59; border-radius:14px; padding:24px; color:#cbd5f5; background:rgba(9,15,30,0.92); text-align:center; font-size:15px; line-height:1.4; display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity 0.25s ease; }
   .empty-state.show { opacity:1; pointer-events:auto; }
+  .legend-control { background:rgba(7,12,24,0.92); color:#e2e8f0; padding:12px 14px; border-radius:14px; box-shadow:0 12px 30px rgba(5,8,15,0.65); min-width:220px; border:1px solid #192642; backdrop-filter:blur(6px); }
+  .legend-control .legend-title { font-size:13px; letter-spacing:0.08em; text-transform:uppercase; color:#94a3b8; margin-bottom:8px; display:flex; align-items:center; justify-content:space-between; }
+  .legend-control .legend-body { display:flex; flex-direction:column; gap:8px; }
+  .legend-item { display:flex; gap:10px; align-items:flex-start; }
+  .legend-swatch { width:28px; height:20px; border-radius:6px; border:2px solid #1e293b; flex-shrink:0; box-shadow:inset 0 0 0 1px rgba(0,0,0,0.2); }
+  .legend-meta { flex:1; }
+  .legend-name { font-size:13px; font-weight:600; color:#f1f5f9; line-height:1.3; }
+  .legend-count { font-size:12px; color:#94a3b8; }
+  .legend-empty { font-size:12px; color:#94a3b8; line-height:1.4; }
+  .legend-foot { font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#7dd3fc; border-top:1px solid #1f2b46; padding-top:6px; margin-top:2px; }
+  .legend-title button.legend-toggle { background:transparent; border:1px solid #1f2b46; color:#7dd3fc; border-radius:999px; width:26px; height:26px; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:13px; transition:transform 0.2s ease, color 0.2s ease; }
+  .legend-title button.legend-toggle:hover { color:#f8fafc; border-color:#2dd4bf; }
+  .legend-control.collapsed { padding:10px 12px; }
+  .legend-control.collapsed .legend-title { margin-bottom:0; }
+  .legend-control.collapsed .legend-body { display:none; }
+  .legend-control.collapsed .legend-toggle { transform:rotate(180deg); }
 </style>
 </head>
 <body>
@@ -1193,7 +1209,13 @@ let PYWEBVIEW_API=null;
 let API_PROMISE=null;
 let STYLE_QUERY_PATH=null;
 let AI_BUSY=false;
+let LEGEND_CONTROL=null;
+let LEGEND_BODY=null;
+let LEGEND_TOGGLE=null;
+let LEGEND_COLLAPSED=false;
 const BASE_OPACITY=0.85;
+const LEGEND_MAX_ITEMS=6;
+const LEGEND_STORAGE_KEY='mesaLegendCollapsed';
 const DEFAULT_STYLE=Object.freeze({
   fill_color:'#9fa4b0',
   border_color:'#2c3342',
@@ -1488,6 +1510,157 @@ function updateEmptyState(){
   }
 }
 
+function readLegendCollapsedPref(){
+  try {
+    if (typeof window !== 'undefined' && window.localStorage){
+      return window.localStorage.getItem(LEGEND_STORAGE_KEY) === '1';
+    }
+  } catch (err) {
+    console.warn('Legend preference read failed', err);
+  }
+  return false;
+}
+
+function writeLegendCollapsedPref(flag){
+  try {
+    if (typeof window !== 'undefined' && window.localStorage){
+      window.localStorage.setItem(LEGEND_STORAGE_KEY, flag ? '1' : '0');
+    }
+  } catch (err) {
+    console.warn('Legend preference write failed', err);
+  }
+}
+
+function applyLegendCollapsedState(){
+  const container = LEGEND_CONTROL && typeof LEGEND_CONTROL.getContainer === 'function'
+    ? LEGEND_CONTROL.getContainer()
+    : null;
+  if (container){
+    container.classList.toggle('collapsed', Boolean(LEGEND_COLLAPSED));
+  }
+  if (LEGEND_TOGGLE){
+    LEGEND_TOGGLE.setAttribute('aria-expanded', String(!LEGEND_COLLAPSED));
+    LEGEND_TOGGLE.title = LEGEND_COLLAPSED ? 'Expand legend' : 'Collapse legend';
+    LEGEND_TOGGLE.textContent = LEGEND_COLLAPSED ? '▸' : '▾';
+  }
+}
+
+function setLegendCollapsed(flag, options){
+  const shouldPersist = !options || options.persist !== false;
+  LEGEND_COLLAPSED = Boolean(flag);
+  applyLegendCollapsedState();
+  if (shouldPersist){
+    writeLegendCollapsedPref(LEGEND_COLLAPSED);
+  }
+}
+
+function toggleLegendCollapsed(){
+  setLegendCollapsed(!LEGEND_COLLAPSED);
+}
+
+function initLegendControl(){
+  if (!MAP || LEGEND_CONTROL){
+    return;
+  }
+  LEGEND_CONTROL = L.control({ position:'bottomright' });
+  LEGEND_CONTROL.onAdd = () => {
+    const container = L.DomUtil.create('div', 'leaflet-control legend-control');
+    container.innerHTML = `
+      <div class="legend-title">
+        <span>Legend</span>
+        <button type="button" class="legend-toggle" aria-expanded="true" title="Collapse legend" aria-label="Collapse legend">▾</button>
+      </div>
+      <div class="legend-body"></div>
+    `;
+    LEGEND_BODY = container.querySelector('.legend-body');
+    LEGEND_TOGGLE = container.querySelector('.legend-toggle');
+    if (LEGEND_TOGGLE){
+      LEGEND_TOGGLE.addEventListener('click', evt => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        toggleLegendCollapsed();
+      });
+    }
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.disableScrollPropagation(container);
+    return container;
+  };
+  LEGEND_CONTROL.addTo(MAP);
+  setLegendCollapsed(readLegendCollapsedPref(), { persist:false });
+  updateLegend();
+}
+
+function collectLegendEntries(){
+  const entries = [];
+  getActiveGroupIds().forEach(id => {
+    const layer = LAYER_BY_GROUP.get(String(id));
+    if (!layer || !layer.__meta){
+      return;
+    }
+    const meta = layer.__meta;
+    const style = computeLayerStyle(meta);
+    entries.push({
+      id: String(id),
+      name: meta.name || meta.title || `Layer ${id}`,
+      count: Number.isFinite(meta.count) ? Number(meta.count) : null,
+      style,
+    });
+  });
+  return entries;
+}
+
+function ensureLegendBody(){
+  if (LEGEND_BODY){
+    return LEGEND_BODY;
+  }
+  if (LEGEND_CONTROL){
+    const container = LEGEND_CONTROL.getContainer();
+    if (container){
+      LEGEND_BODY = container.querySelector('.legend-body');
+    }
+  }
+  return LEGEND_BODY;
+}
+
+function updateLegend(){
+  if (!MAP){
+    return;
+  }
+  if (!LEGEND_CONTROL){
+    initLegendControl();
+  }
+  const body = ensureLegendBody();
+  if (!body){
+    return;
+  }
+  const entries = collectLegendEntries();
+  if (!entries.length){
+    body.innerHTML = '<div class="legend-empty">Activate one or more layers to preview their symbology.</div>';
+    return;
+  }
+  const limited = entries.slice(0, LEGEND_MAX_ITEMS);
+  const fragments = limited.map(entry => {
+    const style = entry.style || {};
+    const fill = style.fillColor || '#9fa4b0';
+    const stroke = style.color || '#2c3342';
+    const countText = entry.count !== null ? `<div class="legend-count">${entry.count.toLocaleString('en-US')} objects</div>` : '';
+    return `
+      <div class="legend-item">
+        <span class="legend-swatch" style="background:${fill}; border-color:${stroke};"></span>
+        <div class="legend-meta">
+          <div class="legend-name">${escapeHtml(entry.name)}</div>
+          ${countText}
+        </div>
+      </div>
+    `;
+  }).join('');
+  let footer = '';
+  if (entries.length > LEGEND_MAX_ITEMS){
+    footer = `<div class="legend-foot">+${entries.length - LEGEND_MAX_ITEMS} more layer(s)</div>`;
+  }
+  body.innerHTML = fragments + footer;
+}
+
 function renderLayerTree(){
   const container = document.getElementById('layerControls');
   if (!container) return;
@@ -1496,12 +1669,14 @@ function renderLayerTree(){
   if (!hasGroupNodes){
     container.innerHTML = '<p style="font-size:13px; color:#94a3b8;">No asset layers available. Return to the Mesa launcher, open the Activities tab, and click the <strong>Import</strong> button to load asset data before reopening Asset maps.</p>';
     updateEmptyState();
+    updateLegend();
     return;
   }
   TREE_ROOTS.forEach(node => container.appendChild(renderTreeNode(node, 0)));
   ensureInitialActivation();
   syncLayerStacking();
   updateEmptyState();
+  updateLegend();
 }
 
 function renderTreeNode(node, depth){
@@ -1787,6 +1962,7 @@ function toggleGroupLayer(groupId, enable, options){
     ACTIVE_GROUPS.delete(String(groupId));
   }
   setLayerActive(layer, enable, options);
+  updateLegend();
 }
 
 function getActiveGroupIds(){
@@ -1890,6 +2066,7 @@ function applyStyleUpdates(updates){
       entry.styling = style;
     }
   });
+  updateLegend();
 }
 
 function setAiStatus(message, isError){
@@ -2052,6 +2229,7 @@ function updateOpacity(){
   GROUP_LAYERS.forEach(layer => {
     reapplyLayerStyle(layer);
   });
+  updateLegend();
 }
 
 function setBaseLayer(key){
@@ -2124,6 +2302,7 @@ function boot(){
     CURRENT_BASE_LAYER.addTo(MAP);
   }
   renderBaseControls();
+  initLegendControl();
 
   const treeContainer = document.getElementById('layerControls');
   if (treeContainer){
