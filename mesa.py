@@ -1029,8 +1029,16 @@ if __name__ == "__main__":
 
     root.bind("<Configure>", enforce_aspect)
 
+    style = ttk.Style()
+    style.configure(
+        "Intro.TLabel",
+        background="#f3f4f6",
+        foreground="#1f2937",
+        font=("Segoe UI", 11, "bold")
+    )
+
     intro_text = (
-        "Launch core jobs from Workflows, then review the live counters in Status to confirm imports, processing, "
+        "Launch core jobs from Workflows, then review the live counters in Status to confirm imports, processing, imports, processing,"
         "and publishing have completed."
     )
 
@@ -1043,7 +1051,7 @@ if __name__ == "__main__":
         wraplength=760,
         justify="left",
         padding=(14, 10),
-        bootstyle="inverse-primary"
+        style="Intro.TLabel"
     )
     intro_label.pack(side="left", fill="x", expand=True)
 
