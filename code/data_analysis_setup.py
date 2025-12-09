@@ -1023,7 +1023,14 @@ class AssetAnalyzer:
             debug_log(self.base_dir, f"Asset group parquet not found at {pq_path}")
             raise FileNotFoundError(f"Asset group table missing: {pq_path}")
         debug_log(self.base_dir, f"Loading asset groups from {pq_path}")
-        df = gpd.read_parquet(pq_path)
+        try:
+            df = gpd.read_parquet(pq_path)
+        except ValueError as exc:
+            debug_log(
+                self.base_dir,
+                f"Geo metadata missing in asset groups parquet; switching to pandas.read_parquet. Details: {exc}"
+            )
+            df = pd.read_parquet(pq_path)
         keep = ["id", "name_original", "name_gis_assetgroup", "title_fromuser", "sensitivity_code", "sensitivity_description"]
         result = df[keep].copy()
         debug_log(self.base_dir, f"Loaded {len(result)} asset group rows")
