@@ -998,9 +998,9 @@ if __name__ == "__main__":
         pass
 
     TARGET_ASPECT_RATIO = 5 / 3
-    DEFAULT_WIDTH = 1050
+    DEFAULT_WIDTH = 1000
     DEFAULT_HEIGHT = int(DEFAULT_WIDTH / TARGET_ASPECT_RATIO)
-    MIN_WIDTH = 930
+    MIN_WIDTH = 900
     MIN_HEIGHT = int(MIN_WIDTH / TARGET_ASPECT_RATIO)
 
     root.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}")
@@ -1037,23 +1037,57 @@ if __name__ == "__main__":
         font=("Segoe UI", 11, "bold")
     )
 
+    banner_image = None
+    banner_image_path = resolve_path(os.path.join("system_resources", "top_graphics.png"))
+    if os.path.exists(banner_image_path):
+        try:
+            banner_image = tk.PhotoImage(file=banner_image_path)
+            root._header_banner_image = banner_image  # stash reference to avoid GC
+        except Exception as exc:
+            banner_image = None
+            log_to_logfile(f"Unable to load header graphic: {exc}")
+
     intro_text = (
-        "Launch core jobs from Workflows, then review the live counters in Status to confirm imports, processing, imports, processing,"
-        "and publishing have completed."
+        "Launch core jobs from Workflows, then review the live counters in Status to \nconfirm imports, "
+        "processing and publishing have completed."
     )
 
-    header = ttk.Frame(root, padding=(12, 10))
-    header.pack(fill="x", padx=12, pady=(12, 6))
+    header = ttk.Frame(root, padding=0)
+    header.pack(fill="x", padx=0, pady=(6, 8))
 
-    intro_label = ttk.Label(
-        header,
-        text=intro_text,
-        wraplength=760,
-        justify="left",
-        padding=(14, 10),
-        style="Intro.TLabel"
-    )
-    intro_label.pack(side="left", fill="x", expand=True)
+    banner_wrap = 760
+    if banner_image:
+        try:
+            banner_wrap = max(640, banner_image.width() - 80)
+        except Exception:
+            banner_wrap = 760
+
+    if banner_image:
+        intro_label = tk.Label(
+            header,
+            text=intro_text,
+            wraplength=banner_wrap,
+            justify="left",
+            anchor="w",
+            padx=10,
+            pady=8,
+            fg="#0f172a",
+            font=("Segoe UI", 11, "bold"),
+            compound="center",
+            image=banner_image
+        )
+    if banner_image:
+        intro_label.pack(side="left", padx=0, pady=0)
+    else:
+        intro_label = ttk.Label(
+            header,
+            text=intro_text,
+            wraplength=banner_wrap,
+            justify="left",
+            padding=(14, 10),
+            style="Intro.TLabel"
+        )
+        intro_label.pack(side="left", fill="x", expand=True, padx=(12, 0))
 
     ttk.Button(
         header,
@@ -1061,7 +1095,7 @@ if __name__ == "__main__":
         command=root.destroy,
         bootstyle="danger-outline",
         width=12
-    ).pack(side="right", padx=(12, 0))
+    ).pack(side="right", padx=(12, 8), pady=(6, 0))
 
     notebook = ttk.Notebook(root, bootstyle=SECONDARY)
     notebook.pack(fill="both", expand=True, padx=12, pady=(0, 10))
