@@ -51,6 +51,8 @@ try:
     matplotlib.use("TkAgg")
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
+    from matplotlib.patches import PathPatch
+    from matplotlib.path import Path as MplPath
 except Exception as exc:  # pragma: no cover - matplotlib is required at runtime
     raise SystemExit("matplotlib with TkAgg support is required for this tool.") from exc
 
@@ -1135,19 +1137,9 @@ class GroupHeader:
 
         summary_frame = ttk.Frame(self.frame)
         summary_frame.grid(row=2, column=0, sticky="ew")
-        summary_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(summary_frame, text="Total area:", style="Caption.TLabel").grid(row=0, column=0, sticky="w")
-        self.total_var = tk.StringVar(value="0.00 km^2")
-        ttk.Label(summary_frame, textvariable=self.total_var, style="Value.TLabel").grid(row=0, column=1, sticky="w")
-
-        ttk.Label(summary_frame, text="Polygons processed:", style="Caption.TLabel").grid(row=1, column=0, sticky="w")
-        self.count_var = tk.StringVar(value="0 / 0")
-        ttk.Label(summary_frame, textvariable=self.count_var, style="Value.TLabel").grid(row=1, column=1, sticky="w")
-
-        ttk.Label(summary_frame, text="Last run:", style="Caption.TLabel").grid(row=2, column=0, sticky="w")
-        self.last_run_var = tk.StringVar(value="--")
-        ttk.Label(summary_frame, textvariable=self.last_run_var, style="Value.TLabel").grid(row=2, column=1, sticky="w")
+        summary_frame.columnconfigure(0, weight=1)
+        self.summary_var = tk.StringVar(value="Total: 0.00 km^2 | Polygons: 0/0 | Last run: --")
+        ttk.Label(summary_frame, textvariable=self.summary_var, style="Value.TLabel").grid(row=0, column=0, sticky="w")
 
     def _handle_selection(self, _event: object = None) -> None:
         if self._on_selection:
@@ -1166,11 +1158,11 @@ class GroupHeader:
 
     def update_summary(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
-        self.total_var.set(summary.get("total_area_label", "0.00 km^2"))
+        total_label = summary.get("total_area_label", "0.00 km^2")
         processed = summary.get("processed_count", 0)
         configured = summary.get("configured_count", 0)
-        self.count_var.set(f"{processed} / {configured}")
-        self.last_run_var.set(summary.get("last_run_label", "--"))
+        last_run = summary.get("last_run_label", "--")
+        self.summary_var.set(f"Total: {total_label} | Polygons: {processed}/{configured} | Last run: {last_run}")
 
 
 class SensitivityChart:
@@ -1493,6 +1485,178 @@ class SensitivityTotalsView:
         ]
 
 
+class SankeyDifferenceView:
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]], sensitivity_order: List[str]) -> None:
+        self.palette_map = palette_map or {}
+        self.sensitivity_order = sensitivity_order or []
+        self.frame = ttk.Frame(master, padding=(6, 6))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(0, weight=1)
+
+        holder = ttk.LabelFrame(self.frame, text="Area difference Sankey")
+        holder.grid(row=0, column=0, sticky="nsew")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        apply_bootstyle(holder, INFO)
+
+        # Allow a smaller minimum height (~1.4 in at 100 dpi) while stretching when space allows
+        self.figure = Figure(figsize=(7.2, 1.4), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=holder)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+    def _color_for(self, code: str) -> str:
+        entry = self.palette_map.get(str(code).upper()) or {}
+        if entry.get("color"):
+            return entry["color"]
+        return DEFAULT_COLOR_FALLBACK.get(str(code).upper(), "#4e79a7")
+
+    def _sensitivity_map(self, summary: Dict[str, Any]) -> Dict[str, float]:
+        mapping: Dict[str, float] = {}
+        if not summary:
+            return mapping
+        for entry in summary.get("sensitivity", []) or []:
+            code = getattr(entry, "code", None)
+            if code is None and isinstance(entry, dict):
+                code = entry.get("code")
+            area_km2 = getattr(entry, "area_km2", None)
+            if area_km2 is None:
+                raw_m2 = entry.get("area_m2", 0.0) if isinstance(entry, dict) else 0.0
+                area_km2 = area_to_km2(raw_m2)
+            if not code:
+                continue
+            normalized = str(code).strip().upper()
+            if not normalized:
+                continue
+            mapping[normalized] = mapping.get(normalized, 0.0) + float(area_km2 or 0.0)
+        return mapping
+
+    def _build_blocks(self, codes: List[str], area_map: Dict[str, float], scale_total: float) -> Dict[str, Dict[str, float]]:
+        if scale_total <= 0:
+            return {}
+        values = [max(area_map.get(code, 0.0), 0.0) for code in codes]
+        min_height = 0.008
+        gap = 0.012
+        heights = [max((v / scale_total), min_height) if v > 0 else 0.0 for v in values]
+        non_zero_heights = [h for h in heights if h > 0]
+        span = sum(non_zero_heights) + gap * (len(non_zero_heights) - 1 if len(non_zero_heights) > 1 else 0)
+        scale = 1.0 if span <= 0.9 else 0.9 / span
+        blocks: Dict[str, Dict[str, float]] = {}
+        cursor = 0.05
+        for code, height, value in zip(codes, heights, values):
+            if height <= 0:
+                continue
+            scaled_h = height * scale
+            blocks[code] = {
+                "start": cursor,
+                "end": cursor + scaled_h,
+                "value": value,
+                "height": scaled_h,
+            }
+            cursor += scaled_h + gap * scale
+        return blocks
+
+    def _draw_ribbon(self, left_block: Dict[str, float], right_block: Dict[str, float], color: str, delta_km2: float) -> None:
+        if not left_block or not right_block:
+            return
+        x_left = 0.28
+        x_right = 0.72
+        bar_w = 0.12
+        verts = [
+            (x_left + bar_w / 2, left_block["start"]),
+            (x_right - bar_w / 2, right_block["start"]),
+            (x_right - bar_w / 2, right_block["end"]),
+            (x_left + bar_w / 2, left_block["end"]),
+            (x_left + bar_w / 2, left_block["start"]),
+        ]
+        codes = [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY]
+        patch = PathPatch(MplPath(verts, codes), facecolor=color, alpha=0.28, edgecolor="none")
+        self.ax.add_patch(patch)
+        mid_x = (x_left + x_right) / 2
+        mid_y = (left_block["start"] + left_block["end"] + right_block["start"] + right_block["end"]) / 4
+        self.ax.text(mid_x, mid_y, f"{delta_km2:+.2f} km²", fontsize=8, ha="center", va="center")
+
+    def _draw_blocks(self, blocks: Dict[str, Dict[str, float]], x: float, color_map: Dict[str, str], align: str) -> None:
+        bar_w = 0.12
+        for code, info in blocks.items():
+            rect = PathPatch(
+                MplPath(
+                    [
+                        (x - bar_w / 2, info["start"]),
+                        (x + bar_w / 2, info["start"]),
+                        (x + bar_w / 2, info["end"]),
+                        (x - bar_w / 2, info["end"]),
+                        (x - bar_w / 2, info["start"]),
+                    ],
+                    [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY],
+                ),
+                facecolor=color_map.get(code, "#6c757d"),
+                edgecolor="#333333",
+                lw=0.5,
+                alpha=0.9,
+            )
+            self.ax.add_patch(rect)
+            label_y = (info["start"] + info["end"]) / 2
+            ha = "right" if align == "left" else "left"
+            offset = -0.02 if align == "left" else 0.02
+            self.ax.text(
+                x + offset,
+                label_y,
+                f"{code}: {info['value']:.2f} km²",
+                fontsize=9,
+                ha=ha,
+                va="center",
+            )
+
+    def update(self, left_summary: Dict[str, Any], right_summary: Dict[str, Any]) -> None:
+        self.ax.clear()
+        self.ax.axis("off")
+        left_map = self._sensitivity_map(left_summary)
+        right_map = self._sensitivity_map(right_summary)
+        codes_in_data = [code for code in self.sensitivity_order if left_map.get(code, 0) > 0 or right_map.get(code, 0) > 0]
+        base_order = [code for code in DEFAULT_SENSITIVITY_ORDER if code in codes_in_data]
+        extras = [code for code in codes_in_data if code not in DEFAULT_SENSITIVITY_ORDER]
+        codes = base_order + extras
+        if not codes:
+            self.ax.text(0.5, 0.5, "No sensitivity area data to compare.", ha="center", va="center", fontsize=10)
+            self.figure.tight_layout()
+            self.canvas.draw_idle()
+            return
+        left_total = sum(left_map.get(c, 0.0) for c in codes)
+        right_total = sum(right_map.get(c, 0.0) for c in codes)
+        scale_total = max(left_total, right_total)
+        if scale_total <= 0:
+            self.ax.text(0.5, 0.5, "Select two groups with sensitivity totals.", ha="center", va="center", fontsize=10)
+            self.figure.tight_layout()
+            self.canvas.draw_idle()
+            return
+
+        color_map = {code: self._color_for(code) for code in codes}
+        left_blocks = self._build_blocks(codes, left_map, scale_total)
+        right_blocks = self._build_blocks(codes, right_map, scale_total)
+
+        self._draw_blocks(left_blocks, 0.28, color_map, "left")
+        self._draw_blocks(right_blocks, 0.72, color_map, "right")
+
+        for code in codes:
+            lb = left_blocks.get(code)
+            rb = right_blocks.get(code)
+            if not lb or not rb:
+                continue
+            delta = left_map.get(code, 0.0) - right_map.get(code, 0.0)
+            self._draw_ribbon(lb, rb, color_map.get(code, "#6c757d"), delta)
+
+        self.ax.set_xlim(0, 1)
+        self.ax.set_ylim(0, 1)
+        self.ax.text(0.28, 0.96, "Left group", ha="center", va="center", fontsize=10, fontweight="bold")
+        self.ax.text(0.72, 0.96, "Right group", ha="center", va="center", fontsize=10, fontweight="bold")
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def chart_figure(self) -> Any:
+        return self.figure
+
+
 class ComparisonTotalsView:
     def __init__(self, master: tk.Widget) -> None:
         self.frame = ttk.Frame(master, padding=(6, 6))
@@ -1563,10 +1727,12 @@ class ComparisonApp:
 
         container = ttk.Frame(self.root, padding=(12, 12))
         container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
         apply_bootstyle(container, SECONDARY)
 
         header_frame = ttk.Frame(container)
-        header_frame.pack(fill=tk.X, pady=(0, 6))
+        header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         header_frame.columnconfigure(0, weight=1)
         header_frame.columnconfigure(1, weight=1)
         apply_bootstyle(header_frame, SECONDARY)
@@ -1585,14 +1751,13 @@ class ComparisonApp:
         self.notebook.add(self.asset_view.frame, text="Asset group overlap")
         self.sensitivity_view = SensitivityTotalsView(self.notebook, self.palette_map)
         self.notebook.add(self.sensitivity_view.frame, text="Sensitivity totals")
+        self.sankey_view = SankeyDifferenceView(self.notebook, self.palette_map, self.data.sensitivity_order)
+        self.notebook.add(self.sankey_view.frame, text="Area difference (Sankey)")
         self.comparison_view = ComparisonTotalsView(self.notebook)
         self.notebook.add(self.comparison_view.frame, text="Comparison totals")
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.notebook.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
         self.status_var = tk.StringVar(value=self.data.status_message())
-        self.status_label = ttk.Label(container, textvariable=self.status_var, anchor="w")
-        apply_bootstyle(self.status_label, INFO)
-        self.status_label.pack(fill=tk.X, pady=(8, 0))
 
         self.report_dir = (self.data.base_dir / "output" / "reports").resolve()
         self.report_note_var = tk.StringVar(value="")
@@ -1608,8 +1773,11 @@ class ComparisonApp:
         )
         self.report_link.bind("<Button-1>", self._open_report_folder)
 
+        self.report_note_label.grid_remove()
+        self.report_link.grid_remove()
+
         footer = ttk.Frame(container)
-        footer.pack(fill=tk.X, pady=(12, 0))
+        footer.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         footer.columnconfigure(0, weight=1)
         footer.columnconfigure(1, weight=1)
         tb.Button(footer, text="Print report", bootstyle=SUCCESS, command=self._export_comprehensive_report).grid(
@@ -1652,6 +1820,7 @@ class ComparisonApp:
             self.asset_view.update_right(empty_comp)
             self.sensitivity_view.update_left(empty_comp)
             self.sensitivity_view.update_right(empty_comp)
+            self.sankey_view.update(empty_comp, empty_comp)
             self.comparison_view.update_rows([])
             self.status_var.set(self.data.status_message())
             self.left_summary = empty_basic
@@ -1681,6 +1850,7 @@ class ComparisonApp:
         self.polygon_view.update_left(self.left_stacked_summary)
         self.asset_view.update_left(self.left_stacked_summary)
         self.sensitivity_view.update_left(self.left_stacked_summary)
+        self._refresh_sankey()
         self._refresh_comparison()
 
     def _on_right_selection(self, display: str) -> None:
@@ -1691,6 +1861,7 @@ class ComparisonApp:
         self.polygon_view.update_right(self.right_stacked_summary)
         self.asset_view.update_right(self.right_stacked_summary)
         self.sensitivity_view.update_right(self.right_stacked_summary)
+        self._refresh_sankey()
         self._refresh_comparison()
 
     def _refresh_comparison(self) -> None:
@@ -1712,6 +1883,9 @@ class ComparisonApp:
             self.status_var.set(messages[0])
         else:
             self.status_var.set(self.data.status_message())
+
+    def _refresh_sankey(self) -> None:
+        self.sankey_view.update(self.left_stacked_summary or {}, self.right_stacked_summary or {})
 
     def _ensure_report_dir(self) -> Path:
         self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -1807,9 +1981,9 @@ class ComparisonApp:
         self.report_note_var.set(msg)
         self.report_link_var.set(f"Open reports folder ({self.report_dir})")
         if not self.report_note_label.winfo_ismapped():
-            self.report_note_label.pack(fill=tk.X, pady=(4, 0))
+            self.report_note_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
         if not self.report_link.winfo_ismapped():
-            self.report_link.pack(anchor="w", pady=(0, 8))
+            self.report_link.grid(row=3, column=0, sticky="w", pady=(0, 8))
         debug_log(self.data.base_dir, msg)
 
     def _open_report_folder(self, _event=None) -> None:
@@ -1842,6 +2016,7 @@ class ComparisonApp:
                 "Comparison": self._comparison_dataframe(),
             }
             charts = self.sensitivity_view.chart_figures()
+            charts.append(("Area difference Sankey", self.sankey_view.chart_figure()))
             path = self._write_excel_report(sheets, "basic_analysis", chart_figures=charts)
             self._after_report_export(path)
         except Exception as exc:
@@ -1863,6 +2038,7 @@ class ComparisonApp:
                 "Right sensitivity": _sensitivity_dataframe(self.right_stacked_summary.get("sensitivity")),
             }
             charts = self.sensitivity_view.chart_figures()
+            charts.append(("Area difference Sankey", self.sankey_view.chart_figure()))
             path = self._write_excel_report(sheets, "comprehensive_analysis", chart_figures=charts)
             self._after_report_export(path)
         except Exception as exc:
