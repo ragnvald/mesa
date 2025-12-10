@@ -1180,13 +1180,22 @@ class SensitivityChart:
         self.palette_map = palette_map or {}
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
-        self.figure = Figure(figsize=(4.0, 3.0), dpi=100)
+        # Fixed footprint ~340x260 px to balance size and readability
+        self.figure = Figure(figsize=(3.4, 2.6), dpi=100)
         self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlabel("Area (km^2)")
-        self.ax.set_ylabel("Sensitivity")
+        self.ax.set_xlabel("Area (km^2)", fontsize=9)
+        self.ax.set_ylabel("Sensitivity", fontsize=9)
+        self.ax.tick_params(axis="both", labelsize=9)
         self.ax.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.6)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=master)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        holder = ttk.Frame(master)
+        holder.grid(row=0, column=0, sticky="n")
+        holder.columnconfigure(0, weight=1)
+        holder.columnconfigure(1, weight=0)
+        holder.columnconfigure(2, weight=1)
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=holder)
+        self.canvas.get_tk_widget().grid(row=0, column=1, sticky="n")
 
     def _palette_entry(self, code: str) -> Dict[str, str]:
         code_upper = str(code).strip().upper() if code is not None else ""
@@ -1202,8 +1211,9 @@ class SensitivityChart:
 
     def update(self, data: Iterable[SensitivitySummary]) -> None:
         self.ax.clear()
-        self.ax.set_xlabel("Area (km^2)")
-        self.ax.set_ylabel("Sensitivity")
+        self.ax.set_xlabel("Area (km^2)", fontsize=9)
+        self.ax.set_ylabel("Sensitivity", fontsize=9)
+        self.ax.tick_params(axis="both", labelsize=9)
         self.ax.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.6)
 
         entries = list(data)
@@ -1233,65 +1243,56 @@ class SensitivityChart:
         self.ax.invert_yaxis()
 
         max_value = max(values) if values else 0.0
-        offset = max(0.05 * max_value, 0.02)
+        offset = max(0.03 * max_value, 0.01)
         for idx, value in enumerate(values):
             self.ax.text(
                 value + offset,
                 y_positions[idx],
                 f"{value:,.2f}",
                 va="center",
-                fontsize=9,
+                fontsize=8,
             )
 
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
 
-class BasicPanel:
-    """Polygons table + sensitivity chart for flat analysis results."""
+class PolygonTotalsPanel:
+    """Displays polygon totals from stacked analysis."""
 
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+    def __init__(self, master: tk.Widget) -> None:
         self.frame = ttk.Frame(master, padding=(6, 6))
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(1, weight=1)
-        self.frame.rowconfigure(2, weight=2)
+        # Avoid stretching the chart; keep minimal height
+        self.frame.rowconfigure(1, weight=0)
 
         self.message_var = tk.StringVar(value="")
-        self.message_label = ttk.Label(
-            self.frame, textvariable=self.message_var, wraplength=360, justify="left"
-        )
+        self.message_label = ttk.Label(self.frame, textvariable=self.message_var, wraplength=360, justify="left")
         apply_bootstyle(self.message_label, WARNING)
         self.message_label.grid(row=0, column=0, sticky="w")
         self.message_label.grid_remove()
 
-        polygon_frame = ttk.LabelFrame(self.frame, text="Polygons")
-        polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
+        polygon_frame = ttk.LabelFrame(self.frame, text="Polygon totals (stacked)")
+        polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
         polygon_frame.columnconfigure(0, weight=1)
         polygon_frame.rowconfigure(0, weight=1)
         apply_bootstyle(polygon_frame, SECONDARY)
 
         self.tree = ttk.Treeview(
             polygon_frame,
-            columns=("title", "area", "run"),
+            columns=("title", "area"),
             show="headings",
-            height=6,
+            height=8,
         )
         self.tree.heading("title", text="Title")
         self.tree.heading("area", text="Area (km^2)")
-        self.tree.heading("run", text="Last processed")
-        self.tree.column("title", width=220, anchor="w")
-        self.tree.column("area", width=110, anchor="e")
-        self.tree.column("run", width=140, anchor="w")
+        self.tree.column("title", width=240, anchor="w")
+        self.tree.column("area", width=120, anchor="e")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(polygon_frame, orient="vertical", command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scrollbar.set)
-
-        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
-        chart_frame.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
-        apply_bootstyle(chart_frame, INFO)
-        self.chart = SensitivityChart(chart_frame, palette_map)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
@@ -1304,88 +1305,51 @@ class BasicPanel:
 
         for item in self.tree.get_children():
             self.tree.delete(item)
-        polygons: Iterable[PolygonSummary] = summary.get("polygons", [])
-        for polygon in polygons:
+        for polygon in summary.get("polygons", []):
             self.tree.insert(
                 "",
                 "end",
-                values=(polygon.title, polygon.area_label, polygon.timestamp_label),
+                values=(polygon.title, polygon.area_label),
             )
 
-        self.chart.update(summary.get("sensitivity", []))
 
-    def chart_figure(self):
-        return self.chart.figure
+class AssetOverlapPanel:
+    """Displays asset group overlap from stacked analysis."""
 
-
-class ComprehensivePanel:
-    """Overlap-focused view using stacked analysis results."""
-
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+    def __init__(self, master: tk.Widget) -> None:
         self.frame = ttk.Frame(master, padding=(6, 6))
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(1, weight=1)
-        self.frame.rowconfigure(2, weight=1)
-        self.frame.rowconfigure(3, weight=1)
 
         self.message_var = tk.StringVar(value="")
-        self.message_label = ttk.Label(
-            self.frame, textvariable=self.message_var, wraplength=360, justify="left"
-        )
+        self.message_label = ttk.Label(self.frame, textvariable=self.message_var, wraplength=360, justify="left")
         apply_bootstyle(self.message_label, WARNING)
         self.message_label.grid(row=0, column=0, sticky="w")
         self.message_label.grid_remove()
 
-        polygon_frame = ttk.LabelFrame(self.frame, text="Polygon totals (stacked)")
-        polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
-        polygon_frame.columnconfigure(0, weight=1)
-        polygon_frame.rowconfigure(0, weight=1)
-        apply_bootstyle(polygon_frame, SECONDARY)
-
-        self.polygon_tree = ttk.Treeview(
-            polygon_frame,
-            columns=("title", "area"),
-            show="headings",
-            height=6,
-        )
-        self.polygon_tree.heading("title", text="Title")
-        self.polygon_tree.heading("area", text="Area (km^2)")
-        self.polygon_tree.column("title", width=220, anchor="w")
-        self.polygon_tree.column("area", width=120, anchor="e")
-        self.polygon_tree.grid(row=0, column=0, sticky="nsew")
-
-        poly_scroll = ttk.Scrollbar(polygon_frame, orient="vertical", command=self.polygon_tree.yview)
-        poly_scroll.grid(row=0, column=1, sticky="ns")
-        self.polygon_tree.configure(yscrollcommand=poly_scroll.set)
-
         asset_frame = ttk.LabelFrame(self.frame, text="Asset group overlap")
-        asset_frame.grid(row=2, column=0, sticky="nsew", pady=(4, 4))
+        asset_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
         asset_frame.columnconfigure(0, weight=1)
         asset_frame.rowconfigure(0, weight=1)
         apply_bootstyle(asset_frame, SUCCESS)
 
-        self.asset_tree = ttk.Treeview(
+        self.tree = ttk.Treeview(
             asset_frame,
             columns=("asset", "sensitivity", "area"),
             show="headings",
-            height=6,
+            height=10,
         )
-        self.asset_tree.heading("asset", text="Asset group")
-        self.asset_tree.heading("sensitivity", text="Dominant sensitivity")
-        self.asset_tree.heading("area", text="Area (km^2)")
-        self.asset_tree.column("asset", width=220, anchor="w")
-        self.asset_tree.column("sensitivity", width=180, anchor="w")
-        self.asset_tree.column("area", width=120, anchor="e")
-        self.asset_tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.heading("asset", text="Asset group")
+        self.tree.heading("sensitivity", text="Dominant sensitivity")
+        self.tree.heading("area", text="Area (km^2)")
+        self.tree.column("asset", width=240, anchor="w")
+        self.tree.column("sensitivity", width=200, anchor="w")
+        self.tree.column("area", width=120, anchor="e")
+        self.tree.grid(row=0, column=0, sticky="nsew")
 
-        asset_scroll = ttk.Scrollbar(asset_frame, orient="vertical", command=self.asset_tree.yview)
-        asset_scroll.grid(row=0, column=1, sticky="ns")
-        self.asset_tree.configure(yscrollcommand=asset_scroll.set)
-
-        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
-        chart_frame.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
-        apply_bootstyle(chart_frame, INFO)
-        self.chart = SensitivityChart(chart_frame, palette_map)
+        scrollbar = ttk.Scrollbar(asset_frame, orient="vertical", command=self.tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scrollbar.set)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
@@ -1396,84 +1360,149 @@ class ComprehensivePanel:
         else:
             self.message_label.grid_remove()
 
-        for item in self.polygon_tree.get_children():
-            self.polygon_tree.delete(item)
-        for polygon in summary.get("polygons", []):
-            self.polygon_tree.insert(
-                "",
-                "end",
-                values=(polygon.title, polygon.area_label),
-            )
-
-        for item in self.asset_tree.get_children():
-            self.asset_tree.delete(item)
+        for item in self.tree.get_children():
+            self.tree.delete(item)
         for asset in summary.get("asset_groups", []):
-            self.asset_tree.insert(
+            self.tree.insert(
                 "",
                 "end",
                 values=(asset.asset_group, asset.dominant_label, asset.area_label),
             )
 
+
+class SensitivityTotalsPanel:
+    """Displays sensitivity totals chart from stacked analysis."""
+
+    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+        self.frame = ttk.Frame(master, padding=(6, 6))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(1, weight=1)
+
+        self.message_var = tk.StringVar(value="")
+        self.message_label = ttk.Label(self.frame, textvariable=self.message_var, wraplength=360, justify="left")
+        apply_bootstyle(self.message_label, WARNING)
+        self.message_label.grid(row=0, column=0, sticky="w")
+        self.message_label.grid_remove()
+
+        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
+        chart_frame.grid(row=1, column=0, sticky="nw", pady=(4, 0))
+        apply_bootstyle(chart_frame, INFO)
+        chart_frame.columnconfigure(0, weight=0)
+        chart_frame.rowconfigure(0, weight=0)
+        self.chart = SensitivityChart(chart_frame, palette_map)
+
+    def update(self, summary: Dict[str, Any]) -> None:
+        summary = summary or {}
+        message = summary.get("message", "")
+        self.message_var.set(message)
+        if message:
+            self.message_label.grid()
+        else:
+            self.message_label.grid_remove()
         self.chart.update(summary.get("sensitivity", []))
 
     def chart_figure(self):
         return self.chart.figure
 
 
-class BasicComparisonView:
-    """Wraps the left/right basic analysis panels for the notebook."""
+class TwoColumnView:
+    """Generic left/right wrapper to keep side-by-side layout."""
 
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+    def __init__(self, master: tk.Widget, left_factory, right_factory) -> None:
         self.frame = ttk.Frame(master)
         self.frame.columnconfigure(0, weight=1)
         self.frame.columnconfigure(1, weight=1)
         self.frame.rowconfigure(0, weight=1)
 
-        self.left_panel = BasicPanel(self.frame, palette_map)
-        self.left_panel.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left_holder = ttk.Frame(self.frame)
+        left_holder.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left_holder.columnconfigure(0, weight=1)
+        left_holder.rowconfigure(0, weight=1)
 
-        self.right_panel = BasicPanel(self.frame, palette_map)
-        self.right_panel.frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right_holder = ttk.Frame(self.frame)
+        right_holder.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right_holder.columnconfigure(0, weight=1)
+        right_holder.rowconfigure(0, weight=1)
+
+        self.left = left_factory(left_holder)
+        self.right = right_factory(right_holder)
+        # Ensure child frames are placed inside their holders
+        if hasattr(self.left, "frame"):
+            self.left.frame.grid(row=0, column=0, sticky="nsew")
+        if hasattr(self.right, "frame"):
+            self.right.frame.grid(row=0, column=0, sticky="nsew")
+
+
+class PolygonTotalsView:
+    def __init__(self, master: tk.Widget) -> None:
+        columns = TwoColumnView(
+            master,
+            lambda parent: PolygonTotalsPanel(parent),
+            lambda parent: PolygonTotalsPanel(parent),
+        )
+        self.frame = columns.frame
+        self.left = columns.left
+        self.right = columns.right
 
     def update_left(self, summary: Dict[str, Any]) -> None:
-        self.left_panel.update(summary)
+        self.left.update(summary)
 
     def update_right(self, summary: Dict[str, Any]) -> None:
-        self.right_panel.update(summary)
-
-    def chart_figures(self) -> List[Tuple[str, Any]]:
-        return [
-            ("Basic - Left sensitivity", self.left_panel.chart_figure()),
-            ("Basic - Right sensitivity", self.right_panel.chart_figure()),
-        ]
+        self.right.update(summary)
 
 
-class ComprehensiveComparisonView:
-    """Wraps the left/right comprehensive analysis panels for the notebook."""
+class AssetOverlapView:
+    def __init__(self, master: tk.Widget) -> None:
+        columns = TwoColumnView(
+            master,
+            lambda parent: AssetOverlapPanel(parent),
+            lambda parent: AssetOverlapPanel(parent),
+        )
+        self.frame = columns.frame
+        self.left = columns.left
+        self.right = columns.right
 
+    def update_left(self, summary: Dict[str, Any]) -> None:
+        self.left.update(summary)
+
+    def update_right(self, summary: Dict[str, Any]) -> None:
+        self.right.update(summary)
+
+
+class SensitivityTotalsView:
     def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
-        self.frame = ttk.Frame(master)
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.columnconfigure(1, weight=1)
-        self.frame.rowconfigure(0, weight=1)
-
-        self.left_panel = ComprehensivePanel(self.frame, palette_map)
-        self.left_panel.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-
-        self.right_panel = ComprehensivePanel(self.frame, palette_map)
-        self.right_panel.frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        columns = TwoColumnView(
+            master,
+            lambda parent: SensitivityTotalsPanel(parent, palette_map),
+            lambda parent: SensitivityTotalsPanel(parent, palette_map),
+        )
+        self.frame = columns.frame
+        self.left = columns.left
+        self.right = columns.right
 
     def update_left(self, summary: Dict[str, Any]) -> None:
-        self.left_panel.update(summary)
+        self.left.update(summary)
 
     def update_right(self, summary: Dict[str, Any]) -> None:
-        self.right_panel.update(summary)
+        self.right.update(summary)
 
     def chart_figures(self) -> List[Tuple[str, Any]]:
         return [
-            ("Comprehensive - Left sensitivity", self.left_panel.chart_figure()),
-            ("Comprehensive - Right sensitivity", self.right_panel.chart_figure()),
+            ("Sensitivity totals - Left", self.left.chart_figure()),
+            ("Sensitivity totals - Right", self.right.chart_figure()),
         ]
+
+
+class ComparisonTotalsView:
+    def __init__(self, master: tk.Widget) -> None:
+        self.frame = ttk.Frame(master, padding=(6, 6))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(0, weight=1)
+        self.table = ComparisonTable(self.frame)
+        self.table.frame.grid(row=0, column=0, sticky="nsew")
+
+    def update_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
+        self.table.update_rows(rows)
 
 
 class ComparisonTable:
@@ -1548,34 +1577,17 @@ class ComparisonApp:
         self.right_header = GroupHeader(header_frame, "Right group", self._on_right_selection)
         self.right_header.frame.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        button_frame = ttk.LabelFrame(header_frame, text="Exports", padding=(8, 4))
-        apply_bootstyle(button_frame, PRIMARY)
-        button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
-        tb.Button(
-            button_frame,
-            text="Export basic report (Excel)",
-            bootstyle=SUCCESS,
-            command=self._export_basic_report,
-        ).grid(row=0, column=0, padx=6, pady=4, sticky="ew")
-        tb.Button(
-            button_frame,
-            text="Export comprehensive report (Excel)",
-            bootstyle=INFO,
-            command=self._export_comprehensive_report,
-        ).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
-
         self.notebook = ttk.Notebook(container)
         apply_bootstyle(self.notebook, SECONDARY)
-        self.basic_view = BasicComparisonView(self.notebook, self.palette_map)
-        self.notebook.add(self.basic_view.frame, text="Basic analysis")
-        self.comprehensive_view = ComprehensiveComparisonView(self.notebook, self.palette_map)
-        self.notebook.add(self.comprehensive_view.frame, text="Comprehensive analysis")
+        self.polygon_view = PolygonTotalsView(self.notebook)
+        self.notebook.add(self.polygon_view.frame, text="Polygon totals (stacked)")
+        self.asset_view = AssetOverlapView(self.notebook)
+        self.notebook.add(self.asset_view.frame, text="Asset group overlap")
+        self.sensitivity_view = SensitivityTotalsView(self.notebook, self.palette_map)
+        self.notebook.add(self.sensitivity_view.frame, text="Sensitivity totals")
+        self.comparison_view = ComparisonTotalsView(self.notebook)
+        self.notebook.add(self.comparison_view.frame, text="Comparison totals")
         self.notebook.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
-
-        self.comparison_table = ComparisonTable(container)
-        self.comparison_table.frame.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
 
         self.status_var = tk.StringVar(value=self.data.status_message())
         self.status_label = ttk.Label(container, textvariable=self.status_var, anchor="w")
@@ -1595,6 +1607,17 @@ class ComparisonApp:
             anchor="w",
         )
         self.report_link.bind("<Button-1>", self._open_report_folder)
+
+        footer = ttk.Frame(container)
+        footer.pack(fill=tk.X, pady=(12, 0))
+        footer.columnconfigure(0, weight=1)
+        footer.columnconfigure(1, weight=1)
+        tb.Button(footer, text="Print report", bootstyle=SUCCESS, command=self._export_comprehensive_report).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 6)
+        )
+        tb.Button(footer, text="Exit", bootstyle=PRIMARY, command=self.root.destroy).grid(
+            row=0, column=1, sticky="ew", padx=(6, 0), pady=(0, 6)
+        )
 
         self.display_to_id: Dict[str, str] = {}
         self.left_summary: Dict[str, Any] = {}
@@ -1623,11 +1646,13 @@ class ComparisonApp:
         if not option_labels:
             self.left_header.update_summary(empty_basic)
             self.right_header.update_summary(empty_basic)
-            self.basic_view.update_left(empty_basic)
-            self.basic_view.update_right(empty_basic)
-            self.comprehensive_view.update_left(empty_comp)
-            self.comprehensive_view.update_right(empty_comp)
-            self.comparison_table.update_rows([])
+            self.polygon_view.update_left(empty_comp)
+            self.polygon_view.update_right(empty_comp)
+            self.asset_view.update_left(empty_comp)
+            self.asset_view.update_right(empty_comp)
+            self.sensitivity_view.update_left(empty_comp)
+            self.sensitivity_view.update_right(empty_comp)
+            self.comparison_view.update_rows([])
             self.status_var.set(self.data.status_message())
             self.left_summary = empty_basic
             self.right_summary = empty_basic
@@ -1652,25 +1677,25 @@ class ComparisonApp:
         group_id = self.display_to_id.get(display)
         self.left_summary = self.data.group_summary(group_id)
         self.left_header.update_summary(self.left_summary)
-        self.basic_view.update_left(self.left_summary)
-
         self.left_stacked_summary = self.data.stacked_summary(group_id)
-        self.comprehensive_view.update_left(self.left_stacked_summary)
+        self.polygon_view.update_left(self.left_stacked_summary)
+        self.asset_view.update_left(self.left_stacked_summary)
+        self.sensitivity_view.update_left(self.left_stacked_summary)
         self._refresh_comparison()
 
     def _on_right_selection(self, display: str) -> None:
         group_id = self.display_to_id.get(display)
         self.right_summary = self.data.group_summary(group_id)
         self.right_header.update_summary(self.right_summary)
-        self.basic_view.update_right(self.right_summary)
-
         self.right_stacked_summary = self.data.stacked_summary(group_id)
-        self.comprehensive_view.update_right(self.right_stacked_summary)
+        self.polygon_view.update_right(self.right_stacked_summary)
+        self.asset_view.update_right(self.right_stacked_summary)
+        self.sensitivity_view.update_right(self.right_stacked_summary)
         self._refresh_comparison()
 
     def _refresh_comparison(self) -> None:
         rows = self.data.comparison_rows(self.left_summary, self.right_summary)
-        self.comparison_table.update_rows(rows)
+        self.comparison_view.update_rows(rows)
 
         messages: List[str] = []
         for summary in (
@@ -1816,7 +1841,7 @@ class ComparisonApp:
                 "Right sensitivity": _sensitivity_dataframe(self.right_summary.get("sensitivity")),
                 "Comparison": self._comparison_dataframe(),
             }
-            charts = self.basic_view.chart_figures()
+            charts = self.sensitivity_view.chart_figures()
             path = self._write_excel_report(sheets, "basic_analysis", chart_figures=charts)
             self._after_report_export(path)
         except Exception as exc:
@@ -1837,7 +1862,7 @@ class ComparisonApp:
                 "Left sensitivity": _sensitivity_dataframe(self.left_stacked_summary.get("sensitivity")),
                 "Right sensitivity": _sensitivity_dataframe(self.right_stacked_summary.get("sensitivity")),
             }
-            charts = self.comprehensive_view.chart_figures()
+            charts = self.sensitivity_view.chart_figures()
             path = self._write_excel_report(sheets, "comprehensive_analysis", chart_figures=charts)
             self._after_report_export(path)
         except Exception as exc:
