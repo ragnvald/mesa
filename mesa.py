@@ -575,6 +575,31 @@ def run_subprocess_async(command, fallback_command, gpkg_file):
 
     threading.Thread(target=_runner, daemon=True).start()
 
+
+def _launch_gui_process(cmd: list[str], label: str):
+    if not cmd:
+        log_to_logfile(f"No command provided for {label}; skipping launch")
+        return
+    log_to_logfile(f"Launching {label}: {cmd}")
+    popen_kwargs = {
+        "cwd": PROJECT_BASE,
+        "env": _sub_env(),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        creationflags = 0
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        popen_kwargs["creationflags"] = creationflags
+    else:
+        popen_kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(cmd, **popen_kwargs)
+    except Exception as exc:
+        log_to_logfile(f"Failed to launch {label}: {exc}")
+
 def _resolve_tool_path(*rel_candidates: str) -> str:
     """Find the first existing helper path across system/, project root, or code/."""
     for rel in rel_candidates:
@@ -682,40 +707,28 @@ def process_lines():
 
 def open_maps_overview():
     python_script, exe_file = get_script_paths("maps_overview")
-    try:
-        if getattr(sys, "frozen", False):
-            log_to_logfile(f"Launching maps_overview exe: {exe_file}")
-            subprocess.Popen([exe_file], cwd=PROJECT_BASE, env=_sub_env())
-        else:
-            python_exe = sys.executable or "python"
-            subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
-    except Exception as e:
-        log_to_logfile(f"Failed to open maps overview: {e}")
+    if getattr(sys, "frozen", False):
+        _launch_gui_process([exe_file], "maps_overview exe")
+    else:
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script], "maps_overview script")
 
 
 def open_asset_layers_viewer():
     python_script, exe_file = get_script_paths("map_assets")
-    try:
-        if getattr(sys, "frozen", False):
-            log_to_logfile(f"Launching map_assets exe: {exe_file}")
-            subprocess.Popen([exe_file], cwd=PROJECT_BASE, env=_sub_env())
-        else:
-            python_exe = sys.executable or "python"
-            subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
-    except Exception as e:
-        log_to_logfile(f"Failed to open map_assets viewer: {e}")
+    if getattr(sys, "frozen", False):
+        _launch_gui_process([exe_file], "map_assets exe")
+    else:
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script], "map_assets script")
 
 def open_present_files():
     python_script, exe_file = get_script_paths("data_report")
-    try:
-        if getattr(sys, "frozen", False):
-            log_to_logfile(f"Launching data_report exe: {exe_file}")
-            subprocess.Popen([exe_file], cwd=PROJECT_BASE, env=_sub_env())
-        else:
-            python_exe = sys.executable or "python"
-            subprocess.Popen([python_exe, python_script], cwd=PROJECT_BASE, env=_sub_env())
-    except Exception as e:
-        log_to_logfile(f"Failed to open data_report: {e}")
+    if getattr(sys, "frozen", False):
+        _launch_gui_process([exe_file], "data_report exe")
+    else:
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script], "data_report script")
 
 def open_data_analysis_setup():
     python_script, exe_file = get_script_paths("data_analysis_setup")
@@ -1048,8 +1061,8 @@ if __name__ == "__main__":
             log_to_logfile(f"Unable to load header graphic: {exc}")
 
     intro_text = (
-        "Launch core jobs from Workflows, then review the live counters in Status to \nconfirm imports, "
-        "processing and publishing have completed."
+        "Launch core jobs from the Workflows-tab, then review the live counters \nin the Status-tab "
+        "to confirm imports, processing and publishing have completed."
     )
 
     header = ttk.Frame(root, padding=0)
@@ -1094,8 +1107,8 @@ if __name__ == "__main__":
         text="Exit",
         command=root.destroy,
         bootstyle="danger-outline",
-        width=12
-    ).pack(side="right", padx=(12, 8), pady=(6, 0))
+        width=20
+    ).pack(side="right", padx=(24, 16), pady=(6, 0))
 
     notebook = ttk.Notebook(root, bootstyle=SECONDARY)
     notebook.pack(fill="both", expand=True, padx=12, pady=(0, 10))
