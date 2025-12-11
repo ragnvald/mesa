@@ -1470,16 +1470,16 @@ class AssetAnalyzer:
             if not clipped_stacked.empty:
                 stacked_results.append(clipped_stacked)
 
-        summaries.append(
-            {
-                "analysis_polygon_id": record.identifier,
-                "title": record.title,
-                "notes": record.notes,
-                "area_sqkm": area_sqkm,
-                "flat_rows": int(len(clipped_flat)),
-                "stacked_rows": int(len(clipped_stacked)),
-            }
-        )
+            summaries.append(
+                {
+                    "analysis_polygon_id": record.identifier,
+                    "title": record.title,
+                    "notes": record.notes,
+                    "area_sqkm": area_sqkm,
+                    "flat_rows": int(len(clipped_flat)),
+                    "stacked_rows": int(len(clipped_stacked)),
+                }
+            )
 
         try:
             preview_frames: List[gpd.GeoDataFrame] = [gdf for gdf in flat_results if not gdf.empty]
@@ -2169,34 +2169,36 @@ HTML_TEMPLATE = """<!doctype html>
   <style>
     html, body { height:100%; margin:0; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f8fafc; color:#1e293b; }
-    .wrap { height:100vh; display:grid; grid-template-columns: 400px 1fr; grid-template-rows: 100%; grid-template-areas: "panel map"; }
-    .panel { grid-area: panel; border-right:2px solid #1f2937; padding:12px 14px; display:flex; flex-direction:column; gap:12px; overflow:auto; background:#fff; }
-    .panel h1 { font-size:20px; margin:0; }
-    .panel h2 { font-size:14px; margin:8px 0 4px; text-transform:uppercase; letter-spacing:0.03em; color:#334155; }
-    .panel .buttons { display:flex; gap:8px; flex-wrap:wrap; }
-    button { padding:6px 10px; border:1px solid #cbd5f5; border-radius:6px; background:#fff; cursor:pointer; }
+    .wrap { height:100vh; display:grid; grid-template-columns: 260px 260px 1fr; grid-template-rows: 100%; grid-template-areas: "panel-left panel-right map"; }
+    .panel { padding:8px 10px; display:flex; flex-direction:column; gap:8px; overflow:auto; background:#fff; }
+    .panel-left { grid-area: panel-left; border-right:2px solid #1f2937; }
+    .panel-right { grid-area: panel-right; border-right:2px solid #1f2937; }
+    .panel h1 { font-size:16px; margin:0; }
+    .panel h2 { font-size:12px; margin:4px 0 2px; text-transform:uppercase; letter-spacing:0.03em; color:#334155; }
+    .panel .buttons { display:flex; gap:5px; flex-wrap:wrap; }
+    button { padding:4px 8px; border:1px solid #cbd5f5; border-radius:6px; background:#fff; cursor:pointer; }
     button.primary { background:#2563eb; color:#fff; border-color:#1d4ed8; }
     button:disabled { opacity:0.45; cursor:not-allowed; }
-    #polygonList { width:100%; min-height:160px; border:1px solid #cbd5f5; border-radius:6px; padding:6px; overflow:auto; }
-    #polygonList li { list-style:none; border-bottom:1px solid #e2e8f0; padding:6px 4px; display:flex; gap:6px; align-items:center; }
+    #polygonList { width:100%; min-height:90px; border:1px solid #cbd5f5; border-radius:6px; padding:3px; overflow:auto; }
+    #polygonList li { list-style:none; border-bottom:1px solid #e2e8f0; padding:4px 3px; display:flex; gap:6px; align-items:center; }
     #polygonList li:last-child { border-bottom:none; }
     #polygonList .title { font-weight:600; }
     #polygonList .meta { font-size:11px; color:#64748b; }
-    .form-group { display:flex; flex-direction:column; gap:4px; }
-    .form-group input, .form-group textarea { border:1px solid #cbd5f5; border-radius:6px; padding:6px 8px; font-size:13px; width:100%; }
-    .form-group textarea { min-height:60px; resize:vertical; }
-    .status { font-size:12px; color:#334155; }
+    .form-group { display:flex; flex-direction:column; gap:2px; }
+    .form-group input, .form-group textarea { border:1px solid #cbd5f5; border-radius:6px; padding:4px 6px; font-size:12px; width:100%; }
+    .form-group textarea { min-height:40px; resize:vertical; }
+    .status { font-size:11px; color:#334155; }
     .status.error { color:#b91c1c; }
     .map { grid-area: map; position:relative; }
     #map { position:absolute; inset:0; }
     .grid-label { font-size:11px; font-weight:500; color:#1f2937; background:rgba(255,255,255,0.85); padding:2px 4px; border-radius:4px; }
-    .background-toggle { font-size:12px; color:#475569; display:flex; align-items:center; gap:6px; margin:4px 0 8px; }
-    .section-divider { border:none; border-top:1px solid #e2e8f0; margin:4px 0; }
+    .background-toggle { font-size:12px; color:#475569; display:flex; align-items:center; gap:6px; margin:1px 0 4px; }
+    .section-divider { border:none; border-top:1px solid #e2e8f0; margin:3px 0 2px; }
   </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="panel">
+  <div class="panel panel-left">
     <div>
       <h1>Area analysis</h1>
       <p class="status" id="statusText">Initialising...</p>
@@ -2252,9 +2254,9 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
       <ul id="polygonList"></ul>
     </div>
+  </div>
 
-    <hr class="section-divider">
-
+  <div class="panel panel-right">
     <div>
       <h2>Details</h2>
       <div class="form-group">
@@ -2488,7 +2490,6 @@ function applyCanvasLayer(layer){
   } else if(!layer.mbtiles){
     clearGridLayer();
   }
-  fitHomeBounds();
 }
 
 function addGridLayer(features){
@@ -2528,17 +2529,16 @@ function setBasemap(name){
 }
 
 function polygonStyle(selected){
-  return selected ? {
-    color: '#d97706',
-    weight: 3,
-    fillColor: '#f59e0b',
-    fillOpacity: 0.2
-  } : {
-    color: '#0f172a',
-    weight: 2,
-    fillColor: '#2563eb',
-    fillOpacity: 0.08
+  const base = {
+    color: '#f97316',
+    weight: 2.5,
+    fillColor: '#e5e7eb',
+    fillOpacity: 0.18
   };
+  if(selected){
+    return Object.assign({}, base, { weight: 3.5, fillOpacity: 0.24 });
+  }
+  return base;
 }
 
 function removePolygonLayer(id){
@@ -2727,6 +2727,34 @@ function loadPolygons(collection){
     collection.features.forEach(addFeatureToMap);
   }
   reloadListFromMap();
+  fitPolygonBoundsWithPadding();
+}
+
+function polygonBounds(){
+  if(!MAP){ return null; }
+  const layers = Object.values(POLYGON_SOURCE || {});
+  let combined = null;
+  layers.forEach(layer => {
+    if(layer && layer.getBounds){
+      const b = layer.getBounds();
+      if(b && b.isValid()){
+        const copy = L.latLngBounds(b.getSouthWest(), b.getNorthEast());
+        combined = combined ? combined.extend(copy) : copy;
+      }
+    }
+  });
+  return combined;
+}
+
+function fitPolygonBoundsWithPadding(){
+  const bounds = polygonBounds();
+  if(bounds && bounds.isValid()){
+    // pad by 40% to give breathing room
+    const padded = bounds.pad(0.4);
+    MAP.fitBounds(padded, {padding:[24,24]});
+    return true;
+  }
+  return false;
 }
 
 function applyState(state){
@@ -2769,7 +2797,8 @@ function applyState(state){
   }
 
   if(GROUPS.length){
-    fitHomeBounds();
+    const fitted = fitPolygonBoundsWithPadding();
+    if(!fitted){ fitHomeBounds(); }
     statusText('Ready.');
   } else {
     statusText('Ready - create a group to begin.');
@@ -3326,7 +3355,9 @@ function loadCanvasLayer(category){
     } else if(res?.mbtiles){
       setMbtilesLayer(res.mbtiles);
     }
-    fitHomeBounds();
+    if(!fitPolygonBoundsWithPadding()){
+      fitHomeBounds();
+    }
     statusText('Ready.');
   });
 }
