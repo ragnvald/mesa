@@ -53,6 +53,7 @@ import sys
 import time
 import shutil
 import multiprocessing as mp
+import traceback
 from pathlib import Path
 from typing import Union, Optional, List, Tuple
 
@@ -65,6 +66,7 @@ from shapely.geometry import (
 from shapely.geometry import mapping as shp_mapping
 from shapely.ops import unary_union, polygonize
 from shapely import wkb as shp_wkb
+from shapely.prepared import prep
 
 # Optional: make_valid (Shapely >=2)
 try:
@@ -581,6 +583,512 @@ def _extract_polygonal(geom):
         pass
     return None
 
+
+# -----------------------------------------------------------------------------
+# Mosaic (basic_mosaic) — linework-based (no tiling)
+# -----------------------------------------------------------------------------
+def _cfg_float(cfg: configparser.ConfigParser, key: str, default: float) -> float:
+    try:
+        raw = (cfg["DEFAULT"].get(key, str(default)) if cfg is not None and "DEFAULT" in cfg else str(default))
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
+
+
+def _cfg_int(cfg: configparser.ConfigParser, key: str, default: int) -> int:
+    try:
+        raw = (cfg["DEFAULT"].get(key, str(default)) if cfg is not None and "DEFAULT" in cfg else str(default))
+        return int(float(str(raw).strip()))
+    except Exception:
+        return int(default)
+
+
+def _geom_to_polygonal_metric(geom, *, line_buf_m: float, point_buf_m: float):
+    """Convert a metric-CRS geometry into polygonal geometry.
+
+    Constraints:
+    - No buffering is applied to polygon inputs.
+    - Line/point assets are buffered using config defaults so they can participate as polygons.
+    """
+    if geom is None:
+        return None
+    try:
+        if geom.is_empty:
+            return None
+    except Exception:
+        return None
+
+    gt = getattr(geom, "geom_type", "")
+    if gt in ("Polygon", "MultiPolygon"):
+        return geom
+    if gt in ("LineString", "MultiLineString"):
+        try:
+            return geom.buffer(max(0.0, float(line_buf_m)))
+        except Exception:
+            return None
+    if gt in ("Point", "MultiPoint"):
+        try:
+            return geom.buffer(max(0.0, float(point_buf_m)))
+        except Exception:
+            return None
+    if gt == "GeometryCollection":
+        polys = []
+        try:
+            for g in getattr(geom, "geoms", []):
+                pg = _geom_to_polygonal_metric(g, line_buf_m=line_buf_m, point_buf_m=point_buf_m)
+                if pg is None:
+                    continue
+                ex = _extract_polygonal(pg)
+                if ex is not None and not ex.is_empty:
+                    polys.append(ex)
+        except Exception:
+            return None
+        if not polys:
+            return None
+        try:
+            return unary_union(polys)
+        except Exception:
+            return polys[0]
+    return None
+
+
+def _iter_boundary_lines(polyish):
+    """Yield LineString boundary parts from a polygonal geometry."""
+    if polyish is None:
+        return
+    try:
+        if polyish.is_empty:
+            return
+    except Exception:
+        return
+
+    try:
+        b = polyish.boundary
+    except Exception:
+        return
+    if b is None:
+        return
+    try:
+        if b.is_empty:
+            return
+    except Exception:
+        return
+
+    gt = getattr(b, "geom_type", "")
+    if gt == "LineString":
+        yield b
+        return
+    if gt == "MultiLineString":
+        try:
+            for seg in b.geoms:
+                if seg is not None and not seg.is_empty:
+                    yield seg
+        except Exception:
+            return
+
+
+def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200):
+    """Attempt unary_union; on memory/GEOS errors, retry with smaller chunks."""
+    if not geoms:
+        return None
+    try:
+        return unary_union(geoms)
+    except MemoryError:
+        log_to_gui(f"[Mosaic] MemoryError during unary_union ({label}) for n={len(geoms):,}; retrying smaller chunks…", "WARN")
+    except Exception as e:
+        log_to_gui(f"[Mosaic] unary_union failed ({label}) for n={len(geoms):,}: {e}; retrying smaller chunks…", "WARN")
+
+    step = max(min_step, len(geoms) // 4)
+    out = None
+    while step >= min_step:
+        ok = True
+        out = None
+        for i in range(0, len(geoms), step):
+            chunk = geoms[i:i+step]
+            try:
+                cu = unary_union(chunk)
+            except Exception:
+                ok = False
+                break
+            out = cu if out is None else unary_union([out, cu])
+        if ok:
+            return out
+        step = max(min_step, step // 2)
+    return None
+
+
+def _tree_reduce_unions(
+    unions: list,
+    *,
+    max_partials: int,
+    label: str = "unions",
+    heartbeat_s: float = 10.0,
+) -> list:
+    """Repeatedly merge unions in a tree-like pairwise fashion.
+
+    Note: GEOS unary_union is typically single-threaded, so this stage can look
+    like "only one core" in Task Manager. We emit throttled progress logs so
+    long merges don't appear stalled.
+    """
+    max_partials = max(2, int(max_partials))
+    label = (label or "unions").strip()
+    hb = max(1.0, float(heartbeat_s or 10.0))
+
+    started = time.time()
+    last_log = started
+    round_idx = 0
+
+    while len(unions) > max_partials:
+        round_idx += 1
+        n_in = len(unions)
+        merges_total = (n_in + 1) // 2
+
+        now = time.time()
+        if now - last_log >= hb:
+            elapsed = now - started
+            log_to_gui(
+                f"[Mosaic] Reducing {label}: round {round_idx} starting (n={n_in:,} -> <= {max_partials:,}); merges={merges_total:,}; elapsed {elapsed:.0f}s…",
+                "INFO",
+            )
+            last_log = now
+
+        merged = []
+        it = iter(unions)
+        merge_i = 0
+        for a in it:
+            b = next(it, None)
+            merge_i += 1
+            if b is None:
+                merged.append(a)
+            else:
+                u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2)
+                merged.append(u if u is not None else a)
+
+            now = time.time()
+            if now - last_log >= hb:
+                elapsed = now - started
+                pct = (merge_i / max(1, merges_total)) * 100.0
+                log_to_gui(
+                    f"[Mosaic] Reducing {label}: round {round_idx} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
+                    "INFO",
+                )
+                last_log = now
+
+        unions = merged
+        now = time.time()
+        if now - last_log >= hb:
+            elapsed = now - started
+            log_to_gui(
+                f"[Mosaic] Reducing {label}: round {round_idx} complete; n={len(unions):,}; elapsed {elapsed:.0f}s",
+                "INFO",
+            )
+            last_log = now
+
+    return unions
+
+
+def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict:
+    """Worker: extract boundary linework + coverage polygons for a chunk.
+
+    Returns WKB for a locally-unioned edge net and coverage polygon union to keep
+    IPC payloads small.
+    """
+    (wkbs, line_buf_m, point_buf_m) = args
+    boundary_parts = 0
+    skipped = 0
+    union_retries = 0
+    boundary_lines = []
+    coverage_polys = []
+
+    # IMPORTANT: Do not call log_to_gui() from worker processes.
+    # Return lightweight log messages to the parent, which can safely forward
+    # them to the GUI and/or log.txt.
+    logs: list[tuple[str, str]] = []  # (level, message)
+
+    def _union_local(geoms: list):
+        if not geoms:
+            return None
+        if len(geoms) == 1:
+            return geoms[0]
+        try:
+            return unary_union(geoms)
+        except Exception:
+            # Retry in smaller pieces; avoid logging from workers.
+            nonlocal union_retries
+            union_retries += 1
+            step = max(50, len(geoms) // 4)
+            out = None
+            while step >= 50:
+                ok = True
+                out = None
+                for i in range(0, len(geoms), step):
+                    chunk = geoms[i:i + step]
+                    try:
+                        cu = unary_union(chunk)
+                    except Exception:
+                        ok = False
+                        break
+                    out = cu if out is None else unary_union([out, cu])
+                if ok:
+                    return out
+                step = max(50, step // 2)
+            return None
+
+    try:
+        for b in wkbs:
+            if not b:
+                skipped += 1
+                continue
+            try:
+                geom = shp_wkb.loads(b)
+            except Exception:
+                skipped += 1
+                continue
+
+            polyish = _geom_to_polygonal_metric(geom, line_buf_m=line_buf_m, point_buf_m=point_buf_m)
+            if polyish is None:
+                skipped += 1
+                continue
+            polyish = _fix_valid(polyish)
+            ex = _extract_polygonal(polyish)
+            if ex is None or getattr(ex, "is_empty", False):
+                skipped += 1
+                continue
+
+            coverage_polys.append(ex)
+            for seg in _iter_boundary_lines(ex):
+                boundary_lines.append(seg)
+                boundary_parts += 1
+
+        edge_u = _union_local(boundary_lines)
+        cov_u = _union_local(coverage_polys)
+
+        if union_retries:
+            # Keep this quiet: only surface when it happens.
+            logs.append(("WARN", f"Worker union retries={union_retries} (boundary_parts={boundary_parts:,}, skipped={skipped:,})."))
+
+        return {
+            "boundary_parts": int(boundary_parts),
+            "skipped": int(skipped),
+            "edge_wkb": shp_wkb.dumps(edge_u) if edge_u is not None else b"",
+            "cov_wkb": shp_wkb.dumps(cov_u) if cov_u is not None else b"",
+            "logs": logs,
+            "err": None,
+        }
+    except Exception as e:
+        try:
+            tb = traceback.format_exc(limit=5)
+            logs.append(("WARN", f"Worker exception traceback (truncated):\n{tb}"))
+        except Exception:
+            pass
+        return {
+            "boundary_parts": int(boundary_parts),
+            "skipped": int(skipped),
+            "edge_wkb": b"",
+            "cov_wkb": b"",
+            "logs": logs,
+            "err": f"{type(e).__name__}: {e}",
+        }
+
+
+def _build_linework_and_coverage(
+    a_metric: gpd.GeoDataFrame,
+    *,
+    cfg: configparser.ConfigParser,
+    workers: int | None = None,
+) -> tuple[object | None, object | None, dict]:
+    """Build noded linework and polygon coverage union.
+
+    - No tiling, no clipping.
+    - Polygons contribute boundaries without buffering.
+    - Lines/points are buffered using default_*_buffer_m so they contribute as polygons.
+    - Memory safety: batched unions + tree reduction.
+    """
+    line_buf_m = _cfg_float(cfg, "default_line_buffer_m", 10.0)
+    point_buf_m = _cfg_float(cfg, "default_point_buffer_m", 10.0)
+    batch_size = max(200, _cfg_int(cfg, "mosaic_line_union_batch", 4000))
+    max_partials = max(2, _cfg_int(cfg, "mosaic_line_union_max_partials", 16))
+    cov_batch_size = max(50, _cfg_int(cfg, "mosaic_coverage_union_batch", 500))
+
+    stats = {
+        "assets": int(len(a_metric)),
+        "line_buf_m": float(line_buf_m),
+        "point_buf_m": float(point_buf_m),
+        "batch_size": int(batch_size),
+        "max_partials": int(max_partials),
+        "boundary_parts": 0,
+        "union_batches": 0,
+        "skipped": 0,
+    }
+
+    boundary_batch: list = []
+    line_partials: list = []
+    cov_batch: list = []
+    cov_partials: list = []
+
+    def flush_boundary():
+        if not boundary_batch:
+            return
+        u = _unary_union_safe(boundary_batch, label="boundary_batch")
+        if u is not None:
+            line_partials.append(u)
+            stats["union_batches"] += 1
+            if len(line_partials) > max_partials:
+                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
+        boundary_batch.clear()
+
+    def flush_coverage():
+        if not cov_batch:
+            return
+        u = _unary_union_safe(cov_batch, label="coverage_batch")
+        if u is not None:
+            cov_partials.append(u)
+            if len(cov_partials) > max_partials:
+                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
+        cov_batch.clear()
+
+    # Prefer parallel extraction/union when workers>1. This stage is the bottleneck.
+    use_parallel = False
+    try:
+        v = str(cfg["DEFAULT"].get("mosaic_parallel_extract", "true")).strip().lower()
+        use_parallel = v in ("1", "true", "yes", "on")
+    except Exception:
+        use_parallel = True
+    if workers is None:
+        workers = 1
+    if workers <= 1:
+        use_parallel = False
+
+    if use_parallel:
+        # Chunk size: tradeoff between overhead and per-worker memory.
+        chunk_size = max(200, _cfg_int(cfg, "mosaic_extract_chunk_size", 2500))
+        maxtasks = max(1, _cfg_int(cfg, "mosaic_extract_maxtasksperchild", 4))
+        pool_chunksize = max(1, _cfg_int(cfg, "mosaic_extract_pool_chunksize", 1))
+
+        # Serialize geometries to WKB once in the parent to avoid GeoPandas objects
+        # crossing processes.
+        wkbs: list[bytes] = []
+        for geom in a_metric.geometry:
+            try:
+                wkbs.append(shp_wkb.dumps(geom) if geom is not None else b"")
+            except Exception:
+                wkbs.append(b"")
+
+        chunks = [wkbs[i:i + chunk_size] for i in range(0, len(wkbs), chunk_size)]
+        log_to_gui(
+            f"[Mosaic] Parallel boundary extraction: workers={workers}, chunks={len(chunks):,}, chunk_size={chunk_size:,}, maxtasksperchild={maxtasks}",
+            "INFO",
+        )
+
+        ctx = mp.get_context("spawn")
+        done = 0
+        try:
+            with ctx.Pool(processes=int(workers), maxtasksperchild=int(maxtasks)) as pool:
+                it = pool.imap_unordered(
+                    _mosaic_extract_chunk_worker,
+                    [(c, float(line_buf_m), float(point_buf_m)) for c in chunks],
+                    chunksize=int(pool_chunksize),
+                )
+                for res in it:
+                    done += 1
+
+                    # Forward worker logs in the parent process only (UI-safe).
+                    wlogs = res.get("logs") or []
+                    if isinstance(wlogs, list) and wlogs:
+                        for item in wlogs[:8]:
+                            try:
+                                if isinstance(item, (tuple, list)) and len(item) == 2:
+                                    lvl, msg = item
+                                    log_to_gui(f"[Mosaic] {msg}", str(lvl) or "INFO")
+                                else:
+                                    log_to_gui(f"[Mosaic] {item}", "INFO")
+                            except Exception:
+                                pass
+
+                    if res.get("err"):
+                        log_to_gui(f"[Mosaic] Worker chunk failed: {res['err']}", "WARN")
+                    stats["boundary_parts"] += int(res.get("boundary_parts", 0))
+                    stats["skipped"] += int(res.get("skipped", 0))
+
+                    eb = res.get("edge_wkb") or b""
+                    cb = res.get("cov_wkb") or b""
+                    if eb:
+                        try:
+                            line_partials.append(shp_wkb.loads(eb))
+                            stats["union_batches"] += 1
+                        except Exception:
+                            pass
+                    if cb:
+                        try:
+                            cov_partials.append(shp_wkb.loads(cb))
+                        except Exception:
+                            pass
+
+                    if done % max(1, (len(chunks) // 20)) == 0:
+                        log_to_gui(f"[Mosaic] Boundary extraction (parallel): {done:,}/{len(chunks):,} chunks…", "INFO")
+        except Exception as e:
+            # Fall back to the serial path (keeps correctness)
+            log_to_gui(f"[Mosaic] Parallel extraction failed ({type(e).__name__}: {e}). Falling back to single-process.", "WARN")
+            use_parallel = False
+
+        # Reduce partials once, after all chunk results are collected.
+        if use_parallel and line_partials:
+            log_to_gui(
+                f"[Mosaic] Reducing partial unions: edges={len(line_partials):,}, coverage={len(cov_partials):,}…",
+                "INFO",
+            )
+            if len(line_partials) > max_partials:
+                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
+            if cov_partials and len(cov_partials) > max_partials:
+                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
+
+    if not use_parallel:
+        for i, geom in enumerate(a_metric.geometry, start=1):
+            if i % 5000 == 0:
+                log_to_gui(f"[Mosaic] Boundary extraction: {i:,}/{len(a_metric):,} assets…", "INFO")
+
+            polyish = _geom_to_polygonal_metric(geom, line_buf_m=line_buf_m, point_buf_m=point_buf_m)
+            if polyish is None:
+                stats["skipped"] += 1
+                continue
+            # Validity (can change topology slightly; but avoids GEOS failures)
+            polyish = _fix_valid(polyish)
+            ex = _extract_polygonal(polyish)
+            if ex is None or getattr(ex, "is_empty", False):
+                stats["skipped"] += 1
+                continue
+
+            cov_batch.append(ex)
+            if len(cov_batch) >= cov_batch_size:
+                flush_coverage()
+
+            for seg in _iter_boundary_lines(ex):
+                boundary_batch.append(seg)
+                stats["boundary_parts"] += 1
+                if len(boundary_batch) >= batch_size:
+                    flush_boundary()
+
+        flush_boundary()
+        flush_coverage()
+
+    if not line_partials:
+        return None, None, stats
+
+    # Final noded linework
+    line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)")
+    edge_net = _unary_union_safe(line_partials, label="linework_final", min_step=2)
+    if edge_net is None:
+        edge_net = line_partials[0]
+
+    coverage = None
+    if cov_partials:
+        cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)")
+        coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2)
+        if coverage is None:
+            coverage = cov_partials[0]
+
+    return edge_net, coverage, stats
+
 def _polyfill_cells(poly: Polygon, res: int) -> set[str]:
     if h3 is None:
         raise RuntimeError("H3 module not available")
@@ -1053,240 +1561,127 @@ def mosaic_faces_from_assets_parallel(
     grid_size_m: float,
     workers: int | None = None,
 ) -> gpd.GeoDataFrame:
-    """
-    Unchanged high-level behavior:
-      - Plan tiles (quadtree + heavy split)
-      - Stream faces out to __mosaic_faces_tmp as Parquet parts
-      - Assemble to final GeoDataFrame in EPSG:4326
-    New bits:
-      - Pool warm-up with timeout; auto-fallback to serial if warm-up fails
-      - Optional force-serial honored by run_mosaic()
+    """Build basic_mosaic faces from global linework.
+
+    Requirements:
+    - No tiling and no polygon buffering.
+    - Line and point assets are buffered to polygons using config.ini defaults
+      (default_line_buffer_m / default_point_buffer_m).
+    - Uses batched unions + tree reduction to reduce peak memory.
+    - Streams faces to disk during polygonize.
+
+        Notes:
+        - buffer_m and grid_size_m are kept for UI/CLI compatibility, but are not used
+            by this algorithm.
+        - workers is used for parallel boundary extraction (map-reduce) before the
+            final global noding + polygonize.
     """
     cfg = read_config(config_path(base_dir))
     update_progress(0)
+    log_to_gui(
+        f"[Mosaic] Linework mosaic (no tiling). Params: buffer={float(buffer_m):.2f} m (unused), grid={float(grid_size_m):.2f} m (unused), workers={workers}",
+        "INFO",
+    )
 
-    # --- load & prep assets (your existing code up to tile planning) ---
     a = _load_asset_objects(base_dir)
     if a.empty:
         log_to_gui("[Mosaic] No assets loaded; nothing to do.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-    log_to_gui(
-        f"[Mosaic] Loaded {len(a):,} asset geometries; buffer={float(buffer_m):.2f} m; grid={float(grid_size_m):.2f} m.",
-        "INFO",
-    )
 
-    # Optionally dedup identical geometries (unchanged behavior)
-    try:
-        dedup = str(cfg["DEFAULT"].get("mosaic_dedup_assets", "true")).strip().lower() in ("1","true","yes")
-    except Exception:
-        dedup = True
-    if dedup and not a.empty:
-        before = len(a)
-        a = a.loc[~a.geometry.duplicated()].copy()
-        if len(a) != before:
-            log_to_gui(f"[Mosaic] Dedup identical asset geometries: {before:,} → {len(a):,}", "INFO")
+    # Reduce memory: only geometry column.
+    a = gpd.GeoDataFrame(a[["geometry"]].copy(), geometry="geometry", crs=a.crs)
 
     metric_crs = working_metric_crs_for(a, cfg)
     t0 = time.time()
-    a = a.to_crs(metric_crs)
-    log_to_gui(f"[Mosaic] Reprojected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
-    try:
-        minx, miny, maxx, maxy = a.total_bounds
-        width_km = max(0.0, (maxx - minx) / 1000.0)
-        height_km = max(0.0, (maxy - miny) / 1000.0)
-        log_to_gui(f"[Mosaic] Asset extent ≈ {width_km:.1f} km × {height_km:.1f} km in metric CRS.")
-    except Exception:
-        pass
+    a_metric = a.to_crs(metric_crs)
+    log_to_gui(f"[Mosaic] Loaded {len(a_metric):,} assets; projected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
+    update_progress(10)
 
-    # Spatial index
-    sidx = a.sindex if hasattr(a, "sindex") else None
-    if sidx is None:
-        log_to_gui("[Mosaic] No spatial index available; building may be slower.", "WARN")
+    STATS.stage = "linework"
+    edge_net, coverage, st = _build_linework_and_coverage(a_metric, cfg=cfg, workers=workers)
+    if edge_net is None:
+        log_to_gui("[Mosaic] No linework produced; cannot polygonize.", "WARN")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Quadtree planning (kept)
-    try: max_feats_per_tile = int(cfg["DEFAULT"].get("mosaic_quadtree_max_feats_per_tile", "800"))
-    except Exception: max_feats_per_tile = 800
-    try: heavy_split_mult = float(cfg["DEFAULT"].get("mosaic_quadtree_heavy_split_multiplier", "2.0"))
-    except Exception: heavy_split_mult = 2.0
-    try: max_depth = int(cfg["DEFAULT"].get("mosaic_quadtree_max_depth", "8"))
-    except Exception: max_depth = 8
-    try: min_tile_size_m = float(cfg["DEFAULT"].get("mosaic_quadtree_min_tile_m", str(grid_size_m)))
-    except Exception: min_tile_size_m = grid_size_m
-    try: simplify_tol = float(cfg["DEFAULT"].get("mosaic_simplify_tolerance_m", "0"))
-    except Exception: simplify_tol = 0.0
-    try: flush_batch = int(cfg["DEFAULT"].get("mosaic_faces_flush_batch", "250000"))
-    except Exception: flush_batch = 250000
-    try: maxtasks = int(cfg["DEFAULT"].get("mosaic_pool_maxtasksperchild", "8"))
-    except Exception: maxtasks = 8
-    try: chunksize = int(cfg["DEFAULT"].get("mosaic_pool_chunksize", "1"))
-    except Exception: chunksize = 1
-    task_order = str(cfg["DEFAULT"].get("mosaic_task_order", "interleave")).strip().lower()
-    clip_before_buffer = str(cfg["DEFAULT"].get("mosaic_clip_before_buffer", "true")).strip().lower() in ("1","true","yes")
-    try: clip_margin = float(cfg["DEFAULT"].get("mosaic_clip_margin_m", "0.05"))
-    except Exception: clip_margin = 0.05
-
-    heavy_threshold = int(max_feats_per_tile * max(1.0, heavy_split_mult))
-
-    # plan tiles (your helper; unchanged)
-    t_plan0 = time.time()
-    minx, miny, maxx, maxy = a.total_bounds
-    leaves = _plan_tiles_quadtree(
-        a_metric=a, sidx=sidx, minx=minx, miny=miny, maxx=maxx, maxy=maxy,
-        overlap_m=buffer_m, max_feats_per_tile=max_feats_per_tile,
-        max_depth=max_depth, min_tile_size_m=max(0.0, float(min_tile_size_m))
+    log_to_gui(
+        f"[Mosaic] Linework ready: boundary_parts={st['boundary_parts']:,}, union_batches={st['union_batches']:,}, skipped={st['skipped']:,}, "
+        f"line_buf_m={st['line_buf_m']:.2f}, point_buf_m={st['point_buf_m']:.2f}.",
+        "INFO",
     )
-    log_to_gui(f"[Mosaic] Planned {len(leaves):,} tiles (first pass); {time.time()-t_plan0:.2f}s.", "INFO")
+    update_progress(55)
 
-    # heavy split (kept)
-    STATS.stage = "splitting heavy tiles"
-    balanced = []
-    heavy_count = 0
-    for (bds, idxs) in leaves:
-        if len(idxs) > heavy_threshold and max_depth > 0:
-            st = _split_tile(bds, a, sidx, overlap_m=buffer_m)
-            if st:
-                balanced.extend(st); heavy_count += 1
-            else:
-                balanced.append((bds, idxs))
-        else:
-            balanced.append((bds, idxs))
-    leaves = balanced
-    log_to_gui(f"[Mosaic] Heavy tiles split: {heavy_count}; final tiles: {len(leaves):,}.", "INFO")
+    prepared_cov = None
+    cov_area = None
+    if coverage is not None:
+        try:
+            prepared_cov = prep(coverage)
+            cov_area = float(getattr(coverage, "area", 0.0))
+        except Exception:
+            prepared_cov = None
+            cov_area = None
 
-    # pack tasks (kept)
-    STATS.stage = "packing tasks"
-    counts = []
-    tasks = []
-    tick = time.time()
-    for i, (bounds, idxs) in enumerate(leaves, start=1):
-        sub = a.iloc[idxs]
-        counts.append(len(sub))
-        wkb_list = [shp_wkb.dumps(g) for g in sub.geometry]
-        if clip_before_buffer:
-            x0, y0, x1, y1 = bounds
-            clip_poly = box(x0, y0, x1, y1).buffer(float(buffer_m) + float(clip_margin))
-            clip_wkb = shp_wkb.dumps(clip_poly)
-        else:
-            clip_wkb = b""
-        tasks.append((i-1, wkb_list, float(buffer_m), float(simplify_tol), clip_wkb))
-        if i % 200 == 0 or (time.time() - tick) >= 5:
-            STATS.detail = f"(packed {i}/{len(leaves)})"
-            tick = time.time()
-
-    order_idx = _order_tasks(counts, task_order)
-    tasks = [tasks[i] for i in order_idx]
-    counts = [counts[i] for i in order_idx]
-    n_tasks = len(tasks)
-
-    STATS.tiles_total = n_tasks
-    STATS.detail = f"(min/med/p95/max feats per tile = {min(counts) if counts else 0}/" \
-                   f"{int(np.percentile(counts,50)) if counts else 0}/" \
-                   f"{int(np.percentile(counts,95)) if counts else 0}/" \
-                   f"{max(counts) if counts else 0})"
-    log_to_gui(f"[Mosaic] Prepared {n_tasks:,} tasks; order={task_order}; chunksize={chunksize}; {STATS.detail}", "INFO")
-
-    # decide workers
-    if workers is None or workers <= 0:
-        try: workers = max(1, mp.cpu_count())
-        except Exception: workers = 4
-    log_to_gui(f"[Mosaic] Parallel polygonize; workers={workers}, maxtasksperchild={maxtasks}.", "INFO")
-
-    # streaming parts dir
+    flush_batch = max(10_000, _cfg_int(cfg, "mosaic_faces_flush_batch", 250_000))
     tmp_dir = gpq_dir(base_dir) / "__mosaic_faces_tmp"
     try:
         if tmp_dir.exists():
-            for p in tmp_dir.glob("*.parquet"):
-                try: p.unlink()
-                except Exception: pass
-        else:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+            _safe_rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
-    face_batches: List[bytes] = []
-    part_files: List[Path] = []
+    STATS.stage = "polygonize"
+    update_progress(60)
+    log_to_gui("[Mosaic] polygonize(edge_net) started…", "INFO")
 
-    def _flush_batch_to_parquet(metric_crs: str):
-        nonlocal face_batches, part_files
-        if not face_batches:
+    face_wkb_batch: List[bytes] = []
+    part_files: List[Path] = []
+    faces_kept = 0
+    faces_total = 0
+
+    def _flush_faces():
+        nonlocal face_wkb_batch, faces_kept
+        if not face_wkb_batch:
             return
-        gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_batches], crs=metric_crs)
-        gdf = gpd.GeoDataFrame(geometry=gseries).to_crs("EPSG:4326")
+        gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_wkb_batch], crs=metric_crs)
+        gdf = gpd.GeoDataFrame(geometry=gseries, crs=metric_crs).to_crs("EPSG:4326")
         part = tmp_dir / f"faces_part_{len(part_files):05d}.parquet"
         gdf.to_parquet(part, index=False)
         part_files.append(part)
-        STATS.faces_total += len(gdf)
-        log_to_gui(
-            f"[Mosaic] Flushed {len(gdf):,} faces to {part.name}; cumulative faces {STATS.faces_total:,}.",
-            "INFO",
-        )
-        face_batches = []
-
-    # --- process tasks (NEW: warm-up + fallback) ---
-    STATS.stage = "polygonize (workers)"
-    STATS.worker_started_at = time.time()
-    ctx = mp.get_context("spawn")
+        faces_kept += len(gdf)
+        face_wkb_batch = []
+        log_to_gui(f"[Mosaic] Flushed {len(gdf):,} faces to {part.name}; kept so far {faces_kept:,}.", "INFO")
 
     try:
-        # Serial path (either requested or trivial)
-        if workers == 1 or n_tasks <= 1:
-            for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
-                _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
-                STATS.tiles_done += 1
-                if err:
-                    log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
-                else:
-                    face_batches.extend(res)
-                    if len(face_batches) >= flush_batch:
-                        _flush_batch_to_parquet(metric_crs)
-                update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
-        else:
-            # --- Warm-up: prove the frozen children can run our worker ---
-            warm_ok = True
+        for poly in polygonize(edge_net):
+            faces_total += 1
+            if poly is None or poly.is_empty:
+                continue
+            if not isinstance(poly, (Polygon, MultiPolygon)):
+                continue
+            if prepared_cov is not None:
+                try:
+                    rp = poly.representative_point()
+                    if not prepared_cov.contains(rp):
+                        continue
+                except Exception:
+                    pass
             try:
-                with ctx.Pool(processes=min(2, workers), maxtasksperchild=1) as warm_pool:
-                    r = warm_pool.apply_async(_mosaic_tile_worker, args=((0, [], 0.0, 0.0, b""),))
-                    # if child cannot import/run, this will raise on get()
-                    r.get(timeout=20)
-            except Exception as e:
-                warm_ok = False
-                log_to_gui(f"[Mosaic] Parallel warm-up failed ({type(e).__name__}: {e}). Falling back to single-process.", "WARN")
-
-            if not warm_ok:
-                # Fallback to serial without restarting whole run
-                for (idx, wkb_list, bufm, simp, clip_wkb) in tasks:
-                    _, res, err = _mosaic_tile_worker((idx, wkb_list, bufm, simp, clip_wkb))
-                    STATS.tiles_done += 1
-                    if err:
-                        log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
-                    else:
-                        face_batches.extend(res)
-                        if len(face_batches) >= flush_batch:
-                            _flush_batch_to_parquet(metric_crs)
-                    update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
-            else:
-                # Real pool
-                with ctx.Pool(processes=workers, maxtasksperchild=maxtasks) as pool:
-                    for (idx, res, err) in pool.imap_unordered(_mosaic_tile_worker, tasks, chunksize=max(1, chunksize)):
-                        STATS.tiles_done += 1
-                        if err:
-                            log_to_gui(f"[Mosaic] Tile {idx+1}/{n_tasks} error: {err}", "WARN")
-                        else:
-                            face_batches.extend(res)
-                            if len(face_batches) >= flush_batch:
-                                _flush_batch_to_parquet(metric_crs)
-                        update_progress(5 + STATS.tiles_done * (80 / max(1, n_tasks)))
+                face_wkb_batch.append(shp_wkb.dumps(poly))
+            except Exception:
+                continue
+            if len(face_wkb_batch) >= flush_batch:
+                _flush_faces()
+            if faces_total % 200_000 == 0:
+                log_to_gui(f"[Mosaic] polygonize progress: produced {faces_total:,} faces; kept {faces_kept + len(face_wkb_batch):,}", "INFO")
     finally:
-        # Always flush whatever we have so far
-        _flush_batch_to_parquet(metric_crs)
-        log_to_gui(f"[Mosaic] Worker stage done: tiles {STATS.tiles_done}/{STATS.tiles_total}, faces so far {STATS.faces_total:,}.", "INFO")
+        _flush_faces()
 
-    # --- assemble parts ---
-    STATS.stage = "assembling"
     if not part_files:
-        log_to_gui("[Mosaic] No faces parts produced; nothing to assemble.", "WARN")
+        log_to_gui("[Mosaic] No faces produced; mosaic empty.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
+    update_progress(85)
+    STATS.stage = "assembling"
     parts = []
     for p in sorted(part_files):
         try:
@@ -1295,9 +1690,28 @@ def mosaic_faces_from_assets_parallel(
             log_to_gui(f"[Mosaic] Failed to read part {p.name}: {e}", "WARN")
     if not parts:
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-
     faces = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
     log_to_gui(f"[Mosaic] Assembled {len(faces):,} faces from {len(part_files)} part(s).", "INFO")
+
+    # Sanity check: compare face area vs coverage area (metric CRS)
+    rel_tol = max(0.0, _cfg_float(cfg, "mosaic_sanity_area_rel_tol", 0.002))
+    abs_tol_m2 = max(0.0, _cfg_float(cfg, "mosaic_sanity_area_abs_m2", 1.0e7))
+    try:
+        faces_area = float(faces.to_crs(metric_crs).geometry.area.sum())
+        if cov_area is not None and cov_area > 0:
+            diff = abs(faces_area - cov_area)
+            ok = diff <= max(abs_tol_m2, rel_tol * cov_area)
+            log_to_gui(
+                f"[Mosaic][Sanity] coverage_area={cov_area:,.0f} m²; faces_area={faces_area:,.0f} m²; diff={diff:,.0f} m²; "
+                f"tol=max({abs_tol_m2:,.0f}, {rel_tol:.4f}×coverage) => {'OK' if ok else 'WARN'}",
+                "INFO" if ok else "WARN",
+            )
+        else:
+            log_to_gui(f"[Mosaic][Sanity] faces_area={faces_area:,.0f} m² (coverage unavailable)", "INFO")
+    except Exception as e:
+        log_to_gui(f"[Mosaic][Sanity] area computation failed: {e}", "WARN")
+
+    update_progress(100)
     return faces
 
 
