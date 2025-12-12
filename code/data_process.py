@@ -515,7 +515,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     tile_ceiling = 99.0  # keep headroom for explicit "completed" phase to own 100%
     try:
-        layers_per_group = 7  # sensitivity, env, groupstotal, assetstotal, importance_max, importance_index, sensitivity_index
+        layers_per_group = 8  # sensitivity, env, groupstotal, assetstotal, importance_max, importance_index, sensitivity_index, owa_index
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
@@ -1691,6 +1691,155 @@ def _scale_index_scores(scores: pd.Series, labels: pd.Series | None = None) -> p
         scaled.loc[group.index] = vals
     return scaled
 
+
+_ASSET_GROUP_LOOKUP: pd.DataFrame | None = None
+
+
+def _get_asset_group_lookup() -> pd.DataFrame:
+    """Small lookup table keyed by ref_asset_group.
+
+    Used to backfill importance/sensitivity/susceptibility into tbl_stacked rows
+    when those numeric fields are not materialized in tbl_stacked partitions.
+    """
+    global _ASSET_GROUP_LOOKUP
+    if _ASSET_GROUP_LOOKUP is not None:
+        return _ASSET_GROUP_LOOKUP
+
+    try:
+        path = gpq_dir() / "tbl_asset_group.parquet"
+        if not path.exists():
+            _ASSET_GROUP_LOOKUP = pd.DataFrame()
+            return _ASSET_GROUP_LOOKUP
+
+        df = pd.read_parquet(path)
+        if "id" in df.columns and "ref_asset_group" not in df.columns:
+            df = df.rename(columns={"id": "ref_asset_group"})
+
+        keep = [
+            "ref_asset_group",
+            "name_gis_assetgroup",
+            "importance",
+            "sensitivity",
+            "susceptibility",
+            "sensitivity_code",
+        ]
+        keep = [c for c in keep if c in df.columns]
+        df = df[keep].copy()
+        if "ref_asset_group" in df.columns:
+            df["ref_asset_group"] = pd.to_numeric(df["ref_asset_group"], errors="coerce")
+
+        _ASSET_GROUP_LOOKUP = df
+        return _ASSET_GROUP_LOOKUP
+    except Exception:
+        _ASSET_GROUP_LOOKUP = pd.DataFrame()
+        return _ASSET_GROUP_LOOKUP
+
+
+def _compute_owa_counts_from_stacked(df: pd.DataFrame, min_score: int = 1, max_score: int = 25) -> pd.DataFrame:
+    """Return per-geocode counts for each integer sensitivity score.
+
+    Output columns: code, owa_n1..owa_n25
+    """
+    if df is None or df.empty or "code" not in df.columns:
+        cols = ["code"] + [f"owa_n{i}" for i in range(min_score, max_score + 1)]
+        return pd.DataFrame(columns=cols)
+
+    out_cols = [f"owa_n{i}" for i in range(min_score, max_score + 1)]
+    if "sensitivity" not in df.columns:
+        # No sensitivity column -> emit zeros for observed codes
+        codes = df[["code"]].dropna().drop_duplicates().copy()
+        for col in out_cols:
+            codes[col] = 0
+        return codes
+
+    tmp = df[["code", "sensitivity"]].copy()
+    tmp = tmp.dropna(subset=["code"])
+    if tmp.empty:
+        cols = ["code"] + out_cols
+        return pd.DataFrame(columns=cols)
+
+    sens = pd.to_numeric(tmp["sensitivity"], errors="coerce").round()
+    sens = sens.clip(min_score, max_score)
+    tmp = tmp.assign(__sens__=sens)
+    tmp = tmp.dropna(subset=["__sens__"])
+    if tmp.empty:
+        codes = df[["code"]].dropna().drop_duplicates().copy()
+        for col in out_cols:
+            codes[col] = 0
+        return codes
+
+    tmp["__sens__"] = tmp["__sens__"].astype(int)
+    pivot = tmp.groupby(["code", "__sens__"]).size().unstack(fill_value=0)
+    for score in range(min_score, max_score + 1):
+        if score not in pivot.columns:
+            pivot[score] = 0
+    pivot = pivot[[i for i in range(min_score, max_score + 1)]]
+    pivot.columns = out_cols
+    return pivot.reset_index()
+
+
+def _compute_owa_index_from_counts(
+    tbl_flat: pd.DataFrame,
+    labels: pd.Series | None = None,
+    min_score: int = 1,
+    max_score: int = 25,
+) -> pd.Series:
+    """Compute OWA (precautionary addition) index as an Int64 0..100 scale.
+
+    Ranking is lexicographic on counts from max_score down to min_score.
+    The highest-ranked cell gets 100, and cells with no overlaps get 0.
+    """
+    if tbl_flat is None or len(tbl_flat) == 0:
+        return pd.Series(dtype="Int64")
+
+    cols_desc = [f"owa_n{i}" for i in range(max_score, min_score - 1, -1) if f"owa_n{i}" in tbl_flat.columns]
+    if not cols_desc:
+        return pd.Series([0] * len(tbl_flat), index=tbl_flat.index, dtype="Int64")
+
+    df = tbl_flat[cols_desc].copy()
+    for c in cols_desc:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+        df[c] = df[c].clip(lower=0)
+
+    if labels is None:
+        group_labels = pd.Series(["__all__"] * len(df), index=df.index, dtype="string")
+    else:
+        group_labels = labels.reindex(df.index).astype("string").fillna("__all__")
+
+    result = pd.Series([0] * len(df), index=df.index, dtype="Int64")
+
+    # Group-wise dense rank on lexicographic ordering of count vectors
+    for _, idx in df.groupby(group_labels).groups.items():
+        sub = df.loc[idx]
+        if sub.empty:
+            continue
+
+        # If every row is all-zero, keep as 0.
+        if (sub.sum(axis=1) == 0).all():
+            result.loc[idx] = 0
+            continue
+
+        sorted_sub = sub.sort_values(cols_desc, ascending=[False] * len(cols_desc), kind="mergesort")
+        arr = sorted_sub.to_numpy()
+        is_new = np.ones(len(sorted_sub), dtype=bool)
+        if len(sorted_sub) > 1:
+            is_new[1:] = (arr[1:] != arr[:-1]).any(axis=1)
+        dense = np.cumsum(is_new)
+        max_dense = int(dense[-1])
+
+        # Invert so best gets max_dense
+        rank_high = (max_dense - dense + 1).astype(float)
+        scaled = np.round((rank_high / max(max_dense, 1)) * 100.0)
+        scaled = np.clip(scaled, 1.0, 100.0)
+        scaled = scaled.astype("int64")
+
+        out = pd.Series(scaled, index=sorted_sub.index, dtype="Int64")
+        # Force all-zero rows to 0
+        out.loc[sorted_sub.sum(axis=1) == 0] = 0
+        result.loc[out.index] = out
+
+    return result
+
 # ----------------------------
 # Parallel Flattening Workers
 # ----------------------------
@@ -1707,6 +1856,32 @@ def _flatten_worker(args):
     
     if df.empty:
         return None
+
+    # Backfill numeric score fields from tbl_asset_group if tbl_stacked doesn't materialize them.
+    # (Current tbl_stacked partitions often only store ref_asset_group + attributes strings.)
+    try:
+        if "ref_asset_group" in df.columns:
+            ag = _get_asset_group_lookup()
+            if ag is not None and not ag.empty:
+                merged = df.merge(ag, on="ref_asset_group", how="left", suffixes=("", "_ag"))
+                for b in ("importance", "sensitivity", "susceptibility"):
+                    src = f"{b}_ag"
+                    if b not in merged.columns and src in merged.columns:
+                        merged[b] = merged[src]
+                    elif b in merged.columns and src in merged.columns:
+                        merged[b] = merged[b].where(~pd.isna(merged[b]), merged[src])
+                for c in ("name_gis_assetgroup", "sensitivity_code"):
+                    src = f"{c}_ag"
+                    if c not in merged.columns and src in merged.columns:
+                        merged[c] = merged[src]
+                    elif c in merged.columns and src in merged.columns:
+                        merged[c] = merged[c].where(~pd.isna(merged[c]), merged[src])
+                drop_cols = [c for c in merged.columns if c.endswith("_ag")]
+                if drop_cols:
+                    merged = merged.drop(columns=drop_cols)
+                df = merged
+    except Exception:
+        pass
 
     # Ensure numeric bases
     bases = ["importance","sensitivity","susceptibility"]
@@ -1812,6 +1987,9 @@ def _flatten_worker(args):
         score_sums = g.groupby("code")["score_part"].sum().reset_index(name=f"{idx_name}_raw_score")
         raw_scores[idx_name] = score_sums
 
+    # OWA counts (precautionary addition) from sensitivity values 1..25
+    owa_counts = _compute_owa_counts_from_stacked(df, min_score=1, max_score=25)
+
     # Merge all partials
     res = meta
     res = res.merge(counts, on="code", how="left")
@@ -1820,6 +1998,15 @@ def _flatten_worker(args):
         res = res.merge(e, on="code", how="left")
     for k, v in raw_scores.items():
         res = res.merge(v, on="code", how="left")
+
+    if owa_counts is not None and not owa_counts.empty:
+        res = res.merge(owa_counts, on="code", how="left")
+    else:
+        # Ensure columns exist for downstream ranking
+        for score in range(1, 26):
+            col = f"owa_n{score}"
+            if col not in res.columns:
+                res[col] = 0
         
     return res
 
@@ -1867,6 +2054,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
+            'index_importance','index_sensitivity','env_index','owa_index',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -1967,6 +2155,8 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         for k in ["importance_raw_score", "sensitivity_raw_score"]:
             if k in full.columns:
                 simple_agg[k] = "sum"
+        for c in [c for c in full.columns if str(c).startswith("owa_n")]:
+            simple_agg[c] = "sum"
         
         grouped = full.groupby("code")
         res_simple = grouped.agg(simple_agg).reset_index()
@@ -2095,6 +2285,14 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         env_base = pd.Series([0] * len(tbl_flat), index=tbl_flat.index, dtype="float64")
     tbl_flat["env_index"] = env_base.clip(lower=0, upper=100).round().astype("Int64")
 
+    # 6b. OWA index (precautionary addition) scaled 0..100
+    try:
+        owa = _compute_owa_index_from_counts(tbl_flat, group_map, min_score=1, max_score=25)
+        tbl_flat["owa_index"] = owa.reindex(tbl_flat.index).fillna(0)
+    except Exception:
+        tbl_flat["owa_index"] = 0
+    tbl_flat["owa_index"] = pd.to_numeric(tbl_flat["owa_index"], errors="coerce").fillna(0).round().astype("Int64")
+
     # 7. Select Columns & Write
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
@@ -2102,7 +2300,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
         'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
         'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-        'index_importance','index_sensitivity','env_index',
+        'index_importance','index_sensitivity','env_index','owa_index',
         'geometry'
     ]
     for c in preferred:
