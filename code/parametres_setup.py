@@ -842,22 +842,109 @@ if __name__ == "__main__":
         pass
     root.geometry("1100x860")
 
-    nb = ttkb.Notebook(root, bootstyle=PRIMARY); nb.pack(fill='both', expand=True)
+    # -------------------------------
+    # Layout: left navigation controls right content
+    # -------------------------------
+    root.grid_rowconfigure(0, weight=1)
+    root.grid_columnconfigure(0, weight=0)
+    root.grid_columnconfigure(1, weight=1)
 
-    # Start
-    tab_start = ttkb.Frame(nb); nb.add(tab_start, text="Start")
-    build_start_tab(tab_start)
+    nav = ttkb.Frame(root, padding=(12, 12))
+    nav.grid(row=0, column=0, sticky="ns")
+    nav.configure(width=260)
+    try:
+        nav.grid_propagate(False)
+    except Exception:
+        pass
 
-    tab_idx = ttkb.Frame(nb); nb.add(tab_idx, text="Indexes")
-    build_indexes_tab(tab_idx)
+    content = ttkb.Frame(root, padding=(12, 12))
+    content.grid(row=0, column=1, sticky="nsew")
+    content.grid_rowconfigure(0, weight=1)
+    content.grid_columnconfigure(0, weight=1)
 
-    # Vulnerability
-    tab_vuln = ttkb.Frame(nb); nb.add(tab_vuln, text="Sensitivity")
-    canvas_v, frame_v = create_scrollable_area(tab_vuln)
+    # Inline status
+    status_message_var = tk.StringVar(value="Ready")
+
+    def do_save_all_excel():
+        input_folder = os.path.join(original_working_directory, "input")
+        os.makedirs(input_folder, exist_ok=True)
+        excel_path = filedialog.asksaveasfilename(
+            title="Save Excel File",
+            initialdir=input_folder,
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
+        )
+        if excel_path:
+            update_all_vuln_rows(entries_vuln, gdf_asset_group)
+            enforce_vuln_dtypes_inplace(gdf_asset_group)
+            save_all_to_excel(gdf_asset_group, excel_path)
+
+    def do_load_all_excel():
+        input_folder = os.path.join(original_working_directory, "input")
+        excel_path = filedialog.askopenfilename(
+            title="Select Excel File",
+            initialdir=input_folder,
+            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
+        )
+        if excel_path:
+            load_all_from_excel(excel_path)
+
+    def do_save_database():
+        # "Database" here is the project data store (GeoParquet + config.ini).
+        update_all_vuln_rows(entries_vuln, gdf_asset_group)
+        enforce_vuln_dtypes_inplace(gdf_asset_group)
+        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+        save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        persist_index_weights_from_ui(strict=False, silent=True)
+        _set_status_message("Saved changes to GeoParquet.")
+
+    ttkb.Label(nav, text="Edit", bootstyle="secondary").pack(anchor="w", pady=(0, 8))
+
+    # Views (created below)
+    def show_view(which: str):
+        which = (which or "").strip().lower()
+        view_indexes.grid_forget()
+        view_sensitivity.grid_forget()
+        if which == "indexes":
+            view_indexes.grid(row=0, column=0, sticky="nsew")
+        else:
+            view_sensitivity.grid(row=0, column=0, sticky="nsew")
+
+    ttkb.Button(nav, text="Edit indexes", command=lambda: show_view("indexes"), bootstyle=PRIMARY).pack(fill="x", pady=4)
+    ttkb.Button(nav, text="Edit sensitivity", command=lambda: show_view("sensitivity"), bootstyle=PRIMARY).pack(fill="x", pady=4)
+
+    ttkb.Separator(nav).pack(fill="x", pady=12)
+    ttkb.Label(nav, text="Data management", bootstyle="secondary").pack(anchor="w", pady=(0, 8))
+    ttkb.Button(nav, text="Save to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(fill="x", pady=4)
+    ttkb.Button(nav, text="Load from Excel", command=do_load_all_excel, bootstyle=INFO).pack(fill="x", pady=4)
+    ttkb.Button(nav, text="Save to database", command=do_save_database, bootstyle=PRIMARY).pack(fill="x", pady=4)
+
+    status_label = ttkb.Label(nav, textvariable=status_message_var, justify='left', bootstyle="secondary", wraplength=230)
+    status_label.pack(side='bottom', fill='x', pady=(12, 0))
+
+    # Right-side views
+    view_host = ttkb.Frame(content)
+    view_host.grid(row=0, column=0, sticky="nsew")
+    view_host.grid_rowconfigure(0, weight=1)
+    view_host.grid_columnconfigure(0, weight=1)
+
+    view_indexes = ttkb.Frame(view_host)
+    build_indexes_tab(view_indexes)
+
+    view_sensitivity = ttkb.Frame(view_host)
+    canvas_v, frame_v = create_scrollable_area(view_sensitivity)
     entries_vuln = []
     setup_headers_vuln(frame_v, column_widths)
     for i, row in enumerate(gdf_asset_group.itertuples(), start=1):
         add_vuln_row(i, row, frame_v, entries_vuln, gdf_asset_group)
     frame_v.update_idletasks(); canvas_v.configure(scrollregion=canvas_v.bbox("all"))
+
+    # Default view
+    show_view("sensitivity")
+
+    try:
+        root.protocol("WM_DELETE_WINDOW", close_application)
+    except Exception:
+        pass
 
     root.mainloop()
