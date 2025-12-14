@@ -45,7 +45,24 @@ entries_vuln = []
 FALLBACK_VULN = 3
 INDEX_WEIGHT_DEFAULTS = {
     "importance": [1, 2, 5, 5, 10],
-    "sensitivity": [1, 2, 3, 5, 10],
+    # Sensitivity is derived as importance * susceptibility (both 1..5).
+    # Only these products can occur.
+    "sensitivity": [
+        10, # 1
+        10, # 2
+        10, # 3
+        10, # 4
+        10, # 5
+        10, # 6
+        10, # 8
+        10, # 9
+        10, # 10
+        10, # 12
+        10, # 15
+        10, # 16
+        10, # 20
+        10, # 25
+    ],
 }
 INDEX_WEIGHT_KEYS = {
     "importance": "index_importance_weights",
@@ -54,6 +71,8 @@ INDEX_WEIGHT_KEYS = {
 index_weight_settings: dict[str, list[int]] = {}
 index_weight_vars: dict[str, list[tk.StringVar]] = {}
 status_message_var: Optional[tk.StringVar] = None
+
+SENSITIVITY_PRODUCT_VALUES: list[int] = [1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 20, 25]
 
 # paths set in __main__
 original_working_directory = ""
@@ -264,8 +283,9 @@ def _parse_weight_line(text: str, default: list[int]) -> list[int]:
         if not text:
             return default.copy()
         raw = [int(x.strip()) for x in str(text).replace(";", ",").split(",") if x.strip()]
-        cleaned = [max(1, v) for v in raw[:5]]
-        while len(cleaned) < 5:
+        want = len(default)
+        cleaned = [max(1, v) for v in raw[:want]]
+        while len(cleaned) < want:
             cleaned.append(default[len(cleaned)])
         return cleaned
     except Exception:
@@ -282,8 +302,9 @@ def load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, list
 def persist_index_weight_settings(cfg_path: str, settings: dict[str, list[int]]) -> None:
     payload = {}
     for key, weights in settings.items():
-        safe = [max(1, int(w)) for w in weights[:5]]
-        while len(safe) < 5:
+        expected = len(INDEX_WEIGHT_DEFAULTS.get(key, [])) or 5
+        safe = [max(1, int(w)) for w in weights[:expected]]
+        while len(safe) < expected:
             safe.append(1)
         payload[INDEX_WEIGHT_KEYS[key]] = ",".join(str(v) for v in safe)
     update_config_with_values(cfg_path, **payload)
@@ -598,6 +619,7 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
     collected: dict[str, list[int]] = {}
     for key, vars_list in index_weight_vars.items():
         defaults = INDEX_WEIGHT_DEFAULTS.get(key, INDEX_WEIGHT_DEFAULTS['importance'])
+        labels = list(range(1, 6)) if key == "importance" else SENSITIVITY_PRODUCT_VALUES
         values: list[int] = []
         for idx, var in enumerate(vars_list, start=1):
             txt = (var.get() or "").strip()
@@ -605,7 +627,8 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
                 val = int(txt)
             else:
                 if strict:
-                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be a positive integer.")
+                    lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
+                    messagebox.showerror("Indexes", f"Weight for value {lab} in {key} must be a positive integer.")
                     return None
                 try:
                     val = int(float(txt))
@@ -614,7 +637,8 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
                     val = defaults[fallback_idx] if fallback_idx < len(defaults) else 1
             if val < 1:
                 if strict:
-                    messagebox.showerror("Indexes", f"Weight for value {idx} in {key} must be at least 1.")
+                    lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
+                    messagebox.showerror("Indexes", f"Weight for value {lab} in {key} must be at least 1.")
                     return None
                 val = 1
             values.append(val)
@@ -650,42 +674,44 @@ def build_indexes_tab(parent):
 
     info = (
         "Configure weighting for the new importance and sensitivity indexes.\n"
-        "Each value column corresponds to the input value (1–5) stored in tbl_stacked.\n"
+        "Importance uses input values 1–5. Sensitivity uses the product importance×susceptibility.\n"
         "Weights must be positive integers; higher weights increase the contribution when\n"
         "counting overlapping assets inside each mosaic cell."
     )
     ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0, 12))
 
     sections = [
-        ("importance", "Importance index weights"),
-        ("sensitivity", "Sensitivity index weights"),
+        ("importance", "Importance index weights (1–5)", list(range(1, 6))),
+        ("sensitivity", "Sensitivity weights (importance×susceptibility)", SENSITIVITY_PRODUCT_VALUES),
     ]
     weight_vars: dict[str, list[tk.StringVar]] = {}
 
-    for key, title in sections:
+    for key, title, value_labels in sections:
         box = ttkb.LabelFrame(frm, text=title, bootstyle="info")
         box.pack(fill='x', pady=8)
-        ttkb.Label(box, text="Value", width=10, anchor='center').grid(row=0, column=0, padx=5, pady=(6, 4))
-        for v in range(1, 6):
-            ttkb.Label(box, text=str(v), width=6, anchor='center').grid(row=0, column=v, padx=2, pady=(6, 4))
-        ttkb.Label(box, text="Weight", width=10, anchor='center').grid(row=1, column=0, padx=5, pady=4)
 
         vars_for_key: list[tk.StringVar] = []
         current = index_weight_settings.get(key, INDEX_WEIGHT_DEFAULTS[key])
-        for idx in range(5):
+
+        # Lay out in 7 columns per line to keep the dialog readable.
+        per_line = 7
+        for idx, v in enumerate(value_labels):
+            block = (idx // per_line)
+            col = (idx % per_line) + 1
+            r0 = block * 2
+            ttkb.Label(box, text=str(v), width=6, anchor='center').grid(row=r0, column=col, padx=2, pady=(6, 2))
             var = tk.StringVar(value=str(current[idx] if idx < len(current) else 1))
             entry = ttkb.Entry(box, width=6, justify='center', textvariable=var)
-            entry.grid(row=1, column=idx + 1, padx=2, pady=4)
+            entry.grid(row=r0 + 1, column=col, padx=2, pady=(0, 6))
             vars_for_key.append(var)
+
+        ttkb.Label(box, text="Value", width=10, anchor='w').grid(row=0, column=0, padx=5, pady=(6, 2), sticky='w')
+        ttkb.Label(box, text="Weight", width=10, anchor='w').grid(row=1, column=0, padx=5, pady=(0, 6), sticky='w')
         weight_vars[key] = vars_for_key
 
     index_weight_vars = weight_vars
 
-    def save_weight_settings():
-        if persist_index_weights_from_ui(strict=True, silent=False):
-            _set_status_message("Index weights saved to config.ini")
-
-    ttkb.Button(frm, text="Save weights", bootstyle=PRIMARY, command=save_weight_settings).pack(anchor='w', pady=(12, 0))
+    # No "Save weights" button: weights are persisted as part of "Save to database".
 
 # -------------------------------
 # Vulnerability UI
