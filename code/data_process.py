@@ -98,12 +98,31 @@ _DEFAULT_BASIC_GROUP_NAME = "basic_mosaic"
 
 INDEX_WEIGHT_DEFAULTS = {
     "importance": [1, 1, 2, 3, 3],
-    "sensitivity": [1, 1, 2, 3, 3],
+    # Sensitivity is derived as importance * susceptibility (both 1..5).
+    # Only these products can occur.
+    "sensitivity": [
+        10, # 1
+        10, # 2
+        10, # 3
+        10, # 4
+        10, # 5
+        10, # 6
+        10, # 8
+        10, # 9
+        10, # 10
+        10, # 12
+        10, # 15
+        10, # 16
+        10, # 20
+        10, # 25
+    ],
 }
 INDEX_WEIGHT_KEYS = {
     "importance": "index_importance_weights",
     "sensitivity": "index_sensitivity_weights",
 }
+
+SENSITIVITY_PRODUCT_VALUES: list[int] = [1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 20, 25]
 
 # ----------------------------
 # Paths & config helpers
@@ -1627,8 +1646,9 @@ def _parse_index_weight_line(text: str, default: list[int]) -> list[int]:
         if not text:
             return default.copy()
         parts = [int(x.strip()) for x in str(text).replace(";", ",").split(",") if x.strip()]
-        values = [max(1, v) for v in parts[:5]]
-        while len(values) < 5:
+        want = len(default)
+        values = [max(1, v) for v in parts[:want]]
+        while len(values) < want:
             values.append(default[len(values)])
         return values
     except Exception:
@@ -1642,6 +1662,37 @@ def _load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, lis
         raw = defaults.get(option, "")
         settings[key] = _parse_index_weight_line(raw, base)
     return settings
+
+def _compute_sensitivity_raw_scores_from_stacked(df: pd.DataFrame, weights: list[int]) -> pd.Series:
+    """Compute sensitivity raw scores using explicit weights per product value.
+
+    Sensitivity values are expected to be the product of importance (1..5) and susceptibility (1..5),
+    yielding values in SENSITIVITY_PRODUCT_VALUES.
+    """
+    if df.empty or "code" not in df.columns or "sensitivity" not in df.columns:
+        return pd.Series(dtype="float64")
+    if not weights:
+        return pd.Series(dtype="float64")
+
+    tmp = df[["code", "sensitivity"]].copy()
+    tmp = tmp.dropna(subset=["code", "sensitivity"])
+    if tmp.empty:
+        return pd.Series(dtype="float64")
+
+    vals = pd.to_numeric(tmp["sensitivity"], errors="coerce").round()
+    tmp = tmp.assign(product=vals)
+    tmp = tmp.dropna(subset=["product"])
+    if tmp.empty:
+        return pd.Series(dtype="float64")
+
+    weight_map = {v: int(weights[i]) if i < len(weights) else 1 for i, v in enumerate(SENSITIVITY_PRODUCT_VALUES)}
+    tmp["product"] = tmp["product"].astype(int)
+    g = tmp.groupby(["code", "product"]).size().reset_index(name="count")
+    g["weight"] = g["product"].map(lambda x: int(weight_map.get(int(x), 0)))
+    g["score_part"] = g["count"] * g["weight"]
+    scores = g.groupby("code")["score_part"].sum()
+    scores = pd.to_numeric(scores, errors="coerce").fillna(0).astype("float64")
+    return scores
 
 def _compute_index_scores_from_stacked(df: pd.DataFrame, value_col: str, weights: list[int]) -> pd.Series:
     if df.empty or value_col not in df.columns or "code" not in df.columns:
@@ -1968,22 +2019,40 @@ def _flatten_worker(args):
         extremes.append(_select_extreme_local(df, b, "max"))
 
     # Raw Scores
-    # We compute sum(weight * count) per bucket
+    # Importance: 1..5 bucket weights.
+    # Sensitivity: explicit weights per (importance×susceptibility) product.
     raw_scores = {}
     for idx_name in ["importance", "sensitivity"]:
         w = index_weights.get(idx_name, [])
-        if not w: continue
-        # bucket logic
+        if not w:
+            continue
+
         val_col = idx_name
         tmp = df[["code", val_col]].dropna()
-        vals = pd.to_numeric(tmp[val_col], errors="coerce").round().clip(1, len(w)).astype(int)
-        tmp = tmp.assign(bucket=vals)
-        # group by code, bucket -> count
-        g = tmp.groupby(["code", "bucket"]).size().reset_index(name="count")
-        # map bucket to weight
-        g["weight"] = g["bucket"].map(lambda x: w[x-1] if 0 < x <= len(w) else 0)
-        g["score_part"] = g["count"] * g["weight"]
-        # sum per code
+        if tmp.empty:
+            continue
+
+        vals = pd.to_numeric(tmp[val_col], errors="coerce").round()
+        tmp = tmp.assign(value=vals)
+        tmp = tmp.dropna(subset=["value"])
+        if tmp.empty:
+            continue
+
+        if idx_name == "importance":
+            # Clip to 1..5 and treat as bucket index
+            tmp["bucket"] = tmp["value"].clip(1, len(w)).astype(int)
+            g = tmp.groupby(["code", "bucket"]).size().reset_index(name="count")
+            g["weight"] = g["bucket"].map(lambda x: w[x - 1] if 0 < x <= len(w) else 0)
+            g["score_part"] = g["count"] * g["weight"]
+        else:
+            # Sensitivity values are products in {1,2,3,4,5,6,8,9,10,12,15,16,20,25}.
+            # Map each product value to its configured weight.
+            weight_map = {v: (w[i] if i < len(w) else 1) for i, v in enumerate(SENSITIVITY_PRODUCT_VALUES)}
+            tmp["product"] = tmp["value"].astype(int)
+            g = tmp.groupby(["code", "product"]).size().reset_index(name="count")
+            g["weight"] = g["product"].map(lambda x: int(weight_map.get(int(x), 0)))
+            g["score_part"] = g["count"] * g["weight"]
+
         score_sums = g.groupby("code")["score_part"].sum().reset_index(name=f"{idx_name}_raw_score")
         raw_scores[idx_name] = score_sums
 
@@ -2087,7 +2156,8 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     if _mp_allowed() and max_workers > 1:
         with multiprocessing.get_context("spawn").Pool(max_workers) as pool:
             args = [(f, ranges_map, desc_map, index_weights) for f in files]
-            for res in pool.imap_unordered(_flatten_worker, args):
+            results = pool.map(_flatten_worker, args)
+            for res in results:
                 if res is not None:
                     partials.append(res)
     else:
@@ -2095,15 +2165,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             res = _flatten_worker((f, ranges_map, desc_map, index_weights))
             if res is not None:
                 partials.append(res)
-
-    if not partials:
-        log_to_gui(log_widget, "No data found in partitions.")
-        return
-
-    # 4. Reduce (Concatenate & Final Aggregation)
-    log_to_gui(log_widget, "Merging partial results…")
-    full = pd.concat(partials, ignore_index=True)
-    
     # If a code was split across files, we need to aggregate again
     # Group by code
     # Aggregations:
