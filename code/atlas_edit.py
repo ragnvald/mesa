@@ -304,7 +304,7 @@ def load_data(base_dir: Path, layer_file: str):
     """
     gpq_path = atlas_parquet_path(base_dir, layer_file)
     if not gpq_path.exists():
-        messagebox.showerror("Missing data", "Required atlas data is missing.")
+        messagebox.showerror("Missing data", "Required atlas data is missing. Define atlas tiles first ")
         empty = _empty_gdf()
         return empty, pd.DataFrame(empty.drop(columns=['geometry'])), str(gpq_path)
     try:
