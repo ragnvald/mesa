@@ -15,6 +15,10 @@ import matplotlib.pyplot as plt
 from matplotlib import cm  # still used for ScalarMappable (not deprecated)
 from matplotlib import colormaps as mpl_cmaps  # modern colormap access
 import matplotlib.colors as mcolors
+try:
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+except Exception:
+    inset_axes = None
 import numpy as np
 import argparse
 import os
@@ -45,6 +49,7 @@ import threading
 from pathlib import Path
 import subprocess
 import io, math, time, urllib.request
+import sqlite3
 from docx import Document
 from docx.shared import Inches, Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -58,6 +63,8 @@ ATLAS_FIGURE_INCHES = (7.2, 7.2)   # atlas tiles render smaller to fit more per 
 ATLAS_DOC_WIDTH_SCALE = 0.75       # reduce displayed width of atlas images inside documents
 
 TILE_CACHE_MAX_AGE_DAYS = 30       # discard cached OSM tiles older than this (<=0 keeps forever)
+
+OSM_ATTRIBUTION_TEXT = "© OpenStreetMap contributors"
 
 # ---------------- GUI / globals ----------------
 log_widget = None
@@ -118,15 +125,40 @@ class ReportEngine:
         if flat_df.empty or 'name_gis_geocodegroup' not in flat_df.columns:
             return pages, intro_table, groups
 
-        groups = (flat_df['name_gis_geocodegroup']
-                  .astype('string')
-                  .dropna().unique().tolist())
-        groups = sorted(groups)
+        # Report maps: only basic_mosaic (or configured basic_group_name)
+        try:
+            cfg_local = read_config(self.config_path)
+            basic_name = (cfg_local['DEFAULT'].get('basic_group_name', 'basic_mosaic') or 'basic_mosaic').strip()
+        except Exception:
+            basic_name = 'basic_mosaic'
+
+        all_groups = (flat_df['name_gis_geocodegroup']
+                      .astype('string')
+                      .dropna().unique().tolist())
+        all_groups = sorted(all_groups)
+
+        # Prefer configured basic group if present, else fall back to a literal basic_mosaic, else first group.
+        chosen = None
+        for cand in (basic_name, 'basic_mosaic'):
+            if any(str(g).strip().lower() == str(cand).strip().lower() for g in all_groups):
+                chosen = cand
+                break
+        if chosen is None and all_groups:
+            chosen = str(all_groups[0])
+        groups = [chosen] if chosen else []
 
         counts = (flat_df.groupby('name_gis_geocodegroup')
                   .agg(total=('name_gis_geocodegroup', 'size'),
                        populated=('geometry', lambda s: int(s.notna().sum())))
                   .reset_index())
+        # Only show the chosen (basic) group in the intro table.
+        try:
+            if chosen:
+                mask = counts['name_gis_geocodegroup'].astype('string').str.strip().str.lower() == str(chosen).strip().lower()
+                counts = counts[mask].copy()
+        except Exception:
+            pass
+
         intro_table = [["Geocode category", "Total objects", "With geometry"]]
         for _, row in counts.sort_values('name_gis_geocodegroup').iterrows():
             intro_table.append([
@@ -139,20 +171,51 @@ class ReportEngine:
 
         done = 0
         for gname in groups:
-            sub = flat_df[flat_df['name_gis_geocodegroup'] == gname].copy()
-
+            # Use MBTiles rasters when available (preferred)
             safe = _safe_name(gname)
-            sens_png = self.make_path("geocode", safe, "sens")
+            mb_root = os.path.join(self.base_dir, "output", "mbtiles")
 
-            ok_sens = draw_group_map_sensitivity(sub, gname, self.palette, self.desc, sens_png, fixed_bounds_3857, base_dir=self.base_dir)
+            # Other maps (non-index): these should come before the index sections in the report.
+            layers = [
+                ("sensitivity", "Sensitive areas (A–E)", "sensitivity"),
+                ("importance_max", "Importance (max)", "importance_max"),
+                ("groupstotal", "Asset groups total", "groupstotal"),
+                ("assetstotal", "Assets total", "assetstotal"),
+            ]
 
-            if ok_sens and _file_ok(sens_png):
-                pages += [
-                    ('heading(2)', f"Geocode group: {gname}"),
-                    ('text', "Sensitivity (A–E palette)."),
-                    ('image', ("Sensitivity map", sens_png)),
-                    ('new_page', None),
-                ]
+            pages.append(('heading(2)', f"Other maps: {gname}"))
+            pages.append(('text', "Rendered from MBTiles with basemap (basic_mosaic only)."))
+            pages.append(('rule', None))
+
+            for suffix, title, slug in layers:
+                mb_path = os.path.join(mb_root, f"{safe}_{suffix}.mbtiles")
+                out_png = self.make_path("geocode", safe, slug)
+                ok = False
+                note = ""
+                if os.path.exists(mb_path):
+                    ok, note = render_mbtiles_to_png_best_fit(mb_path, out_png, base_dir=self.base_dir)
+                else:
+                    note = f"Missing MBTiles: {os.path.basename(mb_path)}"
+
+                if ok and _file_ok(out_png):
+                    pages.append(('heading(3)', title))
+                    pages.append(('text', "Two-line max intro: MBTiles overlay on basemap."))
+                    pages.append(('image_map', (title, out_png)))
+                    pages.append(('new_page', None))
+                else:
+                    # Fallback (only for sensitivity): render polygons (no borders) if MBTiles missing
+                    if suffix == "sensitivity":
+                        sub = flat_df[flat_df['name_gis_geocodegroup'].astype('string').str.strip().str.lower() == str(gname).strip().lower()].copy()
+                        ok_poly = draw_group_map_sensitivity(sub, gname, self.palette, self.desc, out_png, fixed_bounds_3857, base_dir=self.base_dir)
+                        if ok_poly and _file_ok(out_png):
+                            pages.append(('heading(3)', title))
+                            pages.append(('text', "Two-line max intro: polygons on basemap."))
+                            pages.append(('image_map', (title, out_png)))
+                            pages.append(('new_page', None))
+                            continue
+                    pages.append(('heading(3)', title))
+                    pages.append(('text', f"Could not render map: {note or 'unknown error'}"))
+                    pages.append(('new_page', None))
 
             done += 1
             if set_progress_callback:
@@ -260,6 +323,84 @@ class ReportEngine:
                 set_progress_callback(idx+1, max(1, atlas_total))
 
         return pages, atlas_geocode_selected
+
+    def render_index_statistics(self,
+                               flat_df: gpd.GeoDataFrame,
+                               cfg: configparser.ConfigParser,
+                               set_progress_callback=None) -> list:
+        """Create one page per index showing basic_mosaic distribution."""
+        pages: list = []
+        if flat_df is None or flat_df.empty:
+            return pages
+
+        basic_name = (cfg["DEFAULT"].get("basic_group_name", "basic_mosaic") or "basic_mosaic").strip()
+
+        candidates = [
+            ("index_importance", "Importance index", "importance_index"),
+            ("index_sensitivity", "Sensitivity index", "sensitivity_index"),
+            ("owa_index", "OWA index", "owa_index"),
+        ]
+
+        available = [(col, title, mb_suffix) for (col, title, mb_suffix) in candidates if col in flat_df.columns]
+        if not available:
+            return pages
+
+        mb_root = os.path.join(self.base_dir, "output", "mbtiles")
+        safe_basic = _safe_name(basic_name)
+
+        total = len(available)
+        for i, (col, title, mb_suffix) in enumerate(available, start=1):
+            out_png = self.make_path("index", _safe_name(col), "distribution")
+            ok, note = create_index_area_distribution_chart(
+                flat_df,
+                index_col=col,
+                output_path=out_png,
+                basic_group_name=basic_name,
+                base_dir=self.base_dir,
+            )
+            if ok and _file_ok(out_png):
+                pages += [
+                    ('heading(2)', f"{title} – statistics"),
+                    ('text',
+                     f"Computed from <b>tbl_flat</b> for geocode group <b>{basic_name}</b> only. "
+                     "Bars show total polygon area (km²) per index value. "
+                     "Line shows number of categories per index value (A–E if available; otherwise number of cells)."),
+                    ('image', (f"{title} – area distribution", out_png)),
+                    ('new_page', None),
+                ]
+            else:
+                msg = note or "(chart not available)"
+                pages += [
+                    ('heading(2)', f"{title} – statistics"),
+                    ('text', f"Could not generate chart for <b>{col}</b>: {msg}"),
+                    ('new_page', None),
+                ]
+
+            # Index map page (placed immediately after its index statistics page)
+            mb_path = os.path.join(mb_root, f"{safe_basic}_{mb_suffix}.mbtiles")
+            map_png = self.make_path("index", safe_basic, _safe_name(mb_suffix), "map")
+            okm = False
+            note_m = ""
+            if os.path.exists(mb_path):
+                okm, note_m = render_mbtiles_to_png_best_fit(mb_path, map_png, base_dir=self.base_dir)
+            else:
+                note_m = f"Missing MBTiles: {os.path.basename(mb_path)}"
+
+            pages.append(('heading(2)', f"{title} – map"))
+            pages.append(('text', "Two-line max intro: MBTiles overlay on basemap."))
+            if okm and _file_ok(map_png):
+                pages.append(('image_map', (f"{title} – map", map_png)))
+            else:
+                pages.append(('text', f"Could not render map: {note_m or 'unknown error'}"))
+            pages.append(('new_page', None))
+
+            if set_progress_callback:
+                try:
+                    set_progress_callback(i, total)
+                except Exception:
+                    pass
+
+        return pages
 
     def render_segments(self,
                         lines_df: gpd.GeoDataFrame,
@@ -790,7 +931,29 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
     # Preferred path: contextily
     if ctx is not None:
         try:
-            ctx.add_basemap(ax, crs=f"EPSG:{crs_epsg}", source=ctx.providers.OpenStreetMap.Mapnik)
+            # We render attribution as plain text under the map in the DOCX output.
+            # Try to suppress attribution embedded in the map image.
+            try:
+                ctx.add_basemap(
+                    ax,
+                    crs=f"EPSG:{crs_epsg}",
+                    source=ctx.providers.OpenStreetMap.Mapnik,
+                    attribution=None,
+                )
+            except TypeError:
+                ctx.add_basemap(ax, crs=f"EPSG:{crs_epsg}", source=ctx.providers.OpenStreetMap.Mapnik)
+
+            # Defensive cleanup: remove any attribution text artists if present
+            try:
+                for t in list(getattr(ax, "texts", []) or []):
+                    s = (getattr(t, "get_text", lambda: "")() or "")
+                    if ("openstreetmap" in s.lower()) or ("©" in s) or ("copyright" in s.lower()):
+                        try:
+                            t.remove()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             return
         except Exception as e:
             write_to_log(f"Basemap via contextily failed, falling back to tiles: {e}", base_dir)
@@ -954,6 +1117,344 @@ def _expand_bounds(bounds, pad_ratio=0.08):
     pad_x, pad_y = dx * pad_ratio, dy * pad_ratio
     return (minx - pad_x, miny - pad_y, maxx + pad_x, maxy + pad_y)
 
+# ---------------- MBTiles rendering (raster) ----------------
+WEBMERCATOR_MAX_LAT = 85.05112878
+MAX_MAP_PX_WIDTH = 2000
+
+def _clip_latlon_bounds(bounds: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    minlon, minlat, maxlon, maxlat = bounds
+    minlon = max(-180.0, min(180.0, float(minlon)))
+    maxlon = max(-180.0, min(180.0, float(maxlon)))
+    minlat = max(-WEBMERCATOR_MAX_LAT, min(WEBMERCATOR_MAX_LAT, float(minlat)))
+    maxlat = max(-WEBMERCATOR_MAX_LAT, min(WEBMERCATOR_MAX_LAT, float(maxlat)))
+    if maxlon < minlon:
+        minlon, maxlon = maxlon, minlon
+    if maxlat < minlat:
+        minlat, maxlat = maxlat, minlat
+    # Avoid exact-180/85 edges causing off-by-one tile selection
+    eps = 1e-9
+    minlon = max(-180.0 + eps, minlon)
+    maxlon = min(180.0 - eps, maxlon)
+    minlat = max(-WEBMERCATOR_MAX_LAT + eps, minlat)
+    maxlat = min(WEBMERCATOR_MAX_LAT - eps, maxlat)
+    return minlon, minlat, maxlon, maxlat
+
+def _lonlat_to_tile_fraction(lon: float, lat: float, z: int) -> tuple[float, float]:
+    lat = max(-WEBMERCATOR_MAX_LAT, min(WEBMERCATOR_MAX_LAT, float(lat)))
+    lon = max(-180.0, min(180.0, float(lon)))
+    n = 2 ** int(z)
+    x = (lon + 180.0) / 360.0 * n
+    lat_rad = math.radians(lat)
+    y = (1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n
+    return x, y
+
+def _mbtiles_metadata(conn: sqlite3.Connection) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name, value FROM metadata")
+        for name, value in cur.fetchall():
+            if name is None:
+                continue
+            meta[str(name)] = "" if value is None else str(value)
+    except Exception:
+        pass
+    return meta
+
+def _parse_mbtiles_bounds(meta: dict[str, str]) -> tuple[float, float, float, float] | None:
+    raw = (meta.get("bounds") or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = [float(x.strip()) for x in raw.split(",")]
+        if len(parts) != 4:
+            return None
+        return _clip_latlon_bounds((parts[0], parts[1], parts[2], parts[3]))
+    except Exception:
+        return None
+
+def _parse_mbtiles_zoom(meta: dict[str, str], key: str, default: int) -> int:
+    try:
+        return int(float((meta.get(key) or str(default)).strip()))
+    except Exception:
+        return int(default)
+
+def _get_mbtiles_tile_bytes(conn: sqlite3.Connection, z: int, x: int, y_xyz: int) -> bytes | None:
+    """Fetch tile bytes, trying TMS row convention first, then XYZ."""
+    try:
+        cur = conn.cursor()
+        n = 2 ** int(z)
+        y_tms = (n - 1) - int(y_xyz)
+        cur.execute(
+            "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+            (int(z), int(x), int(y_tms)),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return bytes(row[0])
+        cur.execute(
+            "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+            (int(z), int(x), int(y_xyz)),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return bytes(row[0])
+    except Exception:
+        return None
+    return None
+
+def lonlat_to_merc(lon: float, lat: float) -> tuple[float, float]:
+    """Convert lon/lat (EPSG:4326) to WebMercator meters (EPSG:3857)."""
+    R = 6378137.0
+    lon_f = float(lon)
+    lat_f = max(-85.05112878, min(85.05112878, float(lat)))
+    x = lon_f * math.pi / 180.0 * R
+    y = math.log(math.tan((90.0 + lat_f) * math.pi / 360.0)) * R
+    return x, y
+
+def _nice_scale_length_m(target_m: float) -> float:
+    """Pick a human-friendly scale bar length in meters (1/2/5 * 10^n) <= target."""
+    try:
+        t = float(target_m)
+    except Exception:
+        return 0.0
+    if t <= 0:
+        return 0.0
+    exp = 10 ** math.floor(math.log10(t))
+    for m in (5, 2, 1):
+        val = m * exp
+        if val <= t:
+            return float(val)
+    return float(exp)
+
+def _add_map_decorations(ax,
+                         extent_3857: tuple[float, float, float, float],
+                         base_dir: str | None = None,
+                         add_inset: bool = True):
+    """Add north arrow (top-right), scale bar (bottom-left) and optional inset overview."""
+    try:
+        west_x, east_x, south_y, north_y = extent_3857
+        width_m = float(east_x - west_x)
+        height_m = float(north_y - south_y)
+        if width_m <= 0 or height_m <= 0:
+            return
+
+        # North arrow (axes fraction coordinates)
+        try:
+            ax.annotate(
+                "",
+                xy=(0.95, 0.94),
+                xytext=(0.95, 0.82),
+                xycoords=ax.transAxes,
+                textcoords=ax.transAxes,
+                arrowprops=dict(arrowstyle='-|>', lw=1.6, color='black'),
+                zorder=40,
+            )
+            ax.text(
+                0.95, 0.95, "N",
+                transform=ax.transAxes,
+                ha='center', va='bottom',
+                fontsize=12, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.65, ec='none'),
+                zorder=41,
+            )
+        except Exception:
+            pass
+
+        # Scale bar (data coordinates, bottom-left)
+        try:
+            pad_x = 0.04 * width_m
+            pad_y = 0.04 * height_m
+            target = 0.22 * width_m
+            bar_len = _nice_scale_length_m(target)
+            if bar_len > 0:
+                x0 = west_x + pad_x
+                y0 = south_y + pad_y
+                x1 = x0 + bar_len
+                tick_h = 0.012 * height_m
+                ax.plot([x0, x1], [y0, y0], color='black', lw=3.0, zorder=40, solid_capstyle='butt')
+                ax.plot([x0, x0], [y0, y0 + tick_h], color='black', lw=2.0, zorder=40)
+                ax.plot([x1, x1], [y0, y0 + tick_h], color='black', lw=2.0, zorder=40)
+                if bar_len >= 1000:
+                    label = f"{bar_len/1000.0:g} km"
+                else:
+                    label = f"{bar_len:g} m"
+                ax.text(
+                    x0, y0 + tick_h * 1.4, label,
+                    ha='left', va='bottom', fontsize=10,
+                    bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.65, ec='none'),
+                    zorder=41,
+                )
+        except Exception:
+            pass
+
+        # Inset overview (if available)
+        if add_inset and inset_axes is not None:
+            try:
+                iax = inset_axes(ax, width="28%", height="28%", loc='upper left', borderpad=0.8)
+                iax.set_axis_off()
+                # Visible frame around the inset
+                try:
+                    iax.add_patch(Rectangle((0, 0), 1, 1,
+                                            transform=iax.transAxes,
+                                            fill=False,
+                                            edgecolor='black',
+                                            linewidth=1.0,
+                                            zorder=100))
+                except Exception:
+                    pass
+                # Expand view to provide context
+                pad_ix = 2.5 * width_m
+                pad_iy = 2.5 * height_m
+                iax.set_xlim(west_x - pad_ix, east_x + pad_ix)
+                iax.set_ylim(south_y - pad_iy, north_y + pad_iy)
+                _plot_basemap(iax, crs_epsg=3857, base_dir=base_dir)
+                rect = Rectangle((west_x, south_y), width_m, height_m,
+                                 fill=False, edgecolor=PRIMARY_HEX, linewidth=1.6, alpha=0.95, zorder=50)
+                iax.add_patch(rect)
+            except Exception:
+                pass
+    except Exception:
+        return
+
+def render_mbtiles_to_png_best_fit(mbtiles_path: str,
+                                  out_png: str,
+                                  base_dir: str | None = None) -> tuple[bool, str]:
+    """Stitch MBTiles into a single PNG for the MBTiles bounds.
+
+    Chooses the highest zoom that fits within MAX_MAP_PX_WIDTH/MAX_MAP_PX_HEIGHT.
+    """
+    try:
+        if not os.path.exists(mbtiles_path):
+            return False, "mbtiles not found"
+        conn = sqlite3.connect(mbtiles_path)
+        try:
+            meta = _mbtiles_metadata(conn)
+            bounds = _parse_mbtiles_bounds(meta)
+            if bounds is None:
+                return False, "MBTiles missing bounds"
+            minz = _parse_mbtiles_zoom(meta, "minzoom", 0)
+            maxz = _parse_mbtiles_zoom(meta, "maxzoom", 19)
+            tile_size = 256
+
+            minlon, minlat, maxlon, maxlat = bounds
+
+            # Pick best fit zoom
+            chosen_z = maxz
+            while chosen_z > minz:
+                x_w, y_n = _lonlat_to_tile_fraction(minlon, maxlat, chosen_z)
+                x_e, y_s = _lonlat_to_tile_fraction(maxlon, minlat, chosen_z)
+                x0 = int(math.floor(min(x_w, x_e)))
+                x1 = int(math.floor(max(x_w, x_e)))
+                y0 = int(math.floor(min(y_n, y_s)))
+                y1 = int(math.floor(max(y_n, y_s)))
+                w_px = (x1 - x0 + 1) * tile_size
+                h_px = (y1 - y0 + 1) * tile_size
+                tiles = (x1 - x0 + 1) * (y1 - y0 + 1)
+                if w_px <= MAX_MAP_PX_WIDTH and h_px <= MAX_MAP_PX_HEIGHT and tiles <= 400:
+                    break
+                chosen_z -= 1
+
+            z = max(minz, chosen_z)
+
+            x_w, y_n = _lonlat_to_tile_fraction(minlon, maxlat, z)
+            x_e, y_s = _lonlat_to_tile_fraction(maxlon, minlat, z)
+            x0 = int(math.floor(min(x_w, x_e)))
+            x1 = int(math.floor(max(x_w, x_e)))
+            y0 = int(math.floor(min(y_n, y_s)))
+            y1 = int(math.floor(max(y_n, y_s)))
+
+            width = (x1 - x0 + 1) * tile_size
+            height = (y1 - y0 + 1) * tile_size
+            if width <= 0 or height <= 0:
+                return False, "Invalid tile bounds"
+
+            canvas = PILImage.new("RGBA", (width, height), (0, 0, 0, 0))
+            blank = PILImage.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
+
+            for xt in range(x0, x1 + 1):
+                for yt in range(y0, y1 + 1):
+                    tile_bytes = _get_mbtiles_tile_bytes(conn, z, xt, yt)
+                    if tile_bytes:
+                        try:
+                            tile_img = PILImage.open(io.BytesIO(tile_bytes)).convert("RGBA")
+                        except Exception:
+                            tile_img = blank
+                    else:
+                        tile_img = blank
+                    px = (xt - x0) * tile_size
+                    py = (yt - y0) * tile_size
+                    canvas.paste(tile_img, (px, py))
+
+            # Crop to exact bounds
+            left = int(round((min(x_w, x_e) - x0) * tile_size))
+            right = int(round((max(x_w, x_e) - x0) * tile_size))
+            top = int(round((min(y_n, y_s) - y0) * tile_size))
+            bottom = int(round((max(y_n, y_s) - y0) * tile_size))
+            left = max(0, min(width - 1, left))
+            right = max(left + 1, min(width, right))
+            top = max(0, min(height - 1, top))
+            bottom = max(top + 1, min(height, bottom))
+            canvas = canvas.crop((left, top, right, bottom))
+
+            # Final safety resize
+            if canvas.size[0] > MAX_MAP_PX_WIDTH or canvas.size[1] > MAX_MAP_PX_HEIGHT:
+                ratio = min(MAX_MAP_PX_WIDTH / canvas.size[0], MAX_MAP_PX_HEIGHT / canvas.size[1])
+                new_w = max(1, int(canvas.size[0] * ratio))
+                new_h = max(1, int(canvas.size[1] * ratio))
+                canvas = canvas.resize((new_w, new_h), PILImage.LANCZOS)
+
+            # Composite over a basemap for context
+            try:
+                fig_h_in = 8.2
+                fig_w_in = 6.2
+                dpi = 180
+                fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+                ax.set_axis_off()
+
+                # Set extent first (basemap fetch depends on ax limits)
+                west_x, north_y = lonlat_to_merc(minlon, maxlat)
+                east_x, south_y = lonlat_to_merc(maxlon, minlat)
+                ax.set_xlim(west_x, east_x)
+                ax.set_ylim(south_y, north_y)
+                try:
+                    ax.set_aspect('equal', adjustable='box')
+                except Exception:
+                    pass
+
+                # Background basemap in WebMercator
+                _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+                # Overlay MBTiles image in correct extent
+                ax.imshow(
+                    canvas,
+                    extent=[west_x, east_x, south_y, north_y],
+                    origin="upper",
+                    interpolation='nearest',
+                    zorder=10,
+                )
+                _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=True)
+                fig.tight_layout(pad=0)
+                plt.savefig(out_png, bbox_inches='tight')
+                plt.close(fig)
+                return True, ""
+            except Exception:
+                try:
+                    plt.close('all')
+                except Exception:
+                    pass
+                # Fallback: save the stitched overlay only
+                canvas.save(out_png)
+                return True, ""
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        write_to_log(f"MBTiles render failed ({mbtiles_path}): {e}", base_dir)
+        return False, str(e)
+
 # ---------------- tbl_flat (per-geocode maps) ----------------
 def load_tbl_flat(parquet_dir: str, base_dir: str | None = None) -> gpd.GeoDataFrame:
     fp = os.path.join(parquet_dir, "tbl_flat.parquet")
@@ -1041,10 +1542,17 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
         colors = _colors_from_annotations(annotated, palette)
         annotated.plot(ax=ax,
                        color=colors,
-                       edgecolor='white',
-                       linewidth=0.3,
+                       edgecolor='none',
+                       linewidth=0.0,
                        alpha=0.95,
                        zorder=10)
+
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
+        except Exception:
+            pass
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -1130,6 +1638,13 @@ def draw_atlas_map(tile_row: pd.Series,
 
         tile_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.6, zorder=12)
 
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
+        except Exception:
+            pass
+
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         write_to_log(f"Atlas map saved: {out_path}", base_dir)
@@ -1190,6 +1705,13 @@ def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
 
         atlas_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.0, alpha=0.9, zorder=12)
 
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=False)
+        except Exception:
+            pass
+
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         write_to_log(f"Atlas overview map saved: {out_path}", base_dir)
@@ -1249,6 +1771,13 @@ def draw_line_context_map(line_row: pd.Series, out_path: str,
         except Exception:
             pass
         g.plot(ax=ax, color='none', edgecolor=PRIMARY_HEX, linewidth=2.2, alpha=1.0, zorder=22)
+
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
+        except Exception:
+            pass
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -1321,6 +1850,13 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
             except Exception:
                 pass
             lines.plot(ax=ax, color=line_colors_rgba, linewidth=2.4, alpha=1.0, zorder=14)
+
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
+        except Exception:
+            pass
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -1406,6 +1942,100 @@ def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
 
     plt.savefig(output_path, bbox_inches='tight', dpi=110)
     plt.close(fig)
+
+def create_index_area_distribution_chart(flat_df: gpd.GeoDataFrame,
+                                        index_col: str,
+                                        output_path: str,
+                                        basic_group_name: str = "basic_mosaic",
+                                        base_dir: str | None = None) -> tuple[bool, str]:
+    """Render a chart of total area per index value for basic_mosaic only.
+
+    Bars: total polygon area (km²) per index value (0..100)
+    Line (2nd axis): number of "categories" within each index value.
+      - If sensitivity_code_max exists: distinct A–E count per index value.
+      - Else: number of geocode cells per index value.
+    Returns (ok, note).
+    """
+    try:
+        if flat_df is None or flat_df.empty:
+            return False, "tbl_flat is empty."
+        if index_col not in flat_df.columns:
+            return False, f"Missing column: {index_col}."
+        if "area_m2" not in flat_df.columns:
+            return False, "Missing column: area_m2."
+
+        df = flat_df.copy()
+        if "name_gis_geocodegroup" in df.columns and basic_group_name:
+            mask = df["name_gis_geocodegroup"].astype("string").str.strip().str.lower() == str(basic_group_name).strip().lower()
+            df = df[mask].copy()
+
+        if df.empty:
+            return False, f"No rows for geocode group '{basic_group_name}'."
+
+        df["__idx__"] = pd.to_numeric(df[index_col], errors="coerce")
+        df["__idx__"] = df["__idx__"].round().clip(0, 100)
+        df["__area_m2__"] = pd.to_numeric(df["area_m2"], errors="coerce")
+        df = df.dropna(subset=["__idx__", "__area_m2__"])
+        if df.empty:
+            return False, "No numeric index/area rows to chart."
+
+        df["__idx__"] = df["__idx__"].astype(int)
+
+        # Area (km²) per index value (0..100)
+        area_by = df.groupby("__idx__")["__area_m2__"].sum()
+        x = np.arange(0, 101)
+        area_km2 = np.array([float(area_by.get(i, 0.0)) / 1e6 for i in x], dtype=float)
+
+        # "Categories" per index value
+        cat_label = "# categories"
+        if "sensitivity_code_max" in df.columns:
+            codes = df["sensitivity_code_max"].astype("string").str.strip().str.upper()
+            tmp = pd.DataFrame({"idx": df["__idx__"], "code": codes})
+            # count distinct A–E per idx (ignore blanks)
+            tmp = tmp[tmp["code"].isin(["A", "B", "C", "D", "E"])].copy()
+            cats_by = tmp.groupby("idx")["code"].nunique()
+            cats = np.array([int(cats_by.get(i, 0)) for i in x], dtype=int)
+        else:
+            cat_label = "# cells"
+            cnt_by = df.groupby("__idx__").size()
+            cats = np.array([int(cnt_by.get(i, 0)) for i in x], dtype=int)
+
+        total_area_km2 = float(area_km2.sum())
+        nonzero_values = int(np.count_nonzero(area_km2 > 0))
+
+        fig, ax1 = plt.subplots(figsize=(11.0, 6.2), dpi=140)
+        ax2 = ax1.twinx()
+
+        ax1.bar(x, area_km2, color=PRIMARY_HEX, alpha=0.85, width=1.0, linewidth=0)
+        ax2.plot(x, cats, color="#222222", linewidth=1.5)
+
+        ax1.set_xlim(0, 100)
+        ax1.set_xlabel("Index value")
+        ax1.set_ylabel("Total area (km²)")
+        ax2.set_ylabel(cat_label)
+
+        ax1.set_title(f"{index_col} distribution (basic_mosaic)\nTotal area: {total_area_km2:.1f} km² | Values present: {nonzero_values}")
+
+        ax1.grid(True, axis="y", linestyle=":", alpha=0.35)
+        ax1.set_xticks(np.arange(0, 101, 10))
+
+        # Tighten y2 for category scale
+        try:
+            ax2.set_ylim(0, max(1, int(cats.max()) + 1))
+        except Exception:
+            pass
+
+        fig.tight_layout()
+        plt.savefig(output_path, bbox_inches="tight")
+        plt.close(fig)
+        return True, ""
+    except Exception as e:
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        write_to_log(f"Index distribution chart failed for {index_col}: {e}", base_dir)
+        return False, str(e)
 
 def debug_atlas_sample(base_dir: str,
                        cfg: configparser.ConfigParser,
@@ -1823,10 +2453,29 @@ def compile_docx(output_docx: str, order_list: list):
     doc = Document()
     doc.core_properties.title = "MESA Report"
     body_style = doc.styles["Normal"]
-    body_style.font.name = "Segoe UI"
+    body_style.font.name = "Calibri"
     body_style.font.size = Pt(10)
     # Ensure font mapping works in Word
-    body_style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Segoe UI')
+    body_style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Calibri')
+
+    def _needs_osm_attribution(image_path: str) -> bool:
+        try:
+            name = os.path.basename(image_path).lower()
+        except Exception:
+            return False
+        if any(k in name for k in ("ribbon", "distribution")):
+            return False
+        return any(k in name for k in ("geocode_", "index_", "atlas", "line_", "segments_", "context"))
+
+    def _add_osm_attribution_paragraph():
+        try:
+            p = doc.add_paragraph(OSM_ATTRIBUTION_TEXT)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in p.runs:
+                run.font.name = "Calibri"
+                run.font.size = Pt(8)
+        except Exception:
+            pass
 
     def add_heading(level: int, text: str):
         clean = _clean_docx_text(text)
@@ -1860,12 +2509,46 @@ def compile_docx(output_docx: str, order_list: list):
 
     usable_width_cm = 16  # approximate usable width with default margins
 
-    for kind, payload in order_list:
+    def _heading_starts_map_block(idx: int, max_ahead: int = 10) -> bool:
+        """Detect blocks like: heading -> text -> image_map -> new_page.
+
+        Used to insert a page break BEFORE the heading (instead of after the map),
+        which avoids Word creating an empty page when images already overflow.
+        """
+        try:
+            if idx < 0 or idx >= len(order_list):
+                return False
+            k0, _ = order_list[idx]
+            if not str(k0).startswith("heading"):
+                return False
+            for j in range(idx + 1, min(len(order_list), idx + 1 + max_ahead)):
+                kj, _pj = order_list[j]
+                if kj == "new_page":
+                    return False
+                if kj == "image_map":
+                    return True
+                if str(kj).startswith("heading"):
+                    return False
+            return False
+        except Exception:
+            return False
+
+    has_any_content = False
+    last_was_page_break = False
+
+    for idx, (kind, payload) in enumerate(order_list):
         if kind.startswith("heading"):
+            if _heading_starts_map_block(idx) and has_any_content and not last_was_page_break:
+                doc.add_page_break()
+                last_was_page_break = True
             level = int(kind[-2])
             add_heading(level, payload)
+            has_any_content = True
+            last_was_page_break = False
         elif kind in ("text",):
             add_text(payload)
+            has_any_content = True
+            last_was_page_break = False
         elif kind in ("table", "table_data", "table_data_small"):
             if kind == "table":
                 title = None
@@ -1886,27 +2569,81 @@ def compile_docx(output_docx: str, order_list: list):
                 add_table(data)
             else:
                 add_text("(table data unavailable)")
-        elif kind == "image" or kind == "image_ribbon":
+            has_any_content = True
+            last_was_page_break = False
+        elif kind == "image" or kind == "image_ribbon" or kind == "image_map":
             heading, path = payload
-            add_heading(3, heading)
+            # Avoid duplicate headings on map pages (the page already has a heading(2)/(3) in order_list)
+            if kind != "image_map":
+                add_heading(3, heading)
+                has_any_content = True
+                last_was_page_break = False
             if os.path.exists(path):
                 try:
-                    width_cm = usable_width_cm
-                    if 'atlas' in os.path.basename(path).lower():
-                        width_cm *= ATLAS_DOC_WIDTH_SCALE
-                    doc.add_picture(path, width=Cm(width_cm))
+                    if kind == "image_map":
+                        # Fit within A4 page: <=15cm wide and <=20cm tall
+                        max_w_cm = 17.0
+                        max_h_cm = 18.0
+                        with PILImage.open(path) as im:
+                            w_px, h_px = im.size
+                        if w_px <= 0 or h_px <= 0:
+                            doc.add_picture(path, width=Cm(max_w_cm))
+                        else:
+                            aspect = float(h_px) / float(w_px)
+                            out_w_cm = max_w_cm
+                            out_h_cm = out_w_cm * aspect
+                            if out_h_cm > max_h_cm:
+                                out_h_cm = max_h_cm
+                                out_w_cm = out_h_cm / aspect
+                            doc.add_picture(path, width=Cm(out_w_cm))
+                        # Center the map image paragraph
+                        try:
+                            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        except Exception:
+                            pass
+
+                        # Put OSM attribution under the map (plain text)
+                        _add_osm_attribution_paragraph()
+                        has_any_content = True
+                        last_was_page_break = False
+                    else:
+                        width_cm = usable_width_cm
+                        if 'atlas' in os.path.basename(path).lower():
+                            width_cm *= ATLAS_DOC_WIDTH_SCALE
+                        doc.add_picture(path, width=Cm(width_cm))
+
+                        # If this is a map image (not charts/ribbons), add OSM attribution under it.
+                        if _needs_osm_attribution(path):
+                            _add_osm_attribution_paragraph()
+                        has_any_content = True
+                        last_was_page_break = False
                 except Exception:
                     add_text(f"(image unavailable: {os.path.basename(path)})")
+                    has_any_content = True
+                    last_was_page_break = False
             else:
                 add_text(f"(image missing: {os.path.basename(path)})")
+                has_any_content = True
+                last_was_page_break = False
         elif kind == "rule":
             add_rule()
+            has_any_content = True
+            last_was_page_break = False
         elif kind == "spacer":
             doc.add_paragraph("")
+            has_any_content = True
+            last_was_page_break = False
         elif kind == "new_page":
+            # Avoid consecutive page breaks which can create empty pages.
+            if last_was_page_break:
+                continue
             doc.add_page_break()
+            has_any_content = True
+            last_was_page_break = True
         else:
             add_text(str(payload))
+            has_any_content = True
+            last_was_page_break = False
 
     doc.save(output_docx)
 
@@ -2025,9 +2762,13 @@ def generate_report(base_dir: str,
             write_to_log("Per-atlas maps created.", base_dir)
         elif include_atlas_maps:
             write_to_log("Atlas maps requested but none were rendered.", base_dir)
-        set_progress(45 if include_atlas_maps else 38, "Atlas maps processed." if include_atlas_maps else "Atlas maps skipped.")
+        if include_atlas_maps:
+            set_progress(45, "Atlas maps processed.")
+        else:
+            # Atlas is intentionally excluded in Basic/General report mode.
+            set_progress(38)
 
-        # ---- Per-geocode maps ----
+        # ---- Other maps (basic_mosaic only) ----
         def _progress_geocode(done: int, total: int):
             start = 45 if include_atlas_maps else 38
             set_progress(start + int(30 * done / max(1, total)), f"Rendered maps for group {done}/{total}")
@@ -2038,6 +2779,14 @@ def generate_report(base_dir: str,
         else:
             write_to_log("tbl_flat missing or no 'name_gis_geocodegroup'; skipping per-geocode maps.", base_dir)
         set_progress(75 if include_atlas_maps else 68, "Per-geocode maps completed.")
+
+        # ---- Index statistics (basic_mosaic only; each index includes its map page) ----
+        def _progress_indexes(done: int, total: int):
+            start = 45 if include_atlas_maps else 38
+            # keep this light: just a small bump in the progress bar
+            set_progress(start + int(5 * done / max(1, total)), f"Rendering index charts ({done}/{total})")
+
+        index_pages = engine.render_index_statistics(flat_df, cfg, _progress_indexes)
         # ---- Compose PDF ----
         timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 
@@ -2049,7 +2798,8 @@ def generate_report(base_dir: str,
 
         contents_lines = [
             "- Assets overview & statistics",
-            "- Per-geocode maps (Sensitivity & Environment Index, shared scale)"
+            "- Other maps (basic_mosaic)",
+            "- Index statistics + maps (basic_mosaic)"
         ]
         if atlas_pages:
             contents_lines.append("- Atlas tile maps (per atlas object with inset)")
@@ -2073,23 +2823,31 @@ def generate_report(base_dir: str,
             ('text', "Asset groups – sensitivity distribution (count of objects) and number of active groups (distinct groups with ≥1 object)."),
             ('table', os.path.join(tmp_dir, 'asset_group_statistics.xlsx')),
             ('new_page', None),
-
-            ('heading(2)', "Per-geocode maps"),
-            ('text',
-             "About geocode categories: <br/><br/>"
-             "<b>basic_mosaic</b> is the baseline geocoding used for area statistics in MESA. "
-             "It is a consistent partition intended for repeatable reporting and comparison across runs. "
-             "In contrast, <b>H3</b> geocodes are hexagonal cells from Uber’s H3 hierarchical indexing system. "
-             "H3 provides multi-resolution grids that are excellent for scalable analysis and visualization. "
-             "In this report, we render each available geocode category independently. "
-             "All maps below share the same cartographic scale/extent for easier visual comparison."),
         ]
+
+        order_list.extend([
+            ('heading(2)', "Other maps"),
+            ('text',
+             "Maps in this section are rendered for <b>basic_mosaic</b> only (other geocodes are omitted). "
+             "Rendered from MBTiles (raster) with a basemap background."),
+        ])
 
         if geocode_intro_table is not None:
             order_list.append(('table_data', ("Available geocode categories and object counts", geocode_intro_table)))
             order_list.append(('rule', None))
 
         order_list.extend(geocode_pages)
+
+        order_list.extend([
+            ('heading(2)', "Index statistics"),
+            ('text', "One page per index based on <b>basic_mosaic</b> values from <b>tbl_flat</b>. Each index includes its map page."),
+        ])
+
+        if index_pages:
+            order_list.extend(index_pages)
+        else:
+            order_list.append(('text', "No index statistics could be generated (missing data/columns)."))
+            order_list.append(('new_page', None))
         if atlas_pages:
             order_list.append(('heading(2)', "Atlas maps"))
             atlas_intro = ("Each atlas tile focuses on a subset of the study area. "
