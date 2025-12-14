@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, base64, configparser, locale, sqlite3, threading, json, time, io, math
+import os, sys, base64, configparser, locale, sqlite3, threading, json, io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 import pandas as pd
@@ -15,7 +15,6 @@ except Exception:
 from pyproj import Geod
 from pathlib import Path
 
-original_working_directory: str | None = None
 TEST_MODE = (os.environ.get("MESA_TEST_MODE", "").strip().lower() in ("1", "true", "yes"))
 
 # ---------- Optional shapely make_valid ----------
