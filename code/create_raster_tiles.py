@@ -58,6 +58,46 @@ import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon
 from PIL import Image, ImageDraw  # Pillow
 
+
+def _swap_xy_geom(geom):
+    if geom is None:
+        return None
+    try:
+        from shapely.ops import transform as _transform
+    except Exception:
+        return geom
+    try:
+        return _transform(lambda x, y, z=None: (y, x), geom)
+    except TypeError:
+        try:
+            return _transform(lambda x, y: (y, x), geom)
+        except Exception:
+            return geom
+    except Exception:
+        return geom
+
+
+def maybe_swap_xy(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Optionally swap X/Y coordinates.
+
+    IMPORTANT: This is opt-in only. Your current Mafia Island/Tanzania data is
+    already in lon/lat order (x≈39, y≈-8) and must NOT be swapped.
+
+    Enable only if you *know* the data is lat/lon (x≈-8, y≈39):
+      set MESA_SWAP_XY=1
+    """
+    if os.environ.get("MESA_SWAP_XY", "").strip().lower() not in {"1", "true", "yes"}:
+        return gdf
+    if gdf is None or not isinstance(gdf, gpd.GeoDataFrame) or gdf.empty:
+        return gdf
+    out = gdf.copy()
+    out["geometry"] = out.geometry.apply(_swap_xy_geom)
+    try:
+        out = out.set_crs(out.crs, allow_override=True)
+    except Exception:
+        pass
+    return out
+
 # ----------------------- Paths -----------------------
 def base_dir() -> Path:
     """Resolve the mesa root folder in dev, frozen, or tools/ launches."""
@@ -68,8 +108,9 @@ def base_dir() -> Path:
         candidates.append(Path(env_hint))
 
     try:
-        if 'original_working_directory' in globals() and original_working_directory:
-            candidates.append(Path(original_working_directory))
+        owd = globals().get("original_working_directory")
+        if owd:
+            candidates.append(Path(owd))
     except Exception:
         pass
 
@@ -534,6 +575,19 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
                 path = ring_lonlat_to_pixels(ring, z, x, y, tol=0.35 if z>=9 else 0.6)
                 if len(path) < 3:
                     continue
+
+                # Fast reject: if the pixel bbox is fully outside the tile, skip.
+                # This prevents writing many fully-transparent tiles when bbox-based
+                # candidate selection includes geometries that don't actually affect
+                # the current tile after projection/rounding.
+                try:
+                    xs = [p[0] for p in path]
+                    ys = [p[1] for p in path]
+                    if (max(xs) < 0.0) or (min(xs) > float(TILE_SIZE)) or (max(ys) < 0.0) or (min(ys) > float(TILE_SIZE)):
+                        continue
+                except Exception:
+                    pass
+
                 if fill_rgba[3] > 0:
                     try:
                         draw.polygon(path, fill=fill_rgba)
@@ -600,7 +654,8 @@ def run_one_layer(group_name: str,
                   stroke_rgba: Tuple[int,int,int,int],
                   stroke_w: float,
                   procs: int,
-                  tasks: List[Tuple[int,int,int, List[int]]]):
+                  tasks: List[Tuple[int,int,int, List[int]]],
+                  progress_every: int = 1000):
     """
     Prepare MBTiles writer, enumerate tiles, use worker pool to render, stream to writer.
     """
@@ -613,7 +668,7 @@ def run_one_layer(group_name: str,
             for i in gdf.index:
                 c = None
                 if pd.notna(sens_codes.at[i]) and sens_codes.at[i] != "<NA>":
-                    c = str(sens_codes.at[i]).strip().str.upper()
+                    c = str(sens_codes.at[i]).strip().upper()
                 else:
                     c = build_code_from_numeric_if_missing(sens_num.at[i], ranges_map)
                 fallback.append(c)
@@ -696,13 +751,20 @@ def run_one_layer(group_name: str,
     total_tiles = len(tasks)
     written = 0
 
+    try:
+        progress_every = int(progress_every)
+    except Exception:
+        progress_every = 1000
+    progress_every = max(1, progress_every)
+
     procs = max(1, int(procs))
     with mp.get_context("spawn").Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
         for i, out in enumerate(pool.imap_unordered(_render_one_tile, tasks, chunksize=64), 1):
             if out is not None:
                 in_q.put(out)
                 written += 1
-            if i % 100 == 0 or i == total_tiles:
+            # Throttle progress logging to reduce noise in log.txt / UI tail.
+            if i % progress_every == 0 or i == total_tiles:
                 log(f"[progress] {mbt_name}: {i}/{total_tiles}")
 
     # Close writer and confirm
@@ -778,6 +840,12 @@ def main():
     except Exception:
         pass
 
+    # Optional debug escape hatch: swap X/Y only if explicitly enabled.
+    try:
+        gdf_all = maybe_swap_xy(gdf_all)
+    except Exception:
+        pass
+
     # Groups
     all_groups = [str(x) for x in gdf_all[args.group_col].dropna().unique().tolist()]
     all_groups.sort()
@@ -791,7 +859,10 @@ def main():
         groups = all_groups
 
     # Styling from config.ini
-    cfg_path = settings_dir() / "config.ini"
+    # Prefer the root config.ini; fall back to legacy system/config.ini.
+    cfg_path = base_dir() / "config.ini"
+    if not cfg_path.exists():
+        cfg_path = settings_dir() / "config.ini"
     # Alpha settings: CLI > config.ini > default(1.0)
     import configparser
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
@@ -799,6 +870,22 @@ def main():
         cfg.read(cfg_path, encoding="utf-8")
     except Exception:
         pass
+
+    def _get_int(key: str, default: int) -> int:
+        try:
+            v = cfg["DEFAULT"].get(key, None)
+            if v is None:
+                return int(default)
+            s = str(v)
+            for sep in (';', '#'):
+                if sep in s:
+                    s = s.split(sep, 1)[0]
+            s = s.strip()
+            if not s:
+                return int(default)
+            return int(float(s))
+        except Exception:
+            return int(default)
     def _get_alpha(key: str, cli_val: Optional[float], default: float = 1.0) -> float:
         try:
             if cli_val is not None:
@@ -817,6 +904,9 @@ def main():
     env_alpha   = _get_alpha("tiles_env_alpha", args.env_alpha, 1.0)
     blue_alpha  = _get_alpha("tiles_blue_alpha", args.blue_alpha, 1.0)
     index_alpha = _get_alpha("tiles_index_alpha", args.index_alpha, sens_alpha)
+
+    # Tile progress heartbeat (log every N tiles per layer).
+    tiles_progress_every = max(1, _get_int("tiles_progress_every", 1000))
 
     sensitivity_palette = read_sensitivity_palette_from_config(cfg_path, alpha=sens_alpha)
     index_palette_src   = read_sensitivity_palette_from_config(cfg_path, alpha=index_alpha)
@@ -888,7 +978,8 @@ def main():
             stroke_rgba=stroke_rgba,
             stroke_w=args.stroke_width,
             procs=args.procs,
-            tasks=tasks
+            tasks=tasks,
+            progress_every=tiles_progress_every,
         )
 
         # ENV INDEX layer
@@ -907,7 +998,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping envindex tiles (env_index column missing)")
@@ -927,7 +1019,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping groupstotal tiles (asset_groups_total column missing)")
@@ -947,7 +1040,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping assetstotal tiles (assets_overlap_total column missing)")
@@ -966,7 +1060,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping importance_max tiles (importance_max column missing)")
@@ -985,7 +1080,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping importance_index tiles (index_importance column missing)")
@@ -1004,7 +1100,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping sensitivity_index tiles (index_sensitivity column missing)")
@@ -1023,7 +1120,8 @@ def main():
                 stroke_rgba=stroke_rgba,
                 stroke_w=args.stroke_width,
                 procs=args.procs,
-                tasks=tasks
+                tasks=tasks,
+                progress_every=tiles_progress_every,
             )
         else:
             log("  → skipping owa_index tiles (owa_index column missing)")
