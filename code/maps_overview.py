@@ -16,6 +16,7 @@ from pyproj import Geod
 from pathlib import Path
 
 original_working_directory: str | None = None
+TEST_MODE = (os.environ.get("MESA_TEST_MODE", "").strip().lower() in ("1", "true", "yes"))
 
 # ---------- Optional shapely make_valid ----------
 try:
@@ -579,80 +580,201 @@ def _resolve_cat(cat: str):
             return disp, MBTILES_INDEX[disp]
     return cat, None
 
-class _MBTilesHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args): return
-    def log_error(self, format, *args): return
-    
+class _MesaHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def log_error(self, format, *args):
+        return
+
+    def _send_cors(self):
+        origin = self.headers.get("Origin")
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        req_hdr = self.headers.get("Access-Control-Request-Headers")
+        self.send_header("Access-Control-Allow-Headers", req_hdr if req_hdr else "*")
+        # Private Network Access (PNA): Chrome/WebView2 may block requests from secure/opaque origins
+        # to http://127.0.0.1 unless the preflight explicitly allows it.
+        if (self.headers.get("Access-Control-Request-Private-Network") or "").strip().lower() == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+        # Helps some Chromium builds that enforce CORP for cross-origin image loads.
+        self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+
+    def _send_text(self, status: int, text: str):
+        try:
+            data = (text or "").encode("utf-8", errors="replace")
+        except Exception:
+            data = b""
+        self.send_response(int(status))
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self._send_cors()
+        self.end_headers()
+        if data:
+            try:
+                self.wfile.write(data)
+            except Exception:
+                pass
+
     def _send_blank(self):
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(BLANK_PNG)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.end_headers()
-        self.wfile.write(BLANK_PNG)
+        try:
+            self.wfile.write(BLANK_PNG)
+        except Exception:
+            pass
 
-    def do_GET(self):
+    def _send_html(self):
+        try:
+            data = (HTML or "").encode("utf-8", errors="replace")
+        except Exception:
+            data = b""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        # Keep it simple and predictable while iterating.
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if data:
+            try:
+                self.wfile.write(data)
+            except Exception:
+                pass
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._send_cors()
+        self.end_headers()
+
+    def _handle_tiles_get(self):
         con = None
         try:
             parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
             if len(parts) != 6 or parts[0] != "tiles":
-                self.send_response(404); self.end_headers(); return
+                self._send_text(404, "not found")
+                return
             _, kind, cat_enc, z_s, x_s, y_file = parts
             kind = (kind or "").lower()
-            cat  = unquote(cat_enc)
+            cat = unquote(cat_enc)
 
             disp, rec = _resolve_cat(cat)
             if kind not in MBTILES_KINDS or not rec:
-                self.send_response(404); self.end_headers(); return
+                self._send_text(404, "not found")
+                return
 
             db_path = rec.get(kind)
             if not db_path or not os.path.exists(db_path):
-                self._send_blank(); return
+                if MBTILES_DEBUG_GUARD:
+                    try:
+                        sys.stderr.write(f"[mbtiles] missing db for kind={kind} cat={disp} path={db_path}\n")
+                    except Exception:
+                        pass
+                self._send_blank()
+                return
 
-            z = int(z_s); x = int(x_s); y = int(y_file.rsplit(".",1)[0])
+            z = int(z_s)
+            x = int(x_s)
+            y = int(y_file.rsplit(".", 1)[0])
 
-            # Use fresh connection per request
-            con = sqlite3.connect(db_path, timeout=5.0)
+            # Open read-only and immutable to reduce lock issues (e.g. when MBTiles is open elsewhere).
+            db_uri_path = str(Path(db_path).resolve()).replace('\\', '/')
+            db_uri = f"file:{db_uri_path}?mode=ro&immutable=1"
+            con = sqlite3.connect(db_uri, uri=True, timeout=5.0)
+            try:
+                con.execute("PRAGMA query_only=ON")
+            except Exception:
+                pass
             cur = con.cursor()
-            
-            # --- Robust Tile Lookup ---
-            # Try 1: Standard TMS (flipped Y)
-            flipped_y = (1 << z) - 1 - y
-            cur.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, x, flipped_y))
+
+            # Try 1: Standard MBTiles TMS row (y is XYZ from Leaflet, flip to TMS row)
+            tms_row = (1 << z) - 1 - y
+            cur.execute(
+                "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                (z, x, tms_row),
+            )
             row = cur.fetchone()
-            
-            # Try 2: XYZ Fallback (raw Y)
+
+            # Try 2: XYZ fallback (some generators store raw y)
             if not row:
-                cur.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, x, y))
+                cur.execute(
+                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, y),
+                )
                 row = cur.fetchone()
 
             if not row:
+                if MBTILES_DEBUG_GUARD:
+                    try:
+                        sys.stderr.write(f"[mbtiles] tile miss kind={kind} cat={disp} z={z} x={x} y={y}\n")
+                    except Exception:
+                        pass
                 self._send_blank()
                 return
 
             data = row[0]
             fmt = _mb_meta(db_path)["format"]
-            
             self.send_response(200)
             self.send_header("Content-Type", fmt)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._send_cors()
             self.end_headers()
             self.wfile.write(data)
-        except Exception:
-            try: self.send_response(500); self.end_headers()
-            except Exception: pass
+        except Exception as e:
+            if MBTILES_DEBUG_GUARD:
+                try:
+                    sys.stderr.write(f"[mbtiles] handler error: {e}\n")
+                except Exception:
+                    pass
+            # Keep UI behavior stable; return blank instead of breaking image loads.
+            try:
+                self._send_blank()
+            except Exception:
+                try:
+                    self._send_text(500, "server error")
+                except Exception:
+                    pass
         finally:
             if con:
-                try: con.close()
-                except: pass
+                try:
+                    con.close()
+                except Exception:
+                    pass
+
+    def do_GET(self):
+        # Serve UI from the same origin as tiles to avoid WebView2 opaque-origin loopback restrictions.
+        p = self.path.split("?", 1)[0]
+        if p in ("/", "/index.html"):
+            self._send_html()
+            return
+        if p == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        if p.startswith("/tiles/"):
+            self._handle_tiles_get()
+            return
+        self._send_text(404, "not found")
+
+_MESA_HTTPD = None
+_MESA_BASE_URL = None
 
 def start_mbtiles_server():
-    if not MBTILES_INDEX: return None
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MBTilesHandler)
+    global _MESA_HTTPD, _MESA_BASE_URL
+    if _MESA_HTTPD is not None and _MESA_BASE_URL is not None:
+        return _MESA_BASE_URL
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MesaHandler)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{port}"
+    _MESA_HTTPD = server
+    _MESA_BASE_URL = f"http://127.0.0.1:{port}"
+    return _MESA_BASE_URL
 
 def _refresh_mbtiles_index():
     global MBTILES_INDEX, MBTILES_REV
@@ -790,11 +912,19 @@ cfg          = read_config(CONFIG_FILE)
 COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 
-GDF          = to_epsg4326(load_parquet(PARQUET_FILE), cfg)
-SEG_GDF      = to_epsg4326(load_parquet(SEGMENT_FILE), cfg)
-SEG_OUTLINE_GDF = to_epsg4326(load_parquet(SEGMENT_OUTLINE_FILE), cfg)
-LINES_GDF    = to_epsg4326(load_parquet(LINES_FILE), cfg)
-GDF_BOUNDS   = GDF.geometry.bounds if (not GDF.empty and "geometry" in GDF.columns) else None
+if TEST_MODE:
+    # Tests focus on MBTiles scanning/server behavior; avoid IO-heavy GeoParquet loads.
+    GDF = _empty_geodf()
+    SEG_GDF = _empty_geodf()
+    SEG_OUTLINE_GDF = _empty_geodf()
+    LINES_GDF = _empty_geodf()
+    GDF_BOUNDS = None
+else:
+    GDF          = to_epsg4326(load_parquet(PARQUET_FILE), cfg)
+    SEG_GDF      = to_epsg4326(load_parquet(SEGMENT_FILE), cfg)
+    SEG_OUTLINE_GDF = to_epsg4326(load_parquet(SEGMENT_OUTLINE_FILE), cfg)
+    LINES_GDF    = to_epsg4326(load_parquet(LINES_FILE), cfg)
+    GDF_BOUNDS   = GDF.geometry.bounds if (not GDF.empty and "geometry" in GDF.columns) else None
 
 IMPORTANCE_MAX_AVAILABLE = False
 IMPORTANCE_INDEX_AVAILABLE = False
@@ -1555,7 +1685,7 @@ function loadGeocodeIntoGroup(cat, preserveView){
     if (GEO_GROUP) GEO_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.sensitivity_url){
-      var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER=L.tileLayer(res.mbtiles.sensitivity_url, opts);
             attachTileDebug(LAYER, 'sensitivity');
             GEO_GROUP.addLayer(LAYER);
@@ -1586,7 +1716,7 @@ function loadGroupstotalIntoGroup(cat, preserveView){
     if (GROUPSTOTAL_GROUP) GROUPSTOTAL_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.groupstotal_url){
-      var opts={opacity:FILL_ALPHA, pane:'groupsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'groupsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_GROUPSTOTAL=L.tileLayer(res.mbtiles.groupstotal_url, opts);
             attachTileDebug(LAYER_GROUPSTOTAL, 'groupstotal');
             GROUPSTOTAL_GROUP.addLayer(LAYER_GROUPSTOTAL);
@@ -1614,7 +1744,7 @@ function loadAssetstotalIntoGroup(cat, preserveView){
     if (ASSETSTOTAL_GROUP) ASSETSTOTAL_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.assetstotal_url){
-      var opts={opacity:FILL_ALPHA, pane:'assetsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'assetsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_ASSETSTOTAL=L.tileLayer(res.mbtiles.assetstotal_url, opts);
             attachTileDebug(LAYER_ASSETSTOTAL, 'assetstotal');
             ASSETSTOTAL_GROUP.addLayer(LAYER_ASSETSTOTAL);
@@ -1646,6 +1776,7 @@ function loadImportanceMaxIntoGroup(cat, preserveView){
             else if (HOME_BOUNDS){ bounds = L.latLngBounds(HOME_BOUNDS); }
             var opts={opacity:FILL_ALPHA, pane:'importanceMaxPane', crossOrigin:true, noWrap:true,  
                                 bounds: bounds,
+                                minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19),
                                 minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_IMPORTANCE_MAX=L.tileLayer(res.mbtiles.importance_max_url, opts);
             attachTileDebug(LAYER_IMPORTANCE_MAX, 'importance_max');
@@ -1673,7 +1804,7 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
     if (IMPORTANCE_INDEX_GROUP) IMPORTANCE_INDEX_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.importance_index_url){
-      var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.importance_index_url, opts);
             attachTileDebug(LAYER_IMPORTANCE_INDEX, 'importance_index');
             IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
@@ -1703,7 +1834,7 @@ function loadSensitivityIndexIntoGroup(cat, preserveView){
     if (SENSITIVITY_INDEX_GROUP) SENSITIVITY_INDEX_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.sensitivity_index_url){
-      var opts={opacity:FILL_ALPHA, pane:'sensitivityIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'sensitivityIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_SENSITIVITY_INDEX=L.tileLayer(res.mbtiles.sensitivity_index_url, opts);
             attachTileDebug(LAYER_SENSITIVITY_INDEX, 'sensitivity_index');
             SENSITIVITY_INDEX_GROUP.addLayer(LAYER_SENSITIVITY_INDEX);
@@ -1719,7 +1850,7 @@ function loadOwaIndexIntoGroup(cat, preserveView){
         if (OWA_INDEX_GROUP) OWA_INDEX_GROUP.clearLayers();
 
         if (res.mbtiles && res.mbtiles.owa_index_url){
-            var opts={opacity:FILL_ALPHA, pane:'owaIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'owaIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_OWA_INDEX=L.tileLayer(res.mbtiles.owa_index_url, opts);
             attachTileDebug(LAYER_OWA_INDEX, 'owa_index');
             OWA_INDEX_GROUP.addLayer(LAYER_OWA_INDEX);
@@ -2071,6 +2202,7 @@ function boot(){
             _setOpacityMaybe(LAYER_IMPORTANCE_MAX,FILL_ALPHA);
       _setOpacityMaybe(LAYER_IMPORTANCE_INDEX,FILL_ALPHA);
       _setOpacityMaybe(LAYER_SENSITIVITY_INDEX,FILL_ALPHA);
+            _setOpacityMaybe(LAYER_OWA_INDEX,FILL_ALPHA);
       _setOpacityMaybe(LAYER_SEG,FILL_ALPHA);
     });
   }).catch(function(err){
@@ -2094,9 +2226,15 @@ if __name__ == "__main__":
             "Install it in that environment, e.g.:  pip install pywebview\n"
         )
         raise SystemExit(1)
+
+    # Load the UI from the same local origin as the tile endpoints.
+    # This avoids WebView2 opaque-origin (about:blank) restrictions that can block loopback requests.
+    _refresh_mbtiles_index()
+    MBTILES_BASE_URL = start_mbtiles_server()
+
     window = webview.create_window(
         title="Maps overview",
-        html=HTML,
+        url=MBTILES_BASE_URL,
         js_api=api,
         width=1300, height=800, resizable=True
     )
