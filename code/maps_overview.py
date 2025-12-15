@@ -1683,8 +1683,8 @@ function loadGeocodeIntoGroup(cat, preserveView){
     if (res.stats && res.stats.message){ setError(res.stats.message); } else { setError(''); }
     if (GEO_GROUP) GEO_GROUP.clearLayers();
 
-        if (res.mbtiles && res.mbtiles.sensitivity_url){
-            var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+    if (res.mbtiles && res.mbtiles.sensitivity_url){
+            var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER=L.tileLayer(res.mbtiles.sensitivity_url, opts);
             attachTileDebug(LAYER, 'sensitivity');
             GEO_GROUP.addLayer(LAYER);
@@ -1714,8 +1714,8 @@ function loadGroupstotalIntoGroup(cat, preserveView){
     if (!res.ok){ setError('Failed to load groups total: '+res.error); return; }
     if (GROUPSTOTAL_GROUP) GROUPSTOTAL_GROUP.clearLayers();
 
-        if (res.mbtiles && res.mbtiles.groupstotal_url){
-            var opts={opacity:FILL_ALPHA, pane:'groupsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+    if (res.mbtiles && res.mbtiles.groupstotal_url){
+            var opts={opacity:FILL_ALPHA, pane:'groupsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_GROUPSTOTAL=L.tileLayer(res.mbtiles.groupstotal_url, opts);
             attachTileDebug(LAYER_GROUPSTOTAL, 'groupstotal');
             GROUPSTOTAL_GROUP.addLayer(LAYER_GROUPSTOTAL);
@@ -1742,8 +1742,8 @@ function loadAssetstotalIntoGroup(cat, preserveView){
     if (!res.ok){ setError('Failed to load assets total: '+res.error); return; }
     if (ASSETSTOTAL_GROUP) ASSETSTOTAL_GROUP.clearLayers();
 
-        if (res.mbtiles && res.mbtiles.assetstotal_url){
-            var opts={opacity:FILL_ALPHA, pane:'assetsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+    if (res.mbtiles && res.mbtiles.assetstotal_url){
+            var opts={opacity:FILL_ALPHA, pane:'assetsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_ASSETSTOTAL=L.tileLayer(res.mbtiles.assetstotal_url, opts);
             attachTileDebug(LAYER_ASSETSTOTAL, 'assetstotal');
             ASSETSTOTAL_GROUP.addLayer(LAYER_ASSETSTOTAL);
@@ -1775,7 +1775,7 @@ function loadImportanceMaxIntoGroup(cat, preserveView){
             else if (HOME_BOUNDS){ bounds = L.latLngBounds(HOME_BOUNDS); }
             var opts={opacity:FILL_ALPHA, pane:'importanceMaxPane', crossOrigin:true, noWrap:true,  
                                 bounds: bounds,
-                                minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22),
+                                minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19),
                                 minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_IMPORTANCE_MAX=L.tileLayer(res.mbtiles.importance_max_url, opts);
             attachTileDebug(LAYER_IMPORTANCE_MAX, 'importance_max');
@@ -1802,8 +1802,8 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
     if (!res.ok){ setError('Failed to load importance index: '+res.error); return; }
     if (IMPORTANCE_INDEX_GROUP) IMPORTANCE_INDEX_GROUP.clearLayers();
 
-        if (res.mbtiles && res.mbtiles.importance_index_url){
-            var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+    if (res.mbtiles && res.mbtiles.importance_index_url){
+            var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.importance_index_url, opts);
             attachTileDebug(LAYER_IMPORTANCE_INDEX, 'importance_index');
             IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
@@ -1832,8 +1832,8 @@ function loadSensitivityIndexIntoGroup(cat, preserveView){
     if (!res.ok){ setError('Failed to load sensitivity index: '+res.error); return; }
     if (SENSITIVITY_INDEX_GROUP) SENSITIVITY_INDEX_GROUP.clearLayers();
 
-        if (res.mbtiles && res.mbtiles.sensitivity_index_url){
-            var opts={opacity:FILL_ALPHA, pane:'sensitivityIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+    if (res.mbtiles && res.mbtiles.sensitivity_index_url){
+            var opts={opacity:FILL_ALPHA, pane:'sensitivityIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_SENSITIVITY_INDEX=L.tileLayer(res.mbtiles.sensitivity_index_url, opts);
             attachTileDebug(LAYER_SENSITIVITY_INDEX, 'sensitivity_index');
             SENSITIVITY_INDEX_GROUP.addLayer(LAYER_SENSITIVITY_INDEX);
@@ -1849,7 +1849,7 @@ function loadOwaIndexIntoGroup(cat, preserveView){
         if (OWA_INDEX_GROUP) OWA_INDEX_GROUP.clearLayers();
 
         if (res.mbtiles && res.mbtiles.owa_index_url){
-            var opts={opacity:FILL_ALPHA, pane:'owaIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:Math.max((res.mbtiles.maxzoom||19), 22), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
+            var opts={opacity:FILL_ALPHA, pane:'owaIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:(res.mbtiles.maxzoom||19), minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:(res.mbtiles.maxzoom||19)};
             LAYER_OWA_INDEX=L.tileLayer(res.mbtiles.owa_index_url, opts);
             attachTileDebug(LAYER_OWA_INDEX, 'owa_index');
             OWA_INDEX_GROUP.addLayer(LAYER_OWA_INDEX);
@@ -1938,7 +1938,7 @@ function buildLayersControl(state){
 
   var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div>' +
                   '<div class="inlineChecks">' +
-                  '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitive areas</label>' +
+                  '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitivity</label>' +
                   '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index</label>' +
                   '<label><input type="checkbox" id="chkOwaIndex"> OWA index</label>' +
                   '<label><input type="checkbox" id="chkImportanceMax"> Importance</label>' +

@@ -85,30 +85,6 @@ def update_progress(new_value: float):
     progress_var.set(new_value)
     progress_label.config(text=f"{int(new_value)}%")
 
-def increment_stat_value(config_path: str, stat_name: str, increment_value: int):
-    if not os.path.isfile(config_path):
-        log_to_gui(log_widget, f"Configuration file {config_path} not found.")
-        return
-    with open(config_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    updated = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f'{stat_name} ='):
-            parts = line.split('=')
-            if len(parts) == 2:
-                current_value = parts[1].strip()
-                try:
-                    new_value = int(current_value) + increment_value
-                    lines[i] = f"{stat_name} = {new_value}\n"
-                    updated = True
-                    break
-                except ValueError:
-                    log_to_gui(log_widget, f"Error: Current value of {stat_name} is not an integer.")
-                    return
-    if updated:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            f.writelines(lines)
-
 # -------------------------------
 # Parquet I/O helpers
 # -------------------------------
@@ -568,7 +544,6 @@ def process_all(log_widget):
     process_and_buffer_lines(log_widget); update_progress(25)
     create_segments_from_buffered_lines(log_widget); update_progress(55)
     build_flat_and_stacked(log_widget); update_progress(95)
-    increment_stat_value(config_file, 'mesa_stat_process_lines', increment_value=1)
     log_to_gui(log_widget, "COMPLETED: Segment processing (Parquet).")
     update_progress(100)
 
