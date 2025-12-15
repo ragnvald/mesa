@@ -455,13 +455,13 @@ def get_status(geoparquet_dir):
         append_status("+" if has_asset_group_rows else "-",
                       f"Asset layers imported: {asset_group_count}" if has_asset_group_rows else
                       "Assets are missing.\nUse 'Set up' to register asset groups.",
-                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#assets")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
 
         geocode_group_count = read_table_and_count('tbl_geocode_group')
         append_status("+" if geocode_group_count is not None else "/",
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else
                       "Geocodes are missing.\nImport assets by pressing the Import button.",
-                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#geocodes")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
 
         lines_original_count = read_table_and_count('tbl_lines_original')
         lines_processed_count = read_table_and_count('tbl_lines')
@@ -469,23 +469,23 @@ def get_status(geoparquet_dir):
         append_status("+" if visible_lines_count is not None else "/",
                   f"Lines: {visible_lines_count}" if visible_lines_count is not None else
                   "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
-                  "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines")
+                  "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
 
         symbol, message = read_setup_status()
-        append_status(symbol, message, "https://github.com/ragnvald/mesa/wiki/3-User-interface#setting-up-parameters")
+        append_status(symbol, message, "https://github.com/ragnvald/mesa/wiki/User-interface#configure-analysis")
 
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if flat_original_count is not None else "-",
                       "Processing completed. You may choose to Show maps or open the QGIS-project file in the qgis-folder."
                       if flat_original_count is not None else
                       "Processing incomplete. Press the \nProcess area-button.",
-                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#processing")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
 
         atlas_count = read_table_and_count('tbl_atlas')
         append_status("+" if atlas_count is not None else "/",
                       f"Atlas pages: {atlas_count}" if atlas_count is not None else
                       "Please create map tile.",
-                      "https://github.com/ragnvald/mesa/wiki/5-Definitions#atlas")
+                      "https://github.com/ragnvald/mesa/wiki/Definitions#atlas")
 
         segments_flat_count = read_table_and_count('tbl_segment_flat')
         lines_count = lines_processed_count if lines_processed_count is not None else visible_lines_count
@@ -494,7 +494,7 @@ def get_status(geoparquet_dir):
                   f"Segments are in place with {segments_flat_count} segments along {lines_count_label} lines."
                       if segments_flat_count is not None else
                       "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
-                      "https://github.com/ragnvald/mesa/wiki/3-User-interface#lines-and-segments")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
 
         return pd.DataFrame(status_list)
     except Exception as e:
@@ -503,9 +503,23 @@ def get_status(geoparquet_dir):
 # ---------------------------------------------------------------------
 # Subprocess runner (+ unified env/cwd)
 # ---------------------------------------------------------------------
-def _sub_env():
+def _infer_base_dir_from_cmd(cmd) -> str | None:
+    try:
+        if not cmd:
+            return None
+        if "--original_working_directory" in cmd:
+            i = cmd.index("--original_working_directory")
+            if i + 1 < len(cmd):
+                base = str(cmd[i + 1]).strip()
+                if base and os.path.isdir(base):
+                    return os.path.abspath(base)
+    except Exception:
+        pass
+    return None
+
+def _sub_env(base_dir: str | None = None):
     env = os.environ.copy()
-    env["MESA_BASE_DIR"] = PROJECT_BASE
+    env["MESA_BASE_DIR"] = os.path.abspath(base_dir) if base_dir else PROJECT_BASE
     return env
 
 def _schedule_stats_refresh(gpkg_file):
@@ -528,6 +542,7 @@ def _schedule_stats_refresh(gpkg_file):
 
 def run_subprocess(command, fallback_command, gpkg_file):
     try:
+        base_dir = _infer_base_dir_from_cmd(command) or PROJECT_BASE
         log_to_logfile(f"Attempting to run command: {command}")
         result = subprocess.run(
             command,
@@ -535,8 +550,8 @@ def run_subprocess(command, fallback_command, gpkg_file):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=PROJECT_BASE,
-            env=_sub_env()
+            cwd=base_dir,
+            env=_sub_env(base_dir)
         )
         log_to_logfile("Primary command executed successfully")
         log_to_logfile(f"stdout: {result.stdout}")
@@ -546,6 +561,7 @@ def run_subprocess(command, fallback_command, gpkg_file):
         log_to_logfile(f"Failed to execute command: {command}, error: {e.stderr}")
         try:
             if fallback_command:
+                fallback_base = _infer_base_dir_from_cmd(fallback_command) or base_dir
                 log_to_logfile(f"Attempting to run fallback command: {fallback_command}")
                 result = subprocess.run(
                     fallback_command,
@@ -553,8 +569,8 @@ def run_subprocess(command, fallback_command, gpkg_file):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    cwd=PROJECT_BASE,
-                    env=_sub_env()
+                    cwd=fallback_base,
+                    env=_sub_env(fallback_base)
                 )
                 log_to_logfile("Fallback command executed successfully")
                 log_to_logfile(f"stdout: {result.stdout}")
@@ -581,9 +597,10 @@ def _launch_gui_process(cmd: list[str], label: str):
         log_to_logfile(f"No command provided for {label}; skipping launch")
         return
     log_to_logfile(f"Launching {label}: {cmd}")
+    base_dir = _infer_base_dir_from_cmd(cmd) or PROJECT_BASE
     popen_kwargs = {
-        "cwd": PROJECT_BASE,
-        "env": _sub_env(),
+        "cwd": base_dir,
+        "env": _sub_env(base_dir),
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
@@ -839,32 +856,6 @@ def update_config_with_values(config_file, **kwargs):
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-def increment_stat_value(config_file, stat_name, increment_value):
-    cfg_path = config_file if os.path.isabs(config_file) else resolve_path(config_file)
-    if not os.path.isfile(cfg_path):
-        log_to_logfile(f"Configuration file {cfg_path} not found.")
-        return
-    _ensure_default_header_present(cfg_path)
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    updated = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f'{stat_name} ='):
-            parts = line.split('=')
-            if len(parts) == 2:
-                current_value = parts[1].strip()
-                try:
-                    new_value = int(current_value) + increment_value
-                    lines[i] = f"{stat_name} = {new_value}\n"
-                    updated = True
-                    break
-                except ValueError:
-                    log_to_logfile(f"Error: Current value of {stat_name} is not an integer.")
-                    return
-    if updated:
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-
 def add_text_to_labelframe(labelframe, text):
     label = tk.Label(labelframe, text=text, justify='left')
     label.pack(padx=10, pady=10, fill='both', expand=True)
@@ -873,42 +864,8 @@ def add_text_to_labelframe(labelframe, text):
     labelframe.bind('<Configure>', update_wrap)
 
 # ---------------------------------------------------------------------
-# Influx logging helpers (unchanged)
+# Influx logging helpers
 # ---------------------------------------------------------------------
-def store_logs_online(
-        log_host, log_token, log_org, log_bucket, id_uuid, mesa_version,
-        mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets,
-        mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines,
-        mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines):
-    if not is_connected():
-        return "No network access, logs not updated"
-    try:
-        def write_point():
-            client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
-            point = Point("tbl_usage") \
-                .tag("uuid", id_uuid) \
-                .field("mesa_version", mesa_version) \
-                .field("mesa_stat_startup", int(mesa_stat_startup)) \
-                .field("mesa_stat_process", int(mesa_stat_process)) \
-                .field("mesa_stat_import_assets", int(mesa_stat_import_assets)) \
-                .field("mesa_stat_import_geocodes", int(mesa_stat_import_geocodes)) \
-                .field("mesa_stat_import_atlas", int(mesa_stat_import_atlas)) \
-                .field("mesa_stat_import_lines", int(mesa_stat_import_lines)) \
-                .field("mesa_stat_setup", int(mesa_stat_setup)) \
-                .field("mesa_stat_edit_atlas", int(mesa_stat_edit_atlas)) \
-                .field("mesa_stat_create_atlas", int(mesa_stat_create_atlas)) \
-                .field("mesa_stat_process_lines", int(mesa_stat_process_lines))
-            write_api = client.write_api(write_options=WriteOptions(batch_size=1))
-            write_api.write(bucket=log_bucket, org=log_org, record=point)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(write_point)
-            future.result(timeout=3)
-    except TimeoutError:
-        return "No network access, logs not updated"
-    except Exception as e:
-        return f"An error occurred: {str(e)}"
-    return "Usage logs updated successfully"
-
 def store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email):
     if not is_connected():
         return "No network access, logs not updated"
@@ -952,24 +909,11 @@ log_bucket              = config['DEFAULT'].get('log_bucket', '')
 log_host                = config['DEFAULT'].get('log_host', '')
 log_token               = "Xp_sTOcg-46FFiQuplxz-Fqi-jEe5YGfOZarPR7gwZ4CMTMYseUPUjdKtp2xKV9w85TlBlh5X_lnaNzKULAhog=="
 
-mesa_stat_startup           = config['DEFAULT'].get('mesa_stat_startup', '0')
-mesa_stat_process           = config['DEFAULT'].get('mesa_stat_process', '0')
-mesa_stat_import_assets     = config['DEFAULT'].get('mesa_stat_import_assets', '0')
-mesa_stat_import_geocodes   = config['DEFAULT'].get('mesa_stat_import_geocodes', '0')
-mesa_stat_import_atlas      = config['DEFAULT'].get('mesa_stat_import_atlas', '0')
-mesa_stat_import_lines      = config['DEFAULT'].get('mesa_stat_import_lines', '0')
-mesa_stat_setup             = config['DEFAULT'].get('mesa_stat_setup', '0')
-mesa_stat_edit_atlas        = config['DEFAULT'].get('mesa_stat_edit_atlas', '0')
-mesa_stat_create_atlas      = config['DEFAULT'].get('mesa_stat_create_atlas', '0')
-mesa_stat_process_lines     = config['DEFAULT'].get('mesa_stat_process_lines', '0')
-
 id_uuid = config['DEFAULT'].get('id_uuid', '').strip()
 id_name = config['DEFAULT'].get('id_name', '').strip()
 id_email = config['DEFAULT'].get('id_email', '').strip()
 id_uuid_ok_value = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't', 'yes')
 id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't', 'yes')
-
-has_run_update_stats = False
 
 if not id_uuid:
     id_uuid = str(uuid.uuid4())
@@ -990,10 +934,6 @@ except Exception:
     log_date_lastupdate_dt = now - timedelta(hours=2)
 
 if ((now - log_date_lastupdate_dt) > timedelta(hours=1)) and (id_uuid_ok_value is True):
-    log_to_logfile(store_logs_online(log_host, log_token, log_org, log_bucket, id_uuid, mesa_version,
-                                     mesa_stat_startup, mesa_stat_process, mesa_stat_import_assets,
-                                     mesa_stat_import_geocodes, mesa_stat_import_atlas, mesa_stat_import_lines,
-                                     mesa_stat_setup, mesa_stat_edit_atlas, mesa_stat_create_atlas, mesa_stat_process_lines))
     log_to_logfile(store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email))
     update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -1518,8 +1458,6 @@ if __name__ == "__main__":
 
     about_container = ttk.Frame(about_tab, padding=12)
     about_container.pack(fill="both", expand=True)
-
-    increment_stat_value(config_file, 'mesa_stat_startup', increment_value=1)
 
     about_box = ttk.LabelFrame(about_container, text="About MESA", bootstyle='secondary')
     about_box.pack(fill='x', expand=False, padx=5, pady=(0, 10))
