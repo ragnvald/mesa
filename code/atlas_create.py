@@ -701,10 +701,6 @@ def main_create_atlas(log_widget_, progress_var_):
 
     update_progress(100)
     log_to_gui(log_widget_, "COMPLETED: Atlas creation saved to GeoParquet.")
-    try:
-        increment_stat_value(config_file, 'mesa_stat_create_atlas', increment_value=1)
-    except Exception:
-        pass
 
 def process_spatial_file(filepath, atlas_objects, atlas_id_counter, log_widget_):
     try:
@@ -787,11 +783,6 @@ def import_atlas_objects(input_folder_atlas: Path, log_widget_, progress_var_):
     update_progress(100)
     log_to_gui(log_widget_, f"Total atlas polygons added: {atlas_id_counter - 1}")
 
-    try:
-        increment_stat_value(config_file, 'mesa_stat_import_atlas', increment_value=1)
-    except Exception:
-        pass
-
     return atlas_objects_gdf
 
 def run_import_atlas(input_folder_atlas: Path, log_widget_, progress_var_):
@@ -802,33 +793,6 @@ def run_import_atlas(input_folder_atlas: Path, log_widget_, progress_var_):
         log_to_gui(log_widget_, "No atlas objects to export (empty table written).")
     log_to_gui(log_widget_, "COMPLETED: Atlas polygons imported (GeoParquet).")
     update_progress(100)
-
-def increment_stat_value(cfg_path: str, stat_name: str, increment_value: int):
-    if not cfg_path or not os.path.isfile(cfg_path):
-        log_to_gui(log_widget, f"Configuration file {cfg_path} not found.")
-        return
-    try:
-        with open(cfg_path, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
-        updated = False
-        for i, line in enumerate(lines):
-            if line.strip().startswith(f'{stat_name} ='):
-                parts = line.split('=', 1)
-                if len(parts) == 2:
-                    current_value = parts[1].strip()
-                    try:
-                        new_value = int(current_value) + int(increment_value)
-                        lines[i] = f"{stat_name} = {new_value}\n"
-                        updated = True
-                        break
-                    except ValueError:
-                        log_to_gui(log_widget, f"Error: Current value of {stat_name} is not an integer.")
-                        return
-        if updated:
-            with open(cfg_path, 'w', encoding='utf-8', errors='replace') as f:
-                f.writelines(lines)
-    except Exception as e:
-        log_to_gui(log_widget, f"Failed to update stat in config: {e}")
 
 # ----------------------------
 # Entrypoint (GUI)
@@ -855,9 +819,6 @@ if __name__ == "__main__":
         atlas_overlap_percent = float(d.get("atlas_overlap_percent", "10"))
     except Exception:
         atlas_lon_size_km, atlas_lat_size_km, atlas_overlap_percent = 10.0, 10.0, 10.0
-
-    # Path to the config file we actually use (for increment_stat_value)
-    config_file = str(_CFG_PATH if _CFG_PATH is not None else (BASE_DIR / "config.ini"))
 
     # GUI
     if tb is not None:

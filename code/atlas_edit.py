@@ -228,31 +228,6 @@ def read_config(file_name):
         cfg.read(file_name)
     return cfg
 
-def increment_stat_value(cfg_path: str, stat_name: str, increment_value: int):
-    if not cfg_path or not os.path.isfile(cfg_path):
-        return
-    try:
-        with open(cfg_path, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
-        updated = False
-        for i, line in enumerate(lines):
-            if line.strip().startswith(f'{stat_name} ='):
-                parts = line.split('=', 1)
-                if len(parts) == 2:
-                    current_value = parts[1].strip()
-                    try:
-                        new_value = int(current_value) + int(increment_value)
-                        lines[i] = f"{stat_name} = {new_value}\n"
-                        updated = True
-                        break
-                    except ValueError:
-                        return
-        if updated:
-            with open(cfg_path, 'w', encoding='utf-8', errors='replace') as f:
-                f.writelines(lines)
-    except Exception:
-        pass
-
 # -----------------------------
 # GeoParquet I/O
 # -----------------------------
@@ -950,10 +925,6 @@ if __name__ == "__main__":
     ttk_bootstrap_theme    = d.get('ttk_bootstrap_theme', 'flatly')
     workingprojection_epsg = d.get('workingprojection_epsg', '4326')
     atlas_file_name        = args.atlas_parquet_file or d.get('atlas_parquet_file', 'tbl_atlas.parquet')
-
-    # Path to the config file we actually use (for stats)
-    config_file = str(_CFG_PATH if _CFG_PATH is not None else (BASE_DIR / "config.ini"))
-    increment_stat_value(config_file, 'mesa_stat_edit_atlas', increment_value=1)
 
     # UI setup
     if tb is not None:

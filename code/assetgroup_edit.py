@@ -200,33 +200,6 @@ def asset_group_parquet(base_dir: Path, *, for_write: bool = False) -> Path:
             return candidate_path
     return gpq_dir(base_dir) / ASSET_GROUP_FILE_NAME
 
-# ------------------------ Stats / logging ------------------------
-def increment_stat_value(cfg_path: Path | str, stat_name: str, increment_value: int):
-    try:
-        cfg_path = Path(cfg_path)
-        if not cfg_path.is_file():
-            return
-        with open(cfg_path, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
-        updated = False
-        for i, line in enumerate(lines):
-            if line.strip().startswith(f'{stat_name} ='):
-                parts = line.split('=', 1)
-                if len(parts) == 2:
-                    current_value = parts[1].strip()
-                    try:
-                        new_value = int(current_value) + int(increment_value)
-                        lines[i] = f"{stat_name} = {new_value}\n"
-                        updated = True
-                        break
-                    except ValueError:
-                        return
-        if updated:
-            with open(cfg_path, 'w', encoding='utf-8', errors='replace') as f:
-                f.writelines(lines)
-    except Exception:
-        pass
-
 def write_to_log(base_dir: Path, message: str):
     ts = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     try:
@@ -478,8 +451,6 @@ if __name__ == "__main__":
     cfg_used = _CFG_PATH if _CFG_PATH else config_path(BASE_DIR)
 
     theme = _ensure_cfg()["DEFAULT"].get("ttk_bootstrap_theme", "flatly")
-    increment_stat_value(cfg_used, 'mesa_stat_edit_asset_group', 1)
-
     app = (tb.Window(themename=theme) if tb else tk.Tk())
     editor = AssetGroupEditor(app, BASE_DIR, theme)
     app.mainloop()
