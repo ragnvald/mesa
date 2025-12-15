@@ -134,6 +134,14 @@ def base_dir() -> Path:
     """
     candidates: list[Path] = []
 
+    # 0) explicit environment override (mesa.exe sets this for subprocesses)
+    try:
+        env_hint = os.environ.get("MESA_BASE_DIR")
+        if env_hint:
+            candidates.append(Path(env_hint))
+    except Exception:
+        pass
+
     # 1) explicit hint (mesa.exe usually passes this)
     try:
         if 'original_working_directory' in globals() and original_working_directory:
@@ -517,9 +525,16 @@ def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
     if not getattr(sys, "frozen", False) and is_exe:
         log_to_gui(log_widget, "[Tiles] create_raster_tiles.py not found; using bundled executable instead.")
 
+    # Run from the project root to keep all relative paths consistent
+    # (some frozen builds/tools may still fall back to CWD for locating output).
+    try:
+        child_cwd = str(base_dir())
+    except Exception:
+        child_cwd = str(runner_path.parent)
+
     return subprocess.Popen(
         args,
-        cwd=str(runner_path.parent),
+        cwd=child_cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -2165,6 +2180,38 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             res = _flatten_worker((f, ranges_map, desc_map, index_weights))
             if res is not None:
                 partials.append(res)
+
+    if not partials:
+        log_to_gui(log_widget, "No data produced during flattening; writing empty tbl_flat.")
+        empty_cols = [
+            'ref_geocodegroup','name_gis_geocodegroup','code',
+            'importance_min','importance_max','importance_code_min','importance_description_min','importance_code_max','importance_description_max',
+            'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
+            'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
+            'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
+            'index_importance','index_sensitivity','env_index','owa_index',
+            'geometry'
+        ]
+        gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
+        write_parquet("tbl_flat", gdf_empty)
+        try:
+            stats = {"labels": list("ABCDE"), "values": [0,0,0,0,0], "message": f'The geocode/partition "{_basic_group_name()}" is missing.'}
+            _write_area_stats_json(stats)
+        except Exception:
+            pass
+        return
+
+    try:
+        full = pd.concat(partials, ignore_index=True)
+    except Exception:
+        # Fallback: keep as-is (should be rare)
+        full = partials[0]
+
+    try:
+        if "code" in full.columns:
+            full["code"] = full["code"].astype(str)
+    except Exception:
+        pass
     # If a code was split across files, we need to aggregate again
     # Group by code
     # Aggregations:
@@ -2206,7 +2253,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     # We'll do a custom apply or just iterate.
     # Since most codes won't be split, maybe we can optimize.
     # Check duplicates
-    if full["code"].duplicated().any():
+    if "code" in full.columns and full["code"].duplicated().any():
         log_to_gui(log_widget, "Resolving split geocodes…")
         # We need a more complex reduction for the winners
         # Let's do it manually for the complex columns
@@ -2286,10 +2333,29 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     else:
         # No duplicates, just clean up the list columns
         tbl_flat = full
-        tbl_flat["asset_groups_total"] = tbl_flat["ref_asset_group"].apply(lambda x: len(set(x)))
-        tbl_flat["asset_group_names"] = tbl_flat["name_gis_assetgroup"].apply(lambda x: ", ".join(sorted(set(x))))
+        def _safe_list(x):
+            if x is None:
+                return []
+            if isinstance(x, (list, tuple, set)):
+                return list(x)
+            try:
+                if pd.isna(x):
+                    return []
+            except Exception:
+                pass
+            return [x]
+
+        if "ref_asset_group" in tbl_flat.columns:
+            tbl_flat["asset_groups_total"] = tbl_flat["ref_asset_group"].apply(lambda x: len(set(_safe_list(x))))
+        else:
+            tbl_flat["asset_groups_total"] = 0
+
+        if "name_gis_assetgroup" in tbl_flat.columns:
+            tbl_flat["asset_group_names"] = tbl_flat["name_gis_assetgroup"].apply(lambda x: ", ".join(sorted(set(map(str, _safe_list(x))))))
+        else:
+            tbl_flat["asset_group_names"] = ""
         # Drop the list columns
-        tbl_flat = tbl_flat.drop(columns=["ref_asset_group", "name_gis_assetgroup"])
+        tbl_flat = tbl_flat.drop(columns=[c for c in ["ref_asset_group", "name_gis_assetgroup"] if c in tbl_flat.columns])
 
     # 5. Final Descriptions & Area
     for b in bases:
@@ -3080,8 +3146,12 @@ if __name__ == "__main__":
     parser.add_argument('--headless', action='store_true', help='Run without GUI (CLI mode)')
     args = parser.parse_args()
     original_working_directory = args.original_working_directory or os.getcwd()
-    if "system" in os.path.basename(original_working_directory).lower():
-        original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
+    try:
+        leaf = os.path.basename(original_working_directory).lower()
+        if leaf in ("system", "tools", "code"):
+            original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
+    except Exception:
+        pass
 
     # Flat config
     cfg_path = base_dir() / "config.ini"
