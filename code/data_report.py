@@ -66,6 +66,14 @@ TILE_CACHE_MAX_AGE_DAYS = 30       # discard cached OSM tiles older than this (<
 
 OSM_ATTRIBUTION_TEXT = "© OpenStreetMap contributors"
 
+_OSM_TILE_CACHE_LOGGED = False
+
+# Basemap mode (set from config):
+# - xyz: force built-in XYZ downloader with output/tile_cache
+# - contextily: force contextily when available (fallback to xyz if not)
+# - auto: prefer contextily, fallback to xyz
+_REPORT_BASEMAP_MODE = "xyz"
+
 # ---------------- GUI / globals ----------------
 log_widget = None
 progress_var = None
@@ -624,11 +632,14 @@ def _output_candidates(base_dir: str | None) -> list[Path]:
     except Exception:
         pass
     candidates: list[Path] = []
+    # Prefer <base>/output (workspace-root output) whenever possible.
+    # Only fall back to <base>/code/output if needed (e.g. when running with base_dir pointing at repo root
+    # but output exists only under code/).
+    candidates.append((base / "output").resolve())
     if base.name.lower() != "code":
         code_dir = (base / "code")
         if code_dir.exists():
             candidates.append((code_dir / "output").resolve())
-    candidates.append((base / "output").resolve())
     return candidates
 
 def _resolve_output_root(base_dir: str | None) -> Path:
@@ -890,6 +901,15 @@ def _tile_cache_root(base_dir: str | None) -> Path:
         cache.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+
+    # Help users locate the cache on disk (log once per process).
+    global _OSM_TILE_CACHE_LOGGED
+    if not _OSM_TILE_CACHE_LOGGED and base_dir:
+        _OSM_TILE_CACHE_LOGGED = True
+        try:
+            write_to_log(f"OSM tile cache folder: {cache}", base_dir)
+        except Exception:
+            pass
     return cache
 
 def _load_cached_tile(cache_path: Path):
@@ -928,8 +948,10 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
     """Add a basemap under current axes.
     Prefers contextily; if unavailable, fetches OSM Web Mercator tiles and composites them.
     """
-    # Preferred path: contextily
-    if ctx is not None:
+    mode = str(_REPORT_BASEMAP_MODE or "xyz").strip().lower()
+
+    # Preferred path: contextily (unless forced xyz)
+    if mode != "xyz" and ctx is not None:
         try:
             # We render attribution as plain text under the map in the DOCX output.
             # Try to suppress attribution embedded in the map image.
@@ -942,6 +964,12 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
                 )
             except TypeError:
                 ctx.add_basemap(ax, crs=f"EPSG:{crs_epsg}", source=ctx.providers.OpenStreetMap.Mapnik)
+
+            if base_dir:
+                try:
+                    write_to_log("Basemap source: contextily (no local XYZ tile cache used)", base_dir)
+                except Exception:
+                    pass
 
             # Defensive cleanup: remove any attribution text artists if present
             try:
@@ -957,6 +985,10 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
             return
         except Exception as e:
             write_to_log(f"Basemap via contextily failed, falling back to tiles: {e}", base_dir)
+
+    # If contextily is forced, do not proceed with XYZ fallback.
+    if mode == "contextily":
+        return
 
     # Fallback: simple OSM tile fetch/composite in EPSG:3857 only
     if int(crs_epsg) != 3857:
@@ -1065,6 +1097,11 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
         def tile_url(z, x, y):
             return f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
+        if base_dir:
+            try:
+                write_to_log("Basemap source: XYZ tiles (OpenStreetMap) with local cache", base_dir)
+            except Exception:
+                pass
         cache_root = _tile_cache_root(base_dir)
         cache_hits = 0
         fetched = 0
@@ -1434,7 +1471,7 @@ def render_mbtiles_to_png_best_fit(mbtiles_path: str,
                     zorder=10,
                 )
                 _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=True)
-                fig.tight_layout(pad=0)
+                # tight_layout frequently warns with inset axes; bbox_inches='tight' is sufficient here.
                 plt.savefig(out_png, bbox_inches='tight')
                 plt.close(fig)
                 return True, ""
@@ -2608,9 +2645,31 @@ def compile_docx(output_docx: str, order_list: list):
                         last_was_page_break = False
                     else:
                         width_cm = usable_width_cm
-                        if 'atlas' in os.path.basename(path).lower():
+                        base_name_lower = os.path.basename(path).lower()
+                        if 'atlas' in base_name_lower:
                             width_cm *= ATLAS_DOC_WIDTH_SCALE
-                        doc.add_picture(path, width=Cm(width_cm))
+
+                        # Clamp atlas images to max 18 cm tall (overview + tiles)
+                        if 'atlas' in base_name_lower:
+                            max_h_cm = 18.0
+                            with PILImage.open(path) as im:
+                                w_px, h_px = im.size
+                            if w_px <= 0 or h_px <= 0:
+                                doc.add_picture(path, width=Cm(width_cm))
+                            else:
+                                aspect = float(h_px) / float(w_px)
+                                out_w_cm = float(width_cm)
+                                out_h_cm = out_w_cm * aspect
+                                if out_h_cm > max_h_cm:
+                                    out_h_cm = max_h_cm
+                                    out_w_cm = out_h_cm / aspect
+                                doc.add_picture(path, width=Cm(out_w_cm))
+                            try:
+                                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            except Exception:
+                                pass
+                        else:
+                            doc.add_picture(path, width=Cm(width_cm))
 
                         # If this is a map image (not charts/ribbons), add OSM attribution under it.
                         if _needs_osm_attribution(path):
@@ -2670,6 +2729,17 @@ def generate_report(base_dir: str,
     try:
         set_progress(3, "Initializing report generation …")
         cfg       = read_config(config_file)
+
+        # Basemap mode: xyz (default), contextily, auto
+        global _REPORT_BASEMAP_MODE
+        try:
+            _REPORT_BASEMAP_MODE = (cfg['DEFAULT'].get('report_basemap_mode', 'xyz') or 'xyz').strip().lower()
+        except Exception:
+            _REPORT_BASEMAP_MODE = 'xyz'
+        if _REPORT_BASEMAP_MODE not in {'xyz', 'contextily', 'auto'}:
+            _REPORT_BASEMAP_MODE = 'xyz'
+        write_to_log(f"Report basemap mode: {_REPORT_BASEMAP_MODE}", base_dir)
+
         include_atlas_cfg = _cfg_getboolean(cfg, 'DEFAULT', 'report_include_atlas_maps', default=False)
         if report_mode is None:
             include_atlas_maps = include_atlas_cfg
@@ -2690,6 +2760,13 @@ def generate_report(base_dir: str,
             pass
         tmp_dir   = str(tmp_dir_path)
         set_progress(6, "Paths prepared.")
+
+        # Ensure the OSM tile cache folder exists in the expected place, even when basemap is served
+        # via contextily (which doesn't use our XYZ-tile cache).
+        try:
+            _tile_cache_root(base_dir)
+        except Exception:
+            pass
 
         # Load key tables
         asset_object_pq = os.path.join(gpq_dir, "tbl_asset_object.parquet")
