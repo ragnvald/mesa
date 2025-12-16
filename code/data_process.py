@@ -1444,6 +1444,53 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         log_to_gui(log_widget, "ERROR: Missing or empty tbl_geocode_object.parquet; aborting stacked build.")
         return
 
+    # Guardrail: importance/susceptibility are required to compute sensitivity.
+    # If these are not set (typically via parametres_setup), we must stop early
+    # to avoid producing blank sensitivity outputs.
+    try:
+        missing_cols = [c for c in ("importance", "susceptibility") if (groups is None or groups.empty or c not in groups.columns)]
+        valid_count = 0
+        if not missing_cols and groups is not None and not groups.empty:
+            imp = pd.to_numeric(groups.get("importance"), errors="coerce")
+            sus = pd.to_numeric(groups.get("susceptibility"), errors="coerce")
+            valid = imp.between(1, 5) & sus.between(1, 5)
+            try:
+                valid_count = int(valid.sum())
+            except Exception:
+                valid_count = 0
+
+        if missing_cols or valid_count <= 0:
+            msg = (
+                "NOT COMPLETED: Sensitivity cannot be computed because required parameters are missing. "
+                "Please enter Importance and Susceptibility for your asset layers in Processing setup, "
+                "then run processing again."
+            )
+            log_to_gui(log_widget, msg)
+            try:
+                # Mark status file as error so the progress map/UI reflects failure.
+                existing = {}
+                p = _status_path()
+                if p.exists():
+                    with open(p, "r", encoding="utf-8") as f:
+                        existing = json.load(f) or {}
+                payload = {
+                    "phase": "error",
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "chunks_total": int(existing.get("chunks_total", 0) or 0),
+                    "done": int(existing.get("done", 0) or 0),
+                    "running": existing.get("running", []),
+                    "cells": existing.get("cells", []),
+                    "home_bounds": existing.get("home_bounds"),
+                    "message": msg,
+                }
+                _write_status_atomic(payload)
+            except Exception:
+                pass
+            raise RuntimeError(msg)
+    except Exception:
+        # Let this propagate up to stop processing.
+        raise
+
     _log_memory_snapshot(
         "tbl_stacked:start",
         {"assets": f"{len(assets):,}", "geocodes": f"{len(geocodes):,}"},
@@ -2784,8 +2831,15 @@ def _processing_worker_entry(cfg_path_str: str) -> None:
     try:
         process_all(Path(cfg_path_str))
     except Exception:
-        # Child errors are reflected in status/log files; just exit.
-        pass
+        # Ensure the worker exits non-zero so the GUI can skip downstream stages (e.g., tiles).
+        try:
+            _update_status_phase("error")
+        except Exception:
+            pass
+        try:
+            sys.exit(1)
+        except Exception:
+            return
 
 def _start_processing_worker(cfg_path: Path) -> None:
     """Launch processing in a child process so Pools can be used even in frozen GUI runs."""
