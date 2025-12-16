@@ -1085,8 +1085,8 @@ if __name__ == "__main__":
              "Start here when preparing a new dataset or refreshing existing inputs."),
             ("Build geocode grids", geocodes_grids,
              "Create or refresh the hexagon/tile grids that support analysis."),
-            ("Define atlas tiles", make_atlas,
-             "Generate atlas tile polygons used in the QGIS atlas and the report engine."),
+            ("Create atlas", make_atlas,
+             "Generate atlas polygons used in the QGIS atlas and the report engine."),
         ]),
         ("Configure analysis (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
             ("Processing settings", edit_processing_setup,
@@ -1461,19 +1461,31 @@ if __name__ == "__main__":
 
     about_box = ttk.LabelFrame(about_container, text="About MESA", bootstyle='secondary')
     about_box.pack(fill='x', expand=False, padx=5, pady=(0, 10))
+    about_box.columnconfigure(0, weight=1)
     about_text = (
         "Welcome to the MESA tool. The method is developed by UNEP-WCMC and the Norwegian Environment Agency. "
         "The software streamlines sensitivity analysis, reducing the likelihood of manual errors in GIS workflows.\n\n"
-        "Documentation and user guides are available on the MESA wiki: https://github.com/ragnvald/mesa/wiki\n\n"
+        "Documentation and user guides are available on the MESA wiki.\n\n"
         "This release incorporates feedback from workshops with partners in Ghana, Tanzania, Uganda, Mozambique, "
-        "and Kenya. Lead programmer: Ragnvald Larsen - https://www.linkedin.com/in/ragnvald/"
+        "and Kenya. Lead programmer: Ragnvald Larsen."
     )
-    ttk.Label(
+    about_label = ttk.Label(
         about_box,
         text=about_text,
         wraplength=700,
         justify="left"
-    ).pack(fill='x', expand=False, padx=10, pady=10)
+    )
+    about_label.pack(fill='x', expand=False, padx=10, pady=(10, 6))
+
+    links_frame = ttk.Frame(about_box)
+    links_frame.pack(fill='x', expand=False, padx=10, pady=(0, 10))
+    links_frame.columnconfigure(0, weight=1)
+
+    ttk.Label(links_frame, text="Open MESA wiki:", justify="left").grid(row=0, column=0, sticky="w")
+    create_link_icon(links_frame, "https://github.com/ragnvald/mesa/wiki", 0, 1, 6, 0)
+
+    ttk.Label(links_frame, text="Lead programmer (LinkedIn):", justify="left").grid(row=1, column=0, sticky="w", pady=(6, 0))
+    create_link_icon(links_frame, "https://www.linkedin.com/in/ragnvald/", 1, 1, 6, 6)
 
     # ------------------------------------------------------------------
     # Footer
