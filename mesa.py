@@ -1166,10 +1166,12 @@ if __name__ == "__main__":
         color_bar.grid(row=0, column=0, padx=(0, 6), sticky="ns")
         title_label = ttk.Label(entry, text="Event", justify="left")
         title_label.grid(row=0, column=1, sticky="w")
+        duration_label = ttk.Label(entry, text="--", width=12, anchor="e")
+        duration_label.grid(row=0, column=2, padx=(6, 0), sticky="e")
         time_label = ttk.Label(entry, text="--", width=18, anchor="e")
-        time_label.grid(row=0, column=2, sticky="e")
+        time_label.grid(row=0, column=3, padx=(8, 0), sticky="e")
         entry.columnconfigure(1, weight=1)
-        timeline_entries.append((color_bar, title_label, time_label))
+        timeline_entries.append((color_bar, title_label, duration_label, time_label))
 
     # insight boxes container (below Status and help)
     insights_frame = ttk.Frame(stats_container)
@@ -1210,6 +1212,154 @@ if __name__ == "__main__":
             return os.path.getmtime(path)
         except Exception:
             return None
+
+    _log_duration_cache = {
+        "mtime": None,
+        "durations": {},
+    }
+
+    def _parse_log_timestamp(line: str) -> datetime | None:
+        """Parse timestamps like 'YYYY.MM.DD HH:MM:SS' at start of log.txt lines."""
+        if not line or len(line) < 19:
+            return None
+        ts = line[:19]
+        try:
+            return datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
+        except Exception:
+            return None
+
+    def _scan_last_duration_from_log(log_path: str,
+                                    start_markers: list[str],
+                                    end_markers_primary: list[str],
+                                    end_markers_secondary: list[str] | None = None) -> float | None:
+        """Return duration (seconds) for the most recent completed run.
+
+        Uses a simple state-machine:
+        - start markers begin a run
+        - primary end markers end a run immediately
+        - secondary end markers are remembered and used only if no primary end is found
+          before the next run begins or the file ends.
+        """
+        try:
+            if not os.path.exists(log_path):
+                return None
+        except Exception:
+            return None
+
+        current_start: datetime | None = None
+        secondary_end: datetime | None = None
+        last_duration: float | None = None
+
+        def _has_any(haystack: str, needles: list[str]) -> bool:
+            return any(n in haystack for n in needles)
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                for raw in f:
+                    line = raw.rstrip("\n")
+                    ts = _parse_log_timestamp(line)
+                    if ts is None:
+                        continue
+
+                    if current_start is None:
+                        if _has_any(line, start_markers):
+                            current_start = ts
+                            secondary_end = None
+                        continue
+
+                    # run is active
+                    if end_markers_secondary and _has_any(line, end_markers_secondary):
+                        secondary_end = ts
+
+                    if _has_any(line, end_markers_primary):
+                        last_duration = (ts - current_start).total_seconds()
+                        current_start = None
+                        secondary_end = None
+
+            # If we ended the file mid-run but have a secondary end marker, use it.
+            if current_start is not None and secondary_end is not None:
+                last_duration = (secondary_end - current_start).total_seconds()
+        except Exception:
+            return None
+
+        return last_duration
+
+    def _fmt_duration(seconds: float | None) -> str:
+        if seconds is None:
+            return "--"
+        try:
+            total = int(round(float(seconds)))
+        except Exception:
+            return "--"
+        if total < 0:
+            return "--"
+        mins, sec = divmod(total, 60)
+        hrs, mins = divmod(mins, 60)
+        days, hrs = divmod(hrs, 24)
+        if days:
+            return f"{days}d {hrs}h"
+        if hrs:
+            return f"{hrs}h {mins:02d}m"
+        if mins:
+            return f"{mins}m {sec:02d}s"
+        return f"{sec}s"
+
+    def _recent_activity_durations() -> dict[str, str]:
+        """Duration strings for the Status -> Recent activity items."""
+        log_path = os.path.join(original_working_directory, "log.txt")
+        try:
+            mtime = os.path.getmtime(log_path)
+        except Exception:
+            mtime = None
+
+        if mtime and _log_duration_cache.get("mtime") == mtime:
+            return _log_duration_cache.get("durations", {})
+
+        durations: dict[str, str] = {}
+
+        # Import assets (from data_import.py)
+        durations["Import assets"] = _fmt_duration(
+            _scan_last_duration_from_log(
+                log_path,
+                start_markers=["Step [Assets] STARTED"],
+                end_markers_primary=["Step [Assets] COMPLETED", "Step [Assets] FAILED"],
+            )
+        )
+
+        # Processing (from data_process.py) — prefer tile completion when present.
+        durations["Processing"] = _fmt_duration(
+            _scan_last_duration_from_log(
+                log_path,
+                start_markers=["[Stage 1/4] Preparing workspace"],
+                end_markers_primary=["[Tiles] Completed.", "Error during processing:"],
+                end_markers_secondary=[
+                    "Core processing (stages 1-3) finished",
+                    "tbl_flat saved with",
+                ],
+            )
+        )
+
+        # Line processing (from lines_process.py)
+        durations["Line processing"] = _fmt_duration(
+            _scan_last_duration_from_log(
+                log_path,
+                start_markers=["SEGMENT PROCESS START"],
+                end_markers_primary=["COMPLETED: Segment processing", "FAILED: Segment processing"],
+            )
+        )
+
+        # Newest report export (from data_report.py)
+        durations["Newest report export"] = _fmt_duration(
+            _scan_last_duration_from_log(
+                log_path,
+                start_markers=["Report mode selected:"],
+                end_markers_primary=["Word report created:", "ERROR during report generation:"],
+            )
+        )
+
+        _log_duration_cache["mtime"] = mtime
+        _log_duration_cache["durations"] = durations
+        return durations
 
     def _last_flat_timestamp():
         geoparquet_dir = _detect_geoparquet_dir()
@@ -1254,6 +1404,7 @@ if __name__ == "__main__":
         return config['DEFAULT'].get('last_report_export', '--')
 
     def update_timeline():
+        durations = _recent_activity_durations()
         events = [
             ("Import assets", _last_asset_import_timestamp(), 'success'),
             ("Processing", _last_flat_timestamp(), 'info'),
@@ -1263,9 +1414,10 @@ if __name__ == "__main__":
         for idx, (title, timestamp, bootstyle) in enumerate(events):
             if idx >= len(timeline_entries):
                 break
-            color_bar, title_label, time_label = timeline_entries[idx]
+            color_bar, title_label, duration_label, time_label = timeline_entries[idx]
             color_bar.config(bootstyle=bootstyle)
             title_label.config(text=title)
+            duration_label.config(text=durations.get(title, "--"))
             time_label.config(text=timestamp)
 
     def fetch_geocode_objects_summary():
@@ -1347,6 +1499,19 @@ if __name__ == "__main__":
         assets_summary.config(text=fetch_asset_summary())
         lines_summary.config(text=fetch_lines_summary())
         analysis_summary.config(text=fetch_analysis_summary())
+
+    def _on_notebook_tab_changed(_event=None):
+        """Refresh Status tab when it is opened/selected."""
+        try:
+            current_tab = notebook.select()
+            if current_tab and notebook.nametowidget(current_tab) is stats_tab:
+                update_stats(gpkg_file)
+                update_timeline()
+                update_insight_boxes()
+        except Exception:
+            pass
+
+    notebook.bind("<<NotebookTabChanged>>", _on_notebook_tab_changed)
 
     update_stats(gpkg_file)
     update_timeline()
