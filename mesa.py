@@ -17,7 +17,6 @@ import socket
 import uuid
 import datetime
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import threading
 import sys
 from shapely import wkb
