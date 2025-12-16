@@ -17,7 +17,6 @@ import socket
 import uuid
 import datetime
 from datetime import datetime, timedelta
-from influxdb_client import InfluxDBClient, Point, WriteOptions
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import threading
 import sys
@@ -864,27 +863,6 @@ def add_text_to_labelframe(labelframe, text):
     labelframe.bind('<Configure>', update_wrap)
 
 # ---------------------------------------------------------------------
-# Influx logging helpers
-# ---------------------------------------------------------------------
-def store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email):
-    if not is_connected():
-        return "No network access, logs not updated"
-    try:
-        def write_point():
-            client = InfluxDBClient(url=log_host, token=log_token, org=log_org)
-            point = Point("tbl_user").tag("uuid", id_uuid).field("id_name", id_name).field("id_email", id_email)
-            write_api = client.write_api(write_options=WriteOptions(batch_size=1))
-            write_api.write(bucket=log_bucket, org=log_org, record=point)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(write_point)
-            future.result(timeout=3)
-    except TimeoutError:
-        return "No network access, logs not updated"
-    except Exception as e:
-        return f"An error occurred: {str(e)}"
-    return "User logs updated successfully"
-
-# ---------------------------------------------------------------------
 # Main setup
 # ---------------------------------------------------------------------
 # The directory where data/logs should live (never _MEIPASS)
@@ -901,41 +879,6 @@ config                  = read_config(config_file)
 ttk_bootstrap_theme     = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 mesa_version            = config['DEFAULT'].get('mesa_version', 'MESA 5')
 workingprojection_epsg  = config['DEFAULT'].get('workingprojection_epsg', '4326')
-
-log_date_initiated      = config['DEFAULT'].get('log_date_initiated', '')
-log_date_lastupdate     = config['DEFAULT'].get('log_date_lastupdate', '')
-log_org                 = config['DEFAULT'].get('log_org', '')
-log_bucket              = config['DEFAULT'].get('log_bucket', '')
-log_host                = config['DEFAULT'].get('log_host', '')
-log_token               = "Xp_sTOcg-46FFiQuplxz-Fqi-jEe5YGfOZarPR7gwZ4CMTMYseUPUjdKtp2xKV9w85TlBlh5X_lnaNzKULAhog=="
-
-id_uuid = config['DEFAULT'].get('id_uuid', '').strip()
-id_name = config['DEFAULT'].get('id_name', '').strip()
-id_email = config['DEFAULT'].get('id_email', '').strip()
-id_uuid_ok_value = config['DEFAULT'].get('id_uuid_ok', 'False').lower() in ('true', '1', 't', 'yes')
-id_personalinfo_ok_value = config['DEFAULT'].get('id_personalinfo_ok', 'False').lower() in ('true', '1', 't', 'yes')
-
-if not id_uuid:
-    id_uuid = str(uuid.uuid4())
-    update_config_with_values(config_file, id_uuid=id_uuid)
-
-if not log_date_initiated:
-    log_date_initiated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    update_config_with_values(config_file, log_date_initiated=log_date_initiated)
-
-if not log_date_lastupdate:
-    log_date_lastupdate = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    update_config_with_values(config_file, log_date_lastupdate=log_date_lastupdate)
-
-now = datetime.now()
-try:
-    log_date_lastupdate_dt = datetime.strptime(log_date_lastupdate, "%Y-%m-%d %H:%M:%S")
-except Exception:
-    log_date_lastupdate_dt = now - timedelta(hours=2)
-
-if ((now - log_date_lastupdate_dt) > timedelta(hours=1)) and (id_uuid_ok_value is True):
-    log_to_logfile(store_userinfo_online(log_host, log_token, log_org, log_bucket, id_uuid, id_name, id_email))
-    update_config_with_values(config_file, log_date_lastupdate=now.strftime("%Y-%m-%d %H:%M:%S"))
 
 check_and_create_folders()
 
@@ -1277,6 +1220,19 @@ if __name__ == "__main__":
             return _fmt_timestamp(ts)
         return config['DEFAULT'].get('last_process_run', '--')
 
+    def _last_asset_import_timestamp():
+        geoparquet_dir = _detect_geoparquet_dir()
+        candidates = [
+            os.path.join(geoparquet_dir, "tbl_asset_group.parquet"),
+            os.path.join(geoparquet_dir, "tbl_asset_object.parquet"),
+        ]
+        newest = None
+        for p in candidates:
+            ts = _path_mtime(p)
+            if ts and (newest is None or ts > newest):
+                newest = ts
+        return _fmt_timestamp(newest) if newest else "--"
+
     def _last_line_processing_timestamp():
         geoparquet_dir = _detect_geoparquet_dir()
         segment_path = os.path.join(geoparquet_dir, "tbl_segment_flat.parquet")
@@ -1300,7 +1256,7 @@ if __name__ == "__main__":
 
     def update_timeline():
         events = [
-            ("Import assets", config['DEFAULT'].get('log_date_lastupdate', '--'), 'success'),
+            ("Import assets", _last_asset_import_timestamp(), 'success'),
             ("Processing", _last_flat_timestamp(), 'info'),
             ("Line processing", _last_line_processing_timestamp(), 'warning'),
             ("Newest report export", _latest_report_timestamp(), 'secondary')
