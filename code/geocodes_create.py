@@ -150,6 +150,29 @@ class Stats:
         self.running = False
 STATS = Stats()
 
+
+def _progress_lerp(floor_v: float, ceil_v: float, frac: float) -> float:
+    try:
+        f = float(frac)
+    except Exception:
+        f = 0.0
+    f = max(0.0, min(1.0, f))
+    return float(floor_v) + (float(ceil_v) - float(floor_v)) * f
+
+
+def _progress_saturating(floor_v: float, ceil_v: float, n_done: int, half_n: int) -> float:
+    """Monotone progress that approaches ceil_v as n_done grows.
+
+    Useful when total work is unknown (e.g., polygonize output size).
+    """
+    try:
+        done = max(0.0, float(n_done))
+        half = max(1.0, float(half_n))
+        frac = done / (done + half)
+        return _progress_lerp(floor_v, ceil_v, frac)
+    except Exception:
+        return float(floor_v)
+
 # -----------------------------------------------------------------------------
 # Config & paths (flat config)
 # -----------------------------------------------------------------------------
@@ -896,6 +919,8 @@ def _build_linework_and_coverage(
     *,
     cfg: configparser.ConfigParser,
     workers: int | None = None,
+    progress_floor: float | None = None,
+    progress_ceiling: float | None = None,
 ) -> tuple[object | None, object | None, dict]:
     """Build noded linework and polygon coverage union.
 
@@ -975,6 +1000,20 @@ def _build_linework_and_coverage(
                 wkbs.append(b"")
 
         chunks = [wkbs[i:i + chunk_size] for i in range(0, len(wkbs), chunk_size)]
+
+        # Hook heartbeat/progress to real work units.
+        STATS.tiles_total = int(len(chunks))
+        STATS.tiles_done = 0
+        STATS.worker_started_at = time.time()
+        STATS.detail = "extracting boundaries"
+
+        # Most user-visible waiting is here. Let extraction own most of the linework band.
+        if progress_floor is not None and progress_ceiling is not None:
+            extract_floor = float(progress_floor)
+            extract_ceiling = _progress_lerp(progress_floor, progress_ceiling, 0.90)
+        else:
+            extract_floor = extract_ceiling = None
+
         log_to_gui(
             f"[Mosaic] Parallel boundary extraction: workers={workers}, chunks={len(chunks):,}, chunk_size={chunk_size:,}, maxtasksperchild={maxtasks}",
             "INFO",
@@ -982,6 +1021,7 @@ def _build_linework_and_coverage(
 
         ctx = mp.get_context("spawn")
         done = 0
+        last_ui = 0.0
         try:
             with ctx.Pool(processes=int(workers), maxtasksperchild=int(maxtasks)) as pool:
                 it = pool.imap_unordered(
@@ -991,6 +1031,13 @@ def _build_linework_and_coverage(
                 )
                 for res in it:
                     done += 1
+
+                    STATS.tiles_done = int(done)
+                    if extract_floor is not None and extract_ceiling is not None:
+                        now = time.time()
+                        if done <= 2 or done >= len(chunks) or (now - last_ui) >= 0.25:
+                            last_ui = now
+                            update_progress(_progress_lerp(extract_floor, extract_ceiling, done / max(1, len(chunks))))
 
                     # Forward worker logs in the parent process only (UI-safe).
                     wlogs = res.get("logs") or []
@@ -1033,6 +1080,9 @@ def _build_linework_and_coverage(
 
         # Reduce partials once, after all chunk results are collected.
         if use_parallel and line_partials:
+            STATS.detail = "reducing unions"
+            if progress_floor is not None and progress_ceiling is not None:
+                update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.93))
             log_to_gui(
                 f"[Mosaic] Reducing partial unions: edges={len(line_partials):,}, coverage={len(cov_partials):,}…",
                 "INFO",
@@ -1041,11 +1091,33 @@ def _build_linework_and_coverage(
                 line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
             if cov_partials and len(cov_partials) > max_partials:
                 cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
+            if progress_floor is not None and progress_ceiling is not None:
+                update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.97))
 
     if not use_parallel:
+        # Serial path: treat assets as work units.
+        STATS.tiles_total = int(len(a_metric))
+        STATS.tiles_done = 0
+        STATS.worker_started_at = time.time()
+        STATS.detail = "extracting boundaries"
+        last_ui = 0.0
+
+        if progress_floor is not None and progress_ceiling is not None:
+            extract_floor = float(progress_floor)
+            extract_ceiling = _progress_lerp(progress_floor, progress_ceiling, 0.90)
+        else:
+            extract_floor = extract_ceiling = None
+
         for i, geom in enumerate(a_metric.geometry, start=1):
             if i % 5000 == 0:
                 log_to_gui(f"[Mosaic] Boundary extraction: {i:,}/{len(a_metric):,} assets…", "INFO")
+
+            STATS.tiles_done = int(i)
+            if extract_floor is not None and extract_ceiling is not None:
+                now = time.time()
+                if i <= 2 or i >= len(a_metric) or (now - last_ui) >= 0.25:
+                    last_ui = now
+                    update_progress(_progress_lerp(extract_floor, extract_ceiling, i / max(1, len(a_metric))))
 
             polyish = _geom_to_polygonal_metric(geom, line_buf_m=line_buf_m, point_buf_m=point_buf_m)
             if polyish is None:
@@ -1075,6 +1147,9 @@ def _build_linework_and_coverage(
         return None, None, stats
 
     # Final noded linework
+    STATS.detail = "final noding"
+    if progress_floor is not None and progress_ceiling is not None:
+        update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.985))
     line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)")
     edge_net = _unary_union_safe(line_partials, label="linework_final", min_step=2)
     if edge_net is None:
@@ -1086,6 +1161,9 @@ def _build_linework_and_coverage(
         coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2)
         if coverage is None:
             coverage = cov_partials[0]
+
+    if progress_floor is not None and progress_ceiling is not None:
+        update_progress(float(progress_ceiling))
 
     return edge_net, coverage, stats
 
@@ -1598,7 +1676,14 @@ def mosaic_faces_from_assets_parallel(
     update_progress(10)
 
     STATS.stage = "linework"
-    edge_net, coverage, st = _build_linework_and_coverage(a_metric, cfg=cfg, workers=workers)
+    STATS.faces_total = 0
+    edge_net, coverage, st = _build_linework_and_coverage(
+        a_metric,
+        cfg=cfg,
+        workers=workers,
+        progress_floor=10.0,
+        progress_ceiling=60.0,
+    )
     if edge_net is None:
         log_to_gui("[Mosaic] No linework produced; cannot polygonize.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
@@ -1608,8 +1693,6 @@ def mosaic_faces_from_assets_parallel(
         f"line_buf_m={st['line_buf_m']:.2f}, point_buf_m={st['point_buf_m']:.2f}.",
         "INFO",
     )
-    update_progress(55)
-
     prepared_cov = None
     cov_area = None
     if coverage is not None:
@@ -1637,6 +1720,7 @@ def mosaic_faces_from_assets_parallel(
     part_files: List[Path] = []
     faces_kept = 0
     faces_total = 0
+    last_ui = 0.0
 
     def _flush_faces():
         nonlocal face_wkb_batch, faces_kept
@@ -1654,6 +1738,11 @@ def mosaic_faces_from_assets_parallel(
     try:
         for poly in polygonize(edge_net):
             faces_total += 1
+            # Surface progress while polygonize runs. Total is unknown, so use a saturating curve.
+            if faces_total <= 2 or (time.time() - last_ui) >= 0.25:
+                last_ui = time.time()
+                STATS.faces_total = int(faces_total)
+                update_progress(_progress_saturating(60.0, 85.0, faces_total, 300_000))
             if poly is None or poly.is_empty:
                 continue
             if not isinstance(poly, (Polygon, MultiPolygon)):
@@ -1683,11 +1772,13 @@ def mosaic_faces_from_assets_parallel(
     update_progress(85)
     STATS.stage = "assembling"
     parts = []
-    for p in sorted(part_files):
+    part_files_sorted = sorted(part_files)
+    for i, p in enumerate(part_files_sorted, start=1):
         try:
             parts.append(gpd.read_parquet(p))
         except Exception as e:
             log_to_gui(f"[Mosaic] Failed to read part {p.name}: {e}", "WARN")
+        update_progress(_progress_lerp(85.0, 90.0, i / max(1, len(part_files_sorted))))
     if not parts:
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
     faces = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
@@ -1711,7 +1802,8 @@ def mosaic_faces_from_assets_parallel(
     except Exception as e:
         log_to_gui(f"[Mosaic][Sanity] area computation failed: {e}", "WARN")
 
-    update_progress(100)
+    # Leave room for publishing (run_mosaic/publish_mosaic_as_geocode will take it to 100).
+    update_progress(90)
     return faces
 
 
@@ -1724,6 +1816,10 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
         return 0
 
     group_name = BASIC_MOSAIC_GROUP
+
+    STATS.stage = "publishing"
+    STATS.detail = "preparing geocodes"
+    update_progress(92)
 
     cfg: configparser.ConfigParser | None = None
     try:
@@ -1771,9 +1867,13 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
         "geometry": bbox_poly
     }], geometry="geometry", crs="EPSG:4326")
 
+    STATS.detail = "writing GeoParquet"
+    update_progress(95)
+
     added_g, added_o, tot_g, tot_o = _merge_and_write_geocodes(
         base_dir, groups, obj, refresh_group_names=[group_name]
     )
+    update_progress(99)
     log_to_gui(
         f"Published mosaic geocode '{group_name}' → "
         f"added objects: {added_o:,}; totals => groups: {tot_g}, objects: {tot_o:,}"
