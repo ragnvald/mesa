@@ -921,8 +921,10 @@ COLS         = get_color_mapping(cfg)
 DESC         = get_desc_mapping(cfg)
 
 # Tile zoom settings (also used by map viewer to allow "overzoom" beyond MBTiles native maxzoom)
-TILES_MINZOOM = max(0, min(cfg_get_int(cfg, "tiles_minzoom", 0), 22))
-TILES_MAXZOOM = max(TILES_MINZOOM, min(cfg_get_int(cfg, "tiles_maxzoom", 19), 22))
+# Note: Leaflet can display beyond native zoom by upscaling tiles (blurred). We allow a little
+# viewer headroom beyond tiles_maxzoom in JS.
+TILES_MINZOOM = max(0, min(cfg_get_int(cfg, "tiles_minzoom", 6), 24))
+TILES_MAXZOOM = max(TILES_MINZOOM, min(cfg_get_int(cfg, "tiles_maxzoom", 19), 24))
 
 if TEST_MODE:
     # Tests focus on MBTiles scanning/server behavior; avoid IO-heavy GeoParquet loads.
@@ -1453,6 +1455,8 @@ var BING_KEY_JS = null;
 var SATELLITE_FALLBACK = null;
 var ZOOM_THRESHOLD_JS = 12;
 var TILES_MAXZOOM_JS = 19;
+var VIEWER_MAXZOOM_JS = 19;
+var OVERZOOM_EXTRA = 4; // additional zoom levels allowed beyond tiles_maxzoom (blurred scaling)
 var HAS_SEGMENT_OUTLINES=false, SEG_OUTLINE_LOADED=false;
 var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, importance_max:null, importance_index:null, sensitivity_index:null, owa_index:null };
 
@@ -1637,11 +1641,12 @@ function renderChart(stats){
 function tileXYToQuadKey(x,y,z){ var q=''; for(var i=z;i>0;i--){ var d=0,m=1<<(i-1); if((x&m)!==0)d+=1; if((y&m)!==0)d+=2; q+=d.toString(); } return q; }
 var BingAerial = L.TileLayer.extend({ createTile: function(coords, done){ var img=document.createElement('img'); var zoom=this._getZoomForUrl(); if(!BING_KEY_JS){ img.onload=function(){done(null,img)}; img.onerror=function(){done(null,img)}; img.src='about:blank'; return img; } var q=tileXYToQuadKey(coords.x,coords.y,zoom); var t=(coords.x+coords.y)%4; var url='https://ecn.t'+t+'.tiles.virtualearth.net/tiles/a'+q+'.jpeg?g=1&n=z&key='+encodeURIComponent(BING_KEY_JS); img.crossOrigin='anonymous'; img.onload=function(){done(null,img)}; img.onerror=function(){done(null,img)}; img.src=url; return img; }});
 function buildBaseSources(){
-  var common={maxZoom:19,crossOrigin:true,tileSize:256};
-  var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {...common, attribution:'© OpenStreetMap'});
-  var topo= L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {...common, subdomains:['a','b','c'], maxZoom:17, attribution:'© OpenStreetMap, © OpenTopoMap (CC-BY-SA)'});
-  SATELLITE_FALLBACK = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {...common, attribution:'Esri, Maxar, Earthstar Geographics, and the GIS User Community'});
-  var bing = new BingAerial({tileSize:256});
+    var maxZ=(VIEWER_MAXZOOM_JS||19);
+    var common={maxZoom:maxZ,crossOrigin:true,tileSize:256};
+    var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {...common, maxNativeZoom:19, attribution:'© OpenStreetMap'});
+    var topo= L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {...common, maxNativeZoom:17, subdomains:['a','b','c'], attribution:'© OpenStreetMap, © OpenTopoMap (CC-BY-SA)'});
+    SATELLITE_FALLBACK = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {...common, maxNativeZoom:19, attribution:'Esri, Maxar, Earthstar Geographics, and the GIS User Community'});
+    var bing = new BingAerial({tileSize:256, maxZoom:maxZ, maxNativeZoom:19});
   return {osm:osm, topo:topo, sat_bing:bing, sat_esri:SATELLITE_FALLBACK};
 }
 
@@ -1701,7 +1706,7 @@ function loadGeocodeIntoGroup(cat, preserveView){
 
     if (res.mbtiles && res.mbtiles.sensitivity_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'geocodePane', crossOrigin:true, noWrap:true, bounds:L.latLngBounds(res.home_bounds), minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
             LAYER=L.tileLayer(res.mbtiles.sensitivity_url, opts);
             attachTileDebug(LAYER, 'sensitivity');
@@ -1734,7 +1739,7 @@ function loadGroupstotalIntoGroup(cat, preserveView){
 
     if (res.mbtiles && res.mbtiles.groupstotal_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'groupsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
             LAYER_GROUPSTOTAL=L.tileLayer(res.mbtiles.groupstotal_url, opts);
             attachTileDebug(LAYER_GROUPSTOTAL, 'groupstotal');
@@ -1764,7 +1769,7 @@ function loadAssetstotalIntoGroup(cat, preserveView){
 
     if (res.mbtiles && res.mbtiles.assetstotal_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'assetsTotalPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
             LAYER_ASSETSTOTAL=L.tileLayer(res.mbtiles.assetstotal_url, opts);
             attachTileDebug(LAYER_ASSETSTOTAL, 'assetstotal');
@@ -1796,7 +1801,7 @@ function loadImportanceMaxIntoGroup(cat, preserveView){
             if (res.home_bounds){ bounds = L.latLngBounds(res.home_bounds); }
             else if (HOME_BOUNDS){ bounds = L.latLngBounds(HOME_BOUNDS); }
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'importanceMaxPane', crossOrigin:true, noWrap:true,  
                                 bounds: bounds,
                                 minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ,
@@ -1828,7 +1833,7 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
 
     if (res.mbtiles && res.mbtiles.importance_index_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
             LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.importance_index_url, opts);
             attachTileDebug(LAYER_IMPORTANCE_INDEX, 'importance_index');
@@ -1860,7 +1865,7 @@ function loadSensitivityIndexIntoGroup(cat, preserveView){
 
     if (res.mbtiles && res.mbtiles.sensitivity_index_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'sensitivityIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
             LAYER_SENSITIVITY_INDEX=L.tileLayer(res.mbtiles.sensitivity_index_url, opts);
             attachTileDebug(LAYER_SENSITIVITY_INDEX, 'sensitivity_index');
@@ -1878,7 +1883,7 @@ function loadOwaIndexIntoGroup(cat, preserveView){
 
         if (res.mbtiles && res.mbtiles.owa_index_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
-            var maxZ=Math.max(nativeMax, (TILES_MAXZOOM_JS||nativeMax));
+            var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'owaIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
             LAYER_OWA_INDEX=L.tileLayer(res.mbtiles.owa_index_url, opts);
             attachTileDebug(LAYER_OWA_INDEX, 'owa_index');
@@ -2163,6 +2168,8 @@ function buildLayersControl(state){
 function boot(){
   MAP = L.map('map', {
     zoomControl:false, preferCanvas:true,
+        zoomSnap: 0.25,
+        zoomDelta: 0.25,
     maxBounds: L.latLngBounds([[-85,-180],[85,180]]),
     maxBoundsViscosity: 1.0,
     worldCopyJump: false
@@ -2190,8 +2197,6 @@ function boot(){
 
   L.control.scale({ position:'bottomleft', metric:true, imperial:false, maxWidth:200 }).addTo(MAP);
 
-  BASE_SOURCES = buildBaseSources();
-  BASE_SOURCES.osm.addTo(MAP);
   MAP.setView([0,0], 2);
 
   window.pywebview.api.get_state().then(function(state){
@@ -2199,8 +2204,12 @@ function boot(){
         BING_KEY_JS=(state.bing_key||'').trim()||null; ZOOM_THRESHOLD_JS=state.zoom_threshold||12;
         TILES_MAXZOOM_JS = (state.tiles_maxzoom!=null) ? Number(state.tiles_maxzoom) : 19;
         if (!isFinite(TILES_MAXZOOM_JS)) TILES_MAXZOOM_JS = 19;
-        TILES_MAXZOOM_JS = Math.max(0, Math.min(22, Math.round(TILES_MAXZOOM_JS)));
-        try{ MAP.setMaxZoom(TILES_MAXZOOM_JS); }catch(e){}
+        TILES_MAXZOOM_JS = Math.max(0, Math.min(24, Math.round(TILES_MAXZOOM_JS)));
+        VIEWER_MAXZOOM_JS = Math.max(0, Math.min(24, Math.round(TILES_MAXZOOM_JS + (OVERZOOM_EXTRA||0))));
+        try{ MAP.setMaxZoom(VIEWER_MAXZOOM_JS); }catch(e){}
+
+        BASE_SOURCES = buildBaseSources();
+        BASE_SOURCES.osm.addTo(MAP);
 
     renderLegend(null);
     renderChart({labels:['A','B','C','D','E'], values:[0,0,0,0,0]});
