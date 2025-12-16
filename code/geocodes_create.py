@@ -1385,6 +1385,21 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
         "INFO",
     )
 
+def _list_existing_h3_group_names(base_dir: Path) -> list[str]:
+    g, _ = _load_existing_geocodes(base_dir)
+    if g.empty or "name_gis_geocodegroup" not in g.columns:
+        return []
+    try:
+        names = (
+            g["name_gis_geocodegroup"]
+            .astype(str)
+            .map(lambda s: s.strip())
+            .tolist()
+        )
+    except Exception:
+        return []
+    return sorted({n for n in names if n and n.startswith("H3_R")})
+
 def load_geocode_groups(base_dir: Path) -> gpd.GeoDataFrame:
     pg = gpq_dir(base_dir) / "tbl_geocode_group.parquet"
     if pg.exists():
@@ -1883,7 +1898,7 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
 # -----------------------------------------------------------------------------
 # H3 writers
 # -----------------------------------------------------------------------------
-def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
+def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = False) -> int:
     update_progress(0)
     log_to_gui("Step [H3] STARTED")
     status_detail = None
@@ -1910,8 +1925,16 @@ def write_h3_levels(base_dir: Path, levels: List[int]) -> int:
         groups_rows = []
         objects_parts = []
         levels_sorted = sorted(set(int(r) for r in levels))
-        if levels_sorted:
-            _clear_geocode_groups(base_dir, [f"H3_R{r}" for r in levels_sorted])
+        if clear_existing:
+            existing_h3 = _list_existing_h3_group_names(base_dir)
+            if existing_h3:
+                log_to_gui(
+                    f"[H3] Delete existing enabled → clearing {len(existing_h3)} group(s): {', '.join(existing_h3)}",
+                    "INFO",
+                )
+                _clear_geocode_groups(base_dir, existing_h3)
+            else:
+                log_to_gui("[H3] Delete existing enabled → no existing H3 groups found to delete.", "INFO")
         steps = max(1, len(levels_sorted))
         bbox_poly = _bbox_polygon_from(union_geom)
         if bbox_poly is None:
@@ -2121,6 +2144,13 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
     tk.Label(size_frame, text="Matching levels:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
     tk.Label(size_frame, textvariable=size_levels_var, anchor="w").grid(row=1, column=1, columnspan=3, padx=4, pady=2, sticky="w")
 
+    clear_h3_var = tk.BooleanVar(value=False)
+    clear_h3_chk = (
+        ttk.Checkbutton(size_frame, text="Delete existing H3 before generating", variable=clear_h3_var, bootstyle=INFO)
+        if ttk else tk.Checkbutton(size_frame, text="Delete existing H3 before generating", variable=clear_h3_var)
+    )
+    clear_h3_chk.grid(row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+
     def _suggest_levels():
         try:
             min_m = float(min_var.get()); max_m = float(max_var.get())
@@ -2138,7 +2168,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
                 log_to_gui("No suggested levels to generate.", "WARN")
                 return
             mp.get_start_method(allow_none=True)
-            _run_in_thread(write_h3_levels, base, levels)
+            _run_in_thread(write_h3_levels, base, levels, clear_existing=bool(clear_h3_var.get()))
 
         gen_btn.config(command=_generate_size_based, state=("normal" if levels else "disabled"))
         log_to_gui(f"Suggested H3 levels: {levels}" if levels else "No H3 levels for that size range.", "INFO")
