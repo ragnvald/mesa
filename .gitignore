@@ -32,6 +32,6 @@ mesa_4.0.0-alpha.zip
 .venv/
 .vscode/
 .geoparquet/
-.mbtiles/
-./output/tile_cache/
-./output/reports
+mbtiles/
+output/tile_cache/
+output/reports
