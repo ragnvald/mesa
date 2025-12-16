@@ -922,7 +922,7 @@ if __name__ == "__main__":
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
         save_asset_group_to_parquet(gdf_ready, original_working_directory)
         persist_index_weights_from_ui(strict=False, silent=True)
-        _set_status_message("Saved changes to GeoParquet.")
+        _set_status_message("Saved asset-group layer to GeoParquet.")
 
     ttkb.Label(nav, text="Edit", bootstyle="secondary").pack(anchor="w", pady=(0, 8))
 
@@ -943,7 +943,7 @@ if __name__ == "__main__":
     ttkb.Label(nav, text="Data management", bootstyle="secondary").pack(anchor="w", pady=(0, 8))
     ttkb.Button(nav, text="Save to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(fill="x", pady=4)
     ttkb.Button(nav, text="Load from Excel", command=do_load_all_excel, bootstyle=INFO).pack(fill="x", pady=4)
-    ttkb.Button(nav, text="Save to database", command=do_save_database, bootstyle=PRIMARY).pack(fill="x", pady=4)
+    ttkb.Button(nav, text="Save", command=do_save_database, bootstyle=PRIMARY).pack(fill="x", pady=4)
 
     status_label = ttkb.Label(nav, textvariable=status_message_var, justify='left', bootstyle="secondary", wraplength=230)
     status_label.pack(side='bottom', fill='x', pady=(12, 0))
