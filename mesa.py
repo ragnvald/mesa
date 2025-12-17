@@ -1453,15 +1453,22 @@ if __name__ == "__main__":
         if not asset_group_path:
             return "Assets not imported yet."
         try:
-            asset_groups = pd.read_parquet(asset_group_path)
-            layers = asset_groups.shape[0]
+            layers = _parquet_row_count(asset_group_path)
             objects = None
             assets_path = _locate_geoparquet_file("tbl_assets")
             if assets_path:
-                objects = pd.read_parquet(assets_path).shape[0]
-            elif "total_asset_objects" in asset_groups.columns:
-                objects = int(asset_groups["total_asset_objects"].fillna(0).sum())
-            detail = f"Layers: {layers}"
+                objects = _parquet_row_count(assets_path)
+            else:
+                try:
+                    cols = pq.ParquetFile(asset_group_path).schema.names
+                    if "total_asset_objects" in cols:
+                        s = pd.read_parquet(asset_group_path, columns=["total_asset_objects"])["total_asset_objects"]
+                        objects = int(s.fillna(0).sum())
+                except Exception:
+                    pass
+
+            layers_txt = "--" if layers is None else str(layers)
+            detail = f"Layers: {layers_txt}"
             if objects is None:
                 detail += "\nObjects: --"
             else:
@@ -1476,9 +1483,11 @@ if __name__ == "__main__":
             return "Lines not processed yet."
         segments_path = _locate_geoparquet_file("tbl_segment_flat")
         try:
-            lines_count = pd.read_parquet(lines_path).shape[0]
-            segments_count = pd.read_parquet(segments_path).shape[0] if segments_path and os.path.exists(segments_path) else 0
-            return f"Lines: {lines_count}\nSegments: {segments_count}"
+            lines_count = _parquet_row_count(lines_path)
+            segments_count = _parquet_row_count(segments_path) if segments_path and os.path.exists(segments_path) else 0
+            lines_txt = "--" if lines_count is None else str(lines_count)
+            segments_txt = "--" if segments_count is None else str(segments_count)
+            return f"Lines: {lines_txt}\nSegments: {segments_txt}"
         except Exception as exc:
             return f"Unable to read lines: {exc}"[:200]
 
@@ -1513,10 +1522,12 @@ if __name__ == "__main__":
 
     notebook.bind("<<NotebookTabChanged>>", _on_notebook_tab_changed)
 
-    update_stats(gpkg_file)
-    update_timeline()
-    update_insight_boxes()
-    log_to_logfile("User interface, status updated.")
+    # Avoid doing potentially heavy IO (Parquet reads + log scanning) during startup.
+    # Refresh is performed when the Status tab is selected.
+    try:
+        root.after(0, _on_notebook_tab_changed)
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     # Settings tab
