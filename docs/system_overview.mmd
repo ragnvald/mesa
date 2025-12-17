@@ -1,0 +1,71 @@
+flowchart TB
+  %% MESA 4 system overview (Mermaid)
+
+  subgraph UI[Desktop application]
+    Mesa["Mesa desktop<br/>(Tkinter + ttkbootstrap)"]
+    Import[Import]
+    Setup[Set up]
+    Process[Process]
+    Segments[Segments]
+    Atlas[Atlas]
+    Maps["Maps overview<br/>(Leaflet + pywebview)"]
+    AnalysisSetup[Analysis setup]
+    AnalysisPresentation[Analysis presentation]
+    Report[Report engine]
+  end
+
+  subgraph Stores[Project stores]
+    GeoP["GeoParquet store<br/>output/geoparquet<br/>tbl_*.parquet"]
+    MB["MBTiles store (SQLite)<br/>output/mbtiles<br/>{group}_{kind}.mbtiles"]
+  end
+
+  subgraph External[External services]
+    Basemaps["External basemaps<br/>OSM / OpenTopo / Esri / Bing"]
+  end
+
+  subgraph Cache[Cache]
+    TileCache["Basemap tile cache<br/>output/tile_cache"]
+  end
+
+  subgraph Ops[Config + observability]
+    Config["Project configuration & logs<br/>config.ini / secrets/ / log.txt"]
+  end
+
+  subgraph Outputs[Deliverables]
+    Deliver["Deliverables / outputs<br/>output/reports<br/>output/area_stats.json<br/>MBTiles + atlas artifacts"]
+  end
+
+  %% Core flows
+  Mesa --> Import
+  Mesa --> Setup
+  Mesa --> Process
+  Mesa --> Segments
+  Mesa --> Atlas
+  Mesa --> Maps
+  Mesa --> AnalysisSetup
+  Mesa --> AnalysisPresentation
+  Mesa --> Report
+
+  Import --> GeoP
+  Process --> GeoP
+  Segments --> GeoP
+
+  %% Tile generation
+  GeoP --> Raster["Raster tile builder<br/>create_raster_tiles.py/.exe"]
+  Raster --> MB
+
+  %% Viewing
+  MB --> Maps
+  Maps --> Basemaps
+
+  %% Basemap caching for tile-building
+  Basemaps --> TileCache
+  TileCache --> Raster
+
+  %% Outputs
+  Report --> Deliver
+  GeoP --> Deliver
+  MB --> Deliver
+
+  %% Shared config/logs
+  Config --> Mesa
