@@ -60,6 +60,7 @@ from typing import Union, Optional, List, Tuple
 import numpy as np
 import geopandas as gpd
 import pandas as pd
+import uuid
 from shapely.geometry import (
     Polygon, MultiPolygon, GeometryCollection, LineString, MultiLineString, box
 )
@@ -67,6 +68,11 @@ from shapely.geometry import mapping as shp_mapping
 from shapely.ops import unary_union, polygonize
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
+
+try:
+    import fiona
+except Exception:
+    fiona = None
 
 # Optional: make_valid (Shapely >=2)
 try:
@@ -527,6 +533,182 @@ def ensure_wgs84(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     except Exception:
         gdf = gdf.set_crs("EPSG:4326", allow_override=True)
     return gdf
+
+
+# -----------------------------------------------------------------------------
+# Import geocodes from vector files (moved from data_import.py)
+# -----------------------------------------------------------------------------
+def _rglob_many(folder: Path, patterns: tuple[str, ...]) -> list[Path]:
+    files: list[Path] = []
+    for pat in patterns:
+        files.extend(folder.rglob(pat))
+    return files
+
+
+def _scan_for_files(label: str, folder: Path, patterns: tuple[str, ...]) -> list[Path]:
+    if not folder.exists():
+        log_to_gui(f"{label} folder does not exist: {folder}", "WARN")
+        return []
+    pat_list = ", ".join(patterns)
+    log_to_gui(f"{label}: scanning {folder} for {pat_list} …")
+    t0 = time.time()
+    files = _rglob_many(folder, patterns)
+    log_to_gui(f"{label}: scan finished in {time.time() - t0:.1f}s → {len(files)} file(s).")
+    return files
+
+
+def _read_and_reproject_vector(filepath: Path, layer: str | None, working_epsg: int) -> gpd.GeoDataFrame:
+    try:
+        data = gpd.read_file(filepath, layer=layer) if layer else gpd.read_file(filepath)
+        if data.crs is None:
+            log_to_gui(f"No CRS in {filepath.name} (layer={layer}); set EPSG:{working_epsg}", "WARN")
+            data.set_crs(epsg=working_epsg, inplace=True)
+        elif (data.crs.to_epsg() or working_epsg) != int(working_epsg):
+            data = data.to_crs(epsg=int(working_epsg))
+        if data.geometry.name != "geometry":
+            data = data.set_geometry(data.geometry.name).rename_geometry("geometry")
+        return data
+    except Exception as e:
+        log_to_gui(f"Read fail {filepath} (layer={layer}): {e}", "ERROR")
+        return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{working_epsg}")
+
+
+def _read_parquet_vector(fp: Path, working_epsg: int) -> gpd.GeoDataFrame:
+    try:
+        gdf = gpd.read_parquet(fp)
+        if gdf.crs is None:
+            gdf.set_crs(epsg=working_epsg, inplace=True)
+        elif (gdf.crs.to_epsg() or working_epsg) != int(working_epsg):
+            gdf = gdf.to_crs(epsg=int(working_epsg))
+        if gdf.geometry.name != "geometry":
+            gdf = gdf.set_geometry(gdf.geometry.name).rename_geometry("geometry")
+        return gdf
+    except Exception as e:
+        log_to_gui(f"Read fail (parquet) {fp.name}: {e}", "ERROR")
+        return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{working_epsg}")
+
+
+def _ensure_unique_geocode_codes(rows: list[dict]) -> None:
+    counts: dict[str | None, int] = {}
+    for r in rows:
+        v = r.get("code")
+        code = None if pd.isna(v) else str(v)
+        r["code"] = code
+        counts[code] = counts.get(code, 0) + 1
+    for r in rows:
+        code = r.get("code")
+        if counts.get(code, 0) > 1:
+            new_code = f"{code}_{uuid.uuid4()}"
+            log_to_gui(f"Duplicate geocode '{code}' → '{new_code}'")
+            r["code"] = new_code
+
+
+def import_geocodes_from_folder(input_folder: Path, working_epsg: int) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    groups: list[dict] = []
+    objects: list[dict] = []
+    group_id = 1
+    object_id = 1
+
+    patterns = ("*.shp", "*.gpkg", "*.parquet")
+    files = _scan_for_files("Geocodes", input_folder, patterns)
+    log_to_gui(f"Geocode files found: {len(files)}")
+    update_progress(2)
+
+    def _process_layer(gdf: gpd.GeoDataFrame, layer_name: str):
+        nonlocal group_id, object_id
+        if gdf.empty:
+            log_to_gui(f"Empty geocode layer: {layer_name}", "WARN")
+            return
+
+        bbox_polygon = box(*gdf.total_bounds)
+        name_gis_geocodegroup = f"geocode_{group_id:03d}"
+        groups.append({
+            "id": group_id,
+            "name": layer_name,
+            "name_gis_geocodegroup": name_gis_geocodegroup,
+            "title_user": layer_name,
+            "description": "",
+            "geometry": bbox_polygon,
+        })
+
+        for _, row in gdf.iterrows():
+            code = None
+            if "qdgc" in gdf.columns and pd.notna(row.get("qdgc")):
+                code = str(row.get("qdgc"))
+            elif "code" in gdf.columns and pd.notna(row.get("code")):
+                code = str(row.get("code"))
+            else:
+                code = str(object_id)
+
+            attrs = "; ".join(
+                [f"{c}: {row[c]}" for c in gdf.columns if c != gdf.geometry.name and c != "geometry"]
+            )
+            objects.append({
+                "code": code,
+                "ref_geocodegroup": group_id,
+                "name_gis_geocodegroup": name_gis_geocodegroup,
+                "attributes": attrs,
+                "geometry": row.geometry,
+            })
+            object_id += 1
+
+        group_id += 1
+
+    for i, fp in enumerate(files, start=1):
+        update_progress(5 + 85 * (i / max(1, len(files))))
+        if i == 1 or i % 20 == 0:
+            log_to_gui(f"Geocodes: processing {fp.name} ({i}/{max(1, len(files))})")
+
+        if fp.suffix.lower() == ".gpkg":
+            if fiona is None:
+                log_to_gui("Cannot list layers: fiona not available. Install fiona to import .gpkg.", "ERROR")
+                continue
+            try:
+                for layer in fiona.listlayers(fp):
+                    gdf = _read_and_reproject_vector(fp, layer, working_epsg)
+                    _process_layer(gdf, layer)
+            except Exception as e:
+                log_to_gui(f"GPKG error {fp}: {e}", "ERROR")
+        else:
+            layer = fp.stem
+            gdf = _read_parquet_vector(fp, working_epsg) if fp.suffix.lower() == ".parquet" else _read_and_reproject_vector(fp, None, working_epsg)
+            _process_layer(gdf, layer)
+
+    _ensure_unique_geocode_codes(objects)
+
+    crs = f"EPSG:{working_epsg}"
+    groups_gdf = gpd.GeoDataFrame(pd.DataFrame(groups), geometry="geometry", crs=crs) if groups else gpd.GeoDataFrame(geometry=[], crs=crs)
+    objects_gdf = gpd.GeoDataFrame(pd.DataFrame(objects), geometry="geometry", crs=crs) if objects else gpd.GeoDataFrame(geometry=[], crs=crs)
+    log_to_gui(f"Geocodes: groups={len(groups_gdf)}, objects={len(objects_gdf)}")
+    return groups_gdf, objects_gdf
+
+
+def run_import_geocodes(base_dir: Path, cfg: configparser.ConfigParser):
+    update_progress(0)
+    log_to_gui("Step [Import geocodes] STARTED")
+    try:
+        working_epsg = int(str(cfg["DEFAULT"].get("workingprojection_epsg", "4326")))
+    except Exception:
+        working_epsg = 4326
+
+    inp = cfg["DEFAULT"].get("input_folder_geocode", "input/geocode")
+    input_folder = Path(inp)
+    if not input_folder.is_absolute():
+        input_folder = (base_dir / input_folder).resolve()
+
+    try:
+        log_to_gui(f"Importing geocodes from: {input_folder}")
+        g_grp, g_obj = import_geocodes_from_folder(input_folder, working_epsg)
+        out_dir = gpq_dir(base_dir)
+        ensure_wgs84(g_grp).to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
+        ensure_wgs84(g_obj).to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+        log_to_gui(f"Saved tbl_geocode_* → {out_dir}")
+        log_to_gui("Step [Import geocodes] COMPLETED")
+    except Exception as e:
+        log_to_gui(f"Step [Import geocodes] FAILED: {e}", "ERROR")
+        raise
+    finally:
+        update_progress(100)
 
 def working_metric_crs_for(gdf: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> str:
     epsg = (cfg["DEFAULT"].get("workingprojection_epsg", "") if "DEFAULT" in cfg else "").strip()
@@ -2228,6 +2410,8 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
     start_btn.grid(row=0, column=2, padx=4, pady=2, sticky="e")
 
     exit_frame = tk.Frame(root); exit_frame.pack(fill=tk.X, pady=6, padx=10)
+    (ttk.Button(exit_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: _run_in_thread(run_import_geocodes, base, cfg)) if ttk
+     else tk.Button(exit_frame, text="Import geocodes", command=lambda: _run_in_thread(run_import_geocodes, base, cfg))).pack(side=tk.LEFT)
     (ttk.Button(exit_frame, text="Exit", bootstyle=WARNING, command=root.destroy) if ttk
      else tk.Button(exit_frame, text="Exit", command=root.destroy)).pack(side=tk.RIGHT)
 
