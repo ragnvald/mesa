@@ -13,7 +13,6 @@ except Exception:
     pass
 
 import os, sys, argparse, threading, datetime, configparser, time
-from collections import defaultdict
 from pathlib import Path
 
 import tkinter as tk
@@ -197,8 +196,6 @@ def _ensure_cfg() -> configparser.ConfigParser:
     # Defaults
     cfg["DEFAULT"].setdefault("parquet_folder", "output/geoparquet")
     cfg["DEFAULT"].setdefault("input_folder_asset",   "input/asset")
-    cfg["DEFAULT"].setdefault("input_folder_geocode", "input/geocode")
-    cfg["DEFAULT"].setdefault("input_folder_lines",   "input/lines")
     cfg["DEFAULT"].setdefault("segment_width", "600")
     cfg["DEFAULT"].setdefault("segment_length", "1000")
     cfg["DEFAULT"].setdefault("ttk_bootstrap_theme", "flatly")
@@ -252,8 +249,6 @@ def load_settings(cfg: configparser.ConfigParser) -> dict:
     d = cfg["DEFAULT"]
     return {
         "input_folder_asset":   d.get("input_folder_asset",   "input/asset"),
-        "input_folder_geocode": d.get("input_folder_geocode", "input/geocode"),
-        "input_folder_lines":   d.get("input_folder_lines",   "input/lines"),
         "segment_width":        int(d.get("segment_width", "600")),
         "segment_length":       int(d.get("segment_length","1000")),
         "ttk_theme":            d.get("ttk_bootstrap_theme", "flatly"),
@@ -438,194 +433,6 @@ def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
     return asset_objects_gdf, asset_groups_gdf
 
 # ----------------------------
-# IMPORT: Geocodes
-# ----------------------------
-def _ensure_unique_geocode_codes(geocode_objects: list):
-    counts = defaultdict(int)
-    for o in geocode_objects:
-        o["code"] = None if pd.isna(o.get("code")) else str(o.get("code"))
-        counts[o["code"]] += 1
-    for o in geocode_objects:
-        if counts[o["code"]] > 1:
-            import uuid
-            new_code = f"{o['code']}_{uuid.uuid4()}"
-            log_to_gui(f"Duplicate geocode '{o['code']}' → '{new_code}'")
-            o["code"] = new_code
-
-def _process_geocode_layer(data: gpd.GeoDataFrame,
-                           layer_name: str,
-                           geocode_groups: list,
-                           geocode_objects: list,
-                           group_id: int,
-                           object_id: int):
-    if data.empty:
-        log_to_gui(f"Empty geocode layer: {layer_name}")
-        return group_id, object_id
-
-    bbox_polygon = box(*data.total_bounds)
-    name_gis_geocodegroup = f"geocode_{group_id:03d}"
-
-    geocode_groups.append({
-        "id": group_id,
-        "name": layer_name,
-        "name_gis_geocodegroup": name_gis_geocodegroup,
-        "title_user": layer_name,
-        "description": f"Description for {layer_name}",
-        "geometry": bbox_polygon
-    })
-
-    for _, row in data.iterrows():
-        code = None
-        if "qdgc" in data.columns and pd.notna(row.get("qdgc")):
-            code = str(row["qdgc"])
-        else:
-            code = str(object_id)
-        geocode_objects.append({
-            "code": code,
-            "ref_geocodegroup": group_id,
-            "name_gis_geocodegroup": name_gis_geocodegroup,
-            "geometry": row.geometry
-        })
-        object_id += 1
-
-    return group_id + 1, object_id
-
-def import_spatial_data_geocode(input_folder_geocode: Path, working_epsg: int):
-    geocode_groups, geocode_objects = [], []
-    group_id, object_id = 1, 1
-
-    patterns = ("*.shp", "*.gpkg", "*.parquet")
-    files = _scan_for_files("Geocodes", input_folder_geocode, patterns)
-    log_to_gui(f"Geocode files found: {len(files)}")
-    update_progress(2)
-
-    # sort larger first (nice for progress feel)
-    def _featcount(fp: Path):
-        try:
-            return len(gpd.read_file(fp))
-        except Exception:
-            return 0
-    if len(files) > 1:
-        log_to_gui(f"Geocodes: estimating feature counts for ordering ({len(files)} files)…")
-        t0 = time.time()
-        files.sort(key=_featcount, reverse=True)
-        log_to_gui(f"Geocodes: ordering completed in {time.time()-t0:.1f}s.")
-
-    for i, fp in enumerate(files, start=1):
-        update_progress(5 + 85 * (i / max(1, len(files))))
-        if i == 1 or i % 20 == 0:
-            log_to_gui(f"Geocodes: processing {fp.name} ({i}/{max(1, len(files))})")
-        if fp.suffix.lower() == ".gpkg":
-            try:
-                for layer in fiona.listlayers(fp):
-                    gdf = read_and_reproject(fp, layer, working_epsg)
-                    group_id, object_id = _process_geocode_layer(
-                        gdf, layer, geocode_groups, geocode_objects, group_id, object_id
-                    )
-            except Exception as e:
-                log_to_gui(f"GPKG error {fp}: {e}", level="ERROR")
-        else:
-            layer = fp.stem
-            if fp.suffix.lower() == ".parquet":
-                gdf = read_parquet_vector(fp, working_epsg)
-            else:
-                gdf = read_and_reproject(fp, None, working_epsg)
-            group_id, object_id = _process_geocode_layer(
-                gdf, layer, geocode_groups, geocode_objects, group_id, object_id
-            )
-
-    _ensure_unique_geocode_codes(geocode_objects)
-
-    crs = f"EPSG:{working_epsg}"
-    geocode_groups_gdf  = ensure_geo_gdf(geocode_groups,  crs)
-    geocode_objects_gdf = ensure_geo_gdf(geocode_objects, crs)
-    log_to_gui(f"Geocodes: groups={len(geocode_groups_gdf)}, objects={len(geocode_objects_gdf)}")
-    return geocode_groups_gdf, geocode_objects_gdf
-
-# ----------------------------
-# IMPORT: Lines
-# ----------------------------
-def _process_line_layer(data: gpd.GeoDataFrame,
-                        layer_name: str,
-                        line_objects: list,
-                        line_id: int):
-    if data.empty:
-        return line_id
-    # length in meters using 3395, then back to working CRS later
-    temp = data.to_crs(3395)
-    for idx, row in data.iterrows():
-        length_m = int(temp.loc[idx].geometry.length)
-        attrs = "; ".join([f"{c}: {row[c]}" for c in data.columns if c != data.geometry.name])
-        line_objects.append({
-            "name_gis": int(line_id),
-            "name_user": layer_name,
-            "attributes": attrs,
-            "length_m": length_m,
-            "geometry": row.geometry
-        })
-        line_id += 1
-    return line_id
-
-def import_spatial_data_lines(input_folder_lines: Path, working_epsg: int):
-    line_objects: list[dict] = []
-    line_id = 1
-    patterns = ("*.shp", "*.gpkg", "*.parquet")
-    files = _scan_for_files("Lines", input_folder_lines, patterns)
-    log_to_gui(f"Line files found: {len(files)}")
-    update_progress(2)
-
-    for i, fp in enumerate(files, start=1):
-        update_progress(5 + 85 * (i / max(1, len(files))))
-        if i == 1 or i % 25 == 0:
-            log_to_gui(f"Lines: processing {fp.name} ({i}/{max(1, len(files))})")
-        if fp.suffix.lower() == ".gpkg":
-            for layer in fiona.listlayers(fp):
-                gdf = read_and_reproject(fp, layer, working_epsg)
-                line_id = _process_line_layer(gdf, layer, line_objects, line_id)
-        else:
-            layer = fp.stem
-            if fp.suffix.lower() == ".parquet":
-                gdf = read_parquet_vector(fp, working_epsg)
-            else:
-                gdf = read_and_reproject(fp, None, working_epsg)
-            line_id = _process_line_layer(gdf, layer, line_objects, line_id)
-
-    crs = f"EPSG:{working_epsg}"
-    lines_original = ensure_geo_gdf(line_objects, crs)
-
-    lines = lines_original.copy()
-    if not lines.empty:
-        lines["name_gis"] = lines["name_gis"].apply(lambda x: f"line_{int(x):03d}")
-        lines["name_user"] = lines["name_gis"]
-    return lines_original, lines
-
-def finalize_lines(lines_original: gpd.GeoDataFrame,
-                   lines: gpd.GeoDataFrame,
-                   working_epsg: int,
-                   segment_width: int,
-                   segment_length: int):
-    if lines_original.crs is None:
-        lines_original.set_crs(epsg=working_epsg, inplace=True)
-    if lines.crs is None:
-        lines.set_crs(epsg=working_epsg, inplace=True)
-
-    if not lines.empty:
-        lines["segment_length"] = int(segment_length)
-        lines["segment_width"]  = int(segment_width)
-        lines["description"] = lines["name_user"].astype(str) + " + " + lines.get("attributes","").astype(str)
-
-        metric = lines.to_crs(3395)
-        lines["length_m"] = metric.geometry.length.astype(int)
-        lines = lines.to_crs(epsg=working_epsg)
-
-    if not lines_original.empty:
-        lines_original = lines_original[["name_gis","name_user","attributes","length_m","geometry"]]
-    if not lines.empty:
-        lines = lines[["name_gis","name_user","segment_length","segment_width","description","length_m","geometry"]]
-
-    return lines_original, lines
-
-# ----------------------------
 # Orchestration (thread targets)
 # ----------------------------
 def run_import_asset(input_folder_asset: Path, working_epsg: int):
@@ -642,40 +449,11 @@ def run_import_asset(input_folder_asset: Path, working_epsg: int):
     finally:
         update_progress(100)
 
-def run_import_geocode(input_folder_geocode: Path, working_epsg: int):
-    update_progress(0)
-    log_to_gui("Step [Geocodes] STARTED")
-    try:
-        log_to_gui("Importing geocodes…")
-        g_grp, g_obj = import_spatial_data_geocode(input_folder_geocode, working_epsg)
-        save_parquet("tbl_geocode_group",  g_grp)
-        save_parquet("tbl_geocode_object", g_obj)
-        log_to_gui("Step [Geocodes] COMPLETED")
-    except Exception as e:
-        log_to_gui(f"Step [Geocodes] FAILED: {e}", level="ERROR")
-    finally:
-        update_progress(100)
-
-def run_import_lines(input_folder_lines: Path, working_epsg: int, segment_width: int, segment_length: int):
-    update_progress(0)
-    log_to_gui("Step [Lines] STARTED")
-    try:
-        log_to_gui("Importing lines…")
-        l0, l1 = import_spatial_data_lines(input_folder_lines, working_epsg)
-        l0, l1 = finalize_lines(l0, l1, working_epsg, segment_width, segment_length)
-        save_parquet("tbl_lines_original", l0)
-        save_parquet("tbl_lines",          l1)
-        log_to_gui("Step [Lines] COMPLETED")
-    except Exception as e:
-        log_to_gui(f"Step [Lines] FAILED: {e}", level="ERROR")
-    finally:
-        update_progress(100)
-
 # ----------------------------
 # Entrypoint (GUI)
 # ----------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Import assets/geocodes/lines → GeoParquet (robust paths, flat config)")
+    parser = argparse.ArgumentParser(description="Import assets → GeoParquet (robust paths, flat config)")
     parser.add_argument('--original_working_directory', required=False, help='Base dir override (usually set by mesa.py)')
     args = parser.parse_args()
 
@@ -688,10 +466,6 @@ if __name__ == "__main__":
 
     # Resolve input folders (absolute or relative to BASE_DIR)
     input_folder_asset   = _resolve_input_folder("Assets", st["input_folder_asset"])
-    input_folder_geocode = _resolve_input_folder("Geocodes", st["input_folder_geocode"])
-    input_folder_lines   = _resolve_input_folder("Lines", st["input_folder_lines"])
-    segment_width        = st["segment_width"]
-    segment_length       = st["segment_length"]
     ttk_theme            = st["ttk_theme"]
     working_epsg         = st["working_epsg"]
 
@@ -739,9 +513,7 @@ if __name__ == "__main__":
     log_to_gui(f"Config used: {cfg_display}")
     log_to_gui(f"GeoParquet out: {gpq_dir()}")
     log_to_gui(f"Assets in:   {input_folder_asset}")
-    log_to_gui(f"Geocodes in: {input_folder_geocode}")
-    log_to_gui(f"Lines in:    {input_folder_lines}")
-    log_to_gui(f"EPSG: {working_epsg}, theme: {ttk_theme}, segW/L: {segment_width}/{segment_length}")
+    log_to_gui(f"EPSG: {working_epsg}, theme: {ttk_theme}")
 
     btns = tk.Frame(root); btns.pack(pady=8)
 
@@ -750,13 +522,9 @@ if __name__ == "__main__":
 
     if tb is not None:
         tb.Button(btns, text="Import assets",   bootstyle=PRIMARY, command=_btn(lambda: run_import_asset(input_folder_asset, working_epsg))).grid(row=0, column=0, padx=8, pady=4)
-        tb.Button(btns, text="Import geocodes", bootstyle=PRIMARY, command=_btn(lambda: run_import_geocode(input_folder_geocode, working_epsg))).grid(row=0, column=1, padx=8, pady=4)
-        tb.Button(btns, text="Import lines",    bootstyle=PRIMARY, command=_btn(lambda: run_import_lines(input_folder_lines, working_epsg, segment_width, segment_length))).grid(row=0, column=2, padx=8, pady=4)
-        tb.Button(btns, text="Exit", bootstyle=WARNING, command=root.destroy).grid(row=0, column=3, padx=8, pady=4)
+        tb.Button(btns, text="Exit", bootstyle=WARNING, command=root.destroy).grid(row=0, column=1, padx=8, pady=4)
     else:
         tk.Button(btns, text="Import assets",   command=_btn(lambda: run_import_asset(input_folder_asset, working_epsg))).grid(row=0, column=0, padx=8, pady=4)
-        tk.Button(btns, text="Import geocodes", command=_btn(lambda: run_import_geocode(input_folder_geocode, working_epsg))).grid(row=0, column=1, padx=8, pady=4)
-        tk.Button(btns, text="Import lines",    command=_btn(lambda: run_import_lines(input_folder_lines, working_epsg, segment_width, segment_length))).grid(row=0, column=2, padx=8, pady=4)
-        tk.Button(btns, text="Exit",            command=root.destroy).grid(row=0, column=3, padx=8, pady=4)
+        tk.Button(btns, text="Exit",            command=root.destroy).grid(row=0, column=1, padx=8, pady=4)
 
     root.mainloop()
