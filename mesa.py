@@ -1023,11 +1023,13 @@ if __name__ == "__main__":
 
     workflow_sections = [
         ("Prepare data (step 1)", "Import new sources and generate supporting geometry.", [
-            ("Import data", lambda: import_assets(gpkg_file),
+            ("Data", lambda: import_assets(gpkg_file),
              "Start here when preparing a new dataset or refreshing existing inputs."),
-            ("Build geocode grids", geocodes_grids,
+            ("Geocodes", geocodes_grids,
              "Create or refresh the hexagon/tile grids that support analysis."),
-            ("Create atlas", make_atlas,
+            ("Lines", edit_lines,
+             "Import and edit line assets (transport, rivers, utilities) used for segmentation and analysis."),
+            ("Atlas", make_atlas,
              "Generate atlas polygons used in the QGIS atlas and the report engine."),
         ]),
         ("Configure analysis (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
@@ -1560,8 +1562,6 @@ if __name__ == "__main__":
          "This is where you can add titles to the different layers you have imported. You may also add a short descriptive text."),
         ("Edit geocodes", edit_geocodes,
          "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
-        ("Edit lines", edit_lines,
-         "Remember to import lines before attempting to edit them. Adjust buffer/segment parameters per line as needed."),
         ("Edit map tiles", edit_atlas,
          "Remember to import or create map tiles before attempting to edit them. Map tiles are polygons highlighted in the QGIS project."),
     ]
