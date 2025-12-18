@@ -10,7 +10,8 @@ Updates in this Parquet-only, flat-layout version:
 - Keeps the UI/behavior: Save all, Save changes, Apply/Cancel geometry, Delete selected line.
 """
 
-import os, sys, uuid, threading, locale, configparser, argparse, warnings
+import os, sys, uuid, threading, locale, configparser, argparse, warnings, time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 # --- pywebview config (quiet, Edge runtime preferred) ---
@@ -40,6 +41,11 @@ from shapely.geometry import shape as shp_from_geojson, mapping as shp_to_geojso
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely import wkb
+
+try:
+  import fiona
+except Exception:
+  fiona = None
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -139,6 +145,22 @@ def lines_parquet_path(base_dir: str) -> str:
         if os.path.exists(path):
             return path
     primary = os.path.join(gpq_dir(base_dir), "tbl_lines.parquet")
+    return primary
+
+def lines_original_parquet_path(base_dir: str) -> str:
+    for cand in _parquet_dir_candidates(base_dir):
+        path = os.path.join(cand, "tbl_lines_original.parquet")
+        if os.path.exists(path):
+            return path
+    primary = os.path.join(gpq_dir(base_dir), "tbl_lines_original.parquet")
+    return primary
+
+def asset_group_parquet_path(base_dir: str) -> str:
+    for cand in _parquet_dir_candidates(base_dir):
+        path = os.path.join(cand, "tbl_asset_group.parquet")
+        if os.path.exists(path):
+            return path
+    primary = os.path.join(gpq_dir(base_dir), "tbl_asset_group.parquet")
     return primary
 
 def config_path(base_dir: str) -> str:
@@ -246,19 +268,200 @@ def _parse_int_or_na(text: str):
         raise ValueError("Negative values are not allowed.")
     return int(round(float(v)))
 
+# ---------------- Import lines from vector files (moved from data_import.py) ----------------
+def _scan_for_files(label: str, folder: Path, patterns: tuple[str, ...]) -> list[Path]:
+    if not folder.exists():
+        return []
+    t0 = time.time()
+    files: list[Path] = []
+    for pat in patterns:
+        files.extend(folder.rglob(pat))
+    files = sorted(set(files))
+    _ = label  # reserved for future diagnostics
+    _ = time.time() - t0
+    return files
+
+
+def _read_and_reproject_vector(filepath: Path, layer: str | None, working_epsg: int) -> gpd.GeoDataFrame:
+    try:
+        data = gpd.read_file(filepath, layer=layer) if layer else gpd.read_file(filepath)
+        if data.crs is None:
+            data = data.set_crs(epsg=working_epsg)
+        elif (data.crs.to_epsg() or working_epsg) != int(working_epsg):
+            data = data.to_crs(epsg=int(working_epsg))
+        if data.geometry.name != "geometry":
+            data = data.set_geometry(data.geometry.name).rename_geometry("geometry")
+        return data
+    except Exception:
+        return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{working_epsg}")
+
+
+def _read_parquet_vector(fp: Path, working_epsg: int) -> gpd.GeoDataFrame:
+    try:
+        gdf = gpd.read_parquet(fp)
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=working_epsg)
+        elif (gdf.crs.to_epsg() or working_epsg) != int(working_epsg):
+            gdf = gdf.to_crs(epsg=int(working_epsg))
+        if gdf.geometry.name != "geometry":
+            gdf = gdf.set_geometry(gdf.geometry.name).rename_geometry("geometry")
+        return gdf
+    except Exception:
+        return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{working_epsg}")
+
+
+def _finalize_lines(
+    lines_original: gpd.GeoDataFrame,
+    lines: gpd.GeoDataFrame,
+    working_epsg: int,
+    segment_width: int,
+    segment_length: int,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    if lines_original.crs is None:
+        lines_original = lines_original.set_crs(epsg=working_epsg)
+    if lines.crs is None:
+        lines = lines.set_crs(epsg=working_epsg)
+
+    if not lines.empty:
+        lines["segment_length"] = int(segment_length)
+        lines["segment_width"] = int(segment_width)
+        if "attributes" not in lines.columns:
+            lines["attributes"] = ""
+        lines["description"] = lines["name_user"].astype(str) + " + " + lines["attributes"].astype(str)
+
+    if not lines_original.empty:
+        keep0 = [c for c in ["name_gis", "name_user", "attributes", "length_m", "geometry"] if c in lines_original.columns]
+        lines_original = lines_original[keep0]
+    if not lines.empty:
+        keep1 = [c for c in ["name_gis", "name_user", "segment_length", "segment_width", "description", "length_m", "geometry"] if c in lines.columns]
+        lines = lines[keep1]
+    return lines_original, lines
+
+
+def import_lines_from_folder(
+    input_folder: Path,
+    working_epsg: int,
+    segment_width: int,
+    segment_length: int,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    line_objects: list[dict] = []
+    line_id = 1
+    patterns = ("*.shp", "*.gpkg", "*.parquet")
+    files = _scan_for_files("Lines", input_folder, patterns)
+
+    def _process_layer(gdf: gpd.GeoDataFrame, layer_name: str) -> None:
+        nonlocal line_id
+        if gdf.empty:
+            return
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=working_epsg)
+        try:
+            metric = gdf.to_crs(3395)
+        except Exception:
+            metric = gdf
+        for idx, row in gdf.iterrows():
+            try:
+                length_m = int(metric.loc[idx].geometry.length) if metric is not None else 0
+            except Exception:
+                length_m = 0
+            attrs = "; ".join([f"{c}: {row[c]}" for c in gdf.columns if c != gdf.geometry.name and c != "geometry"])
+            line_objects.append(
+                {
+                    "name_gis": int(line_id),
+                    "name_user": layer_name,
+                    "attributes": attrs,
+                    "length_m": length_m,
+                    "geometry": row.geometry,
+                }
+            )
+            line_id += 1
+
+    for fp in files:
+        if fp.suffix.lower() == ".gpkg":
+            if fiona is None:
+                continue
+            try:
+                for layer in fiona.listlayers(fp):
+                    gdf = _read_and_reproject_vector(fp, layer, working_epsg)
+                    _process_layer(gdf, layer)
+            except Exception:
+                continue
+        else:
+            layer = fp.stem
+            gdf = (
+                _read_parquet_vector(fp, working_epsg)
+                if fp.suffix.lower() == ".parquet"
+                else _read_and_reproject_vector(fp, None, working_epsg)
+            )
+            _process_layer(gdf, layer)
+
+    crs = f"EPSG:{working_epsg}"
+    lines_original = (
+        gpd.GeoDataFrame(pd.DataFrame(line_objects), geometry="geometry", crs=crs)
+        if line_objects
+        else gpd.GeoDataFrame(geometry=[], crs=crs)
+    )
+
+    lines = lines_original.copy()
+    if not lines.empty:
+        lines["name_gis"] = lines["name_gis"].apply(lambda x: f"line_{int(x):03d}")
+        lines["name_user"] = lines["name_gis"]
+        lines["segment_length"] = int(segment_length)
+        lines["segment_width"] = int(segment_width)
+        lines["description"] = lines["name_user"].astype(str) + " + " + lines.get("attributes", "").astype(str)
+
+    lines_original, lines = _finalize_lines(lines_original, lines, working_epsg, segment_width, segment_length)
+    return lines_original, lines
+
 # ---------------- API ----------------
 class Api:
-    __slots__ = ("_base_dir", "_pq_path", "_lock", "_gdf", "_storage_epsg")
+    __slots__ = (
+        "_base_dir",
+        "_pq_path",
+    "_pq_orig_path",
+        "_asset_pq_path",
+        "_lock",
+        "_gdf",
+        "_storage_epsg",
+        "_default_epsg",
+        "_asset_home_bounds",
+    "_input_folder_lines",
+    "_segment_width",
+    "_segment_length",
+    )
 
     def __init__(self, base_dir: str, _cfg: configparser.ConfigParser):
         self._base_dir = base_dir
         self._pq_path = lines_parquet_path(base_dir)
+        self._pq_orig_path = lines_original_parquet_path(base_dir)
+        self._asset_pq_path = asset_group_parquet_path(base_dir)
         self._lock = threading.Lock()
 
         try:
             default_epsg = int(str(_cfg["DEFAULT"].get("workingprojection_epsg", "4326")))
         except Exception:
             default_epsg = 4326
+
+        self._default_epsg = default_epsg
+        self._asset_home_bounds = None
+
+        try:
+            inp = str(_cfg["DEFAULT"].get("input_folder_lines", "input/lines"))
+        except Exception:
+            inp = "input/lines"
+        p = Path(inp)
+        if not p.is_absolute():
+            p = (Path(base_dir) / p).resolve()
+        self._input_folder_lines = p
+
+        try:
+            self._segment_width = int(str(_cfg["DEFAULT"].get("segment_width", "600")))
+        except Exception:
+            self._segment_width = 600
+        try:
+            self._segment_length = int(str(_cfg["DEFAULT"].get("segment_length", "1000")))
+        except Exception:
+            self._segment_length = 1000
 
         self._gdf = load_lines_gdf_any(self._pq_path, default_epsg)
         try:
@@ -276,7 +479,7 @@ class Api:
         except Exception:
             pass
         if g.empty:
-            return None
+            return self._asset_group_home_bounds()
         try:
             minx, miny, maxx, maxy = [float(x) for x in g.total_bounds]
         except Exception:
@@ -291,6 +494,53 @@ class Api:
         minx = max(-180.0, minx); maxx = min(180.0, maxx)
         miny = max(-85.0,  miny); maxy = min(85.0,  maxy)
         return [[miny, minx],[maxy, maxx]]
+
+    def _asset_group_home_bounds(self):
+        if self._asset_home_bounds is not None:
+            return self._asset_home_bounds
+        try:
+            if not os.path.exists(self._asset_pq_path):
+                self._asset_home_bounds = None
+                return None
+
+            ag = gpd.read_parquet(self._asset_pq_path)
+            if not _geometry_valid(ag):
+                self._asset_home_bounds = None
+                return None
+
+            if ag.crs is None:
+                ag = ag.set_crs(epsg=self._default_epsg, allow_override=True)
+            ag = to_epsg4326(ag)
+            ag = ag[ag.geometry.notna()]
+            try:
+                mask_empty = ag.geometry.is_empty
+                mask_empty = mask_empty.fillna(True) if hasattr(mask_empty, "fillna") else mask_empty
+                ag = ag[~mask_empty]
+            except Exception:
+                pass
+            if ag.empty:
+                self._asset_home_bounds = None
+                return None
+
+            try:
+                minx, miny, maxx, maxy = [float(x) for x in ag.total_bounds]
+            except Exception:
+                u = unary_union([geom for geom in ag.geometry.values if geom and not geom.is_empty])
+                minx, miny, maxx, maxy = [float(x) for x in u.bounds]
+
+            dx, dy = maxx - minx, maxy - miny
+            if dx <= 0 or dy <= 0:
+                pad = 0.1
+                minx -= pad; maxx += pad; miny -= pad; maxy += pad
+            else:
+                minx -= dx * 0.05; maxx += dx * 0.05; miny -= dy * 0.05; maxy += dy * 0.05
+            minx = max(-180.0, minx); maxx = min(180.0, maxx)
+            miny = max(-85.0,  miny); maxy = min(85.0,  maxy)
+            self._asset_home_bounds = [[miny, minx], [maxy, maxx]]
+            return self._asset_home_bounds
+        except Exception:
+            self._asset_home_bounds = None
+            return None
 
     def _gdf_to_geojson_ll(self) -> Dict[str,Any]:
         g = to_epsg4326(self._gdf)
@@ -353,6 +603,39 @@ class Api:
                 return {"ok": True, "geojson": gj, "home_bounds": home, "count": len(gj["features"])}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
+
+        def import_lines_from_input(self):
+                with self._lock:
+                        try:
+                                lines_original, lines = import_lines_from_folder(
+                                        self._input_folder_lines,
+                                        self._default_epsg,
+                                        self._segment_width,
+                                        self._segment_length,
+                                )
+                                out_dir = gpq_dir(self._base_dir)
+                                os.makedirs(out_dir, exist_ok=True)
+                                try:
+                                        lines_original.to_parquet(os.path.join(out_dir, "tbl_lines_original.parquet"), index=False)
+                                except Exception:
+                                        pass
+
+                                lines = _ensure_schema_types(lines)
+                                lines.to_parquet(os.path.join(out_dir, "tbl_lines.parquet"), index=False)
+
+                                # Reload editor state from the freshly written table
+                                self._pq_path = os.path.join(out_dir, "tbl_lines.parquet")
+                                self._pq_orig_path = os.path.join(out_dir, "tbl_lines_original.parquet")
+                                self._gdf = load_lines_gdf_any(self._pq_path, self._default_epsg)
+                                self._asset_home_bounds = None
+                                return {
+                                        "ok": True,
+                                        "rows": int(len(self._gdf)),
+                                        "input": str(self._input_folder_lines),
+                                        "out": out_dir,
+                                }
+                        except Exception as e:
+                                return {"ok": False, "error": str(e)}
 
     def update_attribute(self, name_gis: str, field: str, value: Any):
         with self._lock:
@@ -483,6 +766,7 @@ HTML = r"""<!doctype html>
     <button id="reloadBtn" class="btn">Reload</button>
     <button id="saveBtn" class="btn" title="Commit all staged changes to disk">Save all</button>
     <button id="discardBtn" class="btn">Discard</button>
+    <button id="importBtn" class="btn" title="Import lines from input/lines into GeoParquet">Import lines</button>
     <button id="exitBtn" class="btn">Exit</button>
     <span id="dirtyBadge" class="badge" style="display:none;">Unsaved changes</span>
     <div class="hint">New: <span class="kbd">N</span> • Finish: <span class="kbd">Enter</span> or double-click • Cancel geometry: <span class="kbd">Esc</span> • Edit: <span class="kbd">E</span> • Delete selected: <span class="kbd">Del</span></div>
@@ -847,7 +1131,7 @@ async function loadAll(){
     HOME_BOUNDS = res.home_bounds || null;
     updateCountBadge();
     setTimeout(function(){
-      if (feats.length > 0 && HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]});
+      if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]});
       else MAP.setView([59.9139,10.7522], 5);
     }, 80);
 
@@ -901,6 +1185,19 @@ function boot(){
       setSelected(pickerSel.value || '');
       showStatus('Reverted to last saved state.','status-ok');
     } catch(err){ showStatus('API error: '+err,'status-err'); }
+  });
+
+  document.getElementById('importBtn').addEventListener('click', async ()=>{
+    showStatus('Importing lines…','status-warn');
+    try{
+      const res = await window.pywebview.api.import_lines_from_input();
+      if (!res.ok){ showStatus(res.error || 'Import failed', 'status-err'); return; }
+      setDirty(false);
+      await loadAll();
+      showStatus('Imported lines.','status-ok');
+    } catch(err){
+      showStatus('API error: '+err, 'status-err');
+    }
   });
 
   bindAuto('f_name_user','name_user');
