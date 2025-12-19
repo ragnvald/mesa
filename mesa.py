@@ -23,6 +23,7 @@ from shapely import wkb
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
 import math
+import time
 
 # ---------------------------------------------------------------------
 # Project/base resolution (works in dev and when frozen)
@@ -877,7 +878,7 @@ gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
 config                  = read_config(config_file)
 ttk_bootstrap_theme     = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 mesa_version            = config['DEFAULT'].get('mesa_version', 'MESA 5')
-workingprojection_epsg  = config['DEFAULT'].get('workingprojection_epsg', '4326')
+workingprojection_epsg  = config['DEFAULT'].get('working_projection_epsg', '4326')
 
 check_and_create_folders()
 
@@ -1138,7 +1139,7 @@ if __name__ == "__main__":
 
     ttk.Label(
         stats_container,
-        text="Live counters and helper tips update automatically when you run any workflow.",
+        text="Get on top of your project with key metrics statistics.",
         justify="left"
     ).pack(anchor="w", pady=(0, 8))
 
@@ -1155,13 +1156,12 @@ if __name__ == "__main__":
     info_labelframe.grid_columnconfigure(1, weight=3)
     info_labelframe.grid_columnconfigure(2, weight=2)
 
-    timeline_frame = ttk.Frame(status_columns)
+    timeline_frame = ttk.LabelFrame(status_columns, text="Recent activity", bootstyle="secondary")
     timeline_frame.grid(row=0, column=1, padx=(8, 0), pady=(0, 8), sticky="nsew")
-    ttk.Label(timeline_frame, text="Recent activity", font=("Segoe UI", 10, "bold"), justify="left").pack(anchor="w")
     timeline_canvas = ttk.Frame(timeline_frame)
-    timeline_canvas.pack(fill="both", expand=True, pady=(6, 0))
+    timeline_canvas.pack(fill="both", expand=True, padx=10, pady=8)
     timeline_entries = []
-    for _ in range(4):
+    for _ in range(5):
         entry = ttk.Frame(timeline_canvas)
         entry.pack(fill="x", pady=4)
         color_bar = ttk.Label(entry, text=" ", width=2, bootstyle="success")
@@ -1217,13 +1217,13 @@ if __name__ == "__main__":
 
     assets_box = ttk.LabelFrame(insights_frame, text="Assets overview", bootstyle="secondary")
     assets_box.grid(row=0, column=1, padx=5, sticky="nsew")
-    assets_table = _make_two_col_table(assets_box, "Metric", "Count", rows=3)
+    assets_table = _make_two_col_table(assets_box, "Metric", "Value", rows=4)
 
     lines_box = ttk.LabelFrame(insights_frame, text="Lines & segments", bootstyle="secondary")
     lines_box.grid(row=0, column=2, padx=5, sticky="nsew")
-    lines_table = _make_two_col_table(lines_box, "Metric", "Count", rows=3)
+    lines_table = _make_two_col_table(lines_box, "Metric", "Value", rows=4)
 
-    analysis_box = ttk.LabelFrame(insights_frame, text="Analysis layer", bootstyle="secondary")
+    analysis_box = ttk.LabelFrame(insights_frame, text="Results metrics", bootstyle="secondary")
     analysis_box.grid(row=0, column=3, padx=5, sticky="nsew")
     analysis_table = _make_two_col_table(analysis_box, "Metric", "Count", rows=2)
 
@@ -1244,6 +1244,11 @@ if __name__ == "__main__":
     _log_duration_cache = {
         "mtime": None,
         "durations": {},
+        "seconds": {},
+    }
+
+    _status_calc_runtime = {
+        "seconds": None,
     }
 
     def _parse_log_timestamp(line: str) -> datetime | None:
@@ -1332,6 +1337,21 @@ if __name__ == "__main__":
             return f"{mins}m {sec:02d}s"
         return f"{sec}s"
 
+    def _fmt_stats_runtime(seconds: float | None) -> str:
+        if seconds is None:
+            return "--"
+        try:
+            s = float(seconds)
+        except Exception:
+            return "--"
+        if s < 0:
+            return "--"
+        if s < 1.0:
+            return f"{s * 1000.0:.0f} ms"
+        if s < 60.0:
+            return f"{s:.1f}s"
+        return _fmt_duration(s)
+
     def _recent_activity_durations() -> dict[str, str]:
         """Duration strings for the Status -> Recent activity items."""
         log_path = os.path.join(original_working_directory, "log.txt")
@@ -1343,49 +1363,39 @@ if __name__ == "__main__":
         if mtime and _log_duration_cache.get("mtime") == mtime:
             return _log_duration_cache.get("durations", {})
 
-        durations: dict[str, str] = {}
-
-        # Import assets (from data_import.py)
-        durations["Import assets"] = _fmt_duration(
-            _scan_last_duration_from_log(
-                log_path,
-                start_markers=["Step [Assets] STARTED"],
-                end_markers_primary=["Step [Assets] COMPLETED", "Step [Assets] FAILED"],
-            )
+        seconds: dict[str, float | None] = {}
+        seconds["Import assets"] = _scan_last_duration_from_log(
+            log_path,
+            start_markers=["Step [Assets] STARTED"],
+            end_markers_primary=["Step [Assets] COMPLETED", "Step [Assets] FAILED"],
         )
 
-        # Processing (from data_process.py) — prefer tile completion when present.
-        durations["Processing"] = _fmt_duration(
-            _scan_last_duration_from_log(
-                log_path,
-                start_markers=["[Stage 1/4] Preparing workspace"],
-                end_markers_primary=["[Tiles] Completed.", "Error during processing:"],
-                end_markers_secondary=[
-                    "Core processing (stages 1-3) finished",
-                    "tbl_flat saved with",
-                ],
-            )
+        seconds["Processing"] = _scan_last_duration_from_log(
+            log_path,
+            start_markers=["[Stage 1/4] Preparing workspace"],
+            end_markers_primary=["[Tiles] Completed.", "Error during processing:"],
+            end_markers_secondary=[
+                "Core processing (stages 1-3) finished",
+                "tbl_flat saved with",
+            ],
         )
 
-        # Line processing (from lines_process.py)
-        durations["Line processing"] = _fmt_duration(
-            _scan_last_duration_from_log(
-                log_path,
-                start_markers=["SEGMENT PROCESS START"],
-                end_markers_primary=["COMPLETED: Segment processing", "FAILED: Segment processing"],
-            )
+        seconds["Line processing"] = _scan_last_duration_from_log(
+            log_path,
+            start_markers=["SEGMENT PROCESS START"],
+            end_markers_primary=["COMPLETED: Segment processing", "FAILED: Segment processing"],
         )
 
-        # Newest report export (from data_report.py)
-        durations["Newest report export"] = _fmt_duration(
-            _scan_last_duration_from_log(
-                log_path,
-                start_markers=["Report mode selected:"],
-                end_markers_primary=["Word report created:", "ERROR during report generation:"],
-            )
+        seconds["Newest report export"] = _scan_last_duration_from_log(
+            log_path,
+            start_markers=["Report mode selected:"],
+            end_markers_primary=["Word report created:", "ERROR during report generation:"],
         )
+
+        durations: dict[str, str] = {k: _fmt_duration(v) for k, v in seconds.items()}
 
         _log_duration_cache["mtime"] = mtime
+        _log_duration_cache["seconds"] = seconds
         _log_duration_cache["durations"] = durations
         return durations
 
@@ -1419,25 +1429,55 @@ if __name__ == "__main__":
         return config['DEFAULT'].get('last_lines_process_run', '--')
 
     def _latest_report_timestamp():
-        reports_dir = os.path.join(original_working_directory, "output")
+        output_dir = os.path.join(original_working_directory, "output")
+        reports_dir = os.path.join(output_dir, "reports")
+
         newest_ts = None
-        if os.path.isdir(reports_dir):
-            for entry in os.scandir(reports_dir):
-                if entry.is_file() and entry.name.lower().endswith(".pdf"):
-                    ts = _path_mtime(entry.path)
-                    if ts and (newest_ts is None or ts > newest_ts):
-                        newest_ts = ts
+
+        def _consider_file(path: str):
+            nonlocal newest_ts
+            ts = _path_mtime(path)
+            if ts and (newest_ts is None or ts > newest_ts):
+                newest_ts = ts
+
+        def _scan_dir(dir_path: str, recursive: bool):
+            if not os.path.isdir(dir_path):
+                return
+            try:
+                if recursive:
+                    for root_dir, _dirs, files in os.walk(dir_path):
+                        for name in files:
+                            low = name.lower()
+                            if low.endswith(".pdf") or low.endswith(".docx"):
+                                _consider_file(os.path.join(root_dir, name))
+                else:
+                    for entry in os.scandir(dir_path):
+                        if not entry.is_file():
+                            continue
+                        low = entry.name.lower()
+                        if low.endswith(".pdf") or low.endswith(".docx"):
+                            _consider_file(entry.path)
+            except Exception:
+                return
+
+        # Prefer the dedicated reports folder (and any nested subfolders)
+        _scan_dir(reports_dir, recursive=True)
+        # Fall back to the output root (non-recursive) for legacy exports
+        _scan_dir(output_dir, recursive=False)
+
         if newest_ts:
             return _fmt_timestamp(newest_ts)
         return config['DEFAULT'].get('last_report_export', '--')
 
     def update_timeline():
-        durations = _recent_activity_durations()
+        durations = dict(_recent_activity_durations())
+        durations["Time to calculate stats on this page"] = _fmt_stats_runtime(_status_calc_runtime.get("seconds"))
         events = [
             ("Import assets", _last_asset_import_timestamp(), 'success'),
             ("Processing", _last_flat_timestamp(), 'info'),
             ("Line processing", _last_line_processing_timestamp(), 'warning'),
-            ("Newest report export", _latest_report_timestamp(), 'secondary')
+            ("Newest report export", _latest_report_timestamp(), 'secondary'),
+            ("Time to calculate stats on this page", "", 'secondary'),
         ]
         for idx, (title, timestamp, bootstyle) in enumerate(events):
             if idx >= len(timeline_entries):
@@ -1483,6 +1523,142 @@ if __name__ == "__main__":
         except Exception as exc:
             return [(f"Unable to read tbl_flat:", ""), (str(exc)[:160], "")]
 
+    def _fmt_count(value: int | float | None) -> str:
+        if value is None:
+            return "--"
+        try:
+            return f"{int(value):,}"
+        except Exception:
+            try:
+                return f"{float(value):,.0f}"
+            except Exception:
+                return "--"
+
+    def _fmt_km2(value: float | None) -> str:
+        if value is None:
+            return "--"
+        try:
+            return f"{float(value):,.1f}"
+        except Exception:
+            return "--"
+
+    def _fmt_km(value: float | None) -> str:
+        if value is None:
+            return "--"
+        try:
+            return f"{float(value):,.1f}"
+        except Exception:
+            return "--"
+
+    def _measurement_epsg() -> int | None:
+        try:
+            # Prefer the explicit metric projection used for area/distance calculations.
+            raw_area = (config["DEFAULT"].get("area_projection_epsg", "") or "").strip()
+            if raw_area:
+                return int(float(raw_area))
+
+            raw_working = (config["DEFAULT"].get("working_projection_epsg", "") or "").strip()
+            if raw_working:
+                epsg = int(float(raw_working))
+                # If working CRS is WGS84/latlon, it's not suitable for meters.
+                if epsg in (4326, 4258):
+                    return None
+                return epsg
+
+            return None
+        except Exception:
+            return None
+
+    def _fallback_metric_epsg_for_wgs84(gdf: "gpd.GeoDataFrame") -> int | None:
+        # A pragmatic fallback when config doesn't provide a metric EPSG.
+        # EPSG:3857 is global and meter-based (approx). Only used if needed.
+        try:
+            if gdf.crs is None:
+                return 3857
+            epsg = getattr(gdf.crs, "to_epsg", lambda: None)()
+            if epsg in (4326, 4258, None):
+                return 3857
+            return None
+        except Exception:
+            return 3857
+
+    _asset_area_cache = {"path": None, "mtime": None, "area_km2": None}
+    _lines_length_cache = {"path": None, "mtime": None, "length_km": None}
+
+    def _total_area_km2_from_asset_objects(asset_object_path: str | None) -> float | None:
+        if not asset_object_path or not os.path.exists(asset_object_path):
+            return None
+        try:
+            mtime = _path_mtime(asset_object_path)
+            if (
+                mtime
+                and _asset_area_cache.get("path") == asset_object_path
+                and _asset_area_cache.get("mtime") == mtime
+            ):
+                return _asset_area_cache.get("area_km2")
+
+            epsg = _measurement_epsg()
+            gdf = gpd.read_parquet(asset_object_path, columns=["geometry"])
+            if epsg:
+                try:
+                    if gdf.crs is None:
+                        gdf = gdf.set_crs(epsg=epsg, allow_override=True)
+                    elif getattr(gdf.crs, "to_epsg", lambda: None)() != epsg:
+                        gdf = gdf.to_crs(epsg=epsg)
+                except Exception:
+                    pass
+            else:
+                fallback_epsg = _fallback_metric_epsg_for_wgs84(gdf)
+                if fallback_epsg:
+                    try:
+                        gdf = gdf.to_crs(epsg=fallback_epsg)
+                    except Exception:
+                        pass
+            total_m2 = float(gdf.geometry.area.fillna(0).sum()) if not gdf.empty else 0.0
+            km2 = total_m2 / 1_000_000.0
+
+            _asset_area_cache.update({"path": asset_object_path, "mtime": mtime, "area_km2": km2})
+            return km2
+        except Exception:
+            return None
+
+    def _total_length_km_from_lines(lines_path: str | None) -> float | None:
+        if not lines_path or not os.path.exists(lines_path):
+            return None
+        try:
+            mtime = _path_mtime(lines_path)
+            if (
+                mtime
+                and _lines_length_cache.get("path") == lines_path
+                and _lines_length_cache.get("mtime") == mtime
+            ):
+                return _lines_length_cache.get("length_km")
+
+            epsg = _measurement_epsg()
+            gdf = gpd.read_parquet(lines_path, columns=["geometry"])
+            if epsg:
+                try:
+                    if gdf.crs is None:
+                        gdf = gdf.set_crs(epsg=epsg, allow_override=True)
+                    elif getattr(gdf.crs, "to_epsg", lambda: None)() != epsg:
+                        gdf = gdf.to_crs(epsg=epsg)
+                except Exception:
+                    pass
+            else:
+                fallback_epsg = _fallback_metric_epsg_for_wgs84(gdf)
+                if fallback_epsg:
+                    try:
+                        gdf = gdf.to_crs(epsg=fallback_epsg)
+                    except Exception:
+                        pass
+            total_m = float(gdf.geometry.length.fillna(0).sum()) if not gdf.empty else 0.0
+            km = total_m / 1000.0
+
+            _lines_length_cache.update({"path": lines_path, "mtime": mtime, "length_km": km})
+            return km
+        except Exception:
+            return None
+
     def fetch_asset_summary() -> list[tuple[str, str]]:
         asset_group_path = _locate_geoparquet_file("tbl_asset_group")
         if not asset_group_path:
@@ -1490,21 +1666,22 @@ if __name__ == "__main__":
         try:
             layers = _parquet_row_count(asset_group_path)
             objects = None
-            assets_path = _locate_geoparquet_file("tbl_assets")
-            if assets_path:
-                objects = _parquet_row_count(assets_path)
-            else:
-                try:
-                    cols = pq.ParquetFile(asset_group_path).schema.names
-                    if "total_asset_objects" in cols:
-                        s = pd.read_parquet(asset_group_path, columns=["total_asset_objects"])["total_asset_objects"]
-                        objects = int(s.fillna(0).sum())
-                except Exception:
-                    pass
+            try:
+                cols = pq.ParquetFile(asset_group_path).schema.names
+                if "total_asset_objects" in cols:
+                    s = pd.read_parquet(asset_group_path, columns=["total_asset_objects"])["total_asset_objects"]
+                    objects = int(s.fillna(0).sum())
+            except Exception:
+                pass
 
-            layers_txt = "--" if layers is None else str(layers)
-            objects_txt = "--" if objects is None else str(objects)
-            return [("Layers", layers_txt), ("Objects", objects_txt)]
+            asset_object_path = _locate_geoparquet_file("tbl_asset_object")
+            total_area_km2 = _total_area_km2_from_asset_objects(asset_object_path)
+
+            return [
+                ("Layers", _fmt_count(layers)),
+                ("Objects", _fmt_count(objects)),
+                ("Area (km²)", _fmt_km2(total_area_km2)),
+            ]
         except Exception as exc:
             return [("Unable to read assets:", ""), (str(exc)[:160], "")]
 
@@ -1516,23 +1693,32 @@ if __name__ == "__main__":
         try:
             lines_count = _parquet_row_count(lines_path)
             segments_count = _parquet_row_count(segments_path) if segments_path and os.path.exists(segments_path) else 0
-            lines_txt = "--" if lines_count is None else str(lines_count)
-            segments_txt = "--" if segments_count is None else str(segments_count)
-            return [("Lines", lines_txt), ("Segments", segments_txt)]
+            total_length_km = _total_length_km_from_lines(lines_path)
+            return [
+                ("Lines", _fmt_count(lines_count)),
+                ("Segments", _fmt_count(segments_count)),
+                ("Length (km)", _fmt_km(total_length_km)),
+            ]
         except Exception as exc:
             return [("Unable to read lines:", ""), (str(exc)[:160], "")]
 
     def fetch_analysis_summary() -> list[tuple[str, str]]:
         stacked_path = _locate_geoparquet_file("tbl_stacked")
-        if not stacked_path:
-            return [("Analysis layer missing.", "")]
+        flat_path = _locate_geoparquet_file("tbl_flat")
+
+        if not stacked_path and not flat_path:
+            return [("Results missing.", "")]
+
         try:
-            row_count = _parquet_row_count(stacked_path)
-            if row_count is None:
-                return [("Unable to read tbl_stacked.", "")]
-            return [("Objects", str(row_count))]
+            stacked_count = _parquet_row_count(stacked_path) if stacked_path else None
+            flat_count = _parquet_row_count(flat_path) if flat_path else None
+
+            return [
+                ("Analysis layer objects", "--" if stacked_count is None else str(stacked_count)),
+                ("Presentation layer objects", "--" if flat_count is None else str(flat_count)),
+            ]
         except Exception as exc:
-            return [("Unable to read tbl_stacked:", ""), (str(exc)[:160], "")]
+            return [("Unable to read results:", ""), (str(exc)[:160], "")]
 
     def update_insight_boxes():
         _populate_two_col_table(geocode_table, fetch_geocode_objects_summary())
@@ -1545,9 +1731,11 @@ if __name__ == "__main__":
         try:
             current_tab = notebook.select()
             if current_tab and notebook.nametowidget(current_tab) is stats_tab:
+                started = time.perf_counter()
                 update_stats(gpkg_file)
-                update_timeline()
                 update_insight_boxes()
+                _status_calc_runtime["seconds"] = time.perf_counter() - started
+                update_timeline()
         except Exception:
             pass
 
