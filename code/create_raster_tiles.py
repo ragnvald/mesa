@@ -518,7 +518,7 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
 _G_GEOMS: List = []
 _G_SENS_CODES: List[Optional[str]] = []
 _G_NUMVALS: List[Optional[float]] = []   # used by env/groupstotal/assetstotal
-_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal" | "importance_max" | "importance_index" | "sensitivity_index" | "owa_index"
+_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "env" | "groupstotal" | "assetstotal" | "importance_max" | "importance_index" | "sensitivity_index" | "index_owa"
 _G_PALETTE: Dict[str, Tuple[int,int,int,int]] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
@@ -565,7 +565,7 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
             elif _G_FILL_MODE == "importance_max":
                 imp_pal = _G_PALETTE.get("importance_max_colors", {})
                 fill_rgba = importance_max_color(_G_NUMVALS[i], imp_pal)
-            elif _G_FILL_MODE in ("importance_index", "sensitivity_index", "owa_index"):
+            elif _G_FILL_MODE in ("importance_index", "sensitivity_index", "index_owa"):
                 gradient = _G_PALETTE.get("gradient", [])
                 fill_rgba = index_layer_color(_G_NUMVALS[i], gradient)
             else:
@@ -720,10 +720,10 @@ def run_one_layer(group_name: str,
         mbt_name = f"{group_name}_sensitivity_index"
         out_path = out_dir / f"{mbt_name}.mbtiles"
         vmin = 1.0; vmax = 100.0
-    elif layer_mode == "owa_index":
-        numvals = pd.to_numeric(gdf.get("owa_index", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+    elif layer_mode == "index_owa":
+        numvals = pd.to_numeric(gdf.get("index_owa", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
         sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_owa_index"
+        mbt_name = f"{group_name}_index_owa"
         out_path = out_dir / f"{mbt_name}.mbtiles"
         vmin = 1.0; vmax = 100.0
     else:
@@ -806,7 +806,7 @@ def main():
         "env_index",
         "asset_groups_total", "assets_overlap_total",
         "index_importance", "index_sensitivity",
-        "owa_index",
+        "index_owa",
         "importance_max",
     ]
     try:
@@ -931,7 +931,7 @@ def main():
     assets_total_available = "assets_overlap_total" in gdf_all.columns
     importance_index_available = "index_importance" in gdf_all.columns
     sensitivity_index_available = "index_sensitivity" in gdf_all.columns
-    owa_index_available = "owa_index" in gdf_all.columns
+    index_owa_available = "index_owa" in gdf_all.columns
     importance_max_available = "importance_max" in gdf_all.columns
     blue_palette = {"blue_alpha": blue_alpha}
 
@@ -1106,12 +1106,12 @@ def main():
         else:
             log("  → skipping sensitivity_index tiles (index_sensitivity column missing)")
 
-        if owa_index_available:
-            log(f"  → building {slug}_owa_index.mbtiles …")
+        if index_owa_available:
+            log(f"  → building {slug}_index_owa.mbtiles …")
             run_one_layer(
                 group_name=slug,
                 gdf=gdf,
-                layer_mode="owa_index",
+                layer_mode="index_owa",
                 palette=sensitivity_index_palette,
                 ranges_map=ranges_map,
                 out_dir=out_dir,
@@ -1124,7 +1124,7 @@ def main():
                 progress_every=tiles_progress_every,
             )
         else:
-            log("  → skipping owa_index tiles (owa_index column missing)")
+            log("  → skipping index_owa tiles (index_owa column missing)")
 
     log("All done.")
 

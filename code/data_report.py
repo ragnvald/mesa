@@ -346,7 +346,7 @@ class ReportEngine:
         candidates = [
             ("index_importance", "Importance index", "importance_index"),
             ("index_sensitivity", "Sensitivity index", "sensitivity_index"),
-            ("owa_index", "OWA index", "owa_index"),
+            ("index_owa", "OWA index", "index_owa"),
         ]
 
         available = [(col, title, mb_suffix) for (col, title, mb_suffix) in candidates if col in flat_df.columns]

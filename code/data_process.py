@@ -549,7 +549,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     tile_ceiling = 99.0  # keep headroom for explicit "completed" phase to own 100%
     try:
-        layers_per_group = 8  # sensitivity, env, groupstotal, assetstotal, importance_max, importance_index, sensitivity_index, owa_index
+        layers_per_group = 8  # sensitivity, env, groupstotal, assetstotal, importance_max, importance_index, sensitivity_index, index_owa
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
@@ -1891,7 +1891,7 @@ def _compute_owa_counts_from_stacked(df: pd.DataFrame, min_score: int = 1, max_s
     return pivot.reset_index()
 
 
-def _compute_owa_index_from_counts(
+def _compute_index_owa_from_counts(
     tbl_flat: pd.DataFrame,
     labels: pd.Series | None = None,
     min_score: int = 1,
@@ -2185,7 +2185,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_importance','index_sensitivity','env_index','owa_index',
+            'index_importance','index_sensitivity','env_index','index_owa',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -2236,7 +2236,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_importance','index_sensitivity','env_index','owa_index',
+            'index_importance','index_sensitivity','env_index','index_owa',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -2461,11 +2461,11 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 
     # 6b. OWA index (precautionary addition) scaled 0..100
     try:
-        owa = _compute_owa_index_from_counts(tbl_flat, group_map, min_score=1, max_score=25)
-        tbl_flat["owa_index"] = owa.reindex(tbl_flat.index).fillna(0)
+        owa = _compute_index_owa_from_counts(tbl_flat, group_map, min_score=1, max_score=25)
+        tbl_flat["index_owa"] = owa.reindex(tbl_flat.index).fillna(0)
     except Exception:
-        tbl_flat["owa_index"] = 0
-    tbl_flat["owa_index"] = pd.to_numeric(tbl_flat["owa_index"], errors="coerce").fillna(0).round().astype("Int64")
+        tbl_flat["index_owa"] = 0
+    tbl_flat["index_owa"] = pd.to_numeric(tbl_flat["index_owa"], errors="coerce").fillna(0).round().astype("Int64")
 
     # 7. Select Columns & Write
     preferred = [
@@ -2474,7 +2474,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
         'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
         'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-        'index_importance','index_sensitivity','env_index','owa_index',
+        'index_importance','index_sensitivity','env_index','index_owa',
         'geometry'
     ]
     for c in preferred:
