@@ -1161,7 +1161,7 @@ if __name__ == "__main__":
     timeline_canvas = ttk.Frame(timeline_frame)
     timeline_canvas.pack(fill="both", expand=True, padx=10, pady=8)
     timeline_entries = []
-    for _ in range(5):
+    for _ in range(6):
         entry = ttk.Frame(timeline_canvas)
         entry.pack(fill="x", pady=4)
         color_bar = ttk.Label(entry, text=" ", width=2, bootstyle="success")
@@ -1245,6 +1245,7 @@ if __name__ == "__main__":
         "mtime": None,
         "durations": {},
         "seconds": {},
+        "times": {},
     }
 
     _status_calc_runtime = {
@@ -1261,27 +1262,23 @@ if __name__ == "__main__":
         except Exception:
             return None
 
-    def _scan_last_duration_from_log(log_path: str,
-                                    start_markers: list[str],
-                                    end_markers_primary: list[str],
-                                    end_markers_secondary: list[str] | None = None) -> float | None:
-        """Return duration (seconds) for the most recent completed run.
-
-        Uses a simple state-machine:
-        - start markers begin a run
-        - primary end markers end a run immediately
-        - secondary end markers are remembered and used only if no primary end is found
-          before the next run begins or the file ends.
-        """
+    def _scan_last_run_from_log(
+                                log_path: str,
+                                start_markers: list[str],
+                                end_markers_primary: list[str],
+                                end_markers_secondary: list[str] | None = None,
+                                ) -> tuple[float | None, datetime | None]:
+        """Return (duration_seconds, end_timestamp) for the most recent completed run."""
         try:
             if not os.path.exists(log_path):
-                return None
+                return None, None
         except Exception:
-            return None
+            return None, None
 
         current_start: datetime | None = None
         secondary_end: datetime | None = None
         last_duration: float | None = None
+        last_end: datetime | None = None
 
         def _has_any(haystack: str, needles: list[str]) -> bool:
             return any(n in haystack for n in needles)
@@ -1306,16 +1303,38 @@ if __name__ == "__main__":
 
                     if _has_any(line, end_markers_primary):
                         last_duration = (ts - current_start).total_seconds()
+                        last_end = ts
                         current_start = None
                         secondary_end = None
 
             # If we ended the file mid-run but have a secondary end marker, use it.
             if current_start is not None and secondary_end is not None:
                 last_duration = (secondary_end - current_start).total_seconds()
+                last_end = secondary_end
         except Exception:
-            return None
+            return None, None
 
-        return last_duration
+        return last_duration, last_end
+
+    def _scan_last_duration_from_log(log_path: str,
+                                    start_markers: list[str],
+                                    end_markers_primary: list[str],
+                                    end_markers_secondary: list[str] | None = None) -> float | None:
+        """Return duration (seconds) for the most recent completed run.
+
+        Uses a simple state-machine:
+        - start markers begin a run
+        - primary end markers end a run immediately
+        - secondary end markers are remembered and used only if no primary end is found
+          before the next run begins or the file ends.
+        """
+        duration, _end = _scan_last_run_from_log(
+            log_path,
+            start_markers=start_markers,
+            end_markers_primary=end_markers_primary,
+            end_markers_secondary=end_markers_secondary,
+        )
+        return duration
 
     def _fmt_duration(seconds: float | None) -> str:
         if seconds is None:
@@ -1364,11 +1383,21 @@ if __name__ == "__main__":
             return _log_duration_cache.get("durations", {})
 
         seconds: dict[str, float | None] = {}
+        times: dict[str, str] = {}
         seconds["Import assets"] = _scan_last_duration_from_log(
             log_path,
             start_markers=["Step [Assets] STARTED"],
             end_markers_primary=["Step [Assets] COMPLETED", "Step [Assets] FAILED"],
         )
+
+        # Mosaic geocode group build (basic_mosaic)
+        mosaic_secs, mosaic_end = _scan_last_run_from_log(
+            log_path,
+            start_markers=["Step [Mosaic] STARTED"],
+            end_markers_primary=["Step [Mosaic] COMPLETED", "Step [Mosaic] FAILED"],
+        )
+        seconds["Build basic_mosaic"] = mosaic_secs
+        times["Build basic_mosaic"] = mosaic_end.strftime("%Y-%m-%d %H:%M") if mosaic_end else "--"
 
         seconds["Processing"] = _scan_last_duration_from_log(
             log_path,
@@ -1397,6 +1426,7 @@ if __name__ == "__main__":
         _log_duration_cache["mtime"] = mtime
         _log_duration_cache["seconds"] = seconds
         _log_duration_cache["durations"] = durations
+        _log_duration_cache["times"] = times
         return durations
 
     def _last_flat_timestamp():
@@ -1472,8 +1502,10 @@ if __name__ == "__main__":
     def update_timeline():
         durations = dict(_recent_activity_durations())
         durations["Time to calculate stats on this page"] = _fmt_stats_runtime(_status_calc_runtime.get("seconds"))
+        times = _log_duration_cache.get("times", {})
         events = [
             ("Import assets", _last_asset_import_timestamp(), 'success'),
+            ("Build basic_mosaic", times.get("Build basic_mosaic", "--"), 'info'),
             ("Processing", _last_flat_timestamp(), 'info'),
             ("Line processing", _last_line_processing_timestamp(), 'warning'),
             ("Newest report export", _latest_report_timestamp(), 'secondary'),
