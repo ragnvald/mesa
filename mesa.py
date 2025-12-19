@@ -1023,11 +1023,11 @@ if __name__ == "__main__":
 
     workflow_sections = [
         ("Prepare data (step 1)", "Import new sources and generate supporting geometry.", [
-            ("Data", lambda: import_assets(gpkg_file),
+            ("Area data", lambda: import_assets(gpkg_file),
              "Start here when preparing a new dataset or refreshing existing inputs."),
             ("Geocodes", geocodes_grids,
              "Create or refresh the hexagon/tile grids that support analysis."),
-            ("Lines", edit_lines,
+            ("Lines data", edit_lines,
              "Import and edit line assets (transport, rivers, utilities) used for segmentation and analysis."),
             ("Atlas", make_atlas,
              "Generate atlas polygons used in the QGIS atlas and the report engine."),
@@ -1180,26 +1180,52 @@ if __name__ == "__main__":
     insights_frame.pack(fill="x", pady=(4, 8))
     insights_frame.columnconfigure((0, 1, 2, 3), weight=1)
 
+    def _make_two_col_table(parent, header_left: str, header_right: str, rows: int):
+        table = ttk.Frame(parent)
+        table.pack(fill="x", padx=10, pady=8)
+        table.columnconfigure(0, weight=1)
+        table.columnconfigure(1, weight=0)
+
+        hdr_l = ttk.Label(table, text=header_left, font=("Segoe UI", 9, "bold"), justify="left")
+        hdr_r = ttk.Label(table, text=header_right, font=("Segoe UI", 9, "bold"), anchor="e", justify="right")
+        hdr_l.grid(row=0, column=0, sticky="w")
+        hdr_r.grid(row=0, column=1, sticky="e")
+
+        cells = []
+        for idx in range(rows):
+            k = ttk.Label(table, text="--", justify="left", wraplength=180)
+            v = ttk.Label(table, text="", anchor="e", justify="right", width=10)
+            k.grid(row=idx + 1, column=0, sticky="w", pady=1)
+            v.grid(row=idx + 1, column=1, sticky="e", pady=1)
+            cells.append((k, v))
+        return cells
+
+    def _populate_two_col_table(cells, rows: list[tuple[str, str]]):
+        for i, (k_lbl, v_lbl) in enumerate(cells):
+            if i < len(rows):
+                k, v = rows[i]
+                k_lbl.config(text=k)
+                v_lbl.config(text=v)
+            else:
+                k_lbl.config(text="")
+                v_lbl.config(text="")
+
     geocode_box = ttk.LabelFrame(insights_frame, text="Objects per geocode", bootstyle="secondary")
     geocode_box.grid(row=0, column=0, padx=5, sticky="nsew")
     geocode_box.columnconfigure(0, weight=1)
-    geocode_summary = ttk.Label(geocode_box, text="--", justify="left", wraplength=220)
-    geocode_summary.pack(anchor="w", padx=10, pady=8)
+    geocode_table = _make_two_col_table(geocode_box, "Geocode", "Objects", rows=6)
 
     assets_box = ttk.LabelFrame(insights_frame, text="Assets overview", bootstyle="secondary")
     assets_box.grid(row=0, column=1, padx=5, sticky="nsew")
-    assets_summary = ttk.Label(assets_box, text="--", justify="left", wraplength=220)
-    assets_summary.pack(anchor="w", padx=10, pady=8)
+    assets_table = _make_two_col_table(assets_box, "Metric", "Count", rows=3)
 
     lines_box = ttk.LabelFrame(insights_frame, text="Lines & segments", bootstyle="secondary")
     lines_box.grid(row=0, column=2, padx=5, sticky="nsew")
-    lines_summary = ttk.Label(lines_box, text="--", justify="left", wraplength=220)
-    lines_summary.pack(anchor="w", padx=10, pady=8)
+    lines_table = _make_two_col_table(lines_box, "Metric", "Count", rows=3)
 
     analysis_box = ttk.LabelFrame(insights_frame, text="Analysis layer", bootstyle="secondary")
     analysis_box.grid(row=0, column=3, padx=5, sticky="nsew")
-    analysis_summary = ttk.Label(analysis_box, text="--", justify="left", wraplength=220)
-    analysis_summary.pack(anchor="w", padx=10, pady=8)
+    analysis_table = _make_two_col_table(analysis_box, "Metric", "Count", rows=2)
 
     def _fmt_timestamp(ts: float | None) -> str:
         if not ts:
@@ -1422,10 +1448,10 @@ if __name__ == "__main__":
             duration_label.config(text=durations.get(title, "--"))
             time_label.config(text=timestamp)
 
-    def fetch_geocode_objects_summary():
+    def fetch_geocode_objects_summary() -> list[tuple[str, str]]:
         flat_path = _locate_geoparquet_file("tbl_flat")
         if not flat_path or not os.path.exists(flat_path):
-            return "No processing results yet."
+            return [("No processing results yet.", "")]
         try:
             preferred_cols = ["geocode_category", "name_gis_geocodegroup", "ref_geocodegroup"]
             available_cols = []
@@ -1438,22 +1464,29 @@ if __name__ == "__main__":
                 df_all = pd.read_parquet(flat_path)
                 target_col = next((col for col in preferred_cols if col in df_all.columns), None)
                 if not target_col:
-                    return "No geocode identifiers found in tbl_flat."
+                    return [("No geocode identifiers found.", "")]
                 data = df_all[target_col]
             else:
                 data = pd.read_parquet(flat_path, columns=[target_col])[target_col]
             counts = data.value_counts(dropna=False).head(5)
-            lines = [f"{idx}: {val}" for idx, val in counts.items()]
+            rows: list[tuple[str, str]] = []
+            for idx, val in counts.items():
+                key = "(missing)" if pd.isna(idx) else str(idx)
+                try:
+                    value = str(int(val))
+                except Exception:
+                    value = str(val)
+                rows.append((key, value))
             if data.nunique(dropna=False) > 5:
-                lines.append("…")
-            return "\n".join(lines) if lines else "No records found."
+                rows.append(("…", ""))
+            return rows if rows else [("No records found.", "")]
         except Exception as exc:
-            return f"Unable to read tbl_flat: {exc}"[:200]
+            return [(f"Unable to read tbl_flat:", ""), (str(exc)[:160], "")]
 
-    def fetch_asset_summary():
+    def fetch_asset_summary() -> list[tuple[str, str]]:
         asset_group_path = _locate_geoparquet_file("tbl_asset_group")
         if not asset_group_path:
-            return "Assets not imported yet."
+            return [("Assets not imported yet.", "")]
         try:
             layers = _parquet_row_count(asset_group_path)
             objects = None
@@ -1470,46 +1503,42 @@ if __name__ == "__main__":
                     pass
 
             layers_txt = "--" if layers is None else str(layers)
-            detail = f"Layers: {layers_txt}"
-            if objects is None:
-                detail += "\nObjects: --"
-            else:
-                detail += f"\nObjects: {objects}"
-            return detail
+            objects_txt = "--" if objects is None else str(objects)
+            return [("Layers", layers_txt), ("Objects", objects_txt)]
         except Exception as exc:
-            return f"Unable to read assets: {exc}"[:200]
+            return [("Unable to read assets:", ""), (str(exc)[:160], "")]
 
-    def fetch_lines_summary():
+    def fetch_lines_summary() -> list[tuple[str, str]]:
         lines_path = _locate_geoparquet_file("tbl_lines")
         if not lines_path:
-            return "Lines not processed yet."
+            return [("Lines not imported yet.", "")]
         segments_path = _locate_geoparquet_file("tbl_segment_flat")
         try:
             lines_count = _parquet_row_count(lines_path)
             segments_count = _parquet_row_count(segments_path) if segments_path and os.path.exists(segments_path) else 0
             lines_txt = "--" if lines_count is None else str(lines_count)
             segments_txt = "--" if segments_count is None else str(segments_count)
-            return f"Lines: {lines_txt}\nSegments: {segments_txt}"
+            return [("Lines", lines_txt), ("Segments", segments_txt)]
         except Exception as exc:
-            return f"Unable to read lines: {exc}"[:200]
+            return [("Unable to read lines:", ""), (str(exc)[:160], "")]
 
-    def fetch_analysis_summary():
+    def fetch_analysis_summary() -> list[tuple[str, str]]:
         stacked_path = _locate_geoparquet_file("tbl_stacked")
         if not stacked_path:
-            return "Analysis layer missing."
+            return [("Analysis layer missing.", "")]
         try:
             row_count = _parquet_row_count(stacked_path)
             if row_count is None:
-                return "Unable to read tbl_stacked."
-            return f"Objects: {row_count}"
+                return [("Unable to read tbl_stacked.", "")]
+            return [("Objects", str(row_count))]
         except Exception as exc:
-            return f"Unable to read tbl_stacked: {exc}"[:200]
+            return [("Unable to read tbl_stacked:", ""), (str(exc)[:160], "")]
 
     def update_insight_boxes():
-        geocode_summary.config(text=fetch_geocode_objects_summary())
-        assets_summary.config(text=fetch_asset_summary())
-        lines_summary.config(text=fetch_lines_summary())
-        analysis_summary.config(text=fetch_analysis_summary())
+        _populate_two_col_table(geocode_table, fetch_geocode_objects_summary())
+        _populate_two_col_table(assets_table, fetch_asset_summary())
+        _populate_two_col_table(lines_table, fetch_lines_summary())
+        _populate_two_col_table(analysis_table, fetch_analysis_summary())
 
     def _on_notebook_tab_changed(_event=None):
         """Refresh Status tab when it is opened/selected."""
@@ -1562,8 +1591,8 @@ if __name__ == "__main__":
          "This is where you can add titles to the different layers you have imported. You may also add a short descriptive text."),
         ("Edit geocodes", edit_geocodes,
          "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
-        ("Edit map tiles", edit_atlas,
-         "Remember to import or create map tiles before attempting to edit them. Map tiles are polygons highlighted in the QGIS project."),
+        ("Edit atlas", edit_atlas,
+         "Remember to import or create the atlas tiles before attempting to edit them. Atlas tiles are polygons highlighted in the QGIS project."),
     ]
 
     for row, (label, command, description) in enumerate(settings_actions):
