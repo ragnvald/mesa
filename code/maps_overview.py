@@ -1458,6 +1458,7 @@ var TILES_MAXZOOM_JS = 19;
 var VIEWER_MAXZOOM_JS = 19;
 var OVERZOOM_EXTRA = 4; // additional zoom levels allowed beyond tiles_maxzoom (blurred scaling)
 var HAS_SEGMENT_OUTLINES=false, SEG_OUTLINE_LOADED=false;
+var SEG_SYNC_HOOKED=false;
 var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, importance_max:null, importance_index:null, sensitivity_index:null, owa_index:null };
 
 function logErr(m){ try{ window.pywebview.api.js_log(m); }catch(e){} }
@@ -1945,6 +1946,28 @@ function hideGeocodeFolderCheckbox(ctrl){
 function ensureOnMap(g){ if (g && !MAP.hasLayer(g)) g.addTo(MAP); }
 function ensureOffMap(g){ if (g && MAP.hasLayer(g)) MAP.removeLayer(g); }
 
+function syncSegmentOutlinesToSegments(){
+    if (!MAP || !SEG_GROUP || !SEG_OUTLINE_GROUP) return;
+    var segOn = MAP.hasLayer(SEG_GROUP);
+    if (!segOn){
+        ensureOffMap(SEG_OUTLINE_GROUP);
+        return;
+    }
+    ensureOnMap(SEG_OUTLINE_GROUP);
+    if (HAS_SEGMENT_OUTLINES) loadSegmentOutlinesOnce();
+}
+
+function hookSegmentOverlaySyncOnce(){
+    if (SEG_SYNC_HOOKED || !MAP) return;
+    SEG_SYNC_HOOKED = true;
+    MAP.on('overlayadd', function(ev){
+        try{ if (ev && ev.layer === SEG_GROUP) syncSegmentOutlinesToSegments(); }catch(e){}
+    });
+    MAP.on('overlayremove', function(ev){
+        try{ if (ev && ev.layer === SEG_GROUP) syncSegmentOutlinesToSegments(); }catch(e){}
+    });
+}
+
 function buildLayersControl(state){
   HAS_SEGMENT_OUTLINES = !!(state && state.has_segment_outlines);
   SEG_OUTLINE_LOADED = false;
@@ -2035,8 +2058,8 @@ function buildLayersControl(state){
   BASE_SOURCES.osm.addTo(MAP);
   GEO_GROUP.addTo(MAP);
   SEG_GROUP.addTo(MAP);
-  SEG_OUTLINE_GROUP.addTo(MAP);
-  if (HAS_SEGMENT_OUTLINES) loadSegmentOutlinesOnce();
+    hookSegmentOverlaySyncOnce();
+    syncSegmentOutlinesToSegments();
 
   setTimeout(function(){
     var geocodes=(state.geocode_categories||[]);
