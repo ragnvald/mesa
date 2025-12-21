@@ -755,6 +755,15 @@ def open_data_analysis_setup():
     else:
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
+def open_analysis_process():
+    python_script, exe_file = get_script_paths("analysis_process")
+    arg_tokens = ["--original_working_directory", original_working_directory]
+    if getattr(sys, "frozen", False):
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
+    else:
+        run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
+
 def open_data_analysis_presentation():
     python_script, exe_file = get_script_paths("data_analysis_presentation")
     if getattr(sys, "frozen", False):
@@ -1036,14 +1045,16 @@ if __name__ == "__main__":
         ("Configure analysis (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
             ("Processing settings", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
-            ("Define study areas", open_data_analysis_setup,
-             "Launch the area analysis tool to pick the study areas."),
+              ("Set up analysis", open_data_analysis_setup,
+               "Define analysis groups and study area polygons."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Run area processing", lambda: process_data(gpkg_file),
              "Runs the main area pipeline to refresh GeoParquet, MBTiles and stats."),
             ("Run line processing", process_lines,
              "Processes line assets (transport, rivers, utilities) into analysis-ready segments."),
+              ("Run analysis processing", open_analysis_process,
+               "Processes the configured study areas into analysis GeoParquet tables."),
         ]),
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map studio", open_asset_layers_viewer,
