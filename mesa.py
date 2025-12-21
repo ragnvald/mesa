@@ -1043,7 +1043,7 @@ if __name__ == "__main__":
              "Generate atlas polygons used in the QGIS atlas and the report engine."),
         ]),
         ("Configure analysis (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
-            ("Processing settings", edit_processing_setup,
+            ("Set up processing", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
               ("Set up analysis", open_data_analysis_setup,
                "Define analysis groups and study area polygons."),
