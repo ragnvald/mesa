@@ -1063,7 +1063,7 @@ if __name__ == "__main__":
              "Review current background layers together with processed assets."),
             ("Compare study areas", open_data_analysis_presentation,
              "Open the dashboard for comparing study groups."),
-            ("Export reports", open_present_files,
+            ("Reports", open_present_files,
              "Render PDF reports based on the latest results."),
         ]),
     ]
