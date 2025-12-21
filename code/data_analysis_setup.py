@@ -950,835 +950,180 @@ class AnalysisStorage:
 
 
 # ---------------------------------------------------------------------------
-# Asset analysis
+# Analysis preview (setup tool only)
 # ---------------------------------------------------------------------------
 
 
-class AssetAnalyzer:
-    """Compute intersection statistics and build the PDF report."""
+class AnalysisPreviewProvider:
+  """Lightweight background + preview provider for the setup UI.
 
-    def __init__(self, base_dir: Path, cfg: configparser.ConfigParser, storage_epsg: int = 4326) -> None:
-        self.base_dir = base_dir
-        self._base_dir = base_dir
-        self.cfg = cfg
-        try:
-            self.working_epsg = int(str(cfg["DEFAULT"].get("workingprojection_epsg", "4326")))
-        except Exception:
-            self.working_epsg = 4326
-        try:
-            self.area_epsg = int(str(cfg["DEFAULT"].get("area_projection_epsg", "3035")))
-        except Exception:
-            self.area_epsg = 3035
-        self.storage_epsg = storage_epsg or 4326
+  Heavy processing lives in analysis_process.py.
+  """
 
-        self.asset_objects = self._load_asset_objects()
-        self.asset_groups = self._load_asset_groups()
-        self.analysis_flat_path = analysis_flat_path(base_dir, cfg)
-        self.analysis_stacked_path = analysis_stacked_path(base_dir, cfg)
-        self._flat_dataset: Optional[gpd.GeoDataFrame] = None
-        self._stacked_dataset: Optional[gpd.GeoDataFrame] = None
-        self._flat_category_cache: Dict[str, gpd.GeoDataFrame] = {}
-        self._stacked_category_cache: Dict[str, gpd.GeoDataFrame] = {}
-        self._canvas_cache: Dict[str, tuple[list[Dict[str, Any]], Optional[List[float]]]] = {}
-        self.default_geocode = DEFAULT_ANALYSIS_GEOCODE
-        self.canvas_bounds: Optional[List[float]] = None
-        try:
-            if not self.asset_objects.empty:
-                self.asset_bounds = tuple(self.asset_objects.to_crs(4326).total_bounds)
-            else:
-                self.asset_bounds = None
-        except Exception:
-            self.asset_bounds = None
-        self.mbtiles_base_url = _ensure_mbtiles(self.base_dir)
-        if self.mbtiles_base_url:
-            debug_log(
-                self._base_dir,
-                f"MBTiles server started at {self.mbtiles_base_url} with {len(_MBTILES_INDEX)} category entries",
-            )
-        else:
-            debug_log(self.base_dir, "No MBTiles background detected; falling back to GeoParquet.")
-        debug_log(
-            self.base_dir,
-            f"AssetAnalyzer ready: assets={len(self.asset_objects)}, groups={len(self.asset_groups)}, asset_bounds={self.asset_bounds}"
-        )
+  def __init__(self, base_dir: Path, cfg: configparser.ConfigParser, storage_epsg: int = 4326) -> None:
+    self.base_dir = base_dir
+    self.cfg = cfg
+    try:
+      self.working_epsg = int(str(cfg["DEFAULT"].get("workingprojection_epsg", "4326")))
+    except Exception:
+      self.working_epsg = 4326
+    self.storage_epsg = storage_epsg or 4326
 
-    def _load_asset_objects(self) -> gpd.GeoDataFrame:
-        pq_path = asset_object_path(self.base_dir, self.cfg)
-        if not pq_path.exists():
-            debug_log(self.base_dir, f"Asset objects parquet not found at {pq_path}")
-            raise FileNotFoundError(f"Asset objects table missing: {pq_path}")
-        debug_log(self.base_dir, f"Loading asset objects from {pq_path}")
-        df = pd.read_parquet(pq_path)
-        gdf = _geo_from_wkb_column(df, epsg=self.working_epsg)
-        if gdf.crs is None:
-            gdf.set_crs(epsg=self.working_epsg, inplace=True, allow_override=True)
-        debug_log(self.base_dir, f"Loaded {len(gdf)} asset objects")
-        return gdf
+    self.default_geocode = DEFAULT_ANALYSIS_GEOCODE
+    self.analysis_flat_path = analysis_flat_path(base_dir, cfg)
 
-    def _load_asset_groups(self) -> pd.DataFrame:
-        pq_path = asset_group_path(self.base_dir, self.cfg)
-        if not pq_path.exists():
-            debug_log(self.base_dir, f"Asset group parquet not found at {pq_path}")
-            raise FileNotFoundError(f"Asset group table missing: {pq_path}")
-        debug_log(self.base_dir, f"Loading asset groups from {pq_path}")
-        try:
-            df = gpd.read_parquet(pq_path)
-        except ValueError as exc:
-            debug_log(
-                self.base_dir,
-                f"Geo metadata missing in asset groups parquet; switching to pandas.read_parquet. Details: {exc}"
-            )
-            df = pd.read_parquet(pq_path)
-        keep = ["id", "name_original", "name_gis_assetgroup", "title_fromuser", "sensitivity_code", "sensitivity_description"]
-        result = df[keep].copy()
-        debug_log(self.base_dir, f"Loaded {len(result)} asset group rows")
-        return result
+    self._canvas_cache: Dict[str, tuple[list[Dict[str, Any]], Optional[List[float]]]] = {}
+    self.canvas_bounds: Optional[List[float]] = None
+    self.asset_bounds: Optional[tuple[float, float, float, float]] = None
 
-    # ---------------------- datasets & geocode helpers ----------------------
-    def _load_flat_dataset(self) -> gpd.GeoDataFrame:
-        if self._flat_dataset is not None:
-            return self._flat_dataset
-        path = find_parquet_file(self.base_dir, self.cfg, "tbl_flat.parquet")
-        if not path:
-            debug_log(self.base_dir, "tbl_flat.parquet could not be located")
-            raise FileNotFoundError("Presentation table missing (tbl_flat.parquet).")
-        debug_log(self.base_dir, f"Loading tbl_flat.parquet from {path}")
-        gdf = gpd.read_parquet(path)
-        if gdf.crs is None:
-            gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
-        self._flat_dataset = gdf
-        debug_log(self.base_dir, f"tbl_flat loaded with {len(gdf)} rows")
-        return self._flat_dataset
+  def available_geocode_categories(self) -> List[str]:
+    return [DEFAULT_ANALYSIS_GEOCODE]
 
-    def _load_stacked_dataset(self) -> gpd.GeoDataFrame:
-        if self._stacked_dataset is not None:
-            return self._stacked_dataset
-        path = find_dataset_dir(self.base_dir, self.cfg, "tbl_stacked")
-        if not path:
-            debug_log(self.base_dir, "tbl_stacked dataset could not be located")
-            raise FileNotFoundError("Stacked table missing (tbl_stacked).")
-        debug_log(self.base_dir, f"Loading tbl_stacked from {path}")
-        gdf = gpd.read_parquet(path)
-        if gdf.crs is None:
-            gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
-        self._stacked_dataset = gdf
-        debug_log(self.base_dir, f"tbl_stacked loaded with {len(gdf)} rows")
-        return self._stacked_dataset
+  def analysis_preview_geojson(self, group_id: str, limit: int = 500) -> Dict[str, Any]:
+    try:
+      path = self.analysis_flat_path
+      if not path.exists():
+        return {"type": "FeatureCollection", "features": []}
+      df = gpd.read_parquet(path)
+    except Exception as exc:
+      debug_log(self.base_dir, f"analysis_preview_geojson: failed to read flat table ({exc})")
+      return {"type": "FeatureCollection", "features": []}
 
-    def available_geocode_categories(self) -> List[str]:
-        try:
-            flat = self._load_flat_dataset()
-        except FileNotFoundError:
-            debug_log(self.base_dir, "tbl_flat.parquet missing; defaulting geocode list to basic_mosaic")
-            return [DEFAULT_ANALYSIS_GEOCODE]
-        has_column = "name_gis_geocodegroup" in flat.columns
-        if has_column:
-            column = flat["name_gis_geocodegroup"].astype(str).str.strip()
-            if DEFAULT_ANALYSIS_GEOCODE not in column.values:
-                debug_log(self.base_dir, f"Geocode '{DEFAULT_ANALYSIS_GEOCODE}' not present; proceeding with empty filtered dataset")
-        else:
-            debug_log(self.base_dir, "tbl_flat.parquet missing geocode column; using full dataset for basic_mosaic")
-        return [DEFAULT_ANALYSIS_GEOCODE]
+    if df.empty or "analysis_group_id" not in df.columns:
+      return {"type": "FeatureCollection", "features": []}
 
-    def _ensure_category(self, category: Optional[str]) -> str:
-        return DEFAULT_ANALYSIS_GEOCODE
+    subset = df[df["analysis_group_id"].astype(str) == str(group_id)].copy()
+    if subset.empty or "geometry" not in subset.columns:
+      return {"type": "FeatureCollection", "features": []}
 
-    def _flat_for_category(self, category: str) -> gpd.GeoDataFrame:
-        cat = DEFAULT_ANALYSIS_GEOCODE
-        cache_key = cat
-        if cache_key in self._flat_category_cache:
-            return self._flat_category_cache[cache_key]
-        try:
-            dataset = self._load_flat_dataset()
-        except FileNotFoundError:
-            empty = gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
-            self._flat_category_cache[cache_key] = empty
-            return empty
-        if "name_gis_geocodegroup" in dataset.columns:
-            mask = dataset["name_gis_geocodegroup"].astype(str).str.strip() == cat
-            subset = dataset.loc[mask].copy()
-        else:
-            subset = dataset.copy()
-        self._flat_category_cache[cache_key] = subset
-        return subset
+    subset = subset.dropna(subset=["geometry"])
+    subset = subset[~subset.geometry.is_empty]
+    if subset.empty:
+      return {"type": "FeatureCollection", "features": []}
 
-    def _stacked_for_category(self, category: str) -> gpd.GeoDataFrame:
-        cat = DEFAULT_ANALYSIS_GEOCODE
-        cache_key = cat
-        if cache_key in self._stacked_category_cache:
-            return self._stacked_category_cache[cache_key]
-        try:
-            dataset = self._load_stacked_dataset()
-        except FileNotFoundError:
-            empty = gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
-            self._stacked_category_cache[cache_key] = empty
-            return empty
-        if "name_gis_geocodegroup" in dataset.columns:
-            mask = dataset["name_gis_geocodegroup"].astype(str).str.strip() == cat
-            subset = dataset.loc[mask].copy()
-        else:
-            subset = dataset.copy()
-        self._stacked_category_cache[cache_key] = subset
-        return subset
+    if limit and len(subset) > limit:
+      if "analysis_timestamp" in subset.columns:
+        subset = subset.sort_values("analysis_timestamp", na_position="last").tail(limit)
+      else:
+        subset = subset.tail(limit)
 
-    def _build_canvas_features(self, category: Optional[str] = None) -> tuple[list[Dict[str, Any]], Optional[List[float]]]:
-        """
-        Prepare a lightweight GeoJSON-ready list used as a visual canvas.
-        Preference order:
-            1. tbl_geocode_group (already grouped polygons)
-            2. tbl_flat (raw mesh, heavily down-sampled)
-        """
-        base = parquet_dir(self.base_dir, self.cfg)
-        max_feats = 2000
-        cat = DEFAULT_ANALYSIS_GEOCODE
-        debug_log(self.base_dir, f"Building canvas features for geocode '{cat}'")
+    try:
+      subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=subset.geometry.crs or f"EPSG:{self.storage_epsg}")
+      subset = subset.to_crs(4326)
+    except Exception as exc:
+      debug_log(self.base_dir, f"analysis_preview_geojson: reprojection failed ({exc})")
+      return {"type": "FeatureCollection", "features": []}
 
-        def _feature_list(gdf: gpd.GeoDataFrame, label_candidates: List[str]) -> tuple[list[Dict[str, Any]], Optional[List[float]]]:
-            if gdf.empty or "geometry" not in gdf.columns:
-                return [], None
-            gdf = gdf.dropna(subset=["geometry"]).copy()
-            if gdf.empty:
-                return [], None
-            if gdf.crs is None:
-                gdf.set_crs(epsg=self.working_epsg, inplace=True, allow_override=True)
-            else:
-                gdf = gdf.to_crs(self.working_epsg)
-            gdf["geometry"] = gdf.geometry.buffer(0)
-            gdf = gdf[~gdf.geometry.is_empty]
-            if gdf.empty:
-                return [], None
+    features: list[Dict[str, Any]] = []
+    keep_keys = [
+      "analysis_polygon_id",
+      "analysis_polygon_title",
+      "analysis_group_id",
+      "analysis_group_name",
+      "analysis_geocode",
+      "analysis_area_m2",
+      "analysis_area_fraction",
+      "sensitivity_code",
+      "sensitivity_description",
+      "analysis_timestamp",
+    ]
 
-            if len(gdf) > max_feats:
-                step = max(1, len(gdf) // max_feats)
-                gdf = gdf.iloc[::step].copy()
+    for _, row in subset.iterrows():
+      try:
+        geom_json = shp_to_geojson(row.geometry)
+      except Exception:
+        continue
+      props: Dict[str, Any] = {}
+      for key in keep_keys:
+        if key in row and not pd.isna(row[key]):
+          value = row[key]
+          if isinstance(value, (pd.Timestamp, dt.datetime)):
+            value = value.isoformat()
+          props[key] = value
+      features.append({"type": "Feature", "geometry": geom_json, "properties": props})
 
-            gdf4326 = gdf.to_crs(4326)
-            label_col = next((c for c in label_candidates if c in gdf4326.columns), None)
+    return {"type": "FeatureCollection", "features": features}
 
-            features: list[Dict[str, Any]] = []
-            for _, row in gdf4326.iterrows():
-                label = ""
-                if label_col:
-                    raw = row.get(label_col)
-                    if raw is not None and not (isinstance(raw, str) and raw.strip() == ""):
-                        label = str(raw)
-                try:
-                    geom_json = shp_to_geojson(row.geometry)
-                except Exception:
-                    continue
-                features.append({"type": "Feature", "geometry": geom_json, "properties": {"label": label}})
+  def canvas_geojson(self, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    cat = DEFAULT_ANALYSIS_GEOCODE
+    if cat not in self._canvas_cache:
+      base = parquet_dir(self.base_dir, self.cfg)
+      max_feats = 2000
 
-            bounds = gdf4326.total_bounds.tolist() if not gdf4326.empty else None
-            return features, bounds
-
-        group_path = base / "tbl_geocode_group.parquet"
-        if group_path.exists():
-            try:
-                gdf = gpd.read_parquet(group_path)
-            except Exception:
-                gdf = None
-            if isinstance(gdf, gpd.GeoDataFrame) and not gdf.empty:
-                if "name_gis_geocodegroup" in gdf.columns:
-                    gdf = gdf[gdf["name_gis_geocodegroup"].astype(str) == cat]
-                feats, bounds = _feature_list(gdf, ["name_gis_geocodegroup", "name", "name_gis", "title_user"])
-                if feats:
-                    debug_log(self.base_dir, f"Canvas built from tbl_geocode_group ({len(feats)} features)")
-                    return feats, bounds
-
-        gdf = self._flat_for_category(cat)
-        if isinstance(gdf, gpd.GeoDataFrame) and not gdf.empty and "geometry" in gdf.columns:
-            subset_cols = ["geometry"] + [c for c in ["name_gis_geocodegroup"] if c in gdf.columns]
-            gdf_subset = gdf[subset_cols].copy()
-            feats, bounds = _feature_list(gdf_subset, ["name_gis_geocodegroup"])
-            if feats:
-                debug_log(self.base_dir, f"Canvas built from tbl_flat ({len(feats)} features)")
-                return feats, bounds
-
-        debug_log(self.base_dir, "Canvas generation produced no features")
-        return [], None
-
-    @staticmethod
-    def _subset_by_polygon(gdf: gpd.GeoDataFrame, polygon: BaseGeometry) -> gpd.GeoDataFrame:
+      def _feature_list(gdf: gpd.GeoDataFrame, label_candidates: List[str]) -> tuple[list[Dict[str, Any]], Optional[List[float]]]:
+        if gdf.empty or "geometry" not in gdf.columns:
+          return [], None
+        gdf = gdf.dropna(subset=["geometry"]).copy()
         if gdf.empty:
-            return gdf.iloc[0:0].copy()
-        try:
-            sindex = gdf.sindex
-            indices = list(sindex.intersection(polygon.bounds))
-            if indices:
-                subset = gdf.iloc[indices].copy()
-            else:
-                subset = gdf.iloc[0:0].copy()
-        except Exception:
-            subset = gdf.copy()
-        if subset.empty:
-            return subset
-        subset = subset[subset.geometry.intersects(polygon)]
-        return subset.copy()
-
-    def _clip_flat_to_polygon(
-        self,
-        flat_gdf: gpd.GeoDataFrame,
-        polygon: BaseGeometry,
-        group: AnalysisGroup,
-        record: AnalysisRecord,
-        geocode: str,
-        run_id: str,
-        run_timestamp: str,
-    ) -> gpd.GeoDataFrame:
-        subset = self._subset_by_polygon(flat_gdf, polygon)
-        if subset.empty:
-            return subset.iloc[0:0].copy()
-
-        clipped_geoms = []
-        for geom in subset.geometry:
-            try:
-                inter = geom.intersection(polygon)
-            except Exception:
-                try:
-                    inter = geom.buffer(0).intersection(polygon)
-                except Exception:
-                    inter = None
-            if inter is None or inter.is_empty:
-                clipped_geoms.append(None)
-            else:
-                clipped_geoms.append(inter)
-        subset = subset.assign(geometry=clipped_geoms)
-        subset = subset[subset.geometry.notna()]
-        subset = subset[~subset.geometry.is_empty]
-        if subset.empty:
-            return subset.iloc[0:0].copy()
-
-        subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=flat_gdf.crs).copy()
-        metric = subset.to_crs(self.area_epsg)
-        subset["analysis_area_m2"] = metric.geometry.area.astype("float64")
-        subset = subset[subset["analysis_area_m2"] > 0]
-        if subset.empty:
-            return subset.iloc[0:0].copy()
-
-        base_area = pd.to_numeric(subset.get("area_m2"), errors="coerce")
-        with np.errstate(divide="ignore", invalid="ignore"):
-            subset["analysis_area_fraction"] = np.where(
-                base_area > 0, subset["analysis_area_m2"] / base_area.astype("float64"), np.nan
-            )
-        subset["analysis_group_id"] = group.identifier
-        subset["analysis_group_name"] = group.name
-        subset["analysis_polygon_id"] = record.identifier
-        subset["analysis_polygon_title"] = record.title
-        subset["analysis_polygon_notes"] = record.notes
-        subset["analysis_geocode"] = geocode
-        subset["analysis_run_id"] = run_id
-        subset["analysis_timestamp"] = run_timestamp
-        return subset.reset_index(drop=True)
-
-    def _clip_stacked_to_polygon(
-        self,
-        stacked_gdf: gpd.GeoDataFrame,
-        polygon: BaseGeometry,
-        group: AnalysisGroup,
-        record: AnalysisRecord,
-        geocode: str,
-        run_id: str,
-        run_timestamp: str,
-    ) -> gpd.GeoDataFrame:
-        if stacked_gdf.empty:
-            return stacked_gdf.iloc[0:0].copy()
-        subset = self._subset_by_polygon(stacked_gdf, polygon)
-        if subset.empty:
-            return subset.iloc[0:0].copy()
-
-        clipped_geoms = []
-        for geom in subset.geometry:
-            try:
-                inter = geom.intersection(polygon)
-            except Exception:
-                try:
-                    inter = geom.buffer(0).intersection(polygon)
-                except Exception:
-                    inter = None
-            if inter is None or inter.is_empty:
-                clipped_geoms.append(None)
-            else:
-                clipped_geoms.append(inter)
-        subset = subset.assign(geometry=clipped_geoms)
-        subset = subset[subset.geometry.notna()]
-        subset = subset[~subset.geometry.is_empty]
-        if subset.empty:
-            return subset.iloc[0:0].copy()
-
-        subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=stacked_gdf.crs).copy()
-        metric = subset.to_crs(self.area_epsg)
-        subset["analysis_area_m2"] = metric.geometry.area.astype("float64")
-        subset = subset[subset["analysis_area_m2"] > 0]
-        if subset.empty:
-            return subset.iloc[0:0].copy()
-
-        base_area = pd.to_numeric(subset.get("area_m2"), errors="coerce")
-        with np.errstate(divide="ignore", invalid="ignore"):
-            subset["analysis_area_fraction"] = np.where(
-                base_area > 0, subset["analysis_area_m2"] / base_area.astype("float64"), np.nan
-            )
-        subset["analysis_group_id"] = group.identifier
-        subset["analysis_group_name"] = group.name
-        subset["analysis_polygon_id"] = record.identifier
-        subset["analysis_polygon_title"] = record.title
-        subset["analysis_polygon_notes"] = record.notes
-        subset["analysis_geocode"] = geocode
-        subset["analysis_run_id"] = run_id
-        subset["analysis_timestamp"] = run_timestamp
-        return subset.reset_index(drop=True)
-
-    def _write_analysis_output(self, path: Path, group_id: str, new_gdf: gpd.GeoDataFrame) -> None:
-        os.makedirs(path.parent, exist_ok=True)
-        if path.exists():
-            try:
-                existing = gpd.read_parquet(path)
-            except Exception:
-                existing = gpd.GeoDataFrame(columns=new_gdf.columns, geometry="geometry", crs=new_gdf.crs)
+          return [], None
+        if gdf.crs is None:
+          gdf.set_crs(epsg=self.working_epsg, inplace=True, allow_override=True)
         else:
-            existing = gpd.GeoDataFrame(columns=new_gdf.columns, geometry="geometry", crs=new_gdf.crs)
-
-        if not isinstance(existing, gpd.GeoDataFrame):
-            existing = gpd.GeoDataFrame(existing, geometry="geometry", crs=getattr(existing, "crs", new_gdf.crs))
-
-        if "analysis_group_id" in existing.columns:
-            mask = existing["analysis_group_id"].astype(str).fillna("") != str(group_id)
-            existing = existing.loc[mask].reset_index(drop=True)
-        else:
-            existing = existing.iloc[0:0].copy()
-
-        if new_gdf is None or new_gdf.empty:
-            combined = existing
-        elif existing.empty:
-            combined = new_gdf.copy()
-        else:
-            combined = pd.concat([existing, new_gdf], ignore_index=True)
-
-        if not isinstance(combined, gpd.GeoDataFrame):
-            combined = gpd.GeoDataFrame(combined, geometry="geometry", crs=new_gdf.crs)
-        combined.to_parquet(path, index=False)
-
-    def analysis_preview_geojson(self, group_id: str, limit: int = 500) -> Dict[str, Any]:
-        try:
-            path = self.analysis_flat_path
-            if not path.exists():
-                return {"type": "FeatureCollection", "features": []}
-            df = gpd.read_parquet(path)
-        except Exception as exc:
-            debug_log(self.base_dir, f"analysis_preview_geojson: failed to read flat table ({exc})")
-            return {"type": "FeatureCollection", "features": []}
-
-        if df.empty or "analysis_group_id" not in df.columns:
-            return {"type": "FeatureCollection", "features": []}
-
-        subset = df[df["analysis_group_id"].astype(str) == str(group_id)].copy()
-        if subset.empty or "geometry" not in subset.columns:
-            return {"type": "FeatureCollection", "features": []}
-
-        subset = subset.dropna(subset=["geometry"])
-        subset = subset[~subset.geometry.is_empty]
-        if subset.empty:
-            return {"type": "FeatureCollection", "features": []}
-
-        if limit and len(subset) > limit:
-            if "analysis_timestamp" in subset.columns:
-                subset = subset.sort_values("analysis_timestamp", na_position="last").tail(limit)
-            else:
-                subset = subset.tail(limit)
-
-        try:
-            subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=subset.geometry.crs or f"EPSG:{self.storage_epsg}")
-            subset = subset.to_crs(4326)
-        except Exception as exc:
-            debug_log(self.base_dir, f"analysis_preview_geojson: reprojection failed ({exc})")
-            return {"type": "FeatureCollection", "features": []}
-
+          gdf = gdf.to_crs(self.working_epsg)
+        gdf["geometry"] = gdf.geometry.buffer(0)
+        gdf = gdf[~gdf.geometry.is_empty]
+        if gdf.empty:
+          return [], None
+        if len(gdf) > max_feats:
+          step = max(1, len(gdf) // max_feats)
+          gdf = gdf.iloc[::step].copy()
+        gdf4326 = gdf.to_crs(4326)
+        label_col = next((c for c in label_candidates if c in gdf4326.columns), None)
         features: list[Dict[str, Any]] = []
-        keep_keys = [
-            "analysis_polygon_id",
-            "analysis_polygon_title",
-            "analysis_group_id",
-            "analysis_group_name",
-            "analysis_geocode",
-            "analysis_area_m2",
-            "analysis_area_fraction",
-            "sensitivity_code",
-            "sensitivity_description",
-            "analysis_timestamp",
-        ]
+        for _, row in gdf4326.iterrows():
+          label = ""
+          if label_col:
+            raw = row.get(label_col)
+            if raw is not None and not (isinstance(raw, str) and raw.strip() == ""):
+              label = str(raw)
+          try:
+            geom_json = shp_to_geojson(row.geometry)
+          except Exception:
+            continue
+          features.append({"type": "Feature", "geometry": geom_json, "properties": {"label": label}})
+        bounds = gdf4326.total_bounds.tolist() if not gdf4326.empty else None
+        return features, bounds
 
-        for _, row in subset.iterrows():
-            try:
-                geom_json = shp_to_geojson(row.geometry)
-            except Exception:
-                continue
-            props: Dict[str, Any] = {}
-            for key in keep_keys:
-                if key in row and not pd.isna(row[key]):
-                    value = row[key]
-                    if isinstance(value, (pd.Timestamp, dt.datetime)):
-                        value = value.isoformat()
-                    props[key] = value
-            features.append({"type": "Feature", "geometry": geom_json, "properties": props})
+      features: list[Dict[str, Any]] = []
+      bounds: Optional[List[float]] = None
 
-        return {"type": "FeatureCollection", "features": features}
-
-    def geocode_feature_collection(self, category: Optional[str]) -> Dict[str, Any]:
-        geojson = self.canvas_geojson(category)
-        if not geojson:
-            cat = self._ensure_category(category)
-            return {"type": "FeatureCollection", "features": [], "bounds": None, "category": cat}
-        return geojson
-
-    def run_group_analysis(
-        self,
-        group: AnalysisGroup,
-        records: List[AnalysisRecord],
-        geocode: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        debug_log(self.base_dir, f"run_group_analysis: group={group.identifier}, polygons={len(records)}, requested_geocode={geocode}")
-        if not records:
-            raise ValueError("Ingen analysepolygoner valgt.")
-        category = DEFAULT_ANALYSIS_GEOCODE
-        flat_base = self._flat_for_category(category)
-        if flat_base.empty:
-            raise ValueError(f"Ingen data funnet for geokode «{category}».")
+      group_path = base / "tbl_geocode_group.parquet"
+      if group_path.exists():
         try:
-            stacked_base = self._stacked_for_category(category)
-        except FileNotFoundError:
-            stacked_base = gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs=flat_base.crs)
+          gdf = gpd.read_parquet(group_path)
+        except Exception:
+          gdf = None
+        if isinstance(gdf, gpd.GeoDataFrame) and not gdf.empty:
+          if "name_gis_geocodegroup" in gdf.columns:
+            gdf = gdf[gdf["name_gis_geocodegroup"].astype(str) == cat]
+          features, bounds = _feature_list(gdf, ["name_gis_geocodegroup", "name", "name_gis", "title_user"])
 
-        run_id = uuid.uuid4().hex
-        run_ts = dt.datetime.utcnow().isoformat()
+      if not features:
+        flat_path = find_parquet_file(self.base_dir, self.cfg, "tbl_flat.parquet")
+        if flat_path and flat_path.exists():
+          try:
+            gdf = gpd.read_parquet(flat_path)
+          except Exception:
+            gdf = None
+          if isinstance(gdf, gpd.GeoDataFrame) and not gdf.empty and "geometry" in gdf.columns:
+            if "name_gis_geocodegroup" in gdf.columns:
+              mask = gdf["name_gis_geocodegroup"].astype(str).str.strip() == cat
+              gdf = gdf.loc[mask].copy()
+            subset_cols = ["geometry"] + [c for c in ["name_gis_geocodegroup"] if c in gdf.columns]
+            features, bounds = _feature_list(gdf[subset_cols].copy(), ["name_gis_geocodegroup"])
 
-        flat_results: List[gpd.GeoDataFrame] = []
-        stacked_results: List[gpd.GeoDataFrame] = []
-        summaries: List[Dict[str, Any]] = []
-        preview_geojson: Dict[str, Any] = {"type": "FeatureCollection", "features": []}
-
-        for record in records:
-            poly_storage = gpd.GeoDataFrame([{"geometry": record.geometry}], geometry="geometry", crs=f"EPSG:{self.storage_epsg}")
-            polygon = poly_storage.to_crs(flat_base.crs).geometry.iloc[0]
-            area_sqkm = _km2(poly_storage.to_crs(self.area_epsg).area.iloc[0])
-
-            clipped_flat = self._clip_flat_to_polygon(flat_base, polygon, group, record, category, run_id, run_ts)
-            if not clipped_flat.empty:
-                flat_results.append(clipped_flat)
-
-            clipped_stacked = self._clip_stacked_to_polygon(stacked_base, polygon, group, record, category, run_id, run_ts)
-            if not clipped_stacked.empty:
-                stacked_results.append(clipped_stacked)
-
-            summaries.append(
-                {
-                    "analysis_polygon_id": record.identifier,
-                    "title": record.title,
-                    "notes": record.notes,
-                    "area_sqkm": area_sqkm,
-                    "flat_rows": int(len(clipped_flat)),
-                    "stacked_rows": int(len(clipped_stacked)),
-                }
-            )
-
+      self._canvas_cache[cat] = (features, bounds)
+      if bounds:
+        self.canvas_bounds = bounds
         try:
-            preview_frames: List[gpd.GeoDataFrame] = [gdf for gdf in flat_results if not gdf.empty]
-            if preview_frames:
-                preview_gdf = gpd.GeoDataFrame(pd.concat(preview_frames, ignore_index=True), geometry="geometry", crs=preview_frames[0].crs)
-                preview_gdf = preview_gdf[preview_gdf.geometry.notna()]
-                preview_gdf = preview_gdf[~preview_gdf.geometry.is_empty]
-                if not preview_gdf.empty:
-                    preview_wgs = preview_gdf.to_crs(4326)
-                    keep_keys = [
-                        "analysis_polygon_id",
-                        "analysis_polygon_title",
-                        "analysis_group_id",
-                        "analysis_group_name",
-                        "analysis_geocode",
-                        "analysis_area_m2",
-                        "analysis_area_fraction",
-                        "display_title",
-                        "sensitivity_code",
-                        "sensitivity_description",
-                    ]
-                    for _, row in preview_wgs.iterrows():
-                        try:
-                            geom_json = shp_to_geojson(row.geometry)
-                        except Exception:
-                            continue
-                        props: Dict[str, Any] = {}
-                        for key in keep_keys:
-                            if key in row:
-                                value = row.get(key)
-                                if _is_blank(value):
-                                    continue
-                                if isinstance(value, (np.generic,)):
-                                    value = value.item()
-                                props[key] = value
-                        preview_geojson["features"].append({"type": "Feature", "geometry": geom_json, "properties": props})
-        except Exception as exc:
-            debug_log(self.base_dir, f"run_group_analysis: preview generation failed: {exc}")
-            preview_geojson = {"type": "FeatureCollection", "features": []}
+          self.asset_bounds = tuple(bounds)
+        except Exception:
+          self.asset_bounds = None
 
-        if flat_results:
-            flat_gdf = gpd.GeoDataFrame(pd.concat(flat_results, ignore_index=True), geometry="geometry", crs=flat_results[0].crs)
-        else:
-            additional_cols = [
-                "analysis_group_id",
-                "analysis_group_name",
-                "analysis_polygon_id",
-                "analysis_polygon_title",
-                "analysis_polygon_notes",
-                "analysis_geocode",
-                "analysis_run_id",
-                "analysis_timestamp",
-                "analysis_area_m2",
-                "analysis_area_fraction",
-            ]
-            flat_gdf = flat_base.iloc[0:0].copy()
-            for col in additional_cols:
-                if col not in flat_gdf.columns:
-                    dtype = "float64" if col in {"analysis_area_m2", "analysis_area_fraction"} else "object"
-                    flat_gdf[col] = pd.Series(dtype=dtype)
-            flat_gdf = gpd.GeoDataFrame(flat_gdf, geometry="geometry", crs=flat_base.crs)
-        flat_gdf = flat_gdf.reset_index(drop=True)
-        self._write_analysis_output(self.analysis_flat_path, group.identifier, flat_gdf)
-
-        if stacked_results:
-            stacked_gdf = gpd.GeoDataFrame(
-                pd.concat(stacked_results, ignore_index=True), geometry="geometry", crs=stacked_results[0].crs
-            )
-        else:
-            additional_cols = [
-                "analysis_group_id",
-                "analysis_group_name",
-                "analysis_polygon_id",
-                "analysis_polygon_title",
-                "analysis_polygon_notes",
-                "analysis_geocode",
-                "analysis_run_id",
-                "analysis_timestamp",
-                "analysis_area_m2",
-                "analysis_area_fraction",
-            ]
-            stacked_gdf = stacked_base.iloc[0:0].copy()
-            for col in additional_cols:
-                if col not in stacked_gdf.columns:
-                    dtype = "float64" if col in {"analysis_area_m2", "analysis_area_fraction"} else "object"
-                    stacked_gdf[col] = pd.Series(dtype=dtype)
-            stacked_gdf = gpd.GeoDataFrame(stacked_gdf, geometry="geometry", crs=stacked_base.crs)
-        stacked_gdf = stacked_gdf.reset_index(drop=True)
-        self._write_analysis_output(self.analysis_stacked_path, group.identifier, stacked_gdf)
-
-        debug_log(self.base_dir, f"run_group_analysis complete: geocode={category}, flat_rows={len(flat_gdf)}, stacked_rows={len(stacked_gdf)}")
-        return {
-            "analysis_group_id": group.identifier,
-            "analysis_group_name": group.name,
-            "analysis_geocode": category,
-            "flat_path": str(self.analysis_flat_path),
-            "stacked_path": str(self.analysis_stacked_path),
-            "flat_rows": int(len(flat_gdf)),
-            "stacked_rows": int(len(stacked_gdf)),
-            "summary": summaries,
-            "run_id": run_id,
-            "run_timestamp": run_ts,
-            "preview_geojson": preview_geojson,
-            "analysis_preview": preview_geojson,
-        }
-
-    def _join_metadata(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df.merge(self.asset_groups, left_on="ref_asset_group", right_on="id", how="left", suffixes=("", "_group"))
-
-    def _intersections(self, polygon: BaseGeometry) -> gpd.GeoDataFrame:
-        mask = self.asset_objects.geometry.intersects(polygon)
-        subset = self.asset_objects.loc[mask].copy()
-        if subset.empty:
-            return subset
-        subset["geometry"] = subset.geometry.intersection(polygon)
-        subset = subset[~subset.geometry.is_empty]
-        return subset
-
-    def analyse_polygon(self, record: AnalysisRecord) -> Dict[str, Any]:
-        geo_df = gpd.GeoDataFrame([{"geometry": record.geometry}], geometry="geometry", crs=self.asset_objects.crs)
-        intersections = self._intersections(geo_df.geometry.iloc[0])
-        if intersections.empty:
-            return {
-                "record": record,
-                "area_sqkm": _km2(geo_df.to_crs(self.area_epsg).area.iloc[0]),
-                "detail_table": pd.DataFrame(columns=["Title", "Code", "Description", "Type", "total_area", "# objects"]),
-                "summary_table": pd.DataFrame(columns=["Sensitivity Code", "Sensitivity Description", "Number of Asset Objects", "Active asset groups"]),
-            }
-
-        enriched = self._join_metadata(intersections)
-        enriched["geom_type"] = enriched.geometry.geom_type
-
-        area_df = enriched.to_crs(self.area_epsg)
-        enriched["area_m2"] = area_df.geometry.area.where(
-            area_df.geometry.geom_type.isin(["Polygon", "MultiPolygon"]), other=pd.NA
-        )
-
-        def _display_title(row: pd.Series) -> str:
-            for col in ("title_fromuser", "name_original", "name_gis_assetgroup"):
-                val = row.get(col)
-                if not _is_blank(val):
-                    return str(val)
-            return f"asset_{row['ref_asset_group']}"
-
-        enriched["display_title"] = enriched.apply(_display_title, axis=1)
-
-        grouped = (
-            enriched.groupby(["display_title", "sensitivity_code", "sensitivity_description", "geom_type"], dropna=False)
-            .agg(
-                total_area_m2=pd.NamedAgg(column="area_m2", aggfunc=lambda s: float(s.dropna().sum()) if not s.dropna().empty else None),
-                object_count=pd.NamedAgg(column="id", aggfunc="nunique"),
-            )
-            .reset_index()
-        )
-        grouped["total_area"] = grouped["total_area_m2"].apply(_km2)
-        grouped.rename(
-            columns={
-                "display_title": "Title",
-                "sensitivity_code": "Code",
-                "sensitivity_description": "Description",
-                "geom_type": "Type",
-                "object_count": "# objects",
-            },
-            inplace=True,
-        )
-        grouped = grouped[["Title", "Code", "Description", "Type", "total_area", "# objects"]].sort_values(
-            ["Code", "Title", "Type"]
-        )
-
-        summary = (
-            enriched.groupby(["sensitivity_code", "sensitivity_description"])
-            .agg(object_count=("id", "nunique"), active_groups=("ref_asset_group", "nunique"))
-            .reset_index()
-        )
-        summary.rename(
-            columns={
-                "sensitivity_code": "Sensitivity Code",
-                "sensitivity_description": "Sensitivity Description",
-                "object_count": "Number of Asset Objects",
-                "active_groups": "Active asset groups",
-            },
-            inplace=True,
-        )
-
-        area_sqkm = _km2(geo_df.to_crs(self.area_epsg).area.iloc[0])
-        return {
-            "record": record,
-            "area_sqkm": area_sqkm,
-            "detail_table": grouped,
-            "summary_table": summary.sort_values("Sensitivity Code"),
-        }
-
-    def canvas_geojson(self, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        cat = self._ensure_category(category)
-        if self.mbtiles_base_url:
-            info = _mbtiles_info(cat)
-        if info and (info.get("sensitivity_url") or info.get("groupstotal_url") or info.get("assetstotal_url")):
-                bounds = info.get("bounds")
-                if bounds:
-                    self.canvas_bounds = bounds
-                debug_log(self.base_dir, f"canvas_geojson: using MBTiles for '{cat}'")
-                return {
-                    "type": "FeatureCollection",
-                    "features": [],
-                    "bounds": bounds,
-                    "category": info.get("category", cat),
-                    "mbtiles": info,
-                }
-        if cat not in self._canvas_cache:
-            features, bounds = self._build_canvas_features(cat)
-            self._canvas_cache[cat] = (features, bounds)
-            if bounds:
-                self.canvas_bounds = bounds
-        features, bounds = self._canvas_cache.get(cat, ([], None))
-        if not features:
-            debug_log(self.base_dir, f"canvas_geojson: no features for '{cat}'")
-            return None
-        debug_log(self.base_dir, f"canvas_geojson: returning {len(features)} features for '{cat}'")
-        return {"type": "FeatureCollection", "features": features, "bounds": bounds, "category": cat}
-
-    def build_report(self, analyses: Iterable[Dict[str, Any]]) -> Path:
-        analyses = list(analyses)
-        if not analyses:
-            raise ValueError("No analyses supplied.")
-
-        output_dir = (self.base_dir / "output").resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = output_dir / REPORT_FILENAME_TEMPLATE.format(ts=_timestamp_label())
-
-        doc = SimpleDocTemplate(str(pdf_path), pagesize=A4, title="MESA Area Analysis Report")
-        styles = getSampleStyleSheet()
-        heading = styles["Heading1"]
-        heading.fontSize = 18
-        heading.leading = 22
-        sub_heading = ParagraphStyle(name="SubHeading", parent=styles["Heading2"], fontSize=14, leading=18, spaceBefore=12)
-        body = styles["BodyText"]
-        body.spaceBefore = 6
-        body.spaceAfter = 6
-
-        elements: List[Any] = []
-        for idx, bundle in enumerate(analyses, start=1):
-            record = bundle["record"]
-            title = record.title or record.identifier
-            elements.append(Paragraph(f"{idx}. Analysis polygon: {title}", heading))
-            elements.append(Spacer(1, 6))
-
-            meta = (
-                f"<b>Polygon ID:</b> {record.identifier}<br/>"
-                f"<b>Created:</b> {record.created_label}<br/>"
-                f"<b>Area:</b> {bundle['area_sqkm']}"
-            )
-            if record.notes:
-                meta += f"<br/><b>Notes:</b> {record.notes}"
-            elements.append(Paragraph(meta, body))
-
-            detail_df: pd.DataFrame = bundle["detail_table"]
-            if detail_df.empty:
-                elements.append(Paragraph("No asset objects intersect this polygon.", body))
-            else:
-                elements.append(Paragraph("Intersecting asset layers", sub_heading))
-                table = Table([list(detail_df.columns)] + detail_df.values.tolist(), repeatRows=1, hAlign="LEFT")
-                table.setStyle(
-                    TableStyle(
-                        [
-                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
-                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
-                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                        ]
-                    )
-                )
-                elements.append(table)
-
-                summary_df: pd.DataFrame = bundle["summary_table"]
-                if not summary_df.empty:
-                    elements.append(Spacer(1, 12))
-                    elements.append(Paragraph("Sensitivity summary", sub_heading))
-                    summary_table = Table([list(summary_df.columns)] + summary_df.values.tolist(), repeatRows=1, hAlign="LEFT")
-                    summary_table.setStyle(
-                        TableStyle(
-                            [
-                                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#385723")),
-                                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
-                                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                            ]
-                        )
-                    )
-                    elements.append(summary_table)
-
-            if idx != len(analyses):
-                elements.append(PageBreak())
-
-        doc.build(elements)
-        return pdf_path
+    features, bounds = self._canvas_cache.get(cat, ([], None))
+    if not features:
+      return None
+    return {"type": "FeatureCollection", "features": features, "bounds": bounds, "category": cat}
 
 
 # ---------------------------------------------------------------------------
@@ -1789,7 +1134,7 @@ class AssetAnalyzer:
 class WebApi:
     """Expose storage and analysis primitives to the embedded Leaflet app."""
 
-    def __init__(self, storage: AnalysisStorage, analyzer: AssetAnalyzer, base_dir: Path) -> None:
+    def __init__(self, storage: AnalysisStorage, analyzer: AnalysisPreviewProvider, base_dir: Path) -> None:
         self._storage = storage
         self._analyzer = analyzer
         self._base_dir = base_dir
@@ -1861,11 +1206,6 @@ class WebApi:
                 }
                 if bounds is None and self._analyzer.canvas_bounds:
                     bounds = self._analyzer.canvas_bounds
-                if bounds is None:
-                    try:
-                        bounds = list(self._analyzer.asset_objects.to_crs(4326).total_bounds)
-                    except Exception:
-                        bounds = None
                 if bounds is None and self._analyzer.asset_bounds:
                     bounds = list(self._analyzer.asset_bounds)
 
@@ -3315,7 +2655,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     cfg = read_config(base_dir)
 
     storage = AnalysisStorage(base_dir, cfg)
-    analyzer = AssetAnalyzer(base_dir, cfg, storage.storage_epsg)
+    analyzer = AnalysisPreviewProvider(base_dir, cfg, storage.storage_epsg)
     api = WebApi(storage, analyzer, base_dir)
 
     window = webview.create_window(
