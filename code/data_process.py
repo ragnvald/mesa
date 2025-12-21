@@ -549,7 +549,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     tile_ceiling = 99.0  # keep headroom for explicit "completed" phase to own 100%
     try:
-        layers_per_group = 8  # sensitivity, env, groupstotal, assetstotal, importance_max, importance_index, sensitivity_index, index_owa
+        layers_per_group = 7  # sensitivity, groupstotal, assetstotal, importance_max, index_importance, index_sensitivity, index_owa
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
@@ -2185,7 +2185,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_importance','index_sensitivity','env_index','index_owa',
+            'index_importance','index_sensitivity','index_owa',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -2236,7 +2236,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_importance','index_sensitivity','env_index','index_owa',
+            'index_importance','index_sensitivity','index_owa',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -2450,15 +2450,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     for col in ("index_importance", "index_sensitivity"):
         tbl_flat[col] = pd.to_numeric(tbl_flat[col], errors="coerce").fillna(0).round().astype("Int64")
 
-    try:
-        env_base = (
-            pd.to_numeric(tbl_flat.get("index_importance"), errors="coerce").fillna(0) +
-            pd.to_numeric(tbl_flat.get("index_sensitivity"), errors="coerce").fillna(0)
-        ) / 2.0
-    except Exception:
-        env_base = pd.Series([0] * len(tbl_flat), index=tbl_flat.index, dtype="float64")
-    tbl_flat["env_index"] = env_base.clip(lower=0, upper=100).round().astype("Int64")
-
     # 6b. OWA index (precautionary addition) scaled 0..100
     try:
         owa = _compute_index_owa_from_counts(tbl_flat, group_map, min_score=1, max_score=25)
@@ -2474,7 +2465,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
         'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
         'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-        'index_importance','index_sensitivity','env_index','index_owa',
+        'index_importance','index_sensitivity','index_owa',
         'geometry'
     ]
     for c in preferred:

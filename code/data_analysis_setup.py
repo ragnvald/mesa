@@ -254,14 +254,13 @@ def _scan_mbtiles_dir(directory: Path) -> tuple[Dict[str, Dict[str, Optional[Pat
         name = entry.name.lower()
         if not name.endswith(".mbtiles"):
             continue
-        kind = None
         base = entry.name
-        if name.endswith("_sensitivity.mbtiles"):
-            cat = base[: -len("_sensitivity.mbtiles")]
-            kind = "sensitivity"
-        elif name.endswith("_envindex.mbtiles"):
-            cat = base[: -len("_envindex.mbtiles")]
-            kind = "envindex"
+        if name.endswith("_sensitivity_max.mbtiles"):
+          cat = base[: -len("_sensitivity_max.mbtiles")]
+          kind = "sensitivity"
+        elif name.endswith("_sensitivity.mbtiles"):
+          cat = base[: -len("_sensitivity.mbtiles")]
+          kind = "sensitivity"
         elif name.endswith("_groupstotal.mbtiles"):
             cat = base[: -len("_groupstotal.mbtiles")]
             kind = "groupstotal"
@@ -270,7 +269,7 @@ def _scan_mbtiles_dir(directory: Path) -> tuple[Dict[str, Dict[str, Optional[Pat
             kind = "assetstotal"
         else:
             continue
-        idx.setdefault(cat, {"sensitivity": None, "envindex": None, "groupstotal": None, "assetstotal": None})
+        idx.setdefault(cat, {"sensitivity": None, "groupstotal": None, "assetstotal": None})
         idx[cat][kind] = entry
         rev[_norm_key(cat)] = cat
     return idx, rev
@@ -298,7 +297,7 @@ class _MBTilesHandler(BaseHTTPRequestHandler):
             cat = unquote(cat_enc)
 
             disp, rec = _resolve_mbtiles(cat)
-            if kind not in {"sensitivity", "envindex", "groupstotal", "assetstotal"} or not rec:
+            if kind not in {"sensitivity", "groupstotal", "assetstotal"} or not rec:
                 self.send_response(404)
                 self.end_headers()
                 return
@@ -420,7 +419,7 @@ def _ensure_mbtiles(base_dir: Path) -> Optional[str]:
         for directory in _mbtiles_search_dirs(base_dir):
             idx, rev = _scan_mbtiles_dir(directory)
             for cat, rec in idx.items():
-                aggregated_index.setdefault(cat, {"sensitivity": None, "envindex": None, "groupstotal": None, "assetstotal": None})
+                aggregated_index.setdefault(cat, {"sensitivity": None, "groupstotal": None, "assetstotal": None})
                 for kind, path in rec.items():
                     if path:
                         aggregated_index[cat][kind] = path
@@ -438,7 +437,7 @@ def _mbtiles_info(category: str) -> Optional[Dict[str, Any]]:
     disp, rec = _resolve_mbtiles(category)
     if not rec or not _MBTILES_BASE_URL:
         return None
-    src = rec.get("sensitivity") or rec.get("envindex") or rec.get("groupstotal") or rec.get("assetstotal")
+    src = rec.get("sensitivity") or rec.get("groupstotal") or rec.get("assetstotal")
     meta = _mbtiles_meta(src) if src else {"bounds": [[-85.0, -180.0], [85.0, 180.0]], "minzoom": 0, "maxzoom": 19, "format": "image/png"}
 
     def build(kind: str) -> Optional[str]:
@@ -458,7 +457,6 @@ def _mbtiles_info(category: str) -> Optional[Dict[str, Any]]:
     return {
         "category": disp,
         "sensitivity_url": build("sensitivity"),
-        "envindex_url": build("envindex"),
         "groupstotal_url": build("groupstotal"),
         "assetstotal_url": build("assetstotal"),
         "bounds": bounds4,
@@ -1676,7 +1674,7 @@ class AssetAnalyzer:
         cat = self._ensure_category(category)
         if self.mbtiles_base_url:
             info = _mbtiles_info(cat)
-            if info and (info.get("sensitivity_url") or info.get("envindex_url")):
+        if info and (info.get("sensitivity_url") or info.get("groupstotal_url") or info.get("assetstotal_url")):
                 bounds = info.get("bounds")
                 if bounds:
                     self.canvas_bounds = bounds
@@ -2450,7 +2448,7 @@ function setMbtilesLayer(info){
   if(!MAP){ return; }
   clearMbtilesLayer();
   if(!info){ return; }
-  const url = info.sensitivity_url || info.envindex_url || info.groupstotal_url || info.assetstotal_url;
+  const url = info.sensitivity_url || info.groupstotal_url || info.assetstotal_url;
   if(!url){ return; }
   const bounds = toLeafletBounds(info.bounds);
   if(bounds){

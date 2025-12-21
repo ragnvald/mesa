@@ -185,7 +185,7 @@ class ReportEngine:
 
             # Other maps (non-index): these should come before the index sections in the report.
             layers = [
-                ("sensitivity", "Sensitive areas (A–E)", "sensitivity"),
+                ("sensitivity_max", "Sensitive areas (A–E)", "sensitivity"),
                 ("importance_max", "Importance (max)", "importance_max"),
                 ("groupstotal", "Asset groups total", "groupstotal"),
                 ("assetstotal", "Assets total", "assetstotal"),
@@ -212,7 +212,7 @@ class ReportEngine:
                     pages.append(('new_page', None))
                 else:
                     # Fallback (only for sensitivity): render polygons (no borders) if MBTiles missing
-                    if suffix == "sensitivity":
+                    if suffix in ("sensitivity_max", "sensitivity"):
                         sub = flat_df[flat_df['name_gis_geocodegroup'].astype('string').str.strip().str.lower() == str(gname).strip().lower()].copy()
                         ok_poly = draw_group_map_sensitivity(sub, gname, self.palette, self.desc, out_png, fixed_bounds_3857, base_dir=self.base_dir)
                         if ok_poly and _file_ok(out_png):
@@ -344,8 +344,8 @@ class ReportEngine:
         basic_name = (cfg["DEFAULT"].get("basic_group_name", "basic_mosaic") or "basic_mosaic").strip()
 
         candidates = [
-            ("index_importance", "Importance index", "importance_index"),
-            ("index_sensitivity", "Sensitivity index", "sensitivity_index"),
+            ("index_importance", "Importance index", "index_importance"),
+            ("index_sensitivity", "Sensitivity index", "index_sensitivity"),
             ("index_owa", "OWA index", "index_owa"),
         ]
 

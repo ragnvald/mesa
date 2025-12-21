@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, base64, configparser, locale, sqlite3, threading, json, io
+import os, sys, base64, configparser, locale, sqlite3, threading, json, io, hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 import pandas as pd
@@ -482,7 +482,7 @@ def _norm_key(s: str) -> str:
 
 MBTILES_KINDS = (
     "sensitivity", "groupstotal", "assetstotal",
-    "importance_max", "importance_index", "sensitivity_index", "index_owa"
+    "importance_max", "index_importance", "index_sensitivity", "index_owa"
 )
 
 def scan_mbtiles(dir_path: str):
@@ -496,14 +496,24 @@ def scan_mbtiles(dir_path: str):
         path = os.path.join(dir_path, fn)
         lo   = fn.lower()
         cat = None
+
+        # Special-case: sensitivity layer was renamed on disk to *_sensitivity_max.mbtiles
+        # but we keep the public kind name as "sensitivity" for URLs/UI compatibility.
+        if lo.endswith("_sensitivity_max.mbtiles"):
+            suffix = "_sensitivity_max.mbtiles"
+            cat = fn[:-len(suffix)]
+            kind = "sensitivity"
+        else:
+            kind = None
         
         # Match suffixes
-        for k in MBTILES_KINDS:
-            suffix = f"_{k}.mbtiles"
-            if lo.endswith(suffix):
-                cat = fn[:-len(suffix)]
-                kind = k
-                break
+        if cat is None:
+            for k in MBTILES_KINDS:
+                suffix = f"_{k}.mbtiles"
+                if lo.endswith(suffix):
+                    cat = fn[:-len(suffix)]
+                    kind = k
+                    break
         
         if not cat: continue
 
@@ -514,7 +524,16 @@ def scan_mbtiles(dir_path: str):
 
 def _mbtiles_snapshot(dir_path: str) -> tuple[str, ...]:
     try:
-        return tuple(sorted(fn for fn in os.listdir(dir_path) if fn.lower().endswith(".mbtiles")))
+        parts = []
+        for fn in os.listdir(dir_path):
+            if not fn.lower().endswith(".mbtiles"):
+                continue
+            try:
+                st = os.stat(os.path.join(dir_path, fn))
+                parts.append(f"{fn}:{st.st_mtime_ns}:{st.st_size}")
+            except Exception:
+                parts.append(fn)
+        return tuple(sorted(parts))
     except Exception:
         return ()
 
@@ -527,6 +546,7 @@ INDEX_OWA_TILES_AVAILABLE = False
 MBTILES_BASE_URL: str | None = None
 _MB_META_CACHE: dict[str, dict] = {}
 _MBTILES_SNAPSHOT: tuple[str, ...] | None = None
+MBTILES_CACHE_BUST: str = "0"
 
 def _mb_meta(path: str):
     if path in _MB_META_CACHE:
@@ -632,6 +652,7 @@ class _MesaHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(BLANK_PNG)))
+        self.send_header("Cache-Control", "no-store")
         self._send_cors()
         self.end_headers()
         try:
@@ -731,6 +752,7 @@ class _MesaHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", fmt)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
             self._send_cors()
             self.end_headers()
             self.wfile.write(data)
@@ -785,7 +807,7 @@ def start_mbtiles_server():
     return _MESA_BASE_URL
 
 def _refresh_mbtiles_index():
-    global MBTILES_INDEX, MBTILES_REV
+    global MBTILES_INDEX, MBTILES_REV, MBTILES_CACHE_BUST
     global IMPORTANCE_MAX_TILES_AVAILABLE, IMPORTANCE_INDEX_TILES_AVAILABLE
     global SENSITIVITY_INDEX_TILES_AVAILABLE, INDEX_OWA_TILES_AVAILABLE
     global MBTILES_BASE_URL, _MBTILES_SNAPSHOT
@@ -794,10 +816,20 @@ def _refresh_mbtiles_index():
     if snapshot == _MBTILES_SNAPSHOT:
         return
 
+    try:
+        _MB_META_CACHE.clear()
+    except Exception:
+        pass
+
+    try:
+        MBTILES_CACHE_BUST = hashlib.md5("|".join(snapshot).encode("utf-8", errors="replace")).hexdigest()[:12] if snapshot else "0"
+    except Exception:
+        MBTILES_CACHE_BUST = "0"
+
     MBTILES_INDEX, MBTILES_REV = scan_mbtiles(MBTILES_DIR)
     IMPORTANCE_MAX_TILES_AVAILABLE = any(r.get("importance_max") for r in MBTILES_INDEX.values())
-    IMPORTANCE_INDEX_TILES_AVAILABLE = any(r.get("importance_index") for r in MBTILES_INDEX.values())
-    SENSITIVITY_INDEX_TILES_AVAILABLE = any(r.get("sensitivity_index") for r in MBTILES_INDEX.values())
+    IMPORTANCE_INDEX_TILES_AVAILABLE = any(r.get("index_importance") for r in MBTILES_INDEX.values())
+    SENSITIVITY_INDEX_TILES_AVAILABLE = any(r.get("index_sensitivity") for r in MBTILES_INDEX.values())
     INDEX_OWA_TILES_AVAILABLE = any(r.get("index_owa") for r in MBTILES_INDEX.values())
     _MBTILES_SNAPSHOT = snapshot
 
@@ -808,7 +840,7 @@ def mbtiles_info(cat: str):
     _refresh_mbtiles_index()
     disp, rec = _resolve_cat(cat)
     def mkurl(k):
-        return f"{MBTILES_BASE_URL}/tiles/{k}/{disp}/{{z}}/{{x}}/{{y}}.png" if (rec and rec.get(k)) else None
+        return f"{MBTILES_BASE_URL}/tiles/{k}/{disp}/{{z}}/{{x}}/{{y}}.png?v={MBTILES_CACHE_BUST}" if (rec and rec.get(k)) else None
 
     src = None
     if rec:
@@ -821,8 +853,8 @@ def mbtiles_info(cat: str):
         "groupstotal_url": mkurl("groupstotal"),
         "assetstotal_url": mkurl("assetstotal"),
         "importance_max_url": mkurl("importance_max"),
-        "importance_index_url": mkurl("importance_index"),
-        "sensitivity_index_url": mkurl("sensitivity_index"),
+        "index_importance_url": mkurl("index_importance"),
+        "index_sensitivity_url": mkurl("index_sensitivity"),
         "index_owa_url": mkurl("index_owa"),
         "bounds": m["bounds"], "minzoom": m["minzoom"], "maxzoom": m["maxzoom"]
     }
@@ -830,8 +862,8 @@ def mbtiles_info(cat: str):
 OVERLAY_LABELS = {
     "sensitivity": "Sensitivity (max)",
     "importance_max": "Importance (max)",
-    "importance_index": "Importance index",
-    "sensitivity_index": "Sensitivity index",
+    "index_importance": "Importance index",
+    "index_sensitivity": "Sensitivity index",
     "index_owa": "OWA index",
     "groupstotal": "Groups total",
     "assetstotal": "Assets total",
@@ -857,8 +889,8 @@ OVERLAY_INFO_FIELDS = {
     "groupstotal": [ ("Asset group names", "asset_group_names", None, None) ],
     "assetstotal": [ ("Assets overlap total", "assets_overlap_total", None, None) ],
     "importance_max": [ ("Importance (max)", "importance_max", None, None) ],
-    "importance_index": [ ("Importance index", "index_importance", None, None) ],
-    "sensitivity_index": [ ("Sensitivity index", "index_sensitivity", None, None) ],
+    "index_importance": [ ("Importance index", "index_importance", None, None) ],
+    "index_sensitivity": [ ("Sensitivity index", "index_sensitivity", None, None) ],
     "index_owa": [ ("OWA index", "index_owa", None, None) ],
 }
 
@@ -963,6 +995,7 @@ SEGMENT_OUTLINES_AVAILABLE = (not SEG_OUTLINE_GDF.empty) and ("geometry" in SEG_
 IMPORTANCE_MAX_AVAILABLE = (not GDF.empty) and ("importance_max" in GDF.columns)
 IMPORTANCE_INDEX_AVAILABLE = (not GDF.empty) and ("index_importance" in GDF.columns)
 IMPORTANCE_INDEX_AVAILABLE = (not GDF.empty) and ("index_importance" in GDF.columns)
+SENSITIVITY_INDEX_AVAILABLE = (not GDF.empty) and ("index_sensitivity" in GDF.columns)
 
 def _current_geocode_categories() -> list[str]:
     cats = set(MBTILES_INDEX.keys())
@@ -1020,6 +1053,7 @@ class Api:
             "importance_max_tiles_available": IMPORTANCE_MAX_TILES_AVAILABLE,
             "importance_index_available": IMPORTANCE_INDEX_AVAILABLE,
             "importance_index_tiles_available": IMPORTANCE_INDEX_TILES_AVAILABLE,
+            "sensitivity_index_available": SENSITIVITY_INDEX_AVAILABLE,
             "sensitivity_index_tiles_available": SENSITIVITY_INDEX_TILES_AVAILABLE,
             "index_owa_tiles_available": INDEX_OWA_TILES_AVAILABLE,
             "colors": COLS,
@@ -1134,9 +1168,9 @@ class Api:
     def get_importance_index_layer(self, geocode_category):
         try:
             mb = mbtiles_info(geocode_category)
-            if mb.get("importance_index_url"):
+            if mb.get("index_importance_url"):
                 return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]},
-                        "mbtiles": {"importance_index_url": mb["importance_index_url"],
+                        "mbtiles": {"index_importance_url": mb["index_importance_url"],
                                     "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]},
                         "home_bounds": mb.get("bounds")}
             if not IMPORTANCE_INDEX_AVAILABLE:
@@ -1167,12 +1201,34 @@ class Api:
     def get_sensitivity_index_layer(self, geocode_category):
         try:
             mb = mbtiles_info(geocode_category)
-            if mb.get("sensitivity_index_url"):
+            if mb.get("index_sensitivity_url"):
                 return {"ok": True, "geojson": {"type":"FeatureCollection","features":[]},
-                        "mbtiles": {"sensitivity_index_url": mb["sensitivity_index_url"],
+                        "mbtiles": {"index_sensitivity_url": mb["index_sensitivity_url"],
                                     "minzoom": mb["minzoom"], "maxzoom": mb["maxzoom"]},
                         "home_bounds": mb.get("bounds")}
-            return {"ok": False, "error": "Sensitivity index MBTiles not available."}
+            if not SENSITIVITY_INDEX_AVAILABLE:
+                return {"ok": False, "error": "Sensitivity index data not available."}
+            df = GDF[GDF["name_gis_geocodegroup"] == geocode_category].copy()
+            if df.empty:
+                return {"ok": False, "error": "Sensitivity index data not available for this geocode group."}
+            if "index_sensitivity" not in df.columns:
+                return {"ok": False, "error": "Sensitivity index column missing."}
+            df = to_plot_crs(df, cfg)
+            keep_cols = ["index_sensitivity", "geometry"]
+            df = df[[c for c in keep_cols if c in df.columns]]
+            vals = pd.to_numeric(df["index_sensitivity"], errors="coerce")
+            valid = vals.dropna()
+            valid = valid[valid > 0]
+            vmin = float(valid.min()) if len(valid) else 0.0
+            vmax = float(valid.max()) if len(valid) else 0.0
+            gj = gdf_to_geojson_min(df)
+            bnds = bounds_to_leaflet(df.total_bounds) if "geometry" in df.columns else [[0,0],[0,0]]
+            return {
+                "ok": True,
+                "geojson": gj,
+                "range": {"min": vmin, "max": vmax},
+                "home_bounds": bnds,
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -1459,7 +1515,7 @@ var VIEWER_MAXZOOM_JS = 19;
 var OVERZOOM_EXTRA = 4; // additional zoom levels allowed beyond tiles_maxzoom (blurred scaling)
 var HAS_SEGMENT_OUTLINES=false, SEG_OUTLINE_LOADED=false;
 var SEG_SYNC_HOOKED=false;
-var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, importance_max:null, importance_index:null, sensitivity_index:null, index_owa:null };
+var RENDERERS = { geocodes:null, segments:null, groupstotal:null, assetstotal:null, importance_max:null, index_importance:null, index_sensitivity:null, index_owa:null };
 
 function logErr(m){ try{ window.pywebview.api.js_log(m); }catch(e){} }
 function setError(msg){
@@ -1503,10 +1559,10 @@ function currentGeocodeCategory(){
 function determineActiveOverlayKind(){
     var order=[
         {id:'chkGeoAreas',       kind:'sensitivity'},
-        {id:'chkSensitivityIndex', kind:'sensitivity_index'},
+        {id:'chkSensitivityIndex', kind:'index_sensitivity'},
         {id:'chkOwaIndex',         kind:'index_owa'},
         {id:'chkImportanceMax',  kind:'importance_max'},
-    {id:'chkImportanceIndex', kind:'importance_index'},
+    {id:'chkImportanceIndex', kind:'index_importance'},
     {id:'chkGroupsTotal',     kind:'groupstotal'},
     {id:'chkAssetsTotal',     kind:'assetstotal'}
   ];
@@ -1832,12 +1888,12 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
     if (!res.ok){ setError('Failed to load importance index: '+res.error); return; }
     if (IMPORTANCE_INDEX_GROUP) IMPORTANCE_INDEX_GROUP.clearLayers();
 
-    if (res.mbtiles && res.mbtiles.importance_index_url){
+        if (res.mbtiles && res.mbtiles.index_importance_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
             var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'importanceIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
-            LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.importance_index_url, opts);
-            attachTileDebug(LAYER_IMPORTANCE_INDEX, 'importance_index');
+                        LAYER_IMPORTANCE_INDEX=L.tileLayer(res.mbtiles.index_importance_url, opts);
+                        attachTileDebug(LAYER_IMPORTANCE_INDEX, 'index_importance');
             IMPORTANCE_INDEX_GROUP.addLayer(LAYER_IMPORTANCE_INDEX);
         } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
             var vmin=(res.range&&isFinite(res.range.min))?res.range.min:1;
@@ -1845,7 +1901,7 @@ function loadImportanceIndexIntoGroup(cat, preserveView){
             LAYER_IMPORTANCE_INDEX=L.geoJSON(res.geojson, {
                 style:function(f){
                     var v=(f.properties && f.properties.index_importance!=null)?Number(f.properties.index_importance):null;
-                    if (v===null || !isFinite(v)){
+                    if (v===null || !isFinite(v) || v===0){
                         return {color:'transparent', weight:0, opacity:0, fillOpacity:0, fillColor:'transparent'};
                     }
                     var col=importanceIndexColor(v, vmin, vmax);
@@ -1864,12 +1920,26 @@ function loadSensitivityIndexIntoGroup(cat, preserveView){
     if (!res.ok){ setError('Failed to load sensitivity index: '+res.error); return; }
     if (SENSITIVITY_INDEX_GROUP) SENSITIVITY_INDEX_GROUP.clearLayers();
 
-    if (res.mbtiles && res.mbtiles.sensitivity_index_url){
+        if (res.mbtiles && res.mbtiles.index_sensitivity_url){
             var nativeMax=(res.mbtiles.maxzoom||19);
             var maxZ=Math.max(nativeMax, (VIEWER_MAXZOOM_JS||TILES_MAXZOOM_JS||nativeMax));
             var opts={opacity:FILL_ALPHA, pane:'sensitivityIndexPane', crossOrigin:true, noWrap:true, bounds: HOME_BOUNDS?L.latLngBounds(HOME_BOUNDS):null, minZoom:(res.mbtiles.minzoom||0), maxZoom:maxZ, minNativeZoom:(res.mbtiles.minzoom||0), maxNativeZoom:nativeMax};
-            LAYER_SENSITIVITY_INDEX=L.tileLayer(res.mbtiles.sensitivity_index_url, opts);
-            attachTileDebug(LAYER_SENSITIVITY_INDEX, 'sensitivity_index');
+                        LAYER_SENSITIVITY_INDEX=L.tileLayer(res.mbtiles.index_sensitivity_url, opts);
+                        attachTileDebug(LAYER_SENSITIVITY_INDEX, 'index_sensitivity');
+            SENSITIVITY_INDEX_GROUP.addLayer(LAYER_SENSITIVITY_INDEX);
+    } else if (res.geojson && res.geojson.features && res.geojson.features.length>0){
+            var vmin=(res.range&&isFinite(res.range.min))?res.range.min:1;
+            var vmax=(res.range&&isFinite(res.range.max))?res.range.max:100;
+            LAYER_SENSITIVITY_INDEX=L.geoJSON(res.geojson, {
+                style:function(f){
+                    var v=(f.properties && f.properties.index_sensitivity!=null)?Number(f.properties.index_sensitivity):null;
+                    if (v===null || !isFinite(v) || v===0){
+                        return {color:'transparent', weight:0, opacity:0, fillOpacity:0, fillColor:'transparent'};
+                    }
+                    var col=importanceIndexColor(v, vmin, vmax);
+                    return {color:col, weight:0, opacity:0, fillOpacity:FILL_ALPHA, fillColor:col};
+                }
+            });
             SENSITIVITY_INDEX_GROUP.addLayer(LAYER_SENSITIVITY_INDEX);
     }
     if (prev){ MAP.setView(prev.center, prev.zoom, {animate:false}); }
@@ -1987,7 +2057,9 @@ function buildLayersControl(state){
     var hasImportanceIndexTiles = !!(state && state.importance_index_tiles_available);
     var hasImportanceIndexVector = !!(state && state.importance_index_available);
     var hasImportanceIndex = hasImportanceIndexTiles || hasImportanceIndexVector;
-    var hasSensitivityIndex = !!(state && state.sensitivity_index_tiles_available);
+    var hasSensitivityIndexTiles = !!(state && state.sensitivity_index_tiles_available);
+    var hasSensitivityIndexVector = !!(state && state.sensitivity_index_available);
+    var hasSensitivityIndex = hasSensitivityIndexTiles || hasSensitivityIndexVector;
         var hasOwaIndex = !!(state && state.index_owa_tiles_available);
     var hasImportanceMaxTiles = !!(state && state.importance_max_tiles_available);
     var hasImportanceMaxVector = !!(state && state.importance_max_available);
