@@ -506,9 +506,9 @@ def scan_mbtiles(dir_path: str):
         else:
             kind = None
         
-        # Match suffixes
+        # Match suffixes (longest first to avoid collisions, e.g. index_sensitivity vs sensitivity)
         if cat is None:
-            for k in MBTILES_KINDS:
+            for k in sorted(MBTILES_KINDS, key=lambda s: len(str(s)), reverse=True):
                 suffix = f"_{k}.mbtiles"
                 if lo.endswith(suffix):
                     cat = fn[:-len(suffix)]
