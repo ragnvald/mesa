@@ -2045,27 +2045,6 @@ class WebApi:
             debug_log(self._base_dir, f"import_file: error {exc}")
             return {"ok": False, "error": str(exc)}
 
-    def run_analysis(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            identifiers = payload.get("identifiers") or []
-            if not identifiers:
-                raise ValueError("Ingen polygoner valgt.")
-            group_id = payload.get("group_id") or self._active_group_id
-            debug_log(self._base_dir, f"run_analysis: group={group_id}, polygons={identifiers}, geocode={payload.get('geocode')}")
-            group = self._storage.get_group(group_id)
-            records = self._storage.get_records(group.identifier, identifiers)
-            if not records:
-                return {"ok": False, "error": "Ingen polygoner funnet for valgt gruppe."}
-            geocode = DEFAULT_ANALYSIS_GEOCODE
-            result = self._analyzer.run_group_analysis(group, records, geocode=geocode)
-            self._active_group_id = group.identifier
-            self._set_dirty(False)
-            debug_log(self._base_dir, f"run_analysis: completed run_id={result.get('run_id')} flat_rows={result.get('flat_rows')} stacked_rows={result.get('stacked_rows')}")
-            return {"ok": True, **result}
-        except Exception as exc:
-            debug_log(self._base_dir, f"run_analysis: error {exc}")
-            return {"ok": False, "error": str(exc)}
-
     def load_canvas(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             category = DEFAULT_ANALYSIS_GEOCODE
@@ -2158,7 +2137,7 @@ HTML_TEMPLATE = """<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>MESA Area Analysis</title>
+  <title>MESA Analysis setup</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -2190,7 +2169,6 @@ HTML_TEMPLATE = """<!doctype html>
     .map { grid-area: map; position:relative; }
     #map { position:absolute; inset:0; }
     .grid-label { font-size:11px; font-weight:500; color:#1f2937; background:rgba(255,255,255,0.85); padding:2px 4px; border-radius:4px; }
-    .background-toggle { font-size:12px; color:#475569; display:flex; align-items:center; gap:6px; margin:1px 0 4px; }
     .section-divider { border:none; border-top:1px solid #e2e8f0; margin:3px 0 2px; }
   </style>
 </head>
@@ -2198,33 +2176,9 @@ HTML_TEMPLATE = """<!doctype html>
 <div class="wrap">
   <div class="panel panel-left">
     <div>
-      <h1>Area analysis</h1>
+      <h1>Analysis setup</h1>
       <p class="status" id="statusText">Initialising...</p>
     </div>
-
-    <div>
-      <h2>Background</h2>
-      <label class="background-toggle">
-        <input type="checkbox" id="backgroundToggle" checked>
-        Show background
-      </label>
-    </div>
-
-    <hr class="section-divider">
-
-    <div>
-      <h2>Basemap</h2>
-      <div class="form-group">
-        <label for="basemapSelect">Basemap layer</label>
-        <select id="basemapSelect">
-          <option value="osm">OpenStreetMap</option>
-          <option value="topo">OpenTopoMap</option>
-          <option value="satellite">Satellite (Esri)</option>
-        </select>
-      </div>
-    </div>
-
-    <hr class="section-divider">
 
     <div>
       <h2>Analysis groups</h2>
@@ -2242,21 +2196,21 @@ HTML_TEMPLATE = """<!doctype html>
     <hr class="section-divider">
 
     <div>
-      <h2>Polygons</h2>
-      <div class="buttons" style="margin-bottom:6px;">
-        <button id="newBtn" class="primary" title="Draw a new polygon">New polygon</button>
-        <button id="editBtn" title="Edit selected polygon" disabled>Edit</button>
-        <button id="deleteBtn" title="Delete selected polygon" disabled>Delete</button>
-        <button id="importBtn" title="Import polygons">Import&hellip;</button>
-        <button id="saveBtn" title="Persist changes to disk" disabled>Save</button>
+      <h2>Basemap</h2>
+      <div class="form-group">
+        <label for="basemapSelect">Basemap layer</label>
+        <select id="basemapSelect">
+          <option value="osm">OpenStreetMap</option>
+          <option value="topo">OpenTopoMap</option>
+          <option value="satellite">Satellite (Esri)</option>
+        </select>
       </div>
-      <ul id="polygonList"></ul>
     </div>
   </div>
 
   <div class="panel panel-right">
     <div>
-      <h2>Details</h2>
+      <h2>This group</h2>
       <div class="form-group">
         <label for="titleInput">Title</label>
         <input id="titleInput" type="text" placeholder="Area of interest">
@@ -2271,13 +2225,17 @@ HTML_TEMPLATE = """<!doctype html>
     <hr class="section-divider">
 
     <div>
-      <h2>Analysis</h2>
-      <p style="font-size:12px; color:#64748b;">
-        Select one or more polygons to calculate results for <code>tbl_analysis_flat.parquet</code> and <code>tbl_analysis_stacked.parquet</code> in <code>output/geoparquet</code>.
-      </p>
-      <button id="analyseBtn" class="primary" disabled>Run analysis</button>
-      <div id="analysisSummary" class="status"></div>
+      <h2>Areas</h2>
+      <div class="buttons" style="margin-bottom:6px;">
+        <button id="newBtn" class="primary" title="Draw a new polygon">New polygon</button>
+        <button id="editBtn" title="Edit selected polygon" disabled>Edit</button>
+        <button id="deleteBtn" title="Delete selected polygon" disabled>Delete</button>
+        <button id="importBtn" title="Import polygons">Import&hellip;</button>
+        <button id="saveBtn" title="Persist changes to disk" disabled>Save</button>
+      </div>
+      <ul id="polygonList"></ul>
     </div>
+
   </div>
 
   <div class="map"><div id="map"></div></div>
@@ -2301,7 +2259,6 @@ let ACTIVE_GEOCODE = null;
 let LAST_ANALYSIS = null;
 let HOME_BOUNDS = null;
 let CURRENT_CANVAS_LAYER = null;
-let SHOW_BACKGROUND = true;
 let ANALYSIS_PREVIEW = { type:'FeatureCollection', features:[] };
 const BASEMAPS = {
   osm: {
@@ -2471,12 +2428,6 @@ function applyCanvasLayer(layer){
   CURRENT_CANVAS_LAYER = layer;
   if(layer.bounds){
     setHomeBounds(layer.bounds);
-  }
-  if(!SHOW_BACKGROUND){
-    clearMbtilesLayer();
-    clearGridLayer();
-    fitHomeBounds();
-    return;
   }
   if(layer.mbtiles){
     setMbtilesLayer(layer.mbtiles);
@@ -2764,8 +2715,6 @@ function applyState(state){
   ensureMap();
   updateGroupSelect();
   updateGeocodeSelect();
-  const bgToggle = document.getElementById('backgroundToggle');
-  if(bgToggle){ bgToggle.checked = SHOW_BACKGROUND; }
   const basemapSelectEl = document.getElementById('basemapSelect');
   if(basemapSelectEl && BASE_LAYER){
     const current = Object.entries(BASEMAPS).find(([key, spec]) => spec.url === BASE_LAYER._url);
@@ -2835,7 +2784,7 @@ function handleAnalysisResult(result){
 function updateActionButtons(){
   const hasSelection = SELECTED_IDS.size > 0;
   if(DRAW_MODE){
-    ['editBtn', 'deleteBtn', 'applyMetaBtn', 'analyseBtn'].forEach(id => {
+    ['editBtn', 'deleteBtn', 'applyMetaBtn'].forEach(id => {
       const btn = document.getElementById(id);
       if(btn){ btn.disabled = true; }
     });
@@ -2844,7 +2793,6 @@ function updateActionButtons(){
   document.getElementById('editBtn').disabled = SELECTED_IDS.size !== 1;
   document.getElementById('deleteBtn').disabled = !hasSelection;
   document.getElementById('applyMetaBtn').disabled = SELECTED_IDS.size !== 1;
-  document.getElementById('analyseBtn').disabled = !hasSelection;
 }
 
 function listItemHtml(rec){
@@ -3002,7 +2950,7 @@ function toggleDrawButtons(enable){
     }
   }
 
-  const lockDuringDraw = ['editBtn', 'deleteBtn', 'analyseBtn', 'importBtn', 'applyMetaBtn'];
+  const lockDuringDraw = ['editBtn', 'deleteBtn', 'importBtn', 'applyMetaBtn'];
   lockDuringDraw.forEach(id => {
     const btn = document.getElementById(id);
     if(!btn){ return; }
@@ -3189,11 +3137,6 @@ if(saveBtn){
   });
 }
 
-document.getElementById('analyseBtn').addEventListener('click', () => {
-  if(SELECTED_IDS.size === 0){ return; }
-  const geocode = document.getElementById('geocodeSelect') ? document.getElementById('geocodeSelect').value : ACTIVE_GEOCODE;
-  callPython('run_analysis', {group_id: ACTIVE_GROUP_ID, geocode, identifiers: Array.from(SELECTED_IDS)}, handleAnalysisResult);
-});
 document.getElementById('applyMetaBtn').addEventListener('click', () => {
   if(SELECTED_IDS.size !== 1) return;
   const id = [...SELECTED_IDS][0];
@@ -3272,20 +3215,6 @@ const refreshGeocodeBtn = document.getElementById('refreshGeocodeBtn');
 if(refreshGeocodeBtn){
   refreshGeocodeBtn.addEventListener('click', () => {
     loadCanvasLayer(ACTIVE_GEOCODE);
-  });
-}
-
-const backgroundToggle = document.getElementById('backgroundToggle');
-if(backgroundToggle){
-  SHOW_BACKGROUND = backgroundToggle.checked;
-  backgroundToggle.addEventListener('change', () => {
-    SHOW_BACKGROUND = backgroundToggle.checked;
-    if(!SHOW_BACKGROUND){
-      clearMbtilesLayer();
-      clearGridLayer();
-    } else if(CURRENT_CANVAS_LAYER){
-      applyCanvasLayer(CURRENT_CANVAS_LAYER);
-    }
   });
 }
 
