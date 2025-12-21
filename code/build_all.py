@@ -302,6 +302,7 @@ def main() -> None:
         "assetgroup_edit",
         "atlas_create",
         "atlas_edit",
+        "analysis_process",
         "create_raster_tiles",
         "data_import",
         "data_process",
