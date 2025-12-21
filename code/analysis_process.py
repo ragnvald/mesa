@@ -1,8 +1,14 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """analysis_process.py — Run study area analysis processing.
 
-This tool is intentionally minimal: it provides a single button that runs the
-analysis processing for the configured study areas.
+UI aligned with other Mesa processing tools:
+- ttkbootstrap window
+- log output window
+- determinate progress bar + percent label
+- Process + Exit buttons
+
+This tool processes ALL analysis groups and ALL polygons in each group.
 
 Inputs (created via data_analysis_setup.py):
 - tbl_analysis_group.parquet
@@ -16,13 +22,20 @@ Outputs (consumed by data_analysis_presentation.py):
 from __future__ import annotations
 
 import argparse
-import datetime as dt
+import datetime
 import queue
 import threading
-import tkinter as tk
-from tkinter import messagebox
-from tkinter import scrolledtext
+import uuid
+from pathlib import Path
 from typing import Callable
+
+import tkinter as tk
+import tkinter.scrolledtext as scrolledtext
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import ttkbootstrap as tb
 
 
 def _parse_args() -> argparse.Namespace:
@@ -35,33 +48,294 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+
+
+class AssetAnalyzer:
+    """Run the actual analysis processing (clipping tbl_flat/tbl_stacked to polygons)."""
+
+    def __init__(self, base_dir: Path, cfg, storage_epsg: int = 4326) -> None:
+        self.base_dir = base_dir
+        self.cfg = cfg
+        self.storage_epsg = storage_epsg or 4326
+        try:
+            self.area_epsg = int(str(cfg["DEFAULT"].get("area_projection_epsg", "3035")))
+        except Exception:
+            self.area_epsg = 3035
+
+        from data_analysis_setup import (
+            DEFAULT_ANALYSIS_GEOCODE,
+            analysis_flat_path,
+            analysis_stacked_path,
+            find_dataset_dir,
+            find_parquet_file,
+        )
+
+        self._DEFAULT_GEOCODE = DEFAULT_ANALYSIS_GEOCODE
+        self._find_parquet_file = find_parquet_file
+        self._find_dataset_dir = find_dataset_dir
+        self.analysis_flat_path = analysis_flat_path(base_dir, cfg)
+        self.analysis_stacked_path = analysis_stacked_path(base_dir, cfg)
+
+        self._flat_dataset: gpd.GeoDataFrame | None = None
+        self._stacked_dataset: gpd.GeoDataFrame | None = None
+
+    def _load_flat_dataset(self) -> gpd.GeoDataFrame:
+        if self._flat_dataset is not None:
+            return self._flat_dataset
+        path = self._find_parquet_file(self.base_dir, self.cfg, "tbl_flat.parquet")
+        if not path:
+            raise FileNotFoundError("Presentation table missing (tbl_flat.parquet).")
+        gdf = gpd.read_parquet(path)
+        if gdf.crs is None:
+            gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+        self._flat_dataset = gdf
+        return gdf
+
+    def _load_stacked_dataset(self) -> gpd.GeoDataFrame:
+        if self._stacked_dataset is not None:
+            return self._stacked_dataset
+        path = self._find_dataset_dir(self.base_dir, self.cfg, "tbl_stacked")
+        if not path:
+            raise FileNotFoundError("Stacked table missing (tbl_stacked).")
+        gdf = gpd.read_parquet(path)
+        if gdf.crs is None:
+            gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+        self._stacked_dataset = gdf
+        return gdf
+
+    @staticmethod
+    def _subset_by_polygon(gdf: gpd.GeoDataFrame, polygon) -> gpd.GeoDataFrame:
+        if gdf.empty:
+            return gdf.iloc[0:0].copy()
+        try:
+            sindex = gdf.sindex
+            candidates = list(sindex.intersection(polygon.bounds))
+            subset = gdf.iloc[candidates].copy() if candidates else gdf.iloc[0:0].copy()
+        except Exception:
+            subset = gdf.copy()
+        if subset.empty:
+            return subset
+        subset = subset[subset.geometry.intersects(polygon)]
+        return subset.copy()
+
+    def _clip_to_polygon(
+        self,
+        base_gdf: gpd.GeoDataFrame,
+        polygon,
+        group,
+        record,
+        geocode: str,
+        run_id: str,
+        run_ts: str,
+    ) -> gpd.GeoDataFrame:
+        subset = self._subset_by_polygon(base_gdf, polygon)
+        if subset.empty:
+            return subset.iloc[0:0].copy()
+
+        clipped_geoms = []
+        for geom in subset.geometry:
+            try:
+                inter = geom.intersection(polygon)
+            except Exception:
+                try:
+                    inter = geom.buffer(0).intersection(polygon)
+                except Exception:
+                    inter = None
+            if inter is None or inter.is_empty:
+                clipped_geoms.append(None)
+            else:
+                clipped_geoms.append(inter)
+
+        subset = subset.assign(geometry=clipped_geoms)
+        subset = subset[subset.geometry.notna()]
+        subset = subset[~subset.geometry.is_empty]
+        if subset.empty:
+            return subset.iloc[0:0].copy()
+
+        subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=base_gdf.crs).copy()
+        metric = subset.to_crs(self.area_epsg)
+        subset["analysis_area_m2"] = metric.geometry.area.astype("float64")
+        subset = subset[subset["analysis_area_m2"] > 0]
+        if subset.empty:
+            return subset.iloc[0:0].copy()
+
+        base_area = pd.to_numeric(subset.get("area_m2"), errors="coerce")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            subset["analysis_area_fraction"] = np.where(
+                base_area > 0, subset["analysis_area_m2"] / base_area.astype("float64"), np.nan
+            )
+
+        subset["analysis_group_id"] = getattr(group, "identifier", "")
+        subset["analysis_group_name"] = getattr(group, "name", "")
+        subset["analysis_polygon_id"] = getattr(record, "identifier", "")
+        subset["analysis_polygon_title"] = getattr(record, "title", "")
+        subset["analysis_polygon_notes"] = getattr(record, "notes", "")
+        subset["analysis_geocode"] = geocode
+        subset["analysis_run_id"] = run_id
+        subset["analysis_timestamp"] = run_ts
+        return subset.reset_index(drop=True)
+
+    def _write_analysis_output(self, path: Path, group_id: str, new_gdf: gpd.GeoDataFrame) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                existing = gpd.read_parquet(path)
+            except Exception:
+                existing = gpd.GeoDataFrame(columns=new_gdf.columns, geometry="geometry", crs=new_gdf.crs)
+        else:
+            existing = gpd.GeoDataFrame(columns=new_gdf.columns, geometry="geometry", crs=new_gdf.crs)
+
+        if "analysis_group_id" in existing.columns:
+            mask = existing["analysis_group_id"].astype(str).fillna("") != str(group_id)
+            existing = existing.loc[mask].reset_index(drop=True)
+        else:
+            existing = existing.iloc[0:0].copy()
+
+        combined = existing if new_gdf.empty else pd.concat([existing, new_gdf], ignore_index=True)
+        if not isinstance(combined, gpd.GeoDataFrame):
+            combined = gpd.GeoDataFrame(combined, geometry="geometry", crs=new_gdf.crs)
+        combined.to_parquet(path, index=False)
+
+    def run_group_analysis(
+        self,
+        group,
+        records,
+        geocode: str | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict:
+        if not records:
+            raise ValueError("No analysis polygons selected.")
+
+        category = self._DEFAULT_GEOCODE
+        flat_base = self._load_flat_dataset()
+        stacked_base = self._load_stacked_dataset()
+
+        # Filter by geocode group if column exists (setup currently uses one category).
+        if "name_gis_geocodegroup" in flat_base.columns:
+            flat_base = flat_base[flat_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
+        if "name_gis_geocodegroup" in stacked_base.columns:
+            stacked_base = stacked_base[stacked_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
+
+        run_id = uuid.uuid4().hex
+        run_ts = datetime.datetime.utcnow().isoformat()
+
+        total_records = len(records)
+        if progress_callback is not None:
+            try:
+                progress_callback(0, total_records)
+            except Exception:
+                pass
+
+        flat_results: list[gpd.GeoDataFrame] = []
+        stacked_results: list[gpd.GeoDataFrame] = []
+
+        for record_index, record in enumerate(records, start=1):
+            poly_storage = gpd.GeoDataFrame(
+                [{"geometry": getattr(record, "geometry", None)}],
+                geometry="geometry",
+                crs=f"EPSG:{self.storage_epsg}",
+            )
+
+            polygon = poly_storage.to_crs(flat_base.crs).geometry.iloc[0]
+
+            clipped_flat = self._clip_to_polygon(flat_base, polygon, group, record, category, run_id, run_ts)
+            if not clipped_flat.empty:
+                flat_results.append(clipped_flat)
+
+            clipped_stacked = self._clip_to_polygon(stacked_base, polygon, group, record, category, run_id, run_ts)
+            if not clipped_stacked.empty:
+                stacked_results.append(clipped_stacked)
+
+            if progress_callback is not None:
+                try:
+                    progress_callback(record_index, total_records)
+                except Exception:
+                    pass
+
+        if flat_results:
+            flat_gdf = gpd.GeoDataFrame(pd.concat(flat_results, ignore_index=True), geometry="geometry", crs=flat_results[0].crs)
+        else:
+            flat_gdf = gpd.GeoDataFrame(columns=list(flat_base.columns) + [
+                "analysis_group_id",
+                "analysis_group_name",
+                "analysis_polygon_id",
+                "analysis_polygon_title",
+                "analysis_polygon_notes",
+                "analysis_geocode",
+                "analysis_run_id",
+                "analysis_timestamp",
+                "analysis_area_m2",
+                "analysis_area_fraction",
+            ], geometry="geometry", crs=flat_base.crs)
+
+        if stacked_results:
+            stacked_gdf = gpd.GeoDataFrame(
+                pd.concat(stacked_results, ignore_index=True),
+                geometry="geometry",
+                crs=stacked_results[0].crs,
+            )
+        else:
+            stacked_gdf = gpd.GeoDataFrame(columns=list(stacked_base.columns) + [
+                "analysis_group_id",
+                "analysis_group_name",
+                "analysis_polygon_id",
+                "analysis_polygon_title",
+                "analysis_polygon_notes",
+                "analysis_geocode",
+                "analysis_run_id",
+                "analysis_timestamp",
+                "analysis_area_m2",
+                "analysis_area_fraction",
+            ], geometry="geometry", crs=stacked_base.crs)
+
+        flat_gdf = flat_gdf.reset_index(drop=True)
+        stacked_gdf = stacked_gdf.reset_index(drop=True)
+
+        self._write_analysis_output(self.analysis_flat_path, getattr(group, "identifier", ""), flat_gdf)
+        self._write_analysis_output(self.analysis_stacked_path, getattr(group, "identifier", ""), stacked_gdf)
+
+        return {
+            "analysis_group_id": getattr(group, "identifier", ""),
+            "analysis_group_name": getattr(group, "name", ""),
+            "analysis_geocode": category,
+            "flat_path": str(self.analysis_flat_path),
+            "stacked_path": str(self.analysis_stacked_path),
+            "flat_rows": int(len(flat_gdf)),
+            "stacked_rows": int(len(stacked_gdf)),
+            "run_id": run_id,
+            "run_timestamp": run_ts,
+        }
+
+
 def main() -> None:
     args = _parse_args()
 
-    # Reuse the implementation from data_analysis_setup without duplicating the GIS logic.
-    # (This module contains AnalysisStorage + AssetAnalyzer + path resolution.)
     from data_analysis_setup import (
         AnalysisStorage,
-        AssetAnalyzer,
-        debug_log,
         read_config,
         resolve_base_dir,
     )
 
     base_dir = resolve_base_dir(args.original_working_directory)
     cfg = read_config(base_dir)
+    ttk_theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if "DEFAULT" in cfg else "flatly"
 
-    root = tk.Tk()
-    root.title("Analysis processing")
-    root.geometry("780x520")
+    root = tb.Window(themename=ttk_theme)
+    root.title("MESA – Analysis processing")
+    try:
+        ico = base_dir / "system_resources" / "mesa.ico"
+        if ico.exists():
+            root.iconbitmap(str(ico))
+    except Exception:
+        pass
+    root.geometry("780x420")
 
     log_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
-    status_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+    progress_queue: queue.SimpleQueue[float] = queue.SimpleQueue()
 
-    def _timestamp() -> str:
-        return dt.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-
-    def log_line(message: str) -> None:
+    def log_to_gui(message: str) -> None:
         formatted = f"{_timestamp()} - {message}"
         log_queue.put(formatted)
         try:
@@ -69,140 +343,203 @@ def main() -> None:
                 fh.write(formatted + "\n")
         except Exception:
             pass
+
+    def update_progress(value: float) -> None:
         try:
-            debug_log(base_dir, message)
+            progress_queue.put(float(value))
         except Exception:
             pass
 
-    def set_status(text: str) -> None:
-        status_queue.put(text)
-
-    status = tk.StringVar(value="Ready.")
-
     def run_processing() -> None:
+        last_progress = 0.0
+
+        def set_progress(v: float) -> None:
+            nonlocal last_progress
+            try:
+                v = float(v)
+            except Exception:
+                return
+            v = max(0.0, min(100.0, v))
+            if v < last_progress:
+                return
+            last_progress = v
+            update_progress(v)
+
         try:
-            set_status("Loading study areas...")
-            log_line("Starting analysis processing.")
-            log_line("This run processes ALL analysis groups and ALL polygons within each group.")
+            set_progress(1.0)
+            log_to_gui("ANALYSIS PROCESS START")
+            log_to_gui("This run processes all analysis groups and all polygons within each group.")
 
             storage = AnalysisStorage(base_dir, cfg)
+            set_progress(3.0)
             analyzer = AssetAnalyzer(base_dir, cfg)
+            set_progress(5.0)
 
             groups = storage.list_groups()
-            total_groups = len(groups)
+            polygon_counts: dict[str, int] = {}
             total_polygons = 0
             for g in groups:
                 try:
-                    total_polygons += len(storage.list_records(g.identifier))
+                    count = len(storage.list_records(g.identifier))
                 except Exception:
-                    pass
-            log_line(f"Found {total_groups} analysis group(s) with {total_polygons} polygon(s) total.")
+                    count = 0
+                polygon_counts[g.identifier] = count
+                total_polygons += count
 
-            ran_any = False
-            processed_groups = 0
-            skipped_groups = 0
+            log_to_gui(f"Found {len(groups)} analysis group(s) with {total_polygons} polygon(s) total.")
+            set_progress(7.0)
 
-            for group in groups:
-                records = storage.list_records(group.identifier)
-                if not records:
-                    skipped_groups += 1
-                    log_line(f"Skipping group '{group.name}' ({group.identifier}): no polygons.")
-                    continue
-
-                ran_any = True
-                set_status(f"Processing group '{group.name}' ({processed_groups + skipped_groups + 1}/{total_groups})...")
-                log_line(f"Processing group '{group.name}' ({group.identifier}) with {len(records)} polygon(s)...")
-                result = analyzer.run_group_analysis(group, records, geocode=group.default_geocode)
-                flat_rows = result.get("flat_rows")
-                stacked_rows = result.get("stacked_rows")
-                log_line(
-                    f"Completed group '{group.name}': flat_rows={flat_rows} stacked_rows={stacked_rows} "
-                    f"flat_path={result.get('flat_path')} stacked_path={result.get('stacked_path')}"
-                )
-                processed_groups += 1
-
-            if not ran_any:
-                set_status("No polygons found.")
-                messagebox.showwarning(
-                    "Nothing to process",
-                    "No study area polygons were found. Use the 'Set up analysis' tool first.",
-                )
-                log_line("No study area polygons found; nothing to do.")
+            work_groups = [g for g in groups if polygon_counts.get(g.identifier, 0) > 0]
+            total_work = len(work_groups)
+            if total_work == 0:
+                log_to_gui("No study area polygons found; nothing to do. Use the 'Set up analysis' tool first.")
+                set_progress(0.0)
                 return
 
-            set_status("Done.")
-            log_line(
-                f"Processing complete. Processed {processed_groups} group(s); skipped {skipped_groups} empty group(s)."
-            )
-            messagebox.showinfo(
-                "Analysis processing complete",
-                f"Processed {processed_groups} group(s). Skipped {skipped_groups} empty group(s).\n\n"
-                "Outputs written to output/geoparquet (tbl_analysis_flat.parquet, tbl_analysis_stacked.parquet).",
-            )
+            # Split progress:
+            # - Groups + per-polygon: 0..90
+            # - Finalization: 90..100
+            GROUP_PHASE_MAX = 90.0
+            group_range = GROUP_PHASE_MAX / float(total_work)
+
+            processed = 0
+            skipped = len(groups) - total_work
+            failed = 0
+
+            for idx, group in enumerate(work_groups, start=1):
+                count = polygon_counts.get(group.identifier, 0)
+                group_start = (idx - 1) * group_range
+                group_end = idx * group_range
+                set_progress(group_start)
+                log_to_gui(f"Processing group '{group.name}' ({group.identifier}) with {count} polygon(s)...")
+
+                def _on_record_progress(done: int, total: int) -> None:
+                    if total <= 0:
+                        return
+                    within_group = done / float(total)
+                    set_progress(group_start + (within_group * group_range))
+
+                try:
+                    result = analyzer.run_group_analysis(
+                        group,
+                        storage.list_records(group.identifier),
+                        geocode=getattr(group, "default_geocode", None),
+                        progress_callback=_on_record_progress,
+                    )
+                    log_to_gui(
+                        f"Completed group '{group.name}': flat_rows={result.get('flat_rows')} stacked_rows={result.get('stacked_rows')}"
+                    )
+                    processed += 1
+                except Exception as exc:
+                    failed += 1
+                    log_to_gui(f"ERROR processing group '{group.name}' ({group.identifier}): {exc}")
+                finally:
+                    set_progress(group_end)
+
+            set_progress(GROUP_PHASE_MAX)
+            log_to_gui(f"COMPLETED: processed_groups={processed} skipped_groups={skipped} failed_groups={failed}")
+
+            # Finalization bucket.
+            set_progress(95.0)
+            set_progress(100.0)
         except Exception as exc:
-            set_status("Error.")
-            log_line(f"ERROR: {exc}")
-            messagebox.showerror("Analysis processing failed", str(exc))
+            log_to_gui(f"FATAL ERROR: {exc}")
         finally:
             try:
-                root.after(0, lambda: run_btn.config(state=tk.NORMAL))
+                root.after(0, lambda: process_button.config(state=tk.NORMAL))
             except Exception:
                 pass
 
     def on_click() -> None:
-        run_btn.config(state=tk.DISABLED)
+        process_button.config(state=tk.DISABLED)
         thread = threading.Thread(target=run_processing, daemon=True)
         thread.start()
 
-    frame = tk.Frame(root, padx=16, pady=16)
-    frame.pack(fill="both", expand=True)
+    def exit_program() -> None:
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
-    title = tk.Label(frame, text="Run analysis processing", font=("Segoe UI", 12, "bold"))
-    title.pack(anchor="w")
+    button_width = 18
+    button_padx = 7
+    button_pady = 7
 
-    desc = tk.Label(
-        frame,
-        text=(
-            "Runs the study area analysis for configured polygons and writes the analysis tables.\n"
-            "This processes all analysis groups and all polygons (sub-polygons) in each group.\n"
-            "Use 'Set up analysis' first to create groups and polygons."
-        ),
-        justify="left",
-        wraplength=740,
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill="both", expand=True, pady=10)
+
+    log_frame = tb.LabelFrame(main_frame, text="Log output", bootstyle="info")
+    log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+    log_widget = scrolledtext.ScrolledText(log_frame, height=10)
+    log_widget.pack(fill=tk.BOTH, expand=True)
+    log_widget.see(tk.END)
+
+    progress_frame = tk.Frame(main_frame)
+    progress_frame.pack(pady=5)
+
+    progress_var = tk.DoubleVar(value=0.0)
+    progress_bar = tb.Progressbar(
+        progress_frame,
+        orient="horizontal",
+        length=280,
+        mode="determinate",
+        variable=progress_var,
+        bootstyle="info",
     )
-    desc.pack(anchor="w", pady=(6, 12))
+    progress_bar.pack(side=tk.LEFT)
+    progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+    progress_label.pack(side=tk.LEFT, padx=5)
 
-    log_box = scrolledtext.ScrolledText(frame, height=18, wrap=tk.WORD)
-    log_box.pack(fill="both", expand=True, pady=(0, 12))
-    log_box.insert(tk.END, f"{_timestamp()} - Ready.\n")
-    log_box.see(tk.END)
+    buttons_frame = tk.Frame(main_frame)
+    buttons_frame.pack(side="left", fill="both", padx=20, pady=5)
 
-    run_btn = tk.Button(frame, text="Start analysis processing", command=on_click, width=24)
-    run_btn.pack(anchor="w")
+    info_label_text = (
+        "Process configured study areas into tbl_analysis_flat.parquet and tbl_analysis_stacked.parquet. "
+        "This processes all analysis groups and all polygons in each group."
+    )
+    info_label = tk.Label(root, text=info_label_text, wraplength=720, justify="left", anchor="w")
+    info_label.pack(fill=tk.X, padx=10, pady=8, anchor="w")
 
-    status_lbl = tk.Label(frame, textvariable=status, fg="#334155")
-    status_lbl.pack(anchor="w", pady=(12, 0))
+    process_button = tb.Button(
+        buttons_frame,
+        text="Process analysis",
+        command=on_click,
+        width=button_width,
+        bootstyle="primary",
+    )
+    process_button.grid(row=0, column=0, padx=button_padx, pady=button_pady, sticky="w")
+
+    exit_btn = tb.Button(
+        buttons_frame,
+        text="Exit",
+        command=exit_program,
+        width=button_width,
+        bootstyle="warning",
+    )
+    exit_btn.grid(row=0, column=1, padx=button_padx, pady=button_pady, sticky="w")
 
     def _pump_queues() -> None:
         try:
             while True:
                 line = log_queue.get_nowait()
-                log_box.insert(tk.END, line + "\n")
-                log_box.see(tk.END)
+                log_widget.insert(tk.END, line + "\n")
+                log_widget.see(tk.END)
         except Exception:
             pass
 
         try:
             while True:
-                st = status_queue.get_nowait()
-                status.set(st)
+                v = progress_queue.get_nowait()
+                v = max(0.0, min(100.0, float(v)))
+                progress_var.set(v)
+                progress_label.config(text=f"{int(v)}%")
         except Exception:
             pass
 
         root.after(100, _pump_queues)
 
     _pump_queues()
-
     root.mainloop()
 
 
