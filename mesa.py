@@ -1049,7 +1049,7 @@ if __name__ == "__main__":
                "Define analysis groups and study area polygons."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
-            ("Process are", lambda: process_data(gpkg_file),
+            ("Process area", lambda: process_data(gpkg_file),
              "Runs the main area pipeline to refresh GeoParquet, MBTiles and stats."),
             ("Process line", process_lines,
              "Processes line assets (transport, rivers, utilities) into analysis-ready segments."),
