@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm  # still used for ScalarMappable (not deprecated)
 from matplotlib import colormaps as mpl_cmaps  # modern colormap access
 import matplotlib.colors as mcolors
+from matplotlib.path import Path as MplPath
 try:
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 except Exception:
@@ -27,7 +28,8 @@ try:
     import contextily as ctx  # optional; heavy deps (rasterio) may be absent in EXE
 except Exception:
     ctx = None
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, PathPatch
+from matplotlib.ticker import MaxNLocator
 
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
@@ -86,6 +88,383 @@ _atlas_geocode_choices: list[str] = []  # cached list for GUI
 SENSITIVITY_ORDER = ['A', 'B', 'C', 'D', 'E']
 SENSITIVITY_UNKNOWN_COLOR = "#FF00F2"
 _SENSITIVITY_NUMERIC_RANGES: list[tuple[str, float, float]] = []
+
+
+# ---------------- Analysis presentation helpers (graphs per analysis area) ----------------
+_ANALYSIS_GROUP_TABLE = "tbl_analysis_group.parquet"
+_ANALYSIS_POLYGON_TABLE = "tbl_analysis_polygons.parquet"
+_ANALYSIS_FLAT_TABLE = "tbl_analysis_flat.parquet"
+
+
+def _analysis_read_table(gpq_dir: str, filename: str, *, geo: bool = False):
+    path = os.path.join(gpq_dir, filename)
+    if not os.path.exists(path):
+        return None
+    try:
+        if geo:
+            return gpd.read_parquet(path)
+        return pd.read_parquet(path)
+    except Exception:
+        try:
+            gdf = gpd.read_parquet(path)
+            return pd.DataFrame(gdf.drop(columns=[c for c in ("geometry",) if c in gdf.columns]))
+        except Exception:
+            return None
+
+
+def _analysis_group_choices(gpq_dir: str) -> list[tuple[str, str]]:
+    df = _analysis_read_table(gpq_dir, _ANALYSIS_GROUP_TABLE, geo=False)
+    if df is None or df.empty or "id" not in df.columns:
+        return []
+    choices: list[tuple[str, str]] = []
+    for _, row in df.iterrows():
+        gid = str(row.get("id", "") or "").strip()
+        if not gid:
+            continue
+        name = str(row.get("name", "") or "").strip()
+        display = name if name else gid
+        choices.append((gid, f"{display} ({gid})"))
+    return choices
+
+
+def _analysis_group_title(gpq_dir: str, group_id: str) -> str:
+    df = _analysis_read_table(gpq_dir, _ANALYSIS_GROUP_TABLE, geo=False)
+    if df is None or df.empty:
+        return str(group_id)
+    try:
+        match = df[df["id"].astype(str) == str(group_id)]
+        if match.empty:
+            return str(group_id)
+        name = str(match.iloc[0].get("name", "") or "").strip()
+        return name or str(group_id)
+    except Exception:
+        return str(group_id)
+
+
+def _analysis_polygons_for_group(gpq_dir: str, group_id: str) -> gpd.GeoDataFrame:
+    gdf = _analysis_read_table(gpq_dir, _ANALYSIS_POLYGON_TABLE, geo=True)
+    if gdf is None or getattr(gdf, "empty", True):
+        return gpd.GeoDataFrame()
+    if "group_id" not in gdf.columns:
+        return gpd.GeoDataFrame(gdf)
+    try:
+        subset = gdf[gdf["group_id"].astype(str) == str(group_id)].copy()
+        return gpd.GeoDataFrame(subset)
+    except Exception:
+        return gpd.GeoDataFrame()
+
+
+def _analysis_flat_for_group(gpq_dir: str, group_id: str) -> pd.DataFrame:
+    gdf = _analysis_read_table(gpq_dir, _ANALYSIS_FLAT_TABLE, geo=True)
+    if gdf is None or getattr(gdf, "empty", True):
+        return pd.DataFrame()
+    df = pd.DataFrame(gdf.drop(columns=[c for c in ("geometry",) if c in gdf.columns]))
+    if "analysis_group_id" not in df.columns:
+        return pd.DataFrame()
+    try:
+        subset = df[df["analysis_group_id"].astype(str) == str(group_id)].copy()
+    except Exception:
+        return pd.DataFrame()
+    if "analysis_geocode" in subset.columns:
+        mask = subset["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
+        subset = subset.loc[mask]
+    return subset
+
+
+def _analysis_sensitivity_totals_km2(flat_df: pd.DataFrame) -> pd.DataFrame:
+    if flat_df is None or flat_df.empty:
+        return pd.DataFrame(columns=["Code", "Description", "Area (km²)"])
+    code_col = "sensitivity_code_max" if "sensitivity_code_max" in flat_df.columns else "sensitivity_code"
+    desc_col = "sensitivity_description_max" if "sensitivity_description_max" in flat_df.columns else (
+        "sensitivity_description" if "sensitivity_description" in flat_df.columns else None
+    )
+    area_col = "analysis_area_m2" if "analysis_area_m2" in flat_df.columns else None
+    if code_col not in flat_df.columns or area_col is None:
+        return pd.DataFrame(columns=["Code", "Description", "Area (km²)"])
+
+    tmp = flat_df.copy()
+    tmp[area_col] = pd.to_numeric(tmp[area_col], errors="coerce").fillna(0.0)
+    tmp[code_col] = tmp[code_col].astype(str).str.strip().str.upper().replace({"NAN": "", "NONE": ""})
+
+    grouped = tmp.groupby(code_col, dropna=False)[area_col].sum()
+    rows: list[dict[str, object]] = []
+    for code, area_m2 in grouped.items():
+        code_u = str(code or "").strip().upper()
+        if not code_u:
+            continue
+        if float(area_m2 or 0.0) <= 0:
+            continue
+        desc = ""
+        if desc_col and desc_col in tmp.columns:
+            try:
+                desc_vals = tmp.loc[tmp[code_col].astype(str).str.upper() == code_u, desc_col].dropna()
+                if not desc_vals.empty:
+                    desc = str(desc_vals.iloc[-1]).strip()
+            except Exception:
+                desc = ""
+        rows.append({
+            "Code": code_u,
+            "Description": desc,
+            "Area (km²)": float(area_m2) / 1_000_000.0,
+        })
+    out = pd.DataFrame(rows, columns=["Code", "Description", "Area (km²)"])
+    if out.empty:
+        return out
+    out.sort_values(["Area (km²)", "Code"], ascending=[False, True], inplace=True, ignore_index=True)
+    return out
+
+
+def _analysis_code_color(code: str, palette_A2E: dict) -> str:
+    fallback = None
+    try:
+        fallback = (palette_A2E or {}).get('UNKNOWN')
+    except Exception:
+        fallback = None
+    if not fallback:
+        fallback = SENSITIVITY_UNKNOWN_COLOR if 'SENSITIVITY_UNKNOWN_COLOR' in globals() else "#6c757d"
+
+    try:
+        entry = (palette_A2E or {}).get(str(code).strip().upper())
+        if isinstance(entry, str) and entry.strip():
+            return entry.strip()
+        if isinstance(entry, dict) and entry.get("color"):
+            return str(entry["color"]).strip() or fallback
+    except Exception:
+        pass
+    return fallback
+
+
+def _analysis_write_area_map_png(
+    polygons_gdf: gpd.GeoDataFrame,
+    out_path: str,
+    *,
+    base_dir: str | None,
+    config_path: str | None,
+    palette_A2E: dict,
+    desc_A2E: dict,
+    overlay_alpha: float = 0.65,
+) -> bool:
+    """Render a small analysis area map with basemap + sensitivity overlay.
+
+    Prefers clipping the existing sensitivity MBTiles (basic_mosaic) to the analysis bounds.
+    Falls back to rendering analysis polygons on basemap when MBTiles is missing/unusable.
+    """
+    try:
+        if polygons_gdf is None or polygons_gdf.empty or "geometry" not in polygons_gdf.columns:
+            return False
+        gdf = polygons_gdf.dropna(subset=["geometry"]).copy()
+        if gdf.empty:
+            return False
+
+        g3857 = _safe_to_3857(gdf)
+        if g3857.empty:
+            return False
+
+        bounds_3857 = _expand_bounds(g3857.total_bounds, pad_ratio=0.08)
+
+        # Union geometry for clipping/masking
+        clip_geom = None
+        try:
+            clip_geom = g3857.unary_union
+        except Exception:
+            clip_geom = None
+
+        # Try MBTiles clip first (zoomed-in raster overlay)
+        mbtiles_path = None
+        try:
+            basic_name = 'basic_mosaic'
+            if config_path:
+                cfg_local = read_config(config_path)
+                basic_name = (cfg_local['DEFAULT'].get('basic_group_name', 'basic_mosaic') or 'basic_mosaic').strip()
+            safe = _safe_name(basic_name)
+            mbtiles_path = os.path.join(base_dir or '', "output", "mbtiles", f"{safe}_sensitivity_max.mbtiles")
+        except Exception:
+            mbtiles_path = None
+
+        if mbtiles_path and os.path.exists(mbtiles_path):
+            try:
+                ok, _note = render_mbtiles_to_png_for_3857_bounds(
+                    mbtiles_path,
+                    out_path,
+                    bounds_3857,
+                    base_dir=base_dir,
+                    overlay_alpha=overlay_alpha,
+                    clip_geom_3857=clip_geom,
+                )
+                if ok and _file_ok(out_path):
+                    return True
+            except Exception:
+                pass
+
+        # Fallback: clip basemap to the study area polygon and fill it
+        return _analysis_write_area_polygon_only_png(
+            g3857,
+            out_path,
+            bounds_3857=bounds_3857,
+            base_dir=base_dir,
+            fill_alpha=0.18,
+        )
+    except Exception:
+        return False
+
+
+def _geom_to_mpl_path(geom) -> MplPath | None:
+    """Convert a (Multi)Polygon-like geometry to a Matplotlib Path."""
+    try:
+        if geom is None:
+            return None
+        if getattr(geom, "is_empty", True):
+            return None
+        gtype = getattr(geom, "geom_type", "")
+        if gtype == "Polygon":
+            polygons = [geom]
+        elif gtype == "MultiPolygon":
+            polygons = list(getattr(geom, "geoms", []) or [])
+        else:
+            return None
+
+        vertices: list[tuple[float, float]] = []
+        codes: list[int] = []
+
+        def _add_ring(coords):
+            pts = list(coords)
+            if len(pts) < 3:
+                return
+            # Ensure closed ring
+            if pts[0] != pts[-1]:
+                pts.append(pts[0])
+            vertices.extend([(float(x), float(y)) for x, y in pts])
+            codes.extend([MplPath.MOVETO] + [MplPath.LINETO] * (len(pts) - 2) + [MplPath.CLOSEPOLY])
+
+        for poly in polygons:
+            try:
+                _add_ring(poly.exterior.coords)
+                for interior in list(getattr(poly, "interiors", []) or []):
+                    _add_ring(interior.coords)
+            except Exception:
+                continue
+
+        if not vertices:
+            return None
+        return MplPath(vertices, codes)
+    except Exception:
+        return None
+
+
+def _analysis_write_area_polygon_only_png(
+    polygons_3857: gpd.GeoDataFrame,
+    out_path: str,
+    *,
+    bounds_3857: tuple[float, float, float, float],
+    base_dir: str | None,
+    fill_alpha: float = 0.18,
+) -> bool:
+    """Fallback: basemap clipped to the study area polygon, with filled polygon."""
+    try:
+        if polygons_3857 is None or polygons_3857.empty:
+            return False
+
+        try:
+            union_geom = polygons_3857.unary_union
+        except Exception:
+            union_geom = None
+
+        if union_geom is None or getattr(union_geom, "is_empty", True):
+            return False
+
+        fig_h_in = 4.2
+        fig_w_in = 5.8
+        dpi = 180
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+
+        minx, miny, maxx, maxy = bounds_3857
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+        try:
+            ax.set_aspect('equal', adjustable='box')
+        except Exception:
+            pass
+
+        # Basemap should cover the full extent (do NOT clip it)
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        # Fill polygon (to make the study area stand out)
+        try:
+            polygons_3857.plot(
+                ax=ax,
+                color=LIGHT_PRIMARY_HEX,
+                alpha=float(max(0.0, min(1.0, fill_alpha))),
+                edgecolor='none',
+                linewidth=0.0,
+                zorder=9,
+            )
+        except Exception:
+            pass
+
+        # Boundary outline
+        try:
+            polygons_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.4, alpha=0.95, zorder=20)
+        except Exception:
+            pass
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        return True
+    except Exception:
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return False
+
+
+def _analysis_write_minimap_png(polygons_gdf: gpd.GeoDataFrame, out_path: str) -> bool:
+    try:
+        if polygons_gdf is None or polygons_gdf.empty or "geometry" not in polygons_gdf.columns:
+            return False
+        gdf = polygons_gdf.dropna(subset=["geometry"]).copy()
+        if gdf.empty:
+            return False
+        fig, ax = plt.subplots(figsize=(3.2, 2.2), dpi=170)
+        ax.set_axis_off()
+        try:
+            gdf.boundary.plot(ax=ax, linewidth=1.2, color="#2f3e46")
+            gdf.plot(ax=ax, color="#adb5bd", alpha=0.35, edgecolor="#2f3e46", linewidth=1.0)
+        except Exception:
+            gdf.plot(ax=ax, color="#adb5bd", alpha=0.35)
+        try:
+            ax.set_aspect("equal", adjustable="box")
+        except Exception:
+            pass
+        fig.tight_layout(pad=0.1)
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return True
+    except Exception:
+        return False
+
+
+def _analysis_write_sensitivity_bar_png(totals_df: pd.DataFrame, palette_A2E: dict, out_path: str, title: str) -> bool:
+    try:
+        if totals_df is None or totals_df.empty:
+            return False
+        codes = totals_df["Code"].astype(str).tolist()
+        areas = totals_df["Area (km²)"].astype(float).tolist()
+        colors = [_analysis_code_color(c, palette_A2E) for c in codes]
+
+        fig, ax = plt.subplots(figsize=(5.8, 2.8), dpi=170)
+        ax.bar(codes, areas, color=colors, edgecolor="#333333", linewidth=0.4)
+        ax.set_title(title, fontsize=11)
+        ax.set_ylabel("Area (km²)")
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout(pad=0.6)
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return True
+    except Exception:
+        return False
 
 class ReportEngine:
     """
@@ -1249,6 +1628,14 @@ def lonlat_to_merc(lon: float, lat: float) -> tuple[float, float]:
     y = math.log(math.tan((90.0 + lat_f) * math.pi / 360.0)) * R
     return x, y
 
+
+def merc_to_lonlat(x: float, y: float) -> tuple[float, float]:
+    """Convert WebMercator meters (EPSG:3857) to lon/lat (EPSG:4326)."""
+    R = 6378137.0
+    lon = (float(x) / R) * 180.0 / math.pi
+    lat = (2.0 * math.atan(math.exp(float(y) / R)) - math.pi / 2.0) * 180.0 / math.pi
+    return lon, lat
+
 def _nice_scale_length_m(target_m: float) -> float:
     """Pick a human-friendly scale bar length in meters (1/2/5 * 10^n) <= target."""
     try:
@@ -1492,6 +1879,220 @@ def render_mbtiles_to_png_best_fit(mbtiles_path: str,
         write_to_log(f"MBTiles render failed ({mbtiles_path}): {e}", base_dir)
         return False, str(e)
 
+
+def render_mbtiles_to_png_for_3857_bounds(
+    mbtiles_path: str,
+    out_png: str,
+    bounds_3857: tuple[float, float, float, float],
+    *,
+    base_dir: str | None = None,
+    overlay_alpha: float = 0.65,
+    clip_geom_3857=None,
+) -> tuple[bool, str]:
+    """Stitch MBTiles into a PNG for an arbitrary EPSG:3857 bounds.
+
+    The output is composited over a basemap; the MBTiles overlay is drawn with `overlay_alpha`.
+    """
+    try:
+        if not os.path.exists(mbtiles_path):
+            return False, "mbtiles not found"
+        if bounds_3857 is None or len(bounds_3857) != 4:
+            return False, "bounds missing"
+
+        minx, miny, maxx, maxy = bounds_3857
+        if not (math.isfinite(minx) and math.isfinite(miny) and math.isfinite(maxx) and math.isfinite(maxy)):
+            return False, "invalid bounds"
+        if maxx <= minx or maxy <= miny:
+            return False, "invalid bounds"
+
+        lon0, lat0 = merc_to_lonlat(minx, miny)
+        lon1, lat1 = merc_to_lonlat(maxx, maxy)
+        req_minlon = min(lon0, lon1)
+        req_maxlon = max(lon0, lon1)
+        req_minlat = min(lat0, lat1)
+        req_maxlat = max(lat0, lat1)
+
+        conn = sqlite3.connect(mbtiles_path)
+        try:
+            meta = _mbtiles_metadata(conn)
+            mb_bounds = _parse_mbtiles_bounds(meta)
+            if mb_bounds is None:
+                return False, "MBTiles missing bounds"
+            minz = _parse_mbtiles_zoom(meta, "minzoom", 0)
+            maxz = _parse_mbtiles_zoom(meta, "maxzoom", 19)
+
+            mb_minlon, mb_minlat, mb_maxlon, mb_maxlat = mb_bounds
+            # Clamp requested area to what the MBTiles contains.
+            minlon = max(req_minlon, mb_minlon)
+            maxlon = min(req_maxlon, mb_maxlon)
+            minlat = max(req_minlat, mb_minlat)
+            maxlat = min(req_maxlat, mb_maxlat)
+            if maxlon <= minlon or maxlat <= minlat:
+                return False, "requested bounds outside MBTiles"
+
+            tile_size = 256
+
+            # Pick a zoom that fits within our pixel caps.
+            chosen_z = maxz
+            while chosen_z > minz:
+                x_w, y_n = _lonlat_to_tile_fraction(minlon, maxlat, chosen_z)
+                x_e, y_s = _lonlat_to_tile_fraction(maxlon, minlat, chosen_z)
+                x0 = int(math.floor(min(x_w, x_e)))
+                x1 = int(math.floor(max(x_w, x_e)))
+                y0 = int(math.floor(min(y_n, y_s)))
+                y1 = int(math.floor(max(y_n, y_s)))
+                w_px = (x1 - x0 + 1) * tile_size
+                h_px = (y1 - y0 + 1) * tile_size
+                tiles = (x1 - x0 + 1) * (y1 - y0 + 1)
+                if w_px <= MAX_MAP_PX_WIDTH and h_px <= MAX_MAP_PX_HEIGHT and tiles <= 400:
+                    break
+                chosen_z -= 1
+
+            z = max(minz, chosen_z)
+
+            x_w, y_n = _lonlat_to_tile_fraction(minlon, maxlat, z)
+            x_e, y_s = _lonlat_to_tile_fraction(maxlon, minlat, z)
+            x0 = int(math.floor(min(x_w, x_e)))
+            x1 = int(math.floor(max(x_w, x_e)))
+            y0 = int(math.floor(min(y_n, y_s)))
+            y1 = int(math.floor(max(y_n, y_s)))
+
+            width = (x1 - x0 + 1) * tile_size
+            height = (y1 - y0 + 1) * tile_size
+            if width <= 0 or height <= 0:
+                return False, "Invalid tile bounds"
+
+            canvas = PILImage.new("RGBA", (width, height), (0, 0, 0, 0))
+            blank = PILImage.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
+
+            for xt in range(x0, x1 + 1):
+                for yt in range(y0, y1 + 1):
+                    tile_bytes = _get_mbtiles_tile_bytes(conn, z, xt, yt)
+                    if tile_bytes:
+                        try:
+                            tile_img = PILImage.open(io.BytesIO(tile_bytes)).convert("RGBA")
+                        except Exception:
+                            tile_img = blank
+                    else:
+                        tile_img = blank
+                    px = (xt - x0) * tile_size
+                    py = (yt - y0) * tile_size
+                    canvas.paste(tile_img, (px, py))
+
+            # Crop to exact requested bounds
+            left = int(round((min(x_w, x_e) - x0) * tile_size))
+            right = int(round((max(x_w, x_e) - x0) * tile_size))
+            top = int(round((min(y_n, y_s) - y0) * tile_size))
+            bottom = int(round((max(y_n, y_s) - y0) * tile_size))
+            left = max(0, min(width - 1, left))
+            right = max(left + 1, min(width, right))
+            top = max(0, min(height - 1, top))
+            bottom = max(top + 1, min(height, bottom))
+            canvas = canvas.crop((left, top, right, bottom))
+
+            # Final safety resize
+            if canvas.size[0] > MAX_MAP_PX_WIDTH or canvas.size[1] > MAX_MAP_PX_HEIGHT:
+                ratio = min(MAX_MAP_PX_WIDTH / canvas.size[0], MAX_MAP_PX_HEIGHT / canvas.size[1])
+                new_w = max(1, int(canvas.size[0] * ratio))
+                new_h = max(1, int(canvas.size[1] * ratio))
+                canvas = canvas.resize((new_w, new_h), PILImage.LANCZOS)
+
+            # Composite over basemap
+            try:
+                fig_h_in = 4.2
+                fig_w_in = 5.8
+                dpi = 180
+                fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+                ax.set_axis_off()
+
+                west_x, north_y = lonlat_to_merc(minlon, maxlat)
+                east_x, south_y = lonlat_to_merc(maxlon, minlat)
+                ax.set_xlim(west_x, east_x)
+                ax.set_ylim(south_y, north_y)
+                try:
+                    ax.set_aspect('equal', adjustable='box')
+                except Exception:
+                    pass
+
+                _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+                overlay_im = ax.imshow(
+                    canvas,
+                    extent=[west_x, east_x, south_y, north_y],
+                    origin="upper",
+                    interpolation='nearest',
+                    alpha=float(max(0.0, min(1.0, overlay_alpha))),
+                    zorder=10,
+                )
+
+                # Optional: clip everything to the study area polygon and fill it
+                clip_patch = None
+                try:
+                    if clip_geom_3857 is not None and not getattr(clip_geom_3857, 'is_empty', True):
+                        clip_path = _geom_to_mpl_path(clip_geom_3857)
+                        if clip_path is not None:
+                            clip_patch = PathPatch(clip_path, facecolor='none', edgecolor='none', transform=ax.transData)
+                            ax.add_patch(clip_patch)
+                except Exception:
+                    clip_patch = None
+
+                if clip_patch is not None:
+                    # Clip only the overlay (basemap remains un-clipped)
+                    try:
+                        overlay_im.set_clip_path(clip_patch)
+                    except Exception:
+                        pass
+
+                    # Subtle fill to make study area stand out
+                    try:
+                        ax.add_patch(
+                            PathPatch(
+                                clip_patch.get_path(),
+                                transform=ax.transData,
+                                facecolor=LIGHT_PRIMARY_HEX,
+                                edgecolor='none',
+                                alpha=0.12,
+                                zorder=9,
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                    # Outline
+                    try:
+                        ax.add_patch(
+                            PathPatch(
+                                clip_patch.get_path(),
+                                transform=ax.transData,
+                                facecolor='none',
+                                edgecolor=PRIMARY_HEX,
+                                linewidth=1.4,
+                                alpha=0.95,
+                                zorder=20,
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=False)
+                plt.savefig(out_png, bbox_inches='tight')
+                plt.close(fig)
+                return True, ""
+            except Exception:
+                try:
+                    plt.close('all')
+                except Exception:
+                    pass
+                canvas.save(out_png)
+                return True, ""
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        write_to_log(f"MBTiles bounds render failed ({mbtiles_path}): {e}", base_dir)
+        return False, str(e)
+
 # ---------------- tbl_flat (per-geocode maps) ----------------
 def load_tbl_flat(parquet_dir: str, base_dir: str | None = None) -> gpd.GeoDataFrame:
     fp = os.path.join(parquet_dir, "tbl_flat.parquet")
@@ -1547,7 +2148,8 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
                                desc: dict,
                                out_path: str,
                                fixed_bounds_3857=None,
-                               base_dir: str | None = None):
+                               base_dir: str | None = None,
+                               alpha: float = 0.95):
     try:
         g = gdf_group.copy()
         g = g[g.geometry.type.isin(['Polygon','MultiPolygon'])]
@@ -1581,7 +2183,7 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
                        color=colors,
                        edgecolor='none',
                        linewidth=0.0,
-                       alpha=0.95,
+                       alpha=float(max(0.0, min(1.0, alpha))),
                        zorder=10)
 
         try:
@@ -2724,7 +3326,16 @@ def generate_report(base_dir: str,
                     palette_A2E: dict,
                     desc_A2E: dict,
                     report_mode: str | None = None,
-                    atlas_geocode_level: str | None = None):
+                    atlas_geocode_level: str | None = None,
+                    include_assets: bool = True,
+                    include_other_maps: bool = True,
+                    include_index_statistics: bool = True,
+                    include_lines_and_segments: bool = True,
+                    include_atlas_maps: bool | None = None,
+                    include_analysis_presentation: bool = False,
+                    analysis_mode: str = "single",
+                    analysis_area_left: str | None = None,
+                    analysis_area_right: str | None = None):
     engine: ReportEngine | None = None
     try:
         set_progress(3, "Initializing report generation …")
@@ -2741,10 +3352,13 @@ def generate_report(base_dir: str,
         write_to_log(f"Report basemap mode: {_REPORT_BASEMAP_MODE}", base_dir)
 
         include_atlas_cfg = _cfg_getboolean(cfg, 'DEFAULT', 'report_include_atlas_maps', default=False)
-        if report_mode is None:
-            include_atlas_maps = include_atlas_cfg
+        if include_atlas_maps is None:
+            if report_mode is None:
+                include_atlas_maps = include_atlas_cfg
+            else:
+                include_atlas_maps = (str(report_mode).lower() == "detailed")
         else:
-            include_atlas_maps = (str(report_mode).lower() == "detailed")
+            include_atlas_maps = bool(include_atlas_maps)
         atlas_geocode_pref = (atlas_geocode_level or
                               cfg['DEFAULT'].get('atlas_report_geocode_level', '') or '').strip()
         atlas_geocode_selected: str | None = None
@@ -2768,47 +3382,69 @@ def generate_report(base_dir: str,
         except Exception:
             pass
 
-        # Load key tables
-        asset_object_pq = os.path.join(gpq_dir, "tbl_asset_object.parquet")
-        asset_group_pq  = os.path.join(gpq_dir, "tbl_asset_group.parquet")
-        flat_pq         = os.path.join(gpq_dir, "tbl_flat.parquet")
-
-        try: asset_objects_df = gpd.read_parquet(asset_object_pq) if os.path.exists(asset_object_pq) else gpd.GeoDataFrame()
-        except Exception: asset_objects_df = gpd.GeoDataFrame()
-        try: asset_groups_df  = gpd.read_parquet(asset_group_pq)  if os.path.exists(asset_group_pq)  else gpd.GeoDataFrame()
-        except Exception: asset_groups_df  = gpd.GeoDataFrame()
-
-        set_progress(10, "Loaded asset tables.")
+        # Load key tables (conditionally)
+        asset_objects_df = gpd.GeoDataFrame()
+        asset_groups_df = gpd.GeoDataFrame()
+        if include_assets:
+            asset_object_pq = os.path.join(gpq_dir, "tbl_asset_object.parquet")
+            asset_group_pq  = os.path.join(gpq_dir, "tbl_asset_group.parquet")
+            try:
+                asset_objects_df = gpd.read_parquet(asset_object_pq) if os.path.exists(asset_object_pq) else gpd.GeoDataFrame()
+            except Exception:
+                asset_objects_df = gpd.GeoDataFrame()
+            try:
+                asset_groups_df = gpd.read_parquet(asset_group_pq) if os.path.exists(asset_group_pq) else gpd.GeoDataFrame()
+            except Exception:
+                asset_groups_df = gpd.GeoDataFrame()
+            set_progress(10, "Loaded asset tables.")
+        else:
+            set_progress(8, "Skipping asset tables (not selected).")
 
         # ---- Assets statistics ----
-        write_to_log("Computing asset object statistics …", base_dir)
-        group_stats_df = calculate_group_statistics(asset_objects_df, asset_groups_df)
         object_stats_xlsx = os.path.join(tmp_dir, 'asset_object_statistics.xlsx')
-        export_to_excel(group_stats_df, object_stats_xlsx)
-
-        ag_stats_df = fetch_asset_group_statistics(asset_groups_df, asset_objects_df)
         ag_stats_xlsx = os.path.join(tmp_dir, 'asset_group_statistics.xlsx')
-        export_to_excel(ag_stats_df, ag_stats_xlsx)
-        set_progress(22, "Asset stats ready.")
+        if include_assets:
+            write_to_log("Computing asset object statistics …", base_dir)
+            group_stats_df = calculate_group_statistics(asset_objects_df, asset_groups_df)
+            export_to_excel(group_stats_df, object_stats_xlsx)
 
-        flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
-                # ---- Lines & segments (grouped per line with context & segments maps) ----
-        lines_df, segments_df = fetch_lines_and_segments(gpq_dir)
-        engine = ReportEngine(base_dir, tmp_dir, palette_A2E, desc_A2E, config_file)
-
-        def _progress_segments(done: int, total: int):
-            set_progress(25 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
-
-        pages_lines, log_data = engine.render_segments(lines_df, segments_df, palette_A2E, base_dir, _progress_segments)
-
-        if log_data:
-            log_df = pd.DataFrame(log_data)
-            log_xlsx = os.path.join(tmp_dir, 'line_segment_log.xlsx')
-            export_to_excel(log_df, log_xlsx)
-            write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
+            ag_stats_df = fetch_asset_group_statistics(asset_groups_df, asset_objects_df)
+            export_to_excel(ag_stats_df, ag_stats_xlsx)
+            set_progress(22, "Asset stats ready.")
         else:
-            write_to_log("Skipping line/segment pages (missing/empty).", base_dir)
-        set_progress(35, "Lines/segments processed.")
+            write_to_log("Skipping asset statistics (not selected).", base_dir)
+            set_progress(12)
+
+        need_flat = bool(include_other_maps or include_index_statistics or include_lines_and_segments or include_atlas_maps)
+        flat_df = gpd.GeoDataFrame()
+        if need_flat:
+            flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
+
+        need_engine = bool(include_other_maps or include_index_statistics or include_lines_and_segments or include_atlas_maps)
+        if need_engine:
+            engine = ReportEngine(base_dir, tmp_dir, palette_A2E, desc_A2E, config_file)
+
+        # ---- Lines & segments (grouped per line with context & segments maps) ----
+        pages_lines = []
+        if include_lines_and_segments and engine is not None:
+            lines_df, segments_df = fetch_lines_and_segments(gpq_dir)
+
+            def _progress_segments(done: int, total: int):
+                set_progress(25 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
+
+            pages_lines, log_data = engine.render_segments(lines_df, segments_df, palette_A2E, base_dir, _progress_segments)
+
+            if log_data:
+                log_df = pd.DataFrame(log_data)
+                log_xlsx = os.path.join(tmp_dir, 'line_segment_log.xlsx')
+                export_to_excel(log_df, log_xlsx)
+                write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
+            else:
+                write_to_log("Skipping line/segment pages (missing/empty).", base_dir)
+            set_progress(35, "Lines/segments processed.")
+        else:
+            write_to_log("Skipping lines/segments section (not selected).", base_dir)
+            set_progress(25)
 
         # ---- Atlas maps ----
         atlas_df = gpd.GeoDataFrame()
@@ -2834,7 +3470,9 @@ def generate_report(base_dir: str,
             if include_atlas_maps:
                 set_progress(37 + int(8 * done / max(1, total)), f"Rendering atlas tiles ({done}/{total})")
 
-        atlas_pages, atlas_geocode_selected = engine.render_atlas_maps(flat_df, atlas_df, atlas_geocode_pref, include_atlas_maps, _progress_atlas)
+        atlas_pages = []
+        if engine is not None:
+            atlas_pages, atlas_geocode_selected = engine.render_atlas_maps(flat_df, atlas_df, atlas_geocode_pref, include_atlas_maps, _progress_atlas)
         if atlas_pages:
             write_to_log("Per-atlas maps created.", base_dir)
         elif include_atlas_maps:
@@ -2850,12 +3488,19 @@ def generate_report(base_dir: str,
             start = 45 if include_atlas_maps else 38
             set_progress(start + int(30 * done / max(1, total)), f"Rendered maps for group {done}/{total}")
 
-        geocode_pages, geocode_intro_table, geocode_groups = engine.render_geocode_maps(flat_df, _progress_geocode)
-        if geocode_pages:
-            write_to_log("Per-geocode maps created.", base_dir)
+        geocode_pages = []
+        geocode_intro_table = None
+        geocode_groups = []
+        if include_other_maps and engine is not None:
+            geocode_pages, geocode_intro_table, geocode_groups = engine.render_geocode_maps(flat_df, _progress_geocode)
+            if geocode_pages:
+                write_to_log("Per-geocode maps created.", base_dir)
+            else:
+                write_to_log("tbl_flat missing or no 'name_gis_geocodegroup'; skipping per-geocode maps.", base_dir)
+            set_progress(75 if include_atlas_maps else 68, "Per-geocode maps completed.")
         else:
-            write_to_log("tbl_flat missing or no 'name_gis_geocodegroup'; skipping per-geocode maps.", base_dir)
-        set_progress(75 if include_atlas_maps else 68, "Per-geocode maps completed.")
+            write_to_log("Skipping other maps section (not selected).", base_dir)
+            set_progress(55 if include_atlas_maps else 45)
 
         # ---- Index statistics (basic_mosaic only; each index includes its map page) ----
         def _progress_indexes(done: int, total: int):
@@ -2863,7 +3508,11 @@ def generate_report(base_dir: str,
             # keep this light: just a small bump in the progress bar
             set_progress(start + int(5 * done / max(1, total)), f"Rendering index charts ({done}/{total})")
 
-        index_pages = engine.render_index_statistics(flat_df, cfg, _progress_indexes)
+        index_pages = []
+        if include_index_statistics and engine is not None:
+            index_pages = engine.render_index_statistics(flat_df, cfg, _progress_indexes)
+        else:
+            write_to_log("Skipping index statistics section (not selected).", base_dir)
         # ---- Compose PDF ----
         timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 
@@ -2873,52 +3522,187 @@ def generate_report(base_dir: str,
             "Line and point assets are still counted in '# objects' and can be visualized on maps."
         )
 
-        contents_lines = [
-            "- Assets overview & statistics",
-            "- Other maps (basic_mosaic)",
-            "- Index statistics + maps (basic_mosaic)"
-        ]
-        if atlas_pages:
+        contents_lines = []
+        if include_assets:
+            contents_lines.append("- Assets overview & statistics")
+        if include_analysis_presentation:
+            mode = str(analysis_mode or "single").strip().lower()
+            if mode == "compare":
+                contents_lines.append("- Analysis presentation (compare two areas)")
+            elif mode == "all":
+                contents_lines.append("- Analysis presentation (all areas)")
+            else:
+                contents_lines.append("- Analysis presentation (single area)")
+        if include_other_maps:
+            contents_lines.append("- Other maps (basic_mosaic)")
+        if include_index_statistics:
+            contents_lines.append("- Index statistics + maps (basic_mosaic)")
+        if include_atlas_maps and atlas_pages:
             contents_lines.append("- Atlas tile maps (per atlas object with inset)")
-        contents_lines.append("- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)")
+        if include_lines_and_segments:
+            contents_lines.append("- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)")
         contents_text = "<br/>".join(contents_lines)
 
         order_list = [
             ('heading(1)', "MESA report"),
             ('text', f"Timestamp: {timestamp}"),
             ('rule', None),
-
             ('heading(2)', "Contents"),
-            ('text', contents_text),
-            ('new_page', None),
-
-            ('heading(2)', "Assets – overview"),
-            ('text', "Asset objects by group (count and area, where applicable)."),
-            ('text', assets_area_note),
-            ('table', os.path.join(tmp_dir, 'asset_object_statistics.xlsx')),
-            ('spacer', 1),
-            ('text', "Asset groups – sensitivity distribution (count of objects) and number of active groups (distinct groups with ≥1 object)."),
-            ('table', os.path.join(tmp_dir, 'asset_group_statistics.xlsx')),
+            ('text', contents_text or "(No sections selected)"),
             ('new_page', None),
         ]
 
-        order_list.extend([
-            ('heading(2)', "Other maps"),
-            ('text',
-             "Maps in this section are rendered for <b>basic_mosaic</b> only (other geocodes are omitted). "
-             "Rendered from MBTiles (raster) with a basemap background."),
-        ])
+        if include_assets:
+            order_list.extend([
+                ('heading(2)', "Assets – overview"),
+                ('text', "Asset objects by group (count and area, where applicable)."),
+                ('text', assets_area_note),
+                ('table', object_stats_xlsx),
+                ('spacer', 1),
+                ('text', "Asset groups – sensitivity distribution (count of objects) and number of active groups (distinct groups with ≥1 object)."),
+                ('table', ag_stats_xlsx),
+                ('new_page', None),
+            ])
 
-        if geocode_intro_table is not None:
-            order_list.append(('table_data', ("Available geocode categories and object counts", geocode_intro_table)))
-            order_list.append(('rule', None))
+        if include_analysis_presentation:
+            write_to_log("Preparing analysis presentation section …", base_dir)
+            try:
+                gpq_dir_analysis = gpq_dir
+                groups = _analysis_group_choices(gpq_dir_analysis)
+                id_list = [gid for gid, _disp in groups]
 
-        order_list.extend(geocode_pages)
+                def _add_single(group_id: str):
+                    group_title = _analysis_group_title(gpq_dir_analysis, group_id)
+                    order_list.append(('heading(2)', f"Analysis – {group_title}"))
 
-        order_list.extend([
-            ('heading(2)', "Index statistics"),
-            ('text', "One page per index based on <b>basic_mosaic</b> values from <b>tbl_flat</b>. Each index includes its map page."),
-        ])
+                    polys = _analysis_polygons_for_group(gpq_dir_analysis, group_id)
+                    minimap_path = os.path.join(tmp_dir, f"analysis_minimap_{group_id}.png")
+                    if _analysis_write_area_map_png(
+                        polys,
+                        minimap_path,
+                        base_dir=base_dir,
+                        config_path=config_file,
+                        palette_A2E=palette_A2E,
+                        desc_A2E=desc_A2E,
+                        overlay_alpha=0.65,
+                    ):
+                        order_list.append(('image', ("Area overview (basemap + sensitivity)", minimap_path)))
+                    else:
+                        order_list.append(('text', "(Area map unavailable: missing analysis polygons and/or basemap/mbtiles.)"))
+
+                    flat_sub = _analysis_flat_for_group(gpq_dir_analysis, group_id)
+                    totals = _analysis_sensitivity_totals_km2(flat_sub)
+                    chart_path = os.path.join(tmp_dir, f"analysis_sensitivity_max_{group_id}.png")
+                    if _analysis_write_sensitivity_bar_png(totals, palette_A2E, chart_path, "Sensitivity (max) totals"):
+                        order_list.append(('image', ("Sensitivity (max) totals", chart_path)))
+                    else:
+                        order_list.append(('text', "(Sensitivity chart unavailable: no analysis results.)"))
+
+                    if totals is not None and not totals.empty:
+                        table = [totals.columns.tolist()] + totals.fillna("").astype(str).values.tolist()
+                        order_list.append(('table_data', ("Sensitivity totals (max)", table)))
+                    order_list.append(('new_page', None))
+
+                mode = str(analysis_mode or "single").strip().lower()
+                if mode == "all":
+                    if not id_list:
+                        order_list.append(('heading(2)', "Analysis"))
+                        order_list.append(('text', "(No analysis groups found. Run data_analysis_setup.py / analysis_process.py first.)"))
+                        order_list.append(('new_page', None))
+                    else:
+                        for gid in id_list:
+                            _add_single(gid)
+                elif mode == "compare":
+                    left = (analysis_area_left or "").strip()
+                    right = (analysis_area_right or "").strip()
+                    if not left or not right:
+                        order_list.append(('heading(2)', "Analysis"))
+                        order_list.append(('text', "(Compare mode selected, but one or both areas were not chosen.)"))
+                        order_list.append(('new_page', None))
+                    else:
+                        left_title = _analysis_group_title(gpq_dir_analysis, left)
+                        right_title = _analysis_group_title(gpq_dir_analysis, right)
+                        order_list.append(('heading(2)', f"Analysis – Compare: {left_title} vs {right_title}"))
+
+                        left_polys = _analysis_polygons_for_group(gpq_dir_analysis, left)
+                        right_polys = _analysis_polygons_for_group(gpq_dir_analysis, right)
+                        left_map = os.path.join(tmp_dir, f"analysis_minimap_{left}.png")
+                        right_map = os.path.join(tmp_dir, f"analysis_minimap_{right}.png")
+                        if _analysis_write_area_map_png(
+                            left_polys,
+                            left_map,
+                            base_dir=base_dir,
+                            config_path=config_file,
+                            palette_A2E=palette_A2E,
+                            desc_A2E=desc_A2E,
+                            overlay_alpha=0.65,
+                        ):
+                            order_list.append(('image', (f"Area map – {left_title}", left_map)))
+                        if _analysis_write_area_map_png(
+                            right_polys,
+                            right_map,
+                            base_dir=base_dir,
+                            config_path=config_file,
+                            palette_A2E=palette_A2E,
+                            desc_A2E=desc_A2E,
+                            overlay_alpha=0.65,
+                        ):
+                            order_list.append(('image', (f"Area map – {right_title}", right_map)))
+
+                        left_totals = _analysis_sensitivity_totals_km2(_analysis_flat_for_group(gpq_dir_analysis, left))
+                        right_totals = _analysis_sensitivity_totals_km2(_analysis_flat_for_group(gpq_dir_analysis, right))
+                        left_chart = os.path.join(tmp_dir, f"analysis_sensitivity_max_{left}.png")
+                        right_chart = os.path.join(tmp_dir, f"analysis_sensitivity_max_{right}.png")
+                        _analysis_write_sensitivity_bar_png(left_totals, palette_A2E, left_chart, f"Sensitivity (max) – {left_title}")
+                        _analysis_write_sensitivity_bar_png(right_totals, palette_A2E, right_chart, f"Sensitivity (max) – {right_title}")
+                        if os.path.exists(left_chart):
+                            order_list.append(('image', (f"Sensitivity (max) – {left_title}", left_chart)))
+                        if os.path.exists(right_chart):
+                            order_list.append(('image', (f"Sensitivity (max) – {right_title}", right_chart)))
+
+                        lm = {r["Code"]: float(r["Area (km²)"]) for _, r in left_totals.iterrows()} if left_totals is not None and not left_totals.empty else {}
+                        rm = {r["Code"]: float(r["Area (km²)"]) for _, r in right_totals.iterrows()} if right_totals is not None and not right_totals.empty else {}
+                        all_codes = sorted(set(lm.keys()) | set(rm.keys()))
+                        comp_rows = [["Code", f"{left_title} (km²)", f"{right_title} (km²)", "Difference (L - R)"]]
+                        for code in all_codes:
+                            lv = lm.get(code, 0.0)
+                            rv = rm.get(code, 0.0)
+                            comp_rows.append([code, f"{lv:,.2f}", f"{rv:,.2f}", f"{(lv-rv):+,.2f}"])
+                        order_list.append(('table_data', ("Sensitivity comparison (max)", comp_rows)))
+                        order_list.append(('new_page', None))
+                else:
+                    gid = (analysis_area_left or "").strip() or (id_list[0] if id_list else "")
+                    if not gid:
+                        order_list.append(('heading(2)', "Analysis"))
+                        order_list.append(('text', "(No analysis groups found. Run data_analysis_setup.py / analysis_process.py first.)"))
+                        order_list.append(('new_page', None))
+                    else:
+                        _add_single(gid)
+            except Exception as exc:
+                write_to_log(f"Analysis presentation section failed: {exc}", base_dir)
+                order_list.append(('heading(2)', "Analysis"))
+                order_list.append(('text', "(Analysis presentation could not be generated; check log for details.)"))
+                order_list.append(('new_page', None))
+
+        if include_other_maps:
+            order_list.extend([
+                ('heading(2)', "Other maps"),
+                ('text',
+                 "Maps in this section are rendered for <b>basic_mosaic</b> only (other geocodes are omitted). "
+                 "Rendered from MBTiles (raster) with a basemap background."),
+            ])
+
+            if geocode_intro_table is not None:
+                order_list.append(('table_data', ("Available geocode categories and object counts", geocode_intro_table)))
+                order_list.append(('rule', None))
+
+            order_list.extend(geocode_pages)
+
+        if include_index_statistics:
+            order_list.extend([
+                ('heading(2)', "Index statistics"),
+                ('text', "One page per index based on <b>basic_mosaic</b> values from <b>tbl_flat</b>. Each index includes its map page."),
+            ])
 
         if index_pages:
             order_list.extend(index_pages)
@@ -2934,7 +3718,7 @@ def generate_report(base_dir: str,
             order_list.append(('text', atlas_intro))
             order_list.extend(atlas_pages)
 
-        if pages_lines:
+        if include_lines_and_segments and pages_lines:
             order_list.append(('heading(2)', "Lines and segments"))
             order_list.append(('text', "Images contain only cartography—no embedded titles. "
                                        "Ribbons are fixed to 0.6 cm high and the full text width. "
@@ -2976,9 +3760,42 @@ def generate_report(base_dir: str,
 
 # ---------------- GUI runner ----------------
 def _start_report_thread(base_dir, config_file, palette, desc, report_mode, atlas_geocode):
+    # Backwards-compatible helper for old call sites.
     threading.Thread(
         target=generate_report,
         args=(base_dir, config_file, palette, desc, report_mode, atlas_geocode),
+        daemon=True
+    ).start()
+
+def _start_report_thread_selected(base_dir, config_file, palette, desc, *, atlas_geocode,
+                                 include_assets: bool,
+                                 include_other_maps: bool,
+                                 include_index_statistics: bool,
+                                 include_lines_and_segments: bool,
+                                 include_atlas_maps: bool,
+                                 include_analysis_presentation: bool,
+                                 analysis_mode: str,
+                                 analysis_area_left: str | None,
+                                 analysis_area_right: str | None):
+    threading.Thread(
+        target=generate_report,
+        kwargs={
+            'base_dir': base_dir,
+            'config_file': config_file,
+            'palette_A2E': palette,
+            'desc_A2E': desc,
+            'report_mode': None,
+            'atlas_geocode_level': atlas_geocode,
+            'include_assets': include_assets,
+            'include_other_maps': include_other_maps,
+            'include_index_statistics': include_index_statistics,
+            'include_lines_and_segments': include_lines_and_segments,
+            'include_atlas_maps': include_atlas_maps,
+            'include_analysis_presentation': include_analysis_presentation,
+            'analysis_mode': analysis_mode,
+            'analysis_area_left': analysis_area_left,
+            'analysis_area_right': analysis_area_right,
+        },
         daemon=True
     ).start()
 
@@ -3025,39 +3842,148 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
         tk.Label(atlas_frame, text="(No geocode levels detected yet)", anchor="w")\
           .grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
-    action_frame = tb.LabelFrame(root, text="Generate report", bootstyle="primary")
+    action_frame = tb.LabelFrame(root, text="Report", bootstyle="primary")
     action_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
     action_frame.columnconfigure(1, weight=1)
 
-    tb.Button(
-        action_frame,
-        text="Basic report",
-        bootstyle="success",
-        width=18,
-        command=lambda: _start_report_thread(base_dir, config_file, palette, desc, "general", atlas_geocode_var.get()),
-    ).grid(row=0, column=0, padx=6, pady=(6, 4), sticky="n")
-    tk.Label(
-        action_frame,
-        text="Focuses on core sensitivity and asset overviews for the selected atlas level.",
-        anchor="w",
-        justify="left",
-        wraplength=420,
-    ).grid(row=0, column=1, padx=(4, 8), pady=(6, 4), sticky="w")
+    contents_frame = tk.Frame(action_frame)
+    contents_frame.grid(row=0, column=0, columnspan=2, padx=6, pady=(6, 2), sticky="w")
+
+    tk.Label(contents_frame, text="Include in report:").grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+    include_assets_var = tk.BooleanVar(value=True)
+    include_analysis_var = tk.BooleanVar(value=False)
+    include_other_maps_var = tk.BooleanVar(value=True)
+    include_index_statistics_var = tk.BooleanVar(value=True)
+    include_lines_and_segments_var = tk.BooleanVar(value=True)
+    include_atlas_maps_var = tk.BooleanVar(value=False)
+
+    tb.Checkbutton(contents_frame, text="Assets overview & statistics",
+                   variable=include_assets_var, bootstyle="round-toggle").grid(row=1, column=0, sticky="w", pady=2)
+    tb.Checkbutton(contents_frame, text="Analysis presentation (graphs)",
+                   variable=include_analysis_var, bootstyle="round-toggle").grid(row=2, column=0, sticky="w", pady=2)
+    tb.Checkbutton(contents_frame, text="Other maps (basic_mosaic)",
+                   variable=include_other_maps_var, bootstyle="round-toggle").grid(row=3, column=0, sticky="w", pady=2)
+    tb.Checkbutton(contents_frame, text="Index statistics",
+                   variable=include_index_statistics_var, bootstyle="round-toggle").grid(row=4, column=0, sticky="w", pady=2)
+    tb.Checkbutton(contents_frame, text="Lines & segments",
+                   variable=include_lines_and_segments_var, bootstyle="round-toggle").grid(row=5, column=0, sticky="w", pady=2)
+    tb.Checkbutton(contents_frame, text="Atlas maps (detailed)",
+                   variable=include_atlas_maps_var, bootstyle="round-toggle").grid(row=6, column=0, sticky="w", pady=2)
+
+    analysis_frame = tb.LabelFrame(action_frame, text="Analysis presentation options", bootstyle="secondary")
+    analysis_frame.grid(row=1, column=0, columnspan=2, padx=6, pady=(4, 2), sticky="ew")
+    analysis_frame.columnconfigure(1, weight=1)
+
+    analysis_mode_var = tk.StringVar(value="single")
+    analysis_left_var = tk.StringVar(value="")
+    analysis_right_var = tk.StringVar(value="")
+
+    tk.Label(analysis_frame, text="Mode:").grid(row=0, column=0, padx=(6, 2), pady=4, sticky="w")
+    mode_holder = tk.Frame(analysis_frame)
+    mode_holder.grid(row=0, column=1, padx=2, pady=4, sticky="w")
+    tb.Radiobutton(mode_holder, text="Single area", value="single", variable=analysis_mode_var,
+                   bootstyle="secondary-toolbutton").pack(side=tk.LEFT, padx=(0, 6))
+    tb.Radiobutton(mode_holder, text="Compare two areas", value="compare", variable=analysis_mode_var,
+                   bootstyle="secondary-toolbutton").pack(side=tk.LEFT, padx=(0, 6))
+    tb.Radiobutton(mode_holder, text="All areas", value="all", variable=analysis_mode_var,
+                   bootstyle="secondary-toolbutton").pack(side=tk.LEFT)
+
+    try:
+        _cfg_tmp = read_config(config_file)
+        _gpq_tmp = parquet_dir_from_cfg(base_dir, _cfg_tmp)
+    except Exception:
+        _gpq_tmp = parquet_dir_from_cfg(base_dir, read_config(config_file))
+    group_choices = _analysis_group_choices(_gpq_tmp)
+    group_labels = [disp for _gid, disp in group_choices]
+    label_to_id = {disp: gid for gid, disp in group_choices}
+
+    tk.Label(analysis_frame, text="Area A:").grid(row=1, column=0, padx=(6, 2), pady=4, sticky="w")
+    analysis_left_combo = tb.Combobox(analysis_frame, textvariable=analysis_left_var, values=tuple(group_labels), width=44,
+                                      state="readonly" if group_labels else "disabled")
+    analysis_left_combo.grid(row=1, column=1, padx=2, pady=4, sticky="w")
+
+    tk.Label(analysis_frame, text="Area B:").grid(row=2, column=0, padx=(6, 2), pady=4, sticky="w")
+    analysis_right_combo = tb.Combobox(analysis_frame, textvariable=analysis_right_var, values=tuple(group_labels), width=44,
+                                       state="readonly" if group_labels else "disabled")
+    analysis_right_combo.grid(row=2, column=1, padx=2, pady=4, sticky="w")
+
+    if group_labels:
+        analysis_left_var.set(group_labels[0])
+        analysis_right_var.set(group_labels[1] if len(group_labels) > 1 else group_labels[0])
+
+    def _sync_analysis_controls(*_args):
+        enabled = bool(include_analysis_var.get())
+        mode = str(analysis_mode_var.get() or "single").lower()
+        if not enabled or not group_labels:
+            analysis_left_combo.configure(state="disabled")
+            analysis_right_combo.configure(state="disabled")
+            return
+        if mode == "all":
+            analysis_left_combo.configure(state="disabled")
+            analysis_right_combo.configure(state="disabled")
+        elif mode == "compare":
+            analysis_left_combo.configure(state="readonly")
+            analysis_right_combo.configure(state="readonly")
+        else:
+            analysis_left_combo.configure(state="readonly")
+            analysis_right_combo.configure(state="disabled")
+
+    include_analysis_var.trace_add("write", _sync_analysis_controls)
+    analysis_mode_var.trace_add("write", _sync_analysis_controls)
+    _sync_analysis_controls()
+
+    def _start_selected():
+        if not any([
+            include_assets_var.get(),
+            include_analysis_var.get(),
+            include_other_maps_var.get(),
+            include_index_statistics_var.get(),
+            include_lines_and_segments_var.get(),
+            include_atlas_maps_var.get(),
+        ]):
+            write_to_log("No report sections selected. Tick at least one box.", base_dir)
+            return
+
+        analysis_left_id = None
+        analysis_right_id = None
+        if include_analysis_var.get():
+            left_label = (analysis_left_var.get() or "").strip()
+            right_label = (analysis_right_var.get() or "").strip()
+            analysis_left_id = label_to_id.get(left_label) if left_label else None
+            analysis_right_id = label_to_id.get(right_label) if right_label else None
+
+        _start_report_thread_selected(
+            base_dir,
+            config_file,
+            palette,
+            desc,
+            atlas_geocode=atlas_geocode_var.get(),
+            include_assets=include_assets_var.get(),
+            include_analysis_presentation=include_analysis_var.get(),
+            analysis_mode=analysis_mode_var.get(),
+            analysis_area_left=analysis_left_id,
+            analysis_area_right=analysis_right_id,
+            include_other_maps=include_other_maps_var.get(),
+            include_index_statistics=include_index_statistics_var.get(),
+            include_lines_and_segments=include_lines_and_segments_var.get(),
+            include_atlas_maps=include_atlas_maps_var.get(),
+        )
 
     tb.Button(
         action_frame,
-        text="Detailed report",
-        bootstyle="info",
+        text="Create report",
+        bootstyle="success",
         width=18,
-        command=lambda: _start_report_thread(base_dir, config_file, palette, desc, "detailed", atlas_geocode_var.get()),
-    ).grid(row=1, column=0, padx=6, pady=(4, 6), sticky="n")
+        command=_start_selected,
+    ).grid(row=2, column=0, padx=6, pady=(6, 6), sticky="w")
     tk.Label(
         action_frame,
-        text="Adds atlas-specific sensitivity and environment maps for deeper review.",
+        text="The report will include only the selected sections.",
         anchor="w",
         justify="left",
         wraplength=420,
-    ).grid(row=1, column=1, padx=(4, 8), pady=(4, 6), sticky="w")
+    ).grid(row=2, column=1, padx=(4, 8), pady=(6, 6), sticky="w")
 
     btn_frame = tk.Frame(root); btn_frame.pack(pady=(0, 6))
     tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.RIGHT, padx=6)
@@ -3085,7 +4011,7 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     link_label.bind("<Button-1>", open_report_folder)
 
     write_to_log(f"Working directory: {base_dir}", base_dir)
-    write_to_log("Ready. Press 'Generate report' to start.", base_dir)
+    write_to_log("Ready. Select report contents, then press 'Create report'.", base_dir)
     root.mainloop()
 
 # ---------------- CLI ----------------
