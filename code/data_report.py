@@ -210,7 +210,22 @@ def _analysis_sensitivity_totals_km2(flat_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows, columns=["Code", "Description", "Area (km²)"])
     if out.empty:
         return out
-    out.sort_values(["Area (km²)", "Code"], ascending=[False, True], inplace=True, ignore_index=True)
+    # Sort codes consistently (A–E), then any other codes, then UNKNOWN/blank.
+    order_map = {c: i for i, c in enumerate(SENSITIVITY_ORDER)}
+
+    def _code_key(val: str) -> tuple[int, str]:
+        s = str(val or "").strip().upper()
+        if s in order_map:
+            return (0, f"{order_map[s]:02d}")
+        if s in ("", "NONE", "NAN"):
+            return (3, "")
+        if s == "UNKNOWN":
+            return (2, s)
+        return (1, s)
+
+    out["__code_key"] = out["Code"].map(_code_key)
+    out.sort_values(["__code_key"], inplace=True, ignore_index=True)
+    out.drop(columns=["__code_key"], inplace=True)
     return out
 
 
@@ -449,8 +464,26 @@ def _analysis_write_sensitivity_bar_png(totals_df: pd.DataFrame, palette_A2E: di
     try:
         if totals_df is None or totals_df.empty:
             return False
-        codes = totals_df["Code"].astype(str).tolist()
-        areas = totals_df["Area (km²)"].astype(float).tolist()
+        raw = totals_df[["Code", "Area (km²)"]].copy()
+        raw["Code"] = raw["Code"].astype(str).str.strip().str.upper()
+
+        order_map = {c: i for i, c in enumerate(SENSITIVITY_ORDER)}
+
+        def _code_key(val: str) -> tuple[int, str]:
+            s = str(val or "").strip().upper()
+            if s in order_map:
+                return (0, f"{order_map[s]:02d}")
+            if s in ("", "NONE", "NAN"):
+                return (3, "")
+            if s == "UNKNOWN":
+                return (2, s)
+            return (1, s)
+
+        raw["__code_key"] = raw["Code"].map(_code_key)
+        raw.sort_values(["__code_key"], inplace=True)
+
+        codes = raw["Code"].astype(str).tolist()
+        areas = raw["Area (km²)"] .astype(float).tolist()
         colors = [_analysis_code_color(c, palette_A2E) for c in codes]
 
         fig, ax = plt.subplots(figsize=(5.8, 2.8), dpi=170)
@@ -464,6 +497,236 @@ def _analysis_write_sensitivity_bar_png(totals_df: pd.DataFrame, palette_A2E: di
         plt.close(fig)
         return True
     except Exception:
+        return False
+
+
+def _analysis_write_relative_share_png(
+    left_totals_df: pd.DataFrame,
+    right_totals_df: pd.DataFrame,
+    palette_A2E: dict,
+    out_path: str,
+    left_label: str,
+    right_label: str,
+) -> bool:
+    """Render relative (percentage) composition charts for two areas."""
+    try:
+        def _to_map(df: pd.DataFrame) -> dict[str, float]:
+            if df is None or df.empty:
+                return {}
+            m: dict[str, float] = {}
+            for _, r in df.iterrows():
+                code = str(r.get('Code', '')).strip().upper()
+                if not code or code in {'NONE', 'NAN'}:
+                    continue
+                try:
+                    km2 = float(r.get('Area (km²)', 0.0) or 0.0)
+                except Exception:
+                    km2 = 0.0
+                if km2 > 0:
+                    m[code] = m.get(code, 0.0) + km2
+            return m
+
+        left_map = _to_map(left_totals_df)
+        right_map = _to_map(right_totals_df)
+        codes = [c for c in SENSITIVITY_ORDER if left_map.get(c, 0) > 0 or right_map.get(c, 0) > 0]
+        # Add any extra codes deterministically
+        extras = sorted({*left_map.keys(), *right_map.keys()} - set(SENSITIVITY_ORDER))
+        codes = codes + extras
+        if not codes:
+            return False
+
+        left_total = sum(left_map.get(c, 0.0) for c in codes)
+        right_total = sum(right_map.get(c, 0.0) for c in codes)
+        if left_total <= 0 and right_total <= 0:
+            return False
+
+        def _shares(area_map: dict[str, float], total: float) -> list[float]:
+            if total <= 0:
+                return [0.0 for _ in codes]
+            return [max(area_map.get(c, 0.0), 0.0) / total for c in codes]
+
+        left_sh = _shares(left_map, left_total)
+        right_sh = _shares(right_map, right_total)
+
+        fig, ax = plt.subplots(figsize=(6.4, 2.2), dpi=170)
+        ax.set_axis_off()
+
+        y_positions = [1.0, 0.35]
+        labels = [left_label, right_label]
+        bar_h = 0.18
+        for y, shares, label in zip(y_positions, [left_sh, right_sh], labels):
+            x = 0.0
+            for code, share in zip(codes, shares):
+                if share <= 0:
+                    continue
+                col = _analysis_code_color(code, palette_A2E)
+                ax.add_patch(Rectangle((x, y), share, bar_h, facecolor=col, edgecolor='white', lw=0.6, alpha=0.95))
+                if share >= 0.08:
+                    ax.text(x + share / 2, y + bar_h / 2, f"{code} {share*100:.0f}%", ha='center', va='center', fontsize=8, color='white')
+                x += share
+            ax.text(-0.02, y + bar_h / 2, label, ha='right', va='center', fontsize=9)
+
+        ax.set_xlim(-0.12, 1.02)
+        ax.set_ylim(0, 1.35)
+        ax.text(0.0, 1.28, "Relative sensitivity composition (100%)", fontsize=10, fontweight='bold')
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        return True
+    except Exception:
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return False
+
+
+def _analysis_write_sankey_difference_png(
+    left_totals_df: pd.DataFrame,
+    right_totals_df: pd.DataFrame,
+    palette_A2E: dict,
+    out_path: str,
+    left_label: str,
+    right_label: str,
+    ribbon_alpha: float = 0.45,
+) -> bool:
+    """Sankey-style comparison: same-code ribbons between left/right blocks (like data_analysis_presentation.py)."""
+    try:
+        def _to_map(df: pd.DataFrame) -> dict[str, float]:
+            if df is None or df.empty:
+                return {}
+            m: dict[str, float] = {}
+            for _, r in df.iterrows():
+                code = str(r.get('Code', '')).strip().upper()
+                if not code or code in {'NONE', 'NAN'}:
+                    continue
+                try:
+                    km2 = float(r.get('Area (km²)', 0.0) or 0.0)
+                except Exception:
+                    km2 = 0.0
+                if km2 > 0:
+                    m[code] = m.get(code, 0.0) + km2
+            return m
+
+        left_map = _to_map(left_totals_df)
+        right_map = _to_map(right_totals_df)
+        codes_in_data = [c for c in SENSITIVITY_ORDER if left_map.get(c, 0) > 0 or right_map.get(c, 0) > 0]
+        extras = sorted({*left_map.keys(), *right_map.keys()} - set(SENSITIVITY_ORDER))
+        codes = codes_in_data + extras
+        if not codes:
+            return False
+
+        left_total = sum(left_map.get(c, 0.0) for c in codes)
+        right_total = sum(right_map.get(c, 0.0) for c in codes)
+        scale_total = max(left_total, right_total)
+        if scale_total <= 0:
+            return False
+
+        def _build_blocks(area_map: dict[str, float]) -> dict[str, dict[str, float]]:
+            values = [max(area_map.get(code, 0.0), 0.0) for code in codes]
+            min_height = 0.010
+            gap = 0.012
+            heights = [max((v / scale_total), min_height) if v > 0 else 0.0 for v in values]
+            non_zero = [h for h in heights if h > 0]
+            span = sum(non_zero) + gap * (len(non_zero) - 1 if len(non_zero) > 1 else 0)
+            scale = 1.0 if span <= 0.90 else 0.90 / span
+            blocks: dict[str, dict[str, float]] = {}
+            cursor = 0.06
+            for code, height, value in zip(codes, heights, values):
+                if height <= 0:
+                    continue
+                h = height * scale
+                blocks[code] = {'start': cursor, 'end': cursor + h, 'value': value, 'height': h}
+                cursor += h + gap * scale
+            return blocks
+
+        left_blocks = _build_blocks(left_map)
+        right_blocks = _build_blocks(right_map)
+
+        fig, ax = plt.subplots(figsize=(7.2, 1.9), dpi=170)
+        ax.axis('off')
+
+        x_left, x_right = 0.28, 0.72
+        bar_w = 0.12
+
+        def _draw_blocks(blocks: dict[str, dict[str, float]], x: float, align: str):
+            for code, info in blocks.items():
+                col = _analysis_code_color(code, palette_A2E)
+                rect = PathPatch(
+                    MplPath(
+                        [
+                            (x - bar_w / 2, info['start']),
+                            (x + bar_w / 2, info['start']),
+                            (x + bar_w / 2, info['end']),
+                            (x - bar_w / 2, info['end']),
+                            (x - bar_w / 2, info['start']),
+                        ],
+                        [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY],
+                    ),
+                    facecolor=col,
+                    edgecolor='#333333',
+                    lw=0.5,
+                    alpha=0.90,
+                )
+                ax.add_patch(rect)
+                label_y = (info['start'] + info['end']) / 2
+                ha = 'right' if align == 'left' else 'left'
+                offset = -0.02 if align == 'left' else 0.02
+                ax.text(x + offset, label_y, f"{code}", fontsize=9, ha=ha, va='center')
+
+        def _draw_ribbon(lb: dict[str, float], rb: dict[str, float], color: str, delta_km2: float):
+            verts = [
+                (x_left + bar_w / 2, lb['start']),
+                (x_right - bar_w / 2, rb['start']),
+                (x_right - bar_w / 2, rb['end']),
+                (x_left + bar_w / 2, lb['end']),
+                (x_left + bar_w / 2, lb['start']),
+            ]
+            patch = PathPatch(
+                MplPath(verts, [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY]),
+                facecolor=color,
+                alpha=float(max(0.05, min(0.90, ribbon_alpha))),
+                edgecolor='none',
+            )
+            ax.add_patch(patch)
+            mid_x = (x_left + x_right) / 2
+            mid_y = (lb['start'] + lb['end'] + rb['start'] + rb['end']) / 4
+            # Keep labels compact; show 0.00 for tiny deltas
+            try:
+                dv = float(delta_km2)
+            except Exception:
+                dv = 0.0
+            if not math.isfinite(dv) or abs(dv) < 0.005:
+                txt = '0.00 km²'
+            else:
+                txt = f"{dv:+.2f} km²"
+            ax.text(mid_x, mid_y, txt, fontsize=8, ha='center', va='center', color='black')
+
+        _draw_blocks(left_blocks, x_left, 'left')
+        _draw_blocks(right_blocks, x_right, 'right')
+
+        for code in codes:
+            lb = left_blocks.get(code)
+            rb = right_blocks.get(code)
+            if not lb or not rb:
+                continue
+            col = _analysis_code_color(code, palette_A2E)
+            delta = left_map.get(code, 0.0) - right_map.get(code, 0.0)
+            _draw_ribbon(lb, rb, col, delta)
+
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.text(x_left, 0.96, left_label, ha='center', va='center', fontsize=10, fontweight='bold')
+        ax.text(x_right, 0.96, right_label, ha='center', va='center', fontsize=10, fontweight='bold')
+        ax.text(0.5, 0.99, "Area difference Sankey", ha='center', va='top', fontsize=10)
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        return True
+    except Exception:
+        try:
+            plt.close('all')
+        except Exception:
+            pass
         return False
 
 class ReportEngine:
@@ -2824,10 +3087,150 @@ def format_area(row):
             area = float(row['total_area'])
         except Exception:
             return "-"
-        if area < 1_000_000:
-            return f"{area:.0f} m²"
-        return f"{area/1_000_000:.2f} km²"
+        return _format_area_m2(area)
     return "-"
+
+
+def _format_area_m2(area_m2: float) -> str:
+    """Format an area in m² as either m² (<0.1 km²) or km² (max 4 decimals)."""
+    try:
+        a = float(area_m2)
+    except Exception:
+        return "-"
+    if not math.isfinite(a) or a < 0:
+        return "-"
+    # Use m² for small areas (<1 km² == 1,000,000 m²)
+    if a < 1_000_000:
+        return f"{a:.0f} m²"
+    km2 = a / 1_000_000.0
+    s = f"{km2:.4f}"  # max 4 decimals
+    # Trim trailing zeros while keeping <= 4 decimals.
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return f"{s} km²"
+
+
+def _format_area_km2(area_km2: float) -> str:
+    """Format an area in km² as either m² (<1 km²) or km² (max 4 decimals)."""
+    try:
+        km2 = float(area_km2)
+    except Exception:
+        return "-"
+    if not math.isfinite(km2) or km2 < 0:
+        return "-"
+    if km2 < 1.0:
+        return _format_area_m2(km2 * 1_000_000.0)
+    s = f"{km2:.4f}"  # max 4 decimals
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return f"{s} km²"
+
+
+def _analysis_assets_within_area_table(
+    asset_objects_df: gpd.GeoDataFrame,
+    asset_groups_df: gpd.GeoDataFrame,
+    area_polys_gdf: gpd.GeoDataFrame,
+) -> list[list[str]] | None:
+    """Return a table of polygon asset area inside the given analysis area polygon(s)."""
+    try:
+        if asset_objects_df is None or asset_objects_df.empty:
+            return None
+        if asset_groups_df is None or asset_groups_df.empty:
+            return None
+        if area_polys_gdf is None or area_polys_gdf.empty or 'geometry' not in area_polys_gdf.columns:
+            return None
+        if 'ref_asset_group' not in asset_objects_df.columns:
+            return None
+
+        base = asset_groups_df.drop(columns=[c for c in ['geometry'] if c in asset_groups_df.columns])
+        ao = asset_objects_df.merge(base, left_on='ref_asset_group', right_on='id', how='left')
+        if 'geometry' not in ao.columns:
+            return None
+
+        ao = ao[ao.geometry.notna()].copy()
+        if ao.empty:
+            return None
+        ao['geometry_type'] = ao.geometry.type
+        ao_poly = ao[ao['geometry_type'].isin(['Polygon', 'MultiPolygon'])].copy()
+        if ao_poly.empty:
+            return None
+
+        # Ensure CRS, then compute intersection areas in an equal-area projection.
+        if ao_poly.crs is None:
+            ao_poly = ao_poly.set_crs(4326)
+        ap = area_polys_gdf.dropna(subset=['geometry']).copy()
+        if ap.empty:
+            return None
+        if ap.crs is None:
+            ap = ap.set_crs(ao_poly.crs)
+
+        try:
+            ao_poly = ao_poly.to_crs('ESRI:54009')
+            ap = ap.to_crs('ESRI:54009')
+        except Exception:
+            # If reprojection fails, proceed in current CRS (areas may be less accurate)
+            pass
+
+        try:
+            area_union = ap.unary_union
+        except Exception:
+            area_union = None
+        if area_union is None or getattr(area_union, 'is_empty', True):
+            return None
+
+        # Fast pre-filter by intersection
+        try:
+            ao_poly = ao_poly[ao_poly.intersects(area_union)].copy()
+        except Exception:
+            pass
+        if ao_poly.empty:
+            return None
+
+        area_gdf = gpd.GeoDataFrame({'geometry': [area_union]}, geometry='geometry', crs=ao_poly.crs)
+        try:
+            inter = gpd.overlay(ao_poly, area_gdf, how='intersection')
+        except Exception:
+            # Fallback: compute per-geometry intersection without overlay
+            try:
+                ao_poly['__geom_i'] = ao_poly.geometry.apply(lambda g: g.intersection(area_union))
+                inter = ao_poly.drop(columns=['geometry']).copy()
+                inter = gpd.GeoDataFrame(inter, geometry='__geom_i', crs=ao_poly.crs)
+                inter = inter.rename_geometry('geometry')
+            except Exception:
+                return None
+
+        if inter is None or inter.empty:
+            return None
+
+        try:
+            inter['area_m2'] = inter.geometry.area
+        except Exception:
+            return None
+
+        title_col = 'title_fromuser' if 'title_fromuser' in inter.columns else None
+        if title_col is None:
+            return None
+
+        agg = (inter.groupby([title_col], dropna=False)
+               .agg(area_m2=('area_m2', 'sum'), objects=('geometry', 'size'))
+               .reset_index())
+        if agg.empty:
+            return None
+
+        agg = agg.sort_values('area_m2', ascending=False)
+
+        table: list[list[str]] = [["Asset", "Area within area", "# objects (polygons)"]]
+        for _, r in agg.iterrows():
+            title = str(r[title_col]) if not pd.isna(r[title_col]) else "(Unknown)"
+            area_str = _format_area_m2(float(r['area_m2']))
+            try:
+                obj_n = int(r['objects'])
+            except Exception:
+                obj_n = 0
+            table.append([title, area_str, str(obj_n)])
+        return table
+    except Exception:
+        return None
 
 def calculate_group_statistics(asset_object_df: gpd.GeoDataFrame, asset_group_df: gpd.GeoDataFrame):
     if asset_object_df.empty or asset_group_df.empty:
@@ -3385,7 +3788,8 @@ def generate_report(base_dir: str,
         # Load key tables (conditionally)
         asset_objects_df = gpd.GeoDataFrame()
         asset_groups_df = gpd.GeoDataFrame()
-        if include_assets:
+        need_assets_tables = bool(include_assets or include_analysis_presentation)
+        if need_assets_tables:
             asset_object_pq = os.path.join(gpq_dir, "tbl_asset_object.parquet")
             asset_group_pq  = os.path.join(gpq_dir, "tbl_asset_group.parquet")
             try:
@@ -3590,6 +3994,10 @@ def generate_report(base_dir: str,
                     else:
                         order_list.append(('text', "(Area map unavailable: missing analysis polygons and/or basemap/mbtiles.)"))
 
+                    assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, polys)
+                    if assets_tbl:
+                        order_list.append(('table_data', ("Assets within area (polygon area)", assets_tbl)))
+
                     flat_sub = _analysis_flat_for_group(gpq_dir_analysis, group_id)
                     totals = _analysis_sensitivity_totals_km2(flat_sub)
                     chart_path = os.path.join(tmp_dir, f"analysis_sensitivity_max_{group_id}.png")
@@ -3599,7 +4007,14 @@ def generate_report(base_dir: str,
                         order_list.append(('text', "(Sensitivity chart unavailable: no analysis results.)"))
 
                     if totals is not None and not totals.empty:
-                        table = [totals.columns.tolist()] + totals.fillna("").astype(str).values.tolist()
+                        cols = ["Code", "Description", "Area"]
+                        rows = []
+                        for _, r in totals.iterrows():
+                            code = str(r.get("Code", ""))
+                            desc = str(r.get("Description", ""))
+                            area = _format_area_km2(r.get("Area (km²)", 0.0))
+                            rows.append([code, desc, area])
+                        table = [cols] + rows
                         order_list.append(('table_data', ("Sensitivity totals (max)", table)))
                     order_list.append(('new_page', None))
 
@@ -3638,6 +4053,11 @@ def generate_report(base_dir: str,
                             overlay_alpha=0.65,
                         ):
                             order_list.append(('image', (f"Area map – {left_title}", left_map)))
+
+                        left_assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, left_polys)
+                        if left_assets_tbl:
+                            order_list.append(('table_data', (f"Assets within area – {left_title}", left_assets_tbl)))
+
                         if _analysis_write_area_map_png(
                             right_polys,
                             right_map,
@@ -3648,6 +4068,10 @@ def generate_report(base_dir: str,
                             overlay_alpha=0.65,
                         ):
                             order_list.append(('image', (f"Area map – {right_title}", right_map)))
+
+                        right_assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, right_polys)
+                        if right_assets_tbl:
+                            order_list.append(('table_data', (f"Assets within area – {right_title}", right_assets_tbl)))
 
                         left_totals = _analysis_sensitivity_totals_km2(_analysis_flat_for_group(gpq_dir_analysis, left))
                         right_totals = _analysis_sensitivity_totals_km2(_analysis_flat_for_group(gpq_dir_analysis, right))
@@ -3660,9 +4084,31 @@ def generate_report(base_dir: str,
                         if os.path.exists(right_chart):
                             order_list.append(('image', (f"Sensitivity (max) – {right_title}", right_chart)))
 
+                        # Relative-size (100%) composition chart
+                        rel_chart = os.path.join(tmp_dir, f"analysis_sensitivity_relative_{left}_vs_{right}.png")
+                        if _analysis_write_relative_share_png(left_totals, right_totals, palette_A2E, rel_chart, left_title, right_title):
+                            order_list.append(('image', ("Sensitivity composition (relative)", rel_chart)))
+
+                        # Sankey-style difference diagram (ribbons between left/right blocks)
+                        sankey_chart = os.path.join(tmp_dir, f"analysis_sensitivity_sankey_{left}_vs_{right}.png")
+                        if _analysis_write_sankey_difference_png(left_totals, right_totals, palette_A2E, sankey_chart, left_title, right_title):
+                            order_list.append(('image', ("Area difference Sankey", sankey_chart)))
+
                         lm = {r["Code"]: float(r["Area (km²)"]) for _, r in left_totals.iterrows()} if left_totals is not None and not left_totals.empty else {}
                         rm = {r["Code"]: float(r["Area (km²)"]) for _, r in right_totals.iterrows()} if right_totals is not None and not right_totals.empty else {}
-                        all_codes = sorted(set(lm.keys()) | set(rm.keys()))
+                        order_map = {c: i for i, c in enumerate(SENSITIVITY_ORDER)}
+
+                        def _code_key(val: str) -> tuple[int, str]:
+                            s = str(val or "").strip().upper()
+                            if s in order_map:
+                                return (0, f"{order_map[s]:02d}")
+                            if s in ("", "NONE", "NAN"):
+                                return (3, "")
+                            if s == "UNKNOWN":
+                                return (2, s)
+                            return (1, s)
+
+                        all_codes = sorted(set(lm.keys()) | set(rm.keys()), key=_code_key)
                         comp_rows = [["Code", f"{left_title} (km²)", f"{right_title} (km²)", "Difference (L - R)"]]
                         for code in all_codes:
                             lv = lm.get(code, 0.0)
