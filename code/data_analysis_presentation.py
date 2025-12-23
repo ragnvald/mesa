@@ -1540,20 +1540,24 @@ class SankeyDifferenceView:
         heights = [max((v / scale_total), min_height) if v > 0 else 0.0 for v in values]
         non_zero_heights = [h for h in heights if h > 0]
         span = sum(non_zero_heights) + gap * (len(non_zero_heights) - 1 if len(non_zero_heights) > 1 else 0)
-        scale = 1.0 if span <= 0.9 else 0.9 / span
+        y_bottom = 0.05
+        y_top = 0.88
+        available = max(0.05, y_top - y_bottom)
+        scale = 1.0 if span <= available else available / span
         blocks: Dict[str, Dict[str, float]] = {}
-        cursor = 0.05
+        # Stack top-down so A appears at the top.
+        cursor_top = y_top
         for code, height, value in zip(codes, heights, values):
             if height <= 0:
                 continue
             scaled_h = height * scale
             blocks[code] = {
-                "start": cursor,
-                "end": cursor + scaled_h,
+                "start": cursor_top - scaled_h,
+                "end": cursor_top,
                 "value": value,
                 "height": scaled_h,
             }
-            cursor += scaled_h + gap * scale
+            cursor_top -= scaled_h + gap * scale
         return blocks
 
     def _draw_ribbon(self, left_block: Dict[str, float], right_block: Dict[str, float], color: str, delta_km2: float) -> None:

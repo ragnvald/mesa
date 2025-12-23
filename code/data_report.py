@@ -141,10 +141,92 @@ def _analysis_group_title(gpq_dir: str, group_id: str) -> str:
         return str(group_id)
 
 
+def _analysis_latest_run_filter(df: pd.DataFrame, group_id: str) -> pd.DataFrame:
+    """Filter an analysis table to the latest run for the given group.
+
+    tbl_analysis_flat.parquet can contain multiple analysis runs; without filtering,
+    maps/statistics may mix runs.
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+    if "analysis_group_id" not in df.columns:
+        return df
+    try:
+        mask = df["analysis_group_id"].astype(str) == str(group_id)
+        sub = df.loc[mask].copy()
+    except Exception:
+        return df
+    if sub.empty:
+        return sub
+
+    # Prefer run_id when present; otherwise use timestamp.
+    if "analysis_run_id" in sub.columns:
+        try:
+            # Pick the most recent timestamp within each run_id, then choose the newest run.
+            if "analysis_timestamp" in sub.columns:
+                ts = pd.to_datetime(sub["analysis_timestamp"], errors="coerce")
+                sub["__ts"] = ts
+                run_ts = sub.groupby("analysis_run_id", dropna=False)["__ts"].max()
+                chosen = run_ts.sort_values().index[-1]
+                sub = sub[sub["analysis_run_id"] == chosen].copy()
+                sub.drop(columns=["__ts"], inplace=True, errors="ignore")
+                return sub
+            # No timestamp: fall back to last run_id in sorted order
+            chosen = sorted(sub["analysis_run_id"].astype(str).unique())[-1]
+            return sub[sub["analysis_run_id"].astype(str) == chosen].copy()
+        except Exception:
+            sub.drop(columns=["__ts"], inplace=True, errors="ignore")
+            return sub
+
+    if "analysis_timestamp" in sub.columns:
+        try:
+            ts = pd.to_datetime(sub["analysis_timestamp"], errors="coerce")
+            if ts.notna().any():
+                latest = ts.max()
+                return sub.loc[ts == latest].copy()
+        except Exception:
+            pass
+    return sub
+
+
 def _analysis_polygons_for_group(gpq_dir: str, group_id: str) -> gpd.GeoDataFrame:
+    # tbl_analysis_flat.parquet contains *many* geometries per polygon (typically per geocode cell)
+    # and is not suitable for rendering analysis area boundaries. We instead use it only to
+    # determine which analysis_polygon_id are part of the selected group/run, then fetch the
+    # actual polygon boundaries from tbl_analysis_polygons.parquet.
+    polygon_ids: list[str] = []
+    gdf_flat = _analysis_read_table(gpq_dir, _ANALYSIS_FLAT_TABLE, geo=True)
+    if gdf_flat is not None and not getattr(gdf_flat, "empty", True):
+        try:
+            flat_df = pd.DataFrame(gdf_flat)
+            flat_df = _analysis_latest_run_filter(flat_df, group_id)
+            if "analysis_geocode" in flat_df.columns:
+                # Match the rest of the report (basic_mosaic totals)
+                mask = flat_df["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
+                flat_df = flat_df.loc[mask].copy()
+            if "analysis_polygon_id" in flat_df.columns:
+                polygon_ids = [
+                    str(v).strip()
+                    for v in flat_df["analysis_polygon_id"].dropna().astype(str).unique().tolist()
+                    if str(v).strip()
+                ]
+        except Exception:
+            polygon_ids = []
+
     gdf = _analysis_read_table(gpq_dir, _ANALYSIS_POLYGON_TABLE, geo=True)
     if gdf is None or getattr(gdf, "empty", True):
         return gpd.GeoDataFrame()
+
+    # First try: explicit polygon ids from the flat table.
+    if polygon_ids and "id" in gdf.columns:
+        try:
+            sub = gdf[gdf["id"].astype(str).isin(set(polygon_ids))].copy()
+            if not sub.empty:
+                return gpd.GeoDataFrame(sub)
+        except Exception:
+            pass
+
+    # Fallback: use group_id link in the polygons table.
     if "group_id" not in gdf.columns:
         return gpd.GeoDataFrame(gdf)
     try:
@@ -162,13 +244,35 @@ def _analysis_flat_for_group(gpq_dir: str, group_id: str) -> pd.DataFrame:
     if "analysis_group_id" not in df.columns:
         return pd.DataFrame()
     try:
-        subset = df[df["analysis_group_id"].astype(str) == str(group_id)].copy()
+        subset = _analysis_latest_run_filter(df, group_id)
     except Exception:
         return pd.DataFrame()
     if "analysis_geocode" in subset.columns:
         mask = subset["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
         subset = subset.loc[mask]
     return subset
+
+
+def _analysis_flat_geo_for_group(gpq_dir: str, group_id: str) -> gpd.GeoDataFrame:
+    """GeoDataFrame subset of tbl_analysis_flat for mapping.
+
+    Note: tbl_analysis_flat geometry is typically per geocode-cell polygon (many per analysis polygon).
+    This is ideal for visualising sensitivity overlays within the analysis area boundary.
+    """
+    gdf = _analysis_read_table(gpq_dir, _ANALYSIS_FLAT_TABLE, geo=True)
+    if gdf is None or getattr(gdf, "empty", True) or "geometry" not in gdf.columns:
+        return gpd.GeoDataFrame()
+    try:
+        df = pd.DataFrame(gdf)
+        df = _analysis_latest_run_filter(df, group_id)
+        if "analysis_geocode" in df.columns:
+            mask = df["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
+            df = df.loc[mask].copy()
+        out = gpd.GeoDataFrame(df, geometry="geometry", crs=getattr(gdf, "crs", None))
+        out = out.dropna(subset=["geometry"]).copy()
+        return out
+    except Exception:
+        return gpd.GeoDataFrame()
 
 
 def _analysis_sensitivity_totals_km2(flat_df: pd.DataFrame) -> pd.DataFrame:
@@ -258,11 +362,12 @@ def _analysis_write_area_map_png(
     palette_A2E: dict,
     desc_A2E: dict,
     overlay_alpha: float = 0.65,
+    flat_cells_gdf: gpd.GeoDataFrame | None = None,
 ) -> bool:
-    """Render a small analysis area map with basemap + sensitivity overlay.
+    """Render analysis area map with basemap + sensitivity overlay (no MBTiles).
 
-    Prefers clipping the existing sensitivity MBTiles (basic_mosaic) to the analysis bounds.
-    Falls back to rendering analysis polygons on basemap when MBTiles is missing/unusable.
+    - Border is drawn from tbl_analysis_polygons.parquet (true analysis polygons).
+    - Sensitivity overlay is derived from tbl_analysis_flat.parquet (geocode-cell polygons).
     """
     try:
         if polygons_gdf is None or polygons_gdf.empty or "geometry" not in polygons_gdf.columns:
@@ -284,41 +389,85 @@ def _analysis_write_area_map_png(
         except Exception:
             clip_geom = None
 
-        # Try MBTiles clip first (zoomed-in raster overlay)
-        mbtiles_path = None
+        fig_h_in = 4.2
+        fig_w_in = 5.8
+        dpi = 180
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+
+        minx, miny, maxx, maxy = bounds_3857
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
         try:
-            basic_name = 'basic_mosaic'
-            if config_path:
-                cfg_local = read_config(config_path)
-                basic_name = (cfg_local['DEFAULT'].get('basic_group_name', 'basic_mosaic') or 'basic_mosaic').strip()
-            safe = _safe_name(basic_name)
-            mbtiles_path = os.path.join(base_dir or '', "output", "mbtiles", f"{safe}_sensitivity_max.mbtiles")
+            ax.set_aspect('equal', adjustable='box')
         except Exception:
-            mbtiles_path = None
+            pass
 
-        if mbtiles_path and os.path.exists(mbtiles_path):
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        # Sensitivity overlay from flat geocode-cell polygons (dissolved by sensitivity_code_max)
+        try:
+            if flat_cells_gdf is not None and not getattr(flat_cells_gdf, 'empty', True) and 'geometry' in flat_cells_gdf.columns:
+                cells = flat_cells_gdf.dropna(subset=['geometry']).copy()
+                if not cells.empty:
+                    cells_3857 = _safe_to_3857(cells)
+                    if not cells_3857.empty:
+                        code_col = 'sensitivity_code_max' if 'sensitivity_code_max' in cells_3857.columns else (
+                            'sensitivity_code' if 'sensitivity_code' in cells_3857.columns else None
+                        )
+                        if code_col:
+                            cells_3857['__sens_code'] = (
+                                cells_3857[code_col].astype(str).str.strip().str.upper().replace({'NAN': '', 'NONE': ''})
+                            )
+                            cells_3857 = cells_3857[cells_3857['__sens_code'] != ''].copy()
+                            if not cells_3857.empty:
+                                # Dissolve to reduce draw cost and make output stable.
+                                dissolved = cells_3857.dissolve(by='__sens_code', as_index=False)
+                                dissolved['__order'] = dissolved['__sens_code'].map({c: i for i, c in enumerate(SENSITIVITY_ORDER)}).fillna(99)
+                                dissolved = dissolved.sort_values(['__order', '__sens_code'])
+                                for _, row in dissolved.iterrows():
+                                    code = str(row.get('__sens_code', '')).strip().upper()
+                                    geom = row.get('geometry')
+                                    if not code or geom is None:
+                                        continue
+                                    col = _analysis_code_color(code, palette_A2E)
+                                    try:
+                                        gpd.GeoSeries([geom], crs=dissolved.crs).plot(
+                                            ax=ax,
+                                            color=col,
+                                            alpha=float(max(0.05, min(0.95, overlay_alpha))),
+                                            edgecolor='none',
+                                            linewidth=0.0,
+                                            zorder=10,
+                                        )
+                                    except Exception:
+                                        pass
+        except Exception:
+            pass
+
+        # Border outline from analysis polygons (single union outline)
+        try:
+            gborder = g3857.copy()
+            union_geom = None
             try:
-                ok, _note = render_mbtiles_to_png_for_3857_bounds(
-                    mbtiles_path,
-                    out_path,
-                    bounds_3857,
-                    base_dir=base_dir,
-                    overlay_alpha=overlay_alpha,
-                    clip_geom_3857=clip_geom,
-                )
-                if ok and _file_ok(out_path):
-                    return True
+                union_geom = gborder.unary_union
             except Exception:
-                pass
+                union_geom = None
+            if union_geom is not None and not getattr(union_geom, 'is_empty', True):
+                gpd.GeoSeries([union_geom], crs=gborder.crs).boundary.plot(
+                    ax=ax,
+                    color="#2f3e46",
+                    linewidth=1.3,
+                    alpha=0.9,
+                    zorder=30,
+                )
+        except Exception:
+            pass
 
-        # Fallback: clip basemap to the study area polygon and fill it
-        return _analysis_write_area_polygon_only_png(
-            g3857,
-            out_path,
-            bounds_3857=bounds_3857,
-            base_dir=base_dir,
-            fill_alpha=0.18,
-        )
+        _add_map_decorations(ax, bounds_3857, base_dir=base_dir, add_inset=False)
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        return True
     except Exception:
         return False
 
@@ -372,7 +521,7 @@ def _analysis_write_area_polygon_only_png(
     *,
     bounds_3857: tuple[float, float, float, float],
     base_dir: str | None,
-    fill_alpha: float = 0.18,
+    fill_alpha: float = 0.12,
 ) -> bool:
     """Fallback: basemap clipped to the study area polygon, with filled polygon."""
     try:
@@ -417,11 +566,8 @@ def _analysis_write_area_polygon_only_png(
         except Exception:
             pass
 
-        # Boundary outline
-        try:
-            polygons_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX, linewidth=1.4, alpha=0.95, zorder=20)
-        except Exception:
-            pass
+        # Intentionally no boundary outline here.
+        # Outlines (often blue) make multi-polygons look like separate highlighted shapes.
 
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
@@ -622,31 +768,42 @@ def _analysis_write_sankey_difference_png(
             return False
 
         def _build_blocks(area_map: dict[str, float]) -> dict[str, dict[str, float]]:
+            # Build stacked blocks top-down so sensitivity ordering reads A (top) -> E (bottom).
             values = [max(area_map.get(code, 0.0), 0.0) for code in codes]
             min_height = 0.010
             gap = 0.012
             heights = [max((v / scale_total), min_height) if v > 0 else 0.0 for v in values]
+
             non_zero = [h for h in heights if h > 0]
             span = sum(non_zero) + gap * (len(non_zero) - 1 if len(non_zero) > 1 else 0)
-            scale = 1.0 if span <= 0.90 else 0.90 / span
+
+            y_bottom = 0.06
+            y_top = 0.88
+            available = max(0.05, y_top - y_bottom)
+            scale = 1.0 if span <= available else available / span
+
             blocks: dict[str, dict[str, float]] = {}
-            cursor = 0.06
+            cursor_top = y_top
             for code, height, value in zip(codes, heights, values):
                 if height <= 0:
                     continue
                 h = height * scale
-                blocks[code] = {'start': cursor, 'end': cursor + h, 'value': value, 'height': h}
-                cursor += h + gap * scale
+                blocks[code] = {'start': cursor_top - h, 'end': cursor_top, 'value': value, 'height': h}
+                cursor_top -= h + gap * scale
             return blocks
 
         left_blocks = _build_blocks(left_map)
         right_blocks = _build_blocks(right_map)
 
-        fig, ax = plt.subplots(figsize=(7.2, 1.9), dpi=170)
+        # NOTE: In the PDF renderer we never scale images *up* (only down).
+        # So to make this diagram larger on the page we must render a reasonably
+        # large PNG and with a taller aspect ratio (more height relative to width).
+        fig, ax = plt.subplots(figsize=(10.0, 4.0), dpi=170)
         ax.axis('off')
 
-        x_left, x_right = 0.28, 0.72
-        bar_w = 0.12
+        # Push the two stacks closer to the edges to avoid large left/right buffers in the exported PNG.
+        x_left, x_right = 0.12, 0.88
+        bar_w = 0.14
 
         def _draw_blocks(blocks: dict[str, dict[str, float]], x: float, align: str):
             for code, info in blocks.items():
@@ -669,9 +826,14 @@ def _analysis_write_sankey_difference_png(
                 )
                 ax.add_patch(rect)
                 label_y = (info['start'] + info['end']) / 2
-                ha = 'right' if align == 'left' else 'left'
-                offset = -0.02 if align == 'left' else 0.02
-                ax.text(x + offset, label_y, f"{code}", fontsize=9, ha=ha, va='center')
+                # Keep labels inside the bars; labels outside the axes make bbox_inches='tight' add margins.
+                if align == 'left':
+                    label_x = x - bar_w / 2 + 0.012
+                    ha = 'left'
+                else:
+                    label_x = x + bar_w / 2 - 0.012
+                    ha = 'right'
+                ax.text(label_x, label_y, f"{code}", fontsize=9, ha=ha, va='center', color='black')
 
         def _draw_ribbon(lb: dict[str, float], rb: dict[str, float], color: str, delta_km2: float):
             verts = [
@@ -2313,28 +2475,14 @@ def render_mbtiles_to_png_for_3857_bounds(
                                 transform=ax.transData,
                                 facecolor=LIGHT_PRIMARY_HEX,
                                 edgecolor='none',
-                                alpha=0.12,
+                                alpha=0.10,
                                 zorder=9,
                             )
                         )
                     except Exception:
                         pass
 
-                    # Outline
-                    try:
-                        ax.add_patch(
-                            PathPatch(
-                                clip_patch.get_path(),
-                                transform=ax.transData,
-                                facecolor='none',
-                                edgecolor=PRIMARY_HEX,
-                                linewidth=1.4,
-                                alpha=0.95,
-                                zorder=20,
-                            )
-                        )
-                    except Exception:
-                        pass
+                    # Intentionally no outline: avoid blue borders and per-part outlines.
 
                 _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=False)
                 plt.savefig(out_png, bbox_inches='tight')
@@ -3694,7 +3842,13 @@ def compile_docx(output_docx: str, order_list: list):
             has_any_content = True
             last_was_page_break = False
         elif kind == "spacer":
-            doc.add_paragraph("")
+            try:
+                n = int(payload) if payload is not None else 1
+            except Exception:
+                n = 1
+            n = max(1, min(20, n))
+            for _ in range(n):
+                doc.add_paragraph("")
             has_any_content = True
             last_was_page_break = False
         elif kind == "new_page":
@@ -3710,6 +3864,39 @@ def compile_docx(output_docx: str, order_list: list):
             last_was_page_break = False
 
     doc.save(output_docx)
+
+
+def _read_text_file(path: str) -> str:
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception:
+        try:
+            with open(path, 'r', encoding='cp1252') as f:
+                return f.read()
+        except Exception:
+            return ""
+
+
+_URL_RE = re.compile(r"\bhttps?://[^\s<>]+", re.IGNORECASE)
+
+
+def _urls_to_footnotes(text: str) -> str:
+    """Replace inline URLs with numeric footnotes appended at the end."""
+    if not text:
+        return ""
+    urls: list[str] = []
+
+    def _repl(m: re.Match) -> str:
+        url = str(m.group(0))
+        urls.append(url)
+        return f"[{len(urls)}]"
+
+    out = _URL_RE.sub(_repl, str(text))
+    if not urls:
+        return out
+    foot = "\n\nFootnotes:\n" + "\n".join([f"[{i}] {u}" for i, u in enumerate(urls, start=1)])
+    return out + foot
 
 def set_progress(pct: float, message: str | None = None):
     try:
@@ -3947,14 +4134,43 @@ def generate_report(base_dir: str,
             contents_lines.append("- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)")
         contents_text = "<br/>".join(contents_lines)
 
+        about_path = os.path.join(base_dir, "docs", "report_about.md")
+        about_text = _urls_to_footnotes(_read_text_file(about_path)).strip() if os.path.exists(about_path) else ""
+
+        # Build initial order_list up to About section
         order_list = [
             ('heading(1)', "MESA report"),
             ('text', f"Timestamp: {timestamp}"),
+            ('spacer', 2),
+            ('heading(2)', "About this report"),
+            ('text', about_text or "(About text missing: docs/report_about.md)"),
             ('rule', None),
-            ('heading(2)', "Contents"),
-            ('text', contents_text or "(No sections selected)"),
-            ('new_page', None),
         ]
+
+        # Dynamically build Contents from all level-2 headings in order_list (after About)
+        def _is_content_heading(item):
+            kind, payload = item
+            return kind == 'heading(2)' and not any(
+                s in str(payload).lower() for s in ['chart', 'table', 'map', 'sankey', 'image', 'ribbon']
+            )
+
+        # Collect headings after About section (will be added as sections)
+        def _collect_contents_sections(order_list):
+            sections = []
+            for kind, payload in order_list:
+                if kind == 'heading(2)' and not any(
+                    s in str(payload).lower() for s in ['chart', 'table', 'map', 'sankey', 'image', 'ribbon']
+                ):
+                    sections.append(str(payload))
+            return sections
+
+        # Placeholder: will be filled after all sections are added
+        order_list.append(('heading(2)', "Contents"))
+        order_list.append(('new_page', None))
+        # ...existing code...
+
+        # After all sections are added to order_list, insert the dynamic Contents page
+        # (This requires a second pass after order_list is fully built, so patch the PDF builder to do this)
 
         if include_assets:
             order_list.extend([
@@ -3980,6 +4196,7 @@ def generate_report(base_dir: str,
                     order_list.append(('heading(2)', f"Analysis – {group_title}"))
 
                     polys = _analysis_polygons_for_group(gpq_dir_analysis, group_id)
+                    flat_cells = _analysis_flat_geo_for_group(gpq_dir_analysis, group_id)
                     minimap_path = os.path.join(tmp_dir, f"analysis_minimap_{group_id}.png")
                     if _analysis_write_area_map_png(
                         polys,
@@ -3989,6 +4206,7 @@ def generate_report(base_dir: str,
                         palette_A2E=palette_A2E,
                         desc_A2E=desc_A2E,
                         overlay_alpha=0.65,
+                        flat_cells_gdf=flat_cells,
                     ):
                         order_list.append(('image', ("Area overview (basemap + sensitivity)", minimap_path)))
                     else:
@@ -4041,6 +4259,8 @@ def generate_report(base_dir: str,
 
                         left_polys = _analysis_polygons_for_group(gpq_dir_analysis, left)
                         right_polys = _analysis_polygons_for_group(gpq_dir_analysis, right)
+                        left_cells = _analysis_flat_geo_for_group(gpq_dir_analysis, left)
+                        right_cells = _analysis_flat_geo_for_group(gpq_dir_analysis, right)
                         left_map = os.path.join(tmp_dir, f"analysis_minimap_{left}.png")
                         right_map = os.path.join(tmp_dir, f"analysis_minimap_{right}.png")
                         if _analysis_write_area_map_png(
@@ -4051,6 +4271,7 @@ def generate_report(base_dir: str,
                             palette_A2E=palette_A2E,
                             desc_A2E=desc_A2E,
                             overlay_alpha=0.65,
+                            flat_cells_gdf=left_cells,
                         ):
                             order_list.append(('image', (f"Area map – {left_title}", left_map)))
 
@@ -4066,6 +4287,7 @@ def generate_report(base_dir: str,
                             palette_A2E=palette_A2E,
                             desc_A2E=desc_A2E,
                             overlay_alpha=0.65,
+                            flat_cells_gdf=right_cells,
                         ):
                             order_list.append(('image', (f"Area map – {right_title}", right_map)))
 
@@ -4295,7 +4517,10 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     contents_frame = tk.Frame(action_frame)
     contents_frame.grid(row=0, column=0, columnspan=2, padx=6, pady=(6, 2), sticky="w")
 
-    tk.Label(contents_frame, text="Include in report:").grid(row=0, column=0, sticky="w", padx=(0, 10))
+    contents_frame.columnconfigure(0, weight=1)
+    contents_frame.columnconfigure(1, weight=1)
+
+    tk.Label(contents_frame, text="Include in report:").grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 10))
 
     include_assets_var = tk.BooleanVar(value=True)
     include_analysis_var = tk.BooleanVar(value=False)
@@ -4304,18 +4529,23 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     include_lines_and_segments_var = tk.BooleanVar(value=True)
     include_atlas_maps_var = tk.BooleanVar(value=False)
 
-    tb.Checkbutton(contents_frame, text="Assets overview & statistics",
-                   variable=include_assets_var, bootstyle="round-toggle").grid(row=1, column=0, sticky="w", pady=2)
-    tb.Checkbutton(contents_frame, text="Analysis presentation (graphs)",
-                   variable=include_analysis_var, bootstyle="round-toggle").grid(row=2, column=0, sticky="w", pady=2)
-    tb.Checkbutton(contents_frame, text="Other maps (basic_mosaic)",
-                   variable=include_other_maps_var, bootstyle="round-toggle").grid(row=3, column=0, sticky="w", pady=2)
-    tb.Checkbutton(contents_frame, text="Index statistics",
-                   variable=include_index_statistics_var, bootstyle="round-toggle").grid(row=4, column=0, sticky="w", pady=2)
-    tb.Checkbutton(contents_frame, text="Lines & segments",
-                   variable=include_lines_and_segments_var, bootstyle="round-toggle").grid(row=5, column=0, sticky="w", pady=2)
-    tb.Checkbutton(contents_frame, text="Atlas maps (detailed)",
-                   variable=include_atlas_maps_var, bootstyle="round-toggle").grid(row=6, column=0, sticky="w", pady=2)
+    _include_options = [
+        ("Assets overview & statistics", include_assets_var),
+        ("Analysis presentation (graphs)", include_analysis_var),
+        ("Other maps (basic_mosaic)", include_other_maps_var),
+        ("Index statistics", include_index_statistics_var),
+        ("Lines & segments", include_lines_and_segments_var),
+        ("Atlas maps (detailed)", include_atlas_maps_var),
+    ]
+    for idx, (label, var) in enumerate(_include_options):
+        row = 1 + (idx // 2)
+        col = idx % 2
+        tb.Checkbutton(
+            contents_frame,
+            text=label,
+            variable=var,
+            bootstyle="round-toggle",
+        ).grid(row=row, column=col, sticky="w", pady=2, padx=(0, 16) if col == 0 else (0, 0))
 
     analysis_frame = tb.LabelFrame(action_frame, text="Analysis presentation options", bootstyle="secondary")
     analysis_frame.grid(row=1, column=0, columnspan=2, padx=6, pady=(4, 2), sticky="ew")
@@ -4452,7 +4682,7 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
 
     link_var = tk.StringVar(value="")
     link_label = tk.Label(root, textvariable=link_var, fg="#4ea3ff", cursor="hand2",
-                          font=("Segoe UI", 10, "underline"))
+                          font=("Segoe UI", 10))
     link_label.pack(pady=(2, 8))
     link_label.bind("<Button-1>", open_report_folder)
 
