@@ -55,6 +55,7 @@ import sqlite3
 from docx import Document
 from docx.shared import Inches, Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 # ---------------- UI / sizing constants ----------------
@@ -385,7 +386,10 @@ def _analysis_write_area_map_png(
         # Union geometry for clipping/masking
         clip_geom = None
         try:
-            clip_geom = g3857.unary_union
+            if hasattr(g3857, "union_all"):
+                clip_geom = g3857.union_all()
+            else:
+                clip_geom = g3857.unary_union
         except Exception:
             clip_geom = None
 
@@ -450,7 +454,10 @@ def _analysis_write_area_map_png(
             gborder = g3857.copy()
             union_geom = None
             try:
-                union_geom = gborder.unary_union
+                if hasattr(gborder, "union_all"):
+                    union_geom = gborder.union_all()
+                else:
+                    union_geom = gborder.unary_union
             except Exception:
                 union_geom = None
             if union_geom is not None and not getattr(union_geom, 'is_empty', True):
@@ -529,7 +536,10 @@ def _analysis_write_area_polygon_only_png(
             return False
 
         try:
-            union_geom = polygons_3857.unary_union
+            if hasattr(polygons_3857, "union_all"):
+                union_geom = polygons_3857.union_all()
+            else:
+                union_geom = polygons_3857.unary_union
         except Exception:
             union_geom = None
 
@@ -3320,7 +3330,10 @@ def _analysis_assets_within_area_table(
             pass
 
         try:
-            area_union = ap.unary_union
+            if hasattr(ap, "union_all"):
+                area_union = ap.union_all()
+            else:
+                area_union = ap.unary_union
         except Exception:
             area_union = None
         if area_union is None or getattr(area_union, 'is_empty', True):
@@ -3636,46 +3649,42 @@ def _clean_docx_text(txt: str) -> str:
     return s
 
 def compile_docx(output_docx: str, order_list: list):
-    """
-    Lightweight Word export to reduce memory footprint compared to PDF.
-    Consumes the same order_list produced for PDF composition.
+    """Export the report to a Word document (.docx).
+
+    Notes:
+    - The table of contents (TOC) is a Word field and updates when opened/updated in Word.
+    - Only real section headings (from 'heading(n)') use Word Heading styles.
+      Image/table titles are bold paragraphs so they do NOT appear in the TOC.
     """
     doc = Document()
     doc.core_properties.title = "MESA Report"
     body_style = doc.styles["Normal"]
     body_style.font.name = "Calibri"
     body_style.font.size = Pt(10)
-    # Ensure font mapping works in Word
-    body_style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Calibri')
+    try:
+        body_style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Calibri')
+    except Exception:
+        pass
 
-    def _needs_osm_attribution(image_path: str) -> bool:
-        try:
-            name = os.path.basename(image_path).lower()
-        except Exception:
-            return False
-        if any(k in name for k in ("ribbon", "distribution")):
-            return False
-        return any(k in name for k in ("geocode_", "index_", "atlas", "line_", "segments_", "context"))
-
-    def _add_osm_attribution_paragraph():
-        try:
-            p = doc.add_paragraph(OSM_ATTRIBUTION_TEXT)
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            for run in p.runs:
-                run.font.name = "Calibri"
-                run.font.size = Pt(8)
-        except Exception:
-            pass
+    MAX_IMAGE_WIDTH_CM = 16.0
+    MAX_ATLAS_HEIGHT_CM = 18.0
 
     def add_heading(level: int, text: str):
         clean = _clean_docx_text(text)
-        lvl = max(1, min(4, level))
+        lvl = max(1, min(4, int(level)))
         doc.add_heading(clean, level=lvl)
 
     def add_text(text: str):
         clean = _clean_docx_text(text)
         para = doc.add_paragraph(clean)
         para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    def add_bold_title(text: str):
+        clean = _clean_docx_text(text)
+        p = doc.add_paragraph()
+        r = p.add_run(clean)
+        r.bold = True
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
     def add_rule():
         run = doc.add_paragraph().add_run("―" * 40)
@@ -3685,26 +3694,55 @@ def compile_docx(output_docx: str, order_list: list):
         if not data:
             return
         rows = len(data)
-        cols = len(data[0])
+        cols = len(data[0]) if rows else 0
+        if rows <= 0 or cols <= 0:
+            return
         table = doc.add_table(rows=rows, cols=cols)
         table.style = "Table Grid"
         for r in range(rows):
             for c in range(cols):
-                table.cell(r, c).text = _clean_docx_text(data[r][c])
+                try:
+                    table.cell(r, c).text = _clean_docx_text(data[r][c])
+                except Exception:
+                    table.cell(r, c).text = ""
         # Bold header row
-        for cell in table.rows[0].cells:
-            for p in cell.paragraphs:
-                for run in p.runs:
-                    run.font.bold = True
+        try:
+            for cell in table.rows[0].cells:
+                for p in cell.paragraphs:
+                    for rr in p.runs:
+                        rr.font.bold = True
+        except Exception:
+            pass
 
-    usable_width_cm = 16  # approximate usable width with default margins
+    def _add_field(paragraph, instr: str, placeholder: str = ""):
+        fld = OxmlElement('w:fldSimple')
+        fld.set(qn('w:instr'), instr)
+        if placeholder:
+            r = OxmlElement('w:r')
+            t = OxmlElement('w:t')
+            t.text = str(placeholder)
+            r.append(t)
+            fld.append(r)
+        paragraph._p.append(fld)
+
+    def _is_map_image(path: str) -> bool:
+        name = os.path.basename(path).lower()
+        return any(tok in name for tok in ['map_', '_segments_', '_context', 'mbtiles'])
+
+    def _is_atlas_image(path: str) -> bool:
+        return 'atlas' in os.path.basename(path).lower()
+
+    def _needs_osm_attribution(path: str) -> bool:
+        return _is_map_image(path) or _is_atlas_image(path)
+
+    def _add_osm_attribution_paragraph():
+        p = doc.add_paragraph()
+        r = p.add_run(OSM_ATTRIBUTION_TEXT)
+        r.italic = True
+        r.font.size = Pt(8)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     def _heading_starts_map_block(idx: int, max_ahead: int = 10) -> bool:
-        """Detect blocks like: heading -> text -> image_map -> new_page.
-
-        Used to insert a page break BEFORE the heading (instead of after the map),
-        which avoids Word creating an empty page when images already overflow.
-        """
         try:
             if idx < 0 or idx >= len(order_list):
                 return False
@@ -3727,22 +3765,40 @@ def compile_docx(output_docx: str, order_list: list):
     last_was_page_break = False
 
     for idx, (kind, payload) in enumerate(order_list):
-        if kind.startswith("heading"):
+        if kind == 'toc':
+            # TOC should start on a new page.
+            if has_any_content and not last_was_page_break:
+                doc.add_page_break()
+                last_was_page_break = True
+            add_bold_title("Contents")
+            p = doc.add_paragraph()
+            _add_field(p, 'TOC \\o "2-3" \\h \\z \\u', placeholder="(Table of contents will appear when fields are updated in Word)")
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            has_any_content = True
+            last_was_page_break = False
+
+        elif isinstance(kind, str) and kind.startswith("heading"):
+            # Keep map sections from starting at end of previous page.
             if _heading_starts_map_block(idx) and has_any_content and not last_was_page_break:
                 doc.add_page_break()
                 last_was_page_break = True
-            level = int(kind[-2])
+            try:
+                level = int(kind[kind.find('(') + 1:kind.find(')')])
+            except Exception:
+                level = 2
             add_heading(level, payload)
             has_any_content = True
             last_was_page_break = False
-        elif kind in ("text",):
+
+        elif kind == "text":
             add_text(payload)
             has_any_content = True
             last_was_page_break = False
+
         elif kind in ("table", "table_data", "table_data_small"):
+            title = None
+            data = None
             if kind == "table":
-                title = None
-                data = None
                 if isinstance(payload, str) and os.path.exists(payload):
                     try:
                         df = pd.read_excel(payload)
@@ -3752,95 +3808,78 @@ def compile_docx(output_docx: str, order_list: list):
                 else:
                     data = payload
             else:
-                title, data = payload
+                try:
+                    title, data = payload
+                except Exception:
+                    title, data = None, None
             if title:
-                add_heading(3, title)
+                add_bold_title(title)
             if data:
                 add_table(data)
             else:
                 add_text("(table data unavailable)")
             has_any_content = True
             last_was_page_break = False
-        elif kind == "image" or kind == "image_ribbon" or kind == "image_map":
-            heading, path = payload
-            # Avoid duplicate headings on map pages (the page already has a heading(2)/(3) in order_list)
-            if kind != "image_map":
-                add_heading(3, heading)
-                has_any_content = True
-                last_was_page_break = False
-            if os.path.exists(path):
+
+        elif kind in ("image", "image_ribbon", "image_map"):
+            # payload: (title, path)
+            try:
+                title, path = payload
+            except Exception:
+                title, path = None, None
+            if title:
+                add_bold_title(title)
+            if path and isinstance(path, str) and os.path.exists(path):
                 try:
-                    if kind == "image_map":
-                        # Fit within A4 page: <=15cm wide and <=20cm tall
-                        max_w_cm = 17.0
-                        max_h_cm = 18.0
+                    width_cm = float(MAX_IMAGE_WIDTH_CM)
+                    base_name_lower = os.path.basename(path).lower()
+
+                    # Atlas images slightly narrower
+                    if _is_atlas_image(path):
+                        width_cm *= float(ATLAS_DOC_WIDTH_SCALE)
+
+                    # Ribbons: fixed height (keep consistent visual size)
+                    if kind == "image_ribbon":
+                        doc.add_picture(path, width=Cm(width_cm), height=Cm(float(RIBBON_CM_HEIGHT)))
+                    # Atlas: clamp height to keep pages readable
+                    elif _is_atlas_image(path):
                         with PILImage.open(path) as im:
                             w_px, h_px = im.size
-                        if w_px <= 0 or h_px <= 0:
-                            doc.add_picture(path, width=Cm(max_w_cm))
-                        else:
+                        if w_px > 0 and h_px > 0:
                             aspect = float(h_px) / float(w_px)
-                            out_w_cm = max_w_cm
+                            out_w_cm = float(width_cm)
                             out_h_cm = out_w_cm * aspect
-                            if out_h_cm > max_h_cm:
-                                out_h_cm = max_h_cm
+                            if out_h_cm > float(MAX_ATLAS_HEIGHT_CM):
+                                out_h_cm = float(MAX_ATLAS_HEIGHT_CM)
                                 out_w_cm = out_h_cm / aspect
                             doc.add_picture(path, width=Cm(out_w_cm))
-                        # Center the map image paragraph
-                        try:
-                            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        except Exception:
-                            pass
-
-                        # Put OSM attribution under the map (plain text)
-                        _add_osm_attribution_paragraph()
-                        has_any_content = True
-                        last_was_page_break = False
-                    else:
-                        width_cm = usable_width_cm
-                        base_name_lower = os.path.basename(path).lower()
-                        if 'atlas' in base_name_lower:
-                            width_cm *= ATLAS_DOC_WIDTH_SCALE
-
-                        # Clamp atlas images to max 18 cm tall (overview + tiles)
-                        if 'atlas' in base_name_lower:
-                            max_h_cm = 18.0
-                            with PILImage.open(path) as im:
-                                w_px, h_px = im.size
-                            if w_px <= 0 or h_px <= 0:
-                                doc.add_picture(path, width=Cm(width_cm))
-                            else:
-                                aspect = float(h_px) / float(w_px)
-                                out_w_cm = float(width_cm)
-                                out_h_cm = out_w_cm * aspect
-                                if out_h_cm > max_h_cm:
-                                    out_h_cm = max_h_cm
-                                    out_w_cm = out_h_cm / aspect
-                                doc.add_picture(path, width=Cm(out_w_cm))
-                            try:
-                                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            except Exception:
-                                pass
                         else:
                             doc.add_picture(path, width=Cm(width_cm))
+                    else:
+                        doc.add_picture(path, width=Cm(width_cm))
 
-                        # If this is a map image (not charts/ribbons), add OSM attribution under it.
-                        if _needs_osm_attribution(path):
-                            _add_osm_attribution_paragraph()
-                        has_any_content = True
-                        last_was_page_break = False
+                    try:
+                        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    except Exception:
+                        pass
+
+                    if _needs_osm_attribution(path):
+                        _add_osm_attribution_paragraph()
                 except Exception:
                     add_text(f"(image unavailable: {os.path.basename(path)})")
-                    has_any_content = True
-                    last_was_page_break = False
             else:
-                add_text(f"(image missing: {os.path.basename(path)})")
-                has_any_content = True
-                last_was_page_break = False
+                if path:
+                    add_text(f"(image missing: {os.path.basename(str(path))})")
+                else:
+                    add_text("(image missing)")
+            has_any_content = True
+            last_was_page_break = False
+
         elif kind == "rule":
             add_rule()
             has_any_content = True
             last_was_page_break = False
+
         elif kind == "spacer":
             try:
                 n = int(payload) if payload is not None else 1
@@ -3851,6 +3890,7 @@ def compile_docx(output_docx: str, order_list: list):
                 doc.add_paragraph("")
             has_any_content = True
             last_was_page_break = False
+
         elif kind == "new_page":
             # Avoid consecutive page breaks which can create empty pages.
             if last_was_page_break:
@@ -3858,6 +3898,7 @@ def compile_docx(output_docx: str, order_list: list):
             doc.add_page_break()
             has_any_content = True
             last_was_page_break = True
+
         else:
             add_text(str(payload))
             has_any_content = True
@@ -4145,29 +4186,10 @@ def generate_report(base_dir: str,
             ('heading(2)', "About this report"),
             ('text', about_text or "(About text missing: docs/report_about.md)"),
             ('rule', None),
+            # Insert a Word TOC field after About section
+            ('toc', None),
+            ('new_page', None),
         ]
-
-        # Dynamically build Contents from all level-2 headings in order_list (after About)
-        def _is_content_heading(item):
-            kind, payload = item
-            return kind == 'heading(2)' and not any(
-                s in str(payload).lower() for s in ['chart', 'table', 'map', 'sankey', 'image', 'ribbon']
-            )
-
-        # Collect headings after About section (will be added as sections)
-        def _collect_contents_sections(order_list):
-            sections = []
-            for kind, payload in order_list:
-                if kind == 'heading(2)' and not any(
-                    s in str(payload).lower() for s in ['chart', 'table', 'map', 'sankey', 'image', 'ribbon']
-                ):
-                    sections.append(str(payload))
-            return sections
-
-        # Placeholder: will be filled after all sections are added
-        order_list.append(('heading(2)', "Contents"))
-        order_list.append(('new_page', None))
-        # ...existing code...
 
         # After all sections are added to order_list, insert the dynamic Contents page
         # (This requires a second pass after order_list is fully built, so patch the PDF builder to do this)
