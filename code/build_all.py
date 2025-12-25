@@ -269,17 +269,7 @@ def copy_resources() -> None:
             shutil.copy2(cfg, FINAL_DIST / "config.ini")
             break
 
-    # Copy secrets/ (prefer repo root, fall back to code/ if present)
-    secrets_candidates = [
-        PROJECT_ROOT / "secrets",
-        CODE_DIR / "secrets",
-    ]
-    dst = FINAL_DIST / "secrets"
-    for src in secrets_candidates:
-        if src.exists():
-            log("Copying 'secrets/' ...")
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-            break
+    # NOTE: Intentionally do NOT copy secrets/ into distributions.
 
 # ---------------------------------------------------------------------------
 # Main
