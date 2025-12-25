@@ -77,8 +77,6 @@ progress_var = None
 progress_label = None
 last_report_path = None
 link_var = None  # hyperlink label StringVar
-atlas_geocode_var = None  # Combobox selection for atlas geocode group
-_atlas_geocode_choices: list[str] = []  # cached list for GUI
 
 SENSITIVITY_ORDER = ['A', 'B', 'C', 'D', 'E']
 SENSITIVITY_UNKNOWN_COLOR = "#FF00F2"
@@ -948,11 +946,10 @@ class ReportEngine:
     def render_atlas_maps(self,
                           flat_df: gpd.GeoDataFrame,
                           atlas_df: gpd.GeoDataFrame,
-                          atlas_geocode_pref: str | None,
                           include_atlas_maps: bool,
                           set_progress_callback) -> tuple[list, str | None]:
         pages = []
-        atlas_geocode_selected = None
+        atlas_geocode_selected = 'basic_mosaic'
         if not include_atlas_maps or atlas_df is None or atlas_df.empty:
             return pages, atlas_geocode_selected
 
@@ -971,27 +968,13 @@ class ReportEngine:
         atlas_crs = atlas_df.crs
         atlas_df = atlas_df[atlas_df['geometry'].notna()].copy()
 
-        def _pick_geocode_level():
-            nonlocal atlas_geocode_selected
-            levels = []
-            if not flat_df.empty and 'name_gis_geocodegroup' in flat_df.columns:
-                levels = sorted(flat_df['name_gis_geocodegroup'].astype('string').dropna().unique().tolist())
-            if atlas_geocode_pref and atlas_geocode_pref in levels:
-                atlas_geocode_selected = atlas_geocode_pref
-            elif 'basic_mosaic' in levels:
-                atlas_geocode_selected = 'basic_mosaic'
-            elif levels:
-                atlas_geocode_selected = levels[0]
-
-        _pick_geocode_level()
-
         polys_for_atlas = flat_polys_3857
         if atlas_geocode_selected and not flat_polys_3857.empty:
             if 'name_gis_geocodegroup' in flat_polys_3857.columns:
                 atlas_mask = flat_polys_3857['name_gis_geocodegroup'].astype('string').str.lower() == atlas_geocode_selected.lower()
                 filtered = flat_polys_3857[atlas_mask].copy()
                 if filtered.empty:
-                    write_to_log(f"No atlas polygons found for geocode '{atlas_geocode_selected}'. Using all polygons.", self.base_dir)
+                    write_to_log("No atlas polygons found for basic_mosaic. Using all polygons.", self.base_dir)
                 else:
                     polys_for_atlas = filtered
             else:
@@ -1002,8 +985,6 @@ class ReportEngine:
         ok_overview = draw_atlas_overview_map(atlas_df, atlas_crs, polys_for_atlas, overview_png, bounds, base_dir=self.base_dir)
         if ok_overview and _file_ok(overview_png):
             text = "Overview of all atlas tiles within the study area."
-            if atlas_geocode_selected:
-                text += f" Geocode level shown: <b>{atlas_geocode_selected}</b>."
             pages += [
                 ('heading(3)', "Atlas overview"),
                 ('text', text),
@@ -1026,8 +1007,6 @@ class ReportEngine:
             info_parts = []
             if isinstance(tile_row.get('description'), str) and tile_row.get('description').strip():
                 info_parts.append(tile_row.get('description').strip())
-            if atlas_geocode_selected:
-                info_parts.append(f"Geocode level: <b>{atlas_geocode_selected}</b>.")
             info_parts.append("Inset highlights tile within the study area.")
             pages.append(('text', " ".join(info_parts)))
 
@@ -1560,28 +1539,6 @@ def _cfg_getfloat(cfg: configparser.ConfigParser,
         return float(str(raw).strip())
     except Exception:
         return default
-
-def _available_geocode_levels(base_dir: str,
-                              config_file: str) -> list[str]:
-    """
-    Return sorted list of geocode group names available in tbl_flat.
-    Used for GUI combo box population. Falls back to an empty list on failure.
-    """
-    try:
-        cfg = read_config(config_file)
-        gpq_dir = parquet_dir_from_cfg(base_dir, cfg)
-        flat_df = load_tbl_flat(gpq_dir, base_dir=base_dir)
-        if flat_df.empty or 'name_gis_geocodegroup' not in flat_df.columns:
-            return []
-        levels = (flat_df['name_gis_geocodegroup']
-                  .astype('string')
-                  .dropna()
-                  .unique()
-                  .tolist())
-        return sorted(levels)
-    except Exception as exc:
-        write_to_log(f"Failed to enumerate geocode levels for UI: {exc}", base_dir)
-        return []
 
 def _dpi_for_fig_height(fig_height_in: float, px_cap: int = MAX_MAP_PX_HEIGHT, min_dpi: int = 110, max_dpi: int = 300) -> int:
     """
@@ -3123,7 +3080,6 @@ def debug_atlas_sample(base_dir: str,
                        palette: dict[str, str],
                        desc: dict[str, str],
                        tile_name: str,
-                       geocode_level: str | None = None,
                        sample_size: int | None = None) -> str | None:
     """
     Render a quick atlas sensitivity map for a single tile using an optional
@@ -3167,14 +3123,10 @@ def debug_atlas_sample(base_dir: str,
             .astype('string')
             .str.strip()
         )
-    else:
-        geocode_level = None  # cannot filter by level if column missing
-
-    if geocode_level:
-        mask_lvl = flat_polys['name_gis_geocodegroup'].astype('string').str.lower() == geocode_level.lower()
+        mask_lvl = flat_polys['name_gis_geocodegroup'].astype('string').str.lower() == 'basic_mosaic'
         filtered = flat_polys[mask_lvl].copy()
         if filtered.empty:
-            write_to_log(f"debug_atlas_sample: geocode '{geocode_level}' produced no polygons; using full set.", base_dir)
+            write_to_log("debug_atlas_sample: no basic_mosaic polygons found; using full set.", base_dir)
         else:
             flat_polys = filtered
 
@@ -3839,7 +3791,6 @@ def generate_report(base_dir: str,
                     palette_A2E: dict,
                     desc_A2E: dict,
                     report_mode: str | None = None,
-                    atlas_geocode_level: str | None = None,
                     include_assets: bool = True,
                     include_other_maps: bool = True,
                     include_index_statistics: bool = True,
@@ -3906,13 +3857,8 @@ def generate_report(base_dir: str,
                 include_atlas_maps = (str(report_mode).lower() == "detailed")
         else:
             include_atlas_maps = bool(include_atlas_maps)
-        atlas_geocode_pref = (atlas_geocode_level or
-                              cfg['DEFAULT'].get('atlas_report_geocode_level', '') or '').strip()
         atlas_geocode_selected: str | None = None
         write_to_log(f"Report mode selected: {'Detailed (atlas included)' if include_atlas_maps else 'General maps only'}", base_dir)
-        if include_atlas_maps:
-            if atlas_geocode_pref:
-                write_to_log(f"Atlas geocode preference: {atlas_geocode_pref}", base_dir)
         gpq_dir   = parquet_dir_from_cfg(base_dir, cfg)
         tmp_dir_path = output_subpath(base_dir, 'tmp')
         try:
@@ -4045,11 +3991,7 @@ def generate_report(base_dir: str,
             else:
                 write_to_log("Parquet table tbl_atlas not found; skipping atlas maps.", base_dir)
 
-        atlas_geocode_pref = None
-        if include_atlas_maps:
-            atlas_geocode_pref = (atlas_geocode_level or cfg['DEFAULT'].get('atlas_report_geocode_level', '') or '').strip() or None
-            if atlas_geocode_pref:
-                write_to_log(f"Atlas geocode preference: {atlas_geocode_pref}", base_dir)
+        atlas_geocode_pref = 'basic_mosaic' if include_atlas_maps else None
 
         def _progress_atlas(done: int, total: int):
             if include_atlas_maps:
@@ -4057,7 +3999,7 @@ def generate_report(base_dir: str,
 
         atlas_pages = []
         if engine is not None:
-            atlas_pages, atlas_geocode_selected = engine.render_atlas_maps(flat_df, atlas_df, atlas_geocode_pref, include_atlas_maps, _progress_atlas)
+            atlas_pages, atlas_geocode_selected = engine.render_atlas_maps(flat_df, atlas_df, include_atlas_maps, _progress_atlas)
         if atlas_pages:
             write_to_log("Per-atlas maps created.", base_dir)
         elif include_atlas_maps:
@@ -4376,8 +4318,6 @@ def generate_report(base_dir: str,
             order_list.append(('heading(2)', "Atlas maps"))
             atlas_intro = ("Each atlas tile focuses on a subset of the study area. "
                            "An inset map indicates where the tile sits relative to the full extent.")
-            if atlas_geocode_selected:
-                atlas_intro += f" Geocode level shown: <b>{atlas_geocode_selected}</b>."
             order_list.append(('text', atlas_intro))
             order_list.extend(atlas_pages)
 
@@ -4415,15 +4355,15 @@ def generate_report(base_dir: str,
                 pass
 
 # ---------------- GUI runner ----------------
-def _start_report_thread(base_dir, config_file, palette, desc, report_mode, atlas_geocode):
+def _start_report_thread(base_dir, config_file, palette, desc, report_mode):
     # Backwards-compatible helper for old call sites.
     threading.Thread(
         target=generate_report,
-        args=(base_dir, config_file, palette, desc, report_mode, atlas_geocode),
+        args=(base_dir, config_file, palette, desc, report_mode),
         daemon=True
     ).start()
 
-def _start_report_thread_selected(base_dir, config_file, palette, desc, *, atlas_geocode,
+def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  include_assets: bool,
                                  include_other_maps: bool,
                                  include_index_statistics: bool,
@@ -4441,7 +4381,6 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *, atlas
             'palette_A2E': palette,
             'desc_A2E': desc,
             'report_mode': None,
-            'atlas_geocode_level': atlas_geocode,
             'include_assets': include_assets,
             'include_other_maps': include_other_maps,
             'include_index_statistics': include_index_statistics,
@@ -4456,7 +4395,7 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *, atlas
     ).start()
 
 def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str):
-    global log_widget, progress_var, progress_label, link_var, atlas_geocode_var, _atlas_geocode_choices
+    global log_widget, progress_var, progress_label, link_var
     root = tb.Window(themename=theme)
     root.title("MESA – Report generator")
     try:
@@ -4478,25 +4417,6 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     pbar.pack(side=tk.LEFT, padx=6)
     progress_label = tk.Label(pframe, text="0%", width=5, anchor="w")
     progress_label.pack(side=tk.LEFT)
-
-    atlas_frame = tb.LabelFrame(root, text="Atlas geocode level", bootstyle="secondary")
-    atlas_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
-    _atlas_geocode_choices = _available_geocode_levels(base_dir, config_file)
-    default_level = None
-    if _atlas_geocode_choices:
-        default_level = 'basic_mosaic' if 'basic_mosaic' in _atlas_geocode_choices else _atlas_geocode_choices[0]
-    atlas_geocode_var = tk.StringVar(value=default_level or '')
-    atlas_combo = tb.Combobox(atlas_frame, textvariable=atlas_geocode_var,
-                              values=tuple(_atlas_geocode_choices),
-                              state="readonly" if _atlas_geocode_choices else "disabled",
-                              width=30)
-    atlas_combo.grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    if _atlas_geocode_choices:
-        tk.Label(atlas_frame, text="Used for atlas sensitivity and environment maps.",
-                 anchor="w").grid(row=0, column=1, padx=6, pady=4, sticky="w")
-    else:
-        tk.Label(atlas_frame, text="(No geocode levels detected yet)", anchor="w")\
-          .grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
     action_frame = tb.LabelFrame(root, text="Report", bootstyle="primary")
     action_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
@@ -4619,7 +4539,6 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
             config_file,
             palette,
             desc,
-            atlas_geocode=atlas_geocode_var.get(),
             include_assets=include_assets_var.get(),
             include_analysis_presentation=include_analysis_var.get(),
             analysis_mode=analysis_mode_var.get(),
@@ -4682,12 +4601,8 @@ if __name__ == "__main__":
     parser.add_argument('--no-gui', action='store_true', help='Run directly without GUI')
     parser.add_argument('--report-mode', choices=['general', 'detailed'],
                         help='Select report detail level (general maps or detailed with atlas overviews).')
-    parser.add_argument('--atlas-geocode',
-                        help='Override geocode level to use for atlas maps (e.g. basic_mosaic, H3_R7).')
     parser.add_argument('--debug-atlas-sample',
                         help='Render a standalone sensitivity atlas map for the specified tile (name_gis).')
-    parser.add_argument('--debug-atlas-geocode',
-                        help='Optional geocode level to filter polygons when using --debug-atlas-sample.')
     parser.add_argument('--debug-atlas-size', type=int,
                         help='Optional max polygon count for --debug-atlas-sample (down-sample if exceeded).')
     args = parser.parse_args()
@@ -4711,7 +4626,6 @@ if __name__ == "__main__":
             palette_A2E,
             desc_A2E,
             args.debug_atlas_sample,
-            geocode_level=args.debug_atlas_geocode,
             sample_size=args.debug_atlas_size
         )
         if out:
@@ -4734,8 +4648,7 @@ if __name__ == "__main__":
 
     if args.no_gui:
         generate_report(base_dir, cfg_path, palette_A2E, desc_A2E,
-                        report_mode=args.report_mode,
-                        atlas_geocode_level=args.atlas_geocode)
+                        report_mode=args.report_mode)
     else:
         launch_gui(base_dir, cfg_path, palette_A2E, desc_A2E, theme)
 
