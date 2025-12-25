@@ -77,6 +77,13 @@ _OSM_TILE_CACHE_LOGGED = False
 # - auto: prefer contextily, fallback to xyz
 _REPORT_BASEMAP_MODE = "xyz"
 
+# Inset styling (for overview/context insets on maps). Can be overridden via config.ini.
+_REPORT_INSET_BORDER_COLOR = "#1f1f1f"
+_REPORT_INSET_BORDER_LW = 1.2
+_REPORT_INSET_SHADOW_ALPHA = 0.18
+_REPORT_INSET_SHADOW_DX = 0.006
+_REPORT_INSET_SHADOW_DY = 0.008
+
 # ---------------- GUI / globals ----------------
 log_widget = None
 progress_var = None
@@ -1373,13 +1380,31 @@ class ReportEngine:
                     axis=1
                 )
 
-            context_img = self.make_path("line", ln_safe, "context")
-            seg_map_max = self.make_path("line", ln_safe, "segments_max")
-            seg_map_min = self.make_path("line", ln_safe, "segments_min")
+            seg_map_max = self.make_path("line", ln_safe, "segments_max_inset")
+            seg_map_min = self.make_path("line", ln_safe, "segments_min_inset")
 
-            ok_context = draw_line_context_map(line, context_img, pad_ratio=1.0, rect_buffer_ratio=0.03, base_dir=base_dir)
-            ok_max = draw_line_segments_map(segments_df, ln_visible, palette, seg_map_max, mode='max', pad_ratio=0.20, base_dir=base_dir)
-            ok_min = draw_line_segments_map(segments_df, ln_visible, palette, seg_map_min, mode='min', pad_ratio=0.20, base_dir=base_dir)
+            ok_max = draw_line_segments_map_with_context_inset(
+                segments_df,
+                ln_visible,
+                palette,
+                seg_map_max,
+                mode='max',
+                pad_ratio=0.20,
+                context_pad_ratio=1.00,
+                rect_buffer_ratio=0.03,
+                base_dir=base_dir,
+            )
+            ok_min = draw_line_segments_map_with_context_inset(
+                segments_df,
+                ln_visible,
+                palette,
+                seg_map_min,
+                mode='min',
+                pad_ratio=0.20,
+                context_pad_ratio=1.00,
+                rect_buffer_ratio=0.03,
+                base_dir=base_dir,
+            )
 
             max_stats_img = self.make_path("line", ln_safe, "max_dist")
             min_stats_img = self.make_path("line", ln_safe, "min_dist")
@@ -1401,14 +1426,11 @@ class ReportEngine:
                 ('heading(2)', f"Line: {ln_visible}"),
                 ('text', f"This section summarizes sensitivity along the line <b>{ln_visible}</b> "
                          f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segment_records)}</b>). "
-                         "Below: geographical context and segments maps colored by sensitivity values, "
+                         "Below: segments map colored by sensitivity values with a context inset, "
                          "followed by the distribution and a ribbon (maximum sensitivity).")
             ]
-
-            if ok_context and _file_ok(context_img):
-                first_page.append(('image', ("Geographical context", context_img)))
             if ok_max and _file_ok(seg_map_max):
-                first_page.append(('image', ("Segments colored by maximum sensitivity", seg_map_max)))
+                first_page.append(('image', ("Segments colored by maximum sensitivity (with context inset)", seg_map_max)))
             first_page.append(('image', ("Maximum sensitivity – distribution", max_stats_img)))
             first_page.append(('text', f"Distance (km): 0 – {length_km/2:.1f} – {length_km:.1f}"))
             first_page.append(('image_ribbon', ("Maximum sensitivity – along line", max_img)))
@@ -1419,7 +1441,7 @@ class ReportEngine:
                 ('text', "Minimum sensitivity map, distribution, and ribbon.")
             ]
             if ok_min and _file_ok(seg_map_min):
-                second_page.append(('image', ("Segments colored by minimum sensitivity", seg_map_min)))
+                second_page.append(('image', ("Segments colored by minimum sensitivity (with context inset)", seg_map_min)))
             second_page.append(('image', ("Minimum sensitivity – distribution", min_stats_img)))
             second_page.append(('text', f"Distance (km): 0 – {length_km/2:.1f} – {length_km:.1f}"))
             second_page.append(('image_ribbon', ("Minimum sensitivity – along line", min_img)))
@@ -1629,6 +1651,22 @@ def _cfg_getboolean(cfg: configparser.ConfigParser,
     if val in {"0", "false", "no", "off"}:
         return False
     return default
+
+def _cfg_getfloat(cfg: configparser.ConfigParser,
+                  section: str,
+                  option: str,
+                  default: float | None = None) -> float | None:
+    """Robust float reader for configparser values."""
+    try:
+        raw = cfg.get(section, option, fallback=None)
+    except Exception:
+        raw = None
+    if raw is None:
+        return default
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return default
 
 def _available_geocode_levels(base_dir: str,
                               config_file: str) -> list[str]:
@@ -2198,6 +2236,101 @@ def _nice_scale_length_m(target_m: float) -> float:
             return float(val)
     return float(exp)
 
+
+def _style_inset_box(fig, inset_ax,
+                     *,
+                     border_color: str | None = None,
+                     border_lw: float | None = None,
+                     shadow_color: str = '#000000',
+                     shadow_alpha: float | None = None,
+                     shadow_dx: float | None = None,
+                     shadow_dy: float | None = None):
+    """Apply a consistent dark border + subtle drop shadow to an inset axes.
+
+    The shadow is drawn as figure-level patches on purpose.
+    Many report maps are saved with bbox_inches='tight'. If we draw the shadow outside
+    the inset using path-effects, the shadow can be cropped away because tight-bbox
+    calculation does not account for path-effects extents.
+
+    To avoid the occasional "faulty"/misaligned shadow, we compute the inset position
+    from the renderer after a canvas draw (in display coords), then transform to figure
+    coords.
+    """
+    try:
+        if fig is None or inset_ax is None:
+            return
+        # Resolve defaults from config-driven globals.
+        if border_color is None:
+            border_color = _REPORT_INSET_BORDER_COLOR
+        if border_lw is None:
+            border_lw = _REPORT_INSET_BORDER_LW
+        if shadow_alpha is None:
+            shadow_alpha = _REPORT_INSET_SHADOW_ALPHA
+        if shadow_dx is None:
+            shadow_dx = _REPORT_INSET_SHADOW_DX
+        if shadow_dy is None:
+            shadow_dy = _REPORT_INSET_SHADOW_DY
+
+        # Compute bbox in figure coordinates.
+        bbox = None
+        try:
+            # Ensure layout is finalized before reading window extents.
+            canvas = getattr(fig, "canvas", None)
+            if canvas is not None:
+                try:
+                    canvas.draw()
+                except Exception:
+                    pass
+                try:
+                    renderer = canvas.get_renderer()
+                    bb_disp = inset_ax.get_window_extent(renderer=renderer)
+                    bbox = bb_disp.transformed(fig.transFigure.inverted())
+                except Exception:
+                    bbox = None
+        except Exception:
+            bbox = None
+        if bbox is None:
+            bbox = inset_ax.get_position()
+
+        # Shadow behind (slightly down/right)
+        shadow_patch = Rectangle(
+            (bbox.x0 + float(shadow_dx), bbox.y0 - float(shadow_dy)),
+            bbox.width,
+            bbox.height,
+            transform=fig.transFigure,
+            facecolor=shadow_color,
+            edgecolor='none',
+            alpha=float(shadow_alpha),
+            zorder=15,
+        )
+        try:
+            shadow_patch.set_clip_on(False)
+            shadow_patch.set_in_layout(False)
+        except Exception:
+            pass
+        fig.patches.append(shadow_patch)
+
+        # Dark border in front
+        border_patch = Rectangle(
+            (bbox.x0, bbox.y0),
+            bbox.width,
+            bbox.height,
+            transform=fig.transFigure,
+            facecolor='none',
+            edgecolor=border_color,
+            linewidth=float(border_lw),
+            alpha=0.95,
+            zorder=25,
+        )
+        try:
+            border_patch.set_clip_on(False)
+            border_patch.set_in_layout(False)
+        except Exception:
+            pass
+        fig.patches.append(border_patch)
+    except Exception:
+        return
+
 def _add_map_decorations(ax,
                          extent_3857: tuple[float, float, float, float],
                          base_dir: str | None = None,
@@ -2263,15 +2396,18 @@ def _add_map_decorations(ax,
         if add_inset and inset_axes is not None:
             try:
                 iax = inset_axes(ax, width="28%", height="28%", loc='upper left', borderpad=0.8)
-                iax.set_axis_off()
-                # Visible frame around the inset
                 try:
-                    iax.add_patch(Rectangle((0, 0), 1, 1,
-                                            transform=iax.transAxes,
-                                            fill=False,
-                                            edgecolor='black',
-                                            linewidth=1.0,
-                                            zorder=100))
+                    iax.set_zorder(20)
+                except Exception:
+                    pass
+                iax.set_axis_off()
+                # Consistent inset styling (dark frame + subtle shadow)
+                _style_inset_box(ax.figure, iax)
+
+                # Ensure the inset has a full-axes background so bbox tightening does not collapse.
+                try:
+                    iax.add_patch(Rectangle((0, 0), 1, 1, transform=iax.transAxes,
+                                            facecolor='white', edgecolor='none', zorder=0))
                 except Exception:
                     pass
                 # Expand view to provide context
@@ -3043,6 +3179,172 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
         plt.close('all')
         return False
 
+
+def _normalize_bounds_aspect(bounds: tuple[float, float, float, float],
+                             *,
+                             min_aspect: float = 0.70,
+                             max_aspect: float = 1.30) -> tuple[float, float, float, float]:
+    """Expand bounds so that dy/dx stays within [min_aspect, max_aspect].
+
+    This prevents very tall/narrow (or wide/flat) extents from creating maps that
+    end up tiny in DOCX when clamped by max height.
+    """
+    minx, miny, maxx, maxy = bounds
+    dx = float(maxx - minx)
+    dy = float(maxy - miny)
+    if dx <= 0 or dy <= 0:
+        return bounds
+    cx = (minx + maxx) / 2.0
+    cy = (miny + maxy) / 2.0
+    aspect = dy / dx
+
+    # Too tall: widen X.
+    if aspect > float(max_aspect):
+        target_dx = dy / float(max_aspect)
+        dx2 = target_dx / 2.0
+        return (cx - dx2, miny, cx + dx2, maxy)
+
+    # Too wide: widen Y.
+    if aspect < float(min_aspect):
+        target_dy = dx * float(min_aspect)
+        dy2 = target_dy / 2.0
+        return (minx, cy - dy2, maxx, cy + dy2)
+
+    return bounds
+
+
+def draw_line_segments_map_with_context_inset(segments_df: gpd.GeoDataFrame,
+                                              line_name: str,
+                                              palette: dict,
+                                              out_path: str,
+                                              mode: str = 'max',
+                                              pad_ratio: float = 0.20,
+                                              context_pad_ratio: float = 1.00,
+                                              rect_buffer_ratio: float = 0.03,
+                                              base_dir: str | None = None) -> bool:
+    """Draw the segments map as the main map, with a context inset showing its location."""
+    try:
+        if segments_df.empty or 'geometry' not in segments_df.columns:
+            write_to_log(f"[{line_name}] No geometry in segments; skipping segments map.", base_dir)
+            return False
+
+        col = 'sensitivity_code_max' if mode == 'max' else 'sensitivity_code_min'
+        segs = segments_df[(segments_df['name_gis'] == line_name) & (segments_df['geometry'].notna())].copy()
+        if segs.empty:
+            write_to_log(f"[{line_name}] No segments found for segments map.", base_dir)
+            return False
+
+        segs = _safe_to_3857(segs)
+        if segs.empty:
+            write_to_log(f"[{line_name}] Segments reprojection failed.", base_dir)
+            return False
+
+        b = tuple(segs.total_bounds)
+        # Main map bounds: pad, then normalize aspect so it doesn't become ultra-narrow.
+        main_bounds = _expand_bounds(b, pad_ratio)
+        main_bounds = _normalize_bounds_aspect(main_bounds, min_aspect=0.70, max_aspect=1.30)
+        minx, miny, maxx, maxy = main_bounds
+
+        fig_h_in = 10.0
+        fig_w_in = 10.0
+        dpi = _dpi_for_fig_height(fig_h_in)
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+
+        # Ensure there's always a full-axes artist so bbox_inches='tight' doesn't
+        # collapse into a thin strip when basemap fetching is unavailable.
+        ax.add_patch(Rectangle((0, 0), 1, 1, transform=ax.transAxes,
+                               facecolor='white', edgecolor='none', zorder=0))
+
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        polys = segs[segs.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+        lines = segs[segs.geometry.type.isin(['LineString', 'MultiLineString'])]
+        value_col = 'sensitivity_max' if mode == 'max' else 'sensitivity_min'
+
+        if not polys.empty:
+            polys_ann = _prepare_sensitivity_annotations(polys, col, value_col)
+            colors_polys = _colors_from_annotations(polys_ann, palette)
+            polys_ann.plot(
+                ax=ax,
+                color=colors_polys,
+                edgecolor='white',
+                linewidth=0.4,
+                alpha=0.95,
+                zorder=12,
+            )
+
+        if not lines.empty:
+            lines_ann = _prepare_sensitivity_annotations(lines, col, value_col)
+            line_colors = _colors_from_annotations(lines_ann, palette)
+            line_colors_rgba = [mcolors.to_rgba(c, alpha=1.0) for c in line_colors]
+            try:
+                lines.plot(ax=ax, color='white', linewidth=4.2, alpha=0.9, zorder=13)
+            except Exception:
+                pass
+            lines.plot(ax=ax, color=line_colors_rgba, linewidth=2.4, alpha=1.0, zorder=14)
+
+        try:
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=False)
+        except Exception:
+            pass
+
+        # ---- Context inset (shows where the main map sits) ----
+        try:
+            inset_w = "34%"
+            inset_h = "34%"
+            if inset_axes is not None:
+                axins = inset_axes(ax, width=inset_w, height=inset_h, loc="upper left", borderpad=0.8)
+            else:
+                # Fallback: manual inset in axes fraction
+                axins = fig.add_axes([0.10, 0.62, 0.30, 0.30])
+            # Ensure the inset sits above the main map layers.
+            try:
+                axins.set_zorder(20)
+            except Exception:
+                pass
+            axins.set_axis_off()
+            axins.add_patch(Rectangle((0, 0), 1, 1, transform=axins.transAxes,
+                                      facecolor='white', edgecolor='none', zorder=0))
+
+            ctx_bounds = _expand_bounds(b, context_pad_ratio)
+            ctx_bounds = _normalize_bounds_aspect(ctx_bounds, min_aspect=0.70, max_aspect=1.30)
+            cminx, cminy, cmaxx, cmaxy = ctx_bounds
+            axins.set_xlim(cminx, cmaxx)
+            axins.set_ylim(cminy, cmaxy)
+
+            _plot_basemap(axins, crs_epsg=3857, base_dir=base_dir)
+
+            try:
+                segs.boundary.plot(ax=axins, edgecolor=PRIMARY_HEX, linewidth=1.0, alpha=0.95, zorder=8)
+            except Exception:
+                pass
+
+            # Rectangle showing the main-map extent (slightly expanded)
+            bx0, by0, bx1, by1 = main_bounds
+            bw, bh = (bx1 - bx0), (by1 - by0)
+            rx0 = bx0 - bw * rect_buffer_ratio
+            ry0 = by0 - bh * rect_buffer_ratio
+            rw = bw + 2 * bw * rect_buffer_ratio
+            rh = bh + 2 * bh * rect_buffer_ratio
+            rect = Rectangle((rx0, ry0), rw, rh, fill=False, edgecolor='red', linewidth=1.6, alpha=0.95, zorder=20)
+            axins.add_patch(rect)
+
+            _style_inset_box(fig, axins)
+        except Exception:
+            pass
+
+        plt.savefig(out_path, bbox_inches='tight', pad_inches=0.02)
+        plt.close(fig)
+        write_to_log(f"Segments map ({mode}) with inset saved: {out_path}", base_dir)
+        return True
+    except Exception as e:
+        write_to_log(f"Segments map with inset failed for {line_name}: {e}", base_dir)
+        plt.close('all')
+        return False
+
 # ---------------- Lines: overview across all lines ----------------
 def draw_lines_overview_map(segments_df: gpd.GeoDataFrame,
                             palette: dict,
@@ -3668,6 +3970,7 @@ def line_up_to_pdf(order_list):
     max_image_width_pts = 16 * RL_CM                 # usable frame width
     default_max_image_height_pts = 24 * RL_CM
     map_max_height_pts = MAX_MAP_CM_HEIGHT * RL_CM
+    line_map_max_height_pts = 14.0 * RL_CM
 
     ribbon_height_pts = RIBBON_CM_HEIGHT * RL_CM
     ribbon_width_pts  = max_image_width_pts          # <-- force ribbons to EXACT frame width
@@ -3685,6 +3988,10 @@ def line_up_to_pdf(order_list):
     def _is_map_image(path: str) -> bool:
         name = os.path.basename(path).lower()
         return any(tok in name for tok in ['map_', '_segments_', '_context'])
+
+    def _is_line_map_image(path: str) -> bool:
+        name = os.path.basename(path).lower()
+        return name.startswith('line_') and ('segments' in name or 'context' in name)
 
     def _is_atlas_image(path: str) -> bool:
         return 'atlas' in os.path.basename(path).lower()
@@ -3723,7 +4030,10 @@ def line_up_to_pdf(order_list):
             img.hAlign = 'CENTER'
 
             # Dual constraint: width + height caps (atlas images get narrower bounds)
-            max_h_pts = map_max_height_pts if _is_map_image(path) else default_max_image_height_pts
+            if _is_line_map_image(path):
+                max_h_pts = line_map_max_height_pts
+            else:
+                max_h_pts = map_max_height_pts if _is_map_image(path) else default_max_image_height_pts
             width_cap_pts = max_image_width_pts
             if _is_atlas_image(path):
                 width_cap_pts *= ATLAS_DOC_WIDTH_SCALE
@@ -3861,10 +4171,9 @@ def compile_docx(output_docx: str, order_list: list):
 
     MAX_IMAGE_WIDTH_CM = 16.0
     MAX_ATLAS_HEIGHT_CM = 18.0
-    # Line maps (context + segments) are often portrait-like and can become very tall
-    # when inserted at full text width. Clamp their display height to avoid Word moving
-    # them to the next page and leaving large whitespace.
-    MAX_LINE_MAP_HEIGHT_CM = 7.0
+    # Line maps are inserted together with distribution + ribbon.
+    # Allow a taller cap now that we use a single combined map (segments + context inset).
+    MAX_LINE_MAP_HEIGHT_CM = 14.0
     MAX_OVERVIEW_MAP_HEIGHT_CM = 10.0
 
     def _is_line_map_image(title: str | None, path: str | None) -> bool:
@@ -4226,6 +4535,40 @@ def generate_report(base_dir: str,
         if _REPORT_BASEMAP_MODE not in {'xyz', 'contextily', 'auto'}:
             _REPORT_BASEMAP_MODE = 'xyz'
         write_to_log(f"Report basemap mode: {_REPORT_BASEMAP_MODE}", base_dir)
+
+        # Inset styling (shadow + border). Configurable via config.ini.
+        global _REPORT_INSET_BORDER_COLOR, _REPORT_INSET_BORDER_LW
+        global _REPORT_INSET_SHADOW_ALPHA, _REPORT_INSET_SHADOW_DX, _REPORT_INSET_SHADOW_DY
+        try:
+            v = (cfg['DEFAULT'].get('report_inset_border_color', '') or '').strip()
+            if v:
+                _REPORT_INSET_BORDER_COLOR = v
+        except Exception:
+            pass
+        try:
+            v = _cfg_getfloat(cfg, 'DEFAULT', 'report_inset_border_lw', default=_REPORT_INSET_BORDER_LW)
+            if v is not None and float(v) > 0:
+                _REPORT_INSET_BORDER_LW = float(v)
+        except Exception:
+            pass
+        try:
+            v = _cfg_getfloat(cfg, 'DEFAULT', 'report_inset_shadow_alpha', default=_REPORT_INSET_SHADOW_ALPHA)
+            if v is not None:
+                _REPORT_INSET_SHADOW_ALPHA = max(0.0, min(1.0, float(v)))
+        except Exception:
+            pass
+        try:
+            v = _cfg_getfloat(cfg, 'DEFAULT', 'report_inset_shadow_dx', default=_REPORT_INSET_SHADOW_DX)
+            if v is not None:
+                _REPORT_INSET_SHADOW_DX = abs(float(v))
+        except Exception:
+            pass
+        try:
+            v = _cfg_getfloat(cfg, 'DEFAULT', 'report_inset_shadow_dy', default=_REPORT_INSET_SHADOW_DY)
+            if v is not None:
+                _REPORT_INSET_SHADOW_DY = abs(float(v))
+        except Exception:
+            pass
 
         include_atlas_cfg = _cfg_getboolean(cfg, 'DEFAULT', 'report_include_atlas_maps', default=False)
         if include_atlas_maps is None:
@@ -4799,7 +5142,7 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
 
     frame = tb.LabelFrame(root, text="Log", bootstyle="info")
     frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-    log_widget = scrolledtext.ScrolledText(frame, height=14)
+    log_widget = scrolledtext.ScrolledText(frame, height=8)
     log_widget.pack(fill=tk.BOTH, expand=True)
 
     pframe = tk.Frame(root); pframe.pack(pady=6)
