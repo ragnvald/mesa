@@ -2951,7 +2951,9 @@ def draw_line_context_map(line_row: pd.Series, out_path: str,
         except Exception:
             pass
 
-        plt.savefig(out_path, bbox_inches='tight')
+        # Avoid bbox_inches='tight' here: for narrow/tall lines it can produce extremely
+        # tall/narrow images, which then overflow pages when inserted into DOCX.
+        plt.savefig(out_path)
         plt.close(fig)
         write_to_log(f"Line context map saved: {out_path}", base_dir)
         return True
@@ -3030,7 +3032,9 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
         except Exception:
             pass
 
-        plt.savefig(out_path, bbox_inches='tight')
+        # Avoid bbox_inches='tight' here: for narrow/tall extents it can create very
+        # tall/narrow images that Word scales poorly.
+        plt.savefig(out_path)
         plt.close(fig)
         write_to_log(f"Segments map ({mode}) saved: {out_path}", base_dir)
         return True
