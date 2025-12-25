@@ -1032,28 +1032,32 @@ if __name__ == "__main__":
     ACTION_COLUMNS = 2
 
     workflow_sections = [
-        ("Prepare data (step 1)", "Import new sources and generate supporting geometry.", [
-            ("Area data", lambda: import_assets(gpkg_file),
-             "Start here when preparing a new dataset or refreshing existing inputs."),
+        ("Prepare data (step 1)", "Import new data and generate supporting geometries.", [
+            ("Area assets", lambda: import_assets(gpkg_file),
+             "Start here to import area asset (wetlands, mangrove forests etc)."),
             ("Geocodes", geocodes_grids,
              "Create or refresh the hexagon/tile grids that support analysis."),
-            ("Lines data", edit_lines,
-             "Import and edit line assets (transport, rivers, utilities) used for segmentation and analysis."),
+            ("Line assets", edit_lines,
+             "Import and edit line assets (transport, rivers, utilities, etc)."),
             ("Atlas", make_atlas,
              "Generate atlas polygons used in the QGIS atlas and the report engine."),
         ]),
-        ("Configure analysis (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
-            ("Set up processing", edit_processing_setup,
+        ("Configure processing (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
+            ("Processing parameters", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
-              ("Set up analysis", open_data_analysis_setup,
+              ("Set up area analysis", open_data_analysis_setup,
                "Define analysis groups and study area polygons."),
+            ("Edit assets", edit_assets,
+             "Add titles to imported layers, plus a short descriptive text."),
+            ("Edit atlas", edit_atlas,
+             "Edit atlas tile titles/metadata after creating/importing atlas tiles."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Process area", lambda: process_data(gpkg_file),
              "Runs the main area pipeline to refresh GeoParquet, MBTiles and stats."),
             ("Process line", process_lines,
              "Processes line assets (transport, rivers, utilities) into analysis-ready segments."),
-              ("Process analysis", open_analysis_process,
+              ("Process area analysis", open_analysis_process,
                "Processes the configured study areas into analysis GeoParquet tables."),
         ]),
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
@@ -1063,8 +1067,8 @@ if __name__ == "__main__":
              "Review current background layers together with processed assets."),
             ("Compare study areas", open_data_analysis_presentation,
              "Open the dashboard for comparing study groups."),
-            ("Reports", open_present_files,
-             "Render PDF reports based on the latest results."),
+            ("Report engine", open_present_files,
+             "Create a tailor made report based on the latest results."),
         ]),
     ]
 
@@ -1818,12 +1822,8 @@ if __name__ == "__main__":
     settings_actions = [
         ("Edit config", edit_main_config,
          "Open the config.ini editor to review or adjust global settings."),
-        ("Edit assets", edit_assets,
-         "This is where you can add titles to the different layers you have imported. You may also add a short descriptive text."),
         ("Edit geocodes", edit_geocodes,
          "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
-        ("Edit atlas", edit_atlas,
-         "Remember to import or create the atlas tiles before attempting to edit them. Atlas tiles are polygons highlighted in the QGIS project."),
     ]
 
     for row, (label, command, description) in enumerate(settings_actions):
