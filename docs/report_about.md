@@ -1,4 +1,4 @@
-MESA (Mapping Environmentally Sensitive Assets) is a method and tool for turning spatial asset information into sensitivity maps and summaries that support planning and decision-making. This report gathers the key results in one place so you can quickly understand what the analysis indicates for the selected study areas.
+MESA (Mapping Environmentally Sensitive Assets) is a method and tool for turning spatial asset information into sensitivity maps and summaries that support planning, planning review, decision-making and emergency response preparations. This report gathers the key results in one place so you can quickly understand what the analysis indicates for the selected study areas.
 
 The pages that follow provide a consistent “wrap” around the analysis: maps to show where patterns occur, charts and tables to summarise what was found, and a small set of visuals to help compare areas side-by-side. The intention is to make the findings readable without requiring specialist knowledge of the underlying processing.
 

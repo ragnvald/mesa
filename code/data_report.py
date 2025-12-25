@@ -1224,6 +1224,107 @@ class ReportEngine:
 
         return pages
 
+    def render_lines_overview(self,
+                              lines_df: gpd.GeoDataFrame,
+                              segments_df: gpd.GeoDataFrame,
+                              palette: dict,
+                              base_dir: str) -> list:
+        """Create a short overview section for all lines (map + distribution + summary table)."""
+        pages: list = []
+        if lines_df is None or segments_df is None:
+            return pages
+        if lines_df.empty or segments_df.empty:
+            return pages
+        if 'name_gis' not in lines_df.columns or 'geometry' not in lines_df.columns:
+            return pages
+        if 'name_gis' not in segments_df.columns:
+            return pages
+
+        segs = segments_df.copy()
+        if 'geometry' in segs.columns:
+            segs = segs[segs['geometry'].notna()].copy()
+
+        if segs.empty:
+            return pages
+
+        # Normalize max sensitivity code (robust against missing code vs numeric).
+        segs['__sens_code_max'] = segs.apply(
+            lambda row: _normalize_sensitivity_code(
+                row.get('sensitivity_code_max'),
+                row.get('sensitivity_max')
+            ),
+            axis=1
+        )
+
+        # Overview map + distribution image.
+        overview_map = self.make_path("lines", "overview", "map")
+        dist_png = self.make_path("lines", "overview", "distribution")
+        ok_map = draw_lines_overview_map(segs, palette, overview_map, mode='max', pad_ratio=0.08, base_dir=base_dir)
+        create_sensitivity_summary(segs['__sens_code_max'], palette, dist_png)
+
+        if ok_map and _file_ok(overview_map):
+            pages.append(('heading(3)', "All lines – overview map"))
+            pages.append(('text', "All line segments colored by <b>maximum sensitivity</b> (A–E palette)."))
+            pages.append(('image_map', ("Lines overview (max sensitivity)", overview_map)))
+
+        if _file_ok(dist_png):
+            pages.append(('heading(3)', "All lines – sensitivity distribution"))
+            pages.append(('image', ("Maximum sensitivity – distribution", dist_png)))
+
+        # Summary table per line.
+        pages.append(('heading(3)', "Per-line summary"))
+
+        counts = (
+            segs.groupby(['name_gis', '__sens_code_max'])
+            .size()
+            .unstack(fill_value=0)
+        )
+        for code in ['A', 'B', 'C', 'D', 'E']:
+            if code not in counts.columns:
+                counts[code] = 0
+
+        seg_count = segs.groupby('name_gis').size().rename('__segments').to_frame()
+        per_line = lines_df[['name_gis', 'geometry']].copy()
+        per_line['name_gis'] = per_line['name_gis'].astype('string')
+        try:
+            g_len = gpd.GeoDataFrame(per_line[['geometry']].copy(), geometry='geometry', crs=lines_df.crs)
+            g_len = g_len[g_len.geometry.notna()].copy()
+            g_len_3857 = _safe_to_3857(g_len)
+            per_line['length_m'] = g_len_3857.geometry.length.reindex(per_line.index).fillna(0.0)
+        except Exception:
+            per_line['length_m'] = 0.0
+        per_line = per_line.merge(seg_count, left_on='name_gis', right_index=True, how='left')
+        per_line = per_line.merge(counts[['A', 'B', 'C', 'D', 'E']], left_on='name_gis', right_index=True, how='left')
+        per_line = per_line.fillna(0)
+
+        def _km(v) -> str:
+            try:
+                return f"{float(v)/1000.0:,.2f}"
+            except Exception:
+                return "0.00"
+
+        table = [["Line", "Length (km)", "Segments", "A", "B", "C", "D", "E"]]
+        try:
+            per_line = per_line.sort_values('name_gis')
+        except Exception:
+            pass
+
+        for _, r in per_line.iterrows():
+            table.append([
+                str(r.get('name_gis', '')),
+                _km(r.get('length_m', 0.0)),
+                int(r.get('__segments', 0) or 0),
+                int(r.get('A', 0) or 0),
+                int(r.get('B', 0) or 0),
+                int(r.get('C', 0) or 0),
+                int(r.get('D', 0) or 0),
+                int(r.get('E', 0) or 0),
+            ])
+
+        pages.append(('table_data', ("Line overview", table)))
+        pages.append(('new_page', None))
+        return pages
+
     def render_segments(self,
                         lines_df: gpd.GeoDataFrame,
                         segments_df: gpd.GeoDataFrame,
@@ -1234,11 +1335,22 @@ class ReportEngine:
         log_data = []
         if (lines_df.empty or segments_df.empty or
             {'name_gis','segment_id','sensitivity_code_max','sensitivity_code_min'}.issubset(segments_df.columns) is False or
-            'length_m' not in lines_df.columns or 'geometry' not in lines_df.columns):
+            'name_gis' not in lines_df.columns or 'geometry' not in lines_df.columns):
             return pages_lines, log_data
 
-        total = len(lines_df)
-        for idx, line in lines_df.iterrows():
+        # tbl_lines may not have a precomputed length_m column; derive it from geometry.
+        lines_work = lines_df.copy()
+        if 'length_m' not in lines_work.columns:
+            try:
+                g_len = gpd.GeoDataFrame(lines_work[['geometry']].copy(), geometry='geometry', crs=lines_df.crs)
+                g_len = g_len[g_len.geometry.notna()].copy()
+                g_len_3857 = _safe_to_3857(g_len)
+                lines_work['length_m'] = g_len_3857.geometry.length.reindex(lines_work.index).fillna(0.0)
+            except Exception:
+                lines_work['length_m'] = 0.0
+
+        total = len(lines_work)
+        for idx, line in lines_work.iterrows():
             ln_visible = line['name_gis']
             ln_safe = _safe_name(ln_visible)
             length_m = float(line.get('length_m', 0) or 0)
@@ -2802,7 +2914,7 @@ def draw_line_context_map(line_row: pd.Series, out_path: str,
             write_to_log(f"[{line_row.get('name_gis','?')}] Invalid geometry after reprojection.", base_dir)
             return False
 
-        fig_h_in = 7.5
+        fig_h_in = 10.0
         fig_w_in = 10.0
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
@@ -2874,7 +2986,7 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
             write_to_log(f"[{line_name}] Segments reprojection failed.", base_dir)
             return False
 
-        fig_h_in = 7.5
+        fig_h_in = 10.0
         fig_w_in = 10.0
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
@@ -2924,6 +3036,83 @@ def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
         return True
     except Exception as e:
         write_to_log(f"Segments map failed for {line_name}: {e}", base_dir)
+        plt.close('all')
+        return False
+
+# ---------------- Lines: overview across all lines ----------------
+def draw_lines_overview_map(segments_df: gpd.GeoDataFrame,
+                            palette: dict,
+                            out_path: str,
+                            mode: str = 'max',
+                            pad_ratio: float = 0.08,
+                            base_dir: str | None = None) -> bool:
+    """Draw a single overview map for all line segments, colored by sensitivity (max or min)."""
+    try:
+        if segments_df is None or segments_df.empty or 'geometry' not in segments_df.columns:
+            write_to_log("Lines overview map skipped (no segment geometries).", base_dir)
+            return False
+
+        col = 'sensitivity_code_max' if mode == 'max' else 'sensitivity_code_min'
+        value_col = 'sensitivity_max' if mode == 'max' else 'sensitivity_min'
+        segs = segments_df[segments_df['geometry'].notna()].copy()
+        if segs.empty:
+            write_to_log("Lines overview map skipped (all segment geometries empty).", base_dir)
+            return False
+
+        segs = _safe_to_3857(segs)
+        if segs.empty:
+            write_to_log("Lines overview map reprojection failed; skipping.", base_dir)
+            return False
+
+        fig_h_in = 10.0
+        fig_w_in = 10.0
+        dpi = _dpi_for_fig_height(fig_h_in)
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+
+        b = segs.total_bounds
+        minx, miny, maxx, maxy = _expand_bounds(b, pad_ratio)
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        polys = segs[segs.geometry.type.isin(['Polygon','MultiPolygon'])]
+        lines = segs[segs.geometry.type.isin(['LineString','MultiLineString'])]
+
+        if not polys.empty:
+            polys_ann = _prepare_sensitivity_annotations(polys, col, value_col)
+            colors_polys = _colors_from_annotations(polys_ann, palette)
+            polys_ann.plot(ax=ax,
+                           color=colors_polys,
+                           edgecolor='white',
+                           linewidth=0.35,
+                           alpha=0.90,
+                           zorder=12)
+
+        if not lines.empty:
+            lines_ann = _prepare_sensitivity_annotations(lines, col, value_col)
+            line_colors = _colors_from_annotations(lines_ann, palette)
+            line_colors_rgba = [mcolors.to_rgba(c, alpha=1.0) for c in line_colors]
+            try:
+                lines.plot(ax=ax, color='white', linewidth=4.0, alpha=0.90, zorder=13)
+            except Exception:
+                pass
+            lines.plot(ax=ax, color=line_colors_rgba, linewidth=2.2, alpha=1.0, zorder=14)
+
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
+        except Exception:
+            pass
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        write_to_log(f"Lines overview map saved: {out_path}", base_dir)
+        return True
+    except Exception as e:
+        write_to_log(f"Lines overview map failed: {e}", base_dir)
         plt.close('all')
         return False
 
@@ -3668,6 +3857,44 @@ def compile_docx(output_docx: str, order_list: list):
 
     MAX_IMAGE_WIDTH_CM = 16.0
     MAX_ATLAS_HEIGHT_CM = 18.0
+    # Line maps (context + segments) are often portrait-like and can become very tall
+    # when inserted at full text width. Clamp their display height to avoid Word moving
+    # them to the next page and leaving large whitespace.
+    MAX_LINE_MAP_HEIGHT_CM = 7.0
+    MAX_OVERVIEW_MAP_HEIGHT_CM = 10.0
+
+    def _is_line_map_image(title: str | None, path: str | None) -> bool:
+        if not path:
+            return False
+        base = os.path.basename(str(path)).lower()
+        if "_context" in base or base.endswith("context.png") or "context" in base:
+            return True
+        if "segments_" in base or "_segments" in base or "segments" in base:
+            return True
+        if title:
+            t = str(title).lower()
+            if "geographical context" in t:
+                return True
+            if "segments" in t and "sensitivity" in t:
+                return True
+        return False
+
+    def _docx_add_picture_with_height_clamp(img_path: str, *, target_width_cm: float, max_height_cm: float):
+        """Add a picture at up to target_width_cm, but reduce width if needed to keep height <= max_height_cm."""
+        out_w_cm = float(target_width_cm)
+        try:
+            with PILImage.open(img_path) as im:
+                w_px, h_px = im.size
+            if w_px and h_px and w_px > 0 and h_px > 0:
+                aspect = float(h_px) / float(w_px)
+                out_h_cm = out_w_cm * aspect
+                if out_h_cm > float(max_height_cm):
+                    out_h_cm = float(max_height_cm)
+                    out_w_cm = out_h_cm / aspect
+        except Exception:
+            # If we can't read image metadata, fall back to the target width.
+            out_w_cm = float(target_width_cm)
+        doc.add_picture(img_path, width=Cm(out_w_cm))
 
     def add_heading(level: int, text: str):
         clean = _clean_docx_text(text)
@@ -3772,7 +3999,7 @@ def compile_docx(output_docx: str, order_list: list):
                 last_was_page_break = True
             add_bold_title("Contents")
             p = doc.add_paragraph()
-            _add_field(p, 'TOC \\o "2-3" \\h \\z \\u', placeholder="(Table of contents will appear when fields are updated in Word)")
+            _add_field(p, 'TOC \\o "2-3" \\h \\z \\u', placeholder="(Put your marker here and press F9 to update the table of contents.)")
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             has_any_content = True
             last_was_page_break = False
@@ -3855,6 +4082,20 @@ def compile_docx(output_docx: str, order_list: list):
                             doc.add_picture(path, width=Cm(out_w_cm))
                         else:
                             doc.add_picture(path, width=Cm(width_cm))
+                    # Line context/segment maps: clamp height (portrait maps can overflow page)
+                    elif _is_line_map_image(title, path):
+                        _docx_add_picture_with_height_clamp(
+                            path,
+                            target_width_cm=width_cm,
+                            max_height_cm=float(MAX_LINE_MAP_HEIGHT_CM),
+                        )
+                    # Overview maps: keep wide but avoid extreme height
+                    elif kind == "image_map":
+                        _docx_add_picture_with_height_clamp(
+                            path,
+                            target_width_cm=width_cm,
+                            max_height_cm=float(MAX_OVERVIEW_MAP_HEIGHT_CM),
+                        )
                     else:
                         doc.add_picture(path, width=Cm(width_cm))
 
@@ -4058,21 +4299,58 @@ def generate_report(base_dir: str,
 
         # ---- Lines & segments (grouped per line with context & segments maps) ----
         pages_lines = []
+        pages_lines_overview = []
         if include_lines_and_segments and engine is not None:
+            lines_pq = os.path.join(gpq_dir, "tbl_lines.parquet")
+            segments_pq = os.path.join(gpq_dir, "tbl_segment_flat.parquet")
+            if not os.path.exists(lines_pq):
+                write_to_log(f"Parquet table tbl_lines not found at {lines_pq}", base_dir)
+            if not os.path.exists(segments_pq):
+                write_to_log(f"Parquet table tbl_segment_flat not found at {segments_pq}", base_dir)
+
             lines_df, segments_df = fetch_lines_and_segments(gpq_dir)
+            try:
+                write_to_log(f"Lines table: {len(lines_df)} rows; Segments table: {len(segments_df)} rows", base_dir)
+            except Exception:
+                pass
+
+            try:
+                set_progress(23, "Rendering line overview …")
+                pages_lines_overview = engine.render_lines_overview(lines_df, segments_df, palette_A2E, base_dir)
+            except Exception as exc:
+                write_to_log(f"Line overview failed: {exc}", base_dir)
+                pages_lines_overview = []
 
             def _progress_segments(done: int, total: int):
                 set_progress(25 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
 
             pages_lines, log_data = engine.render_segments(lines_df, segments_df, palette_A2E, base_dir, _progress_segments)
 
-            if log_data:
-                log_df = pd.DataFrame(log_data)
-                log_xlsx = os.path.join(tmp_dir, 'line_segment_log.xlsx')
-                export_to_excel(log_df, log_xlsx)
-                write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
+            if pages_lines:
+                if log_data:
+                    log_df = pd.DataFrame(log_data)
+                    log_xlsx = os.path.join(tmp_dir, 'line_segment_log.xlsx')
+                    export_to_excel(log_df, log_xlsx)
+                    write_to_log(f"Segments log exported to {log_xlsx}", base_dir)
+                else:
+                    write_to_log("Line/segment pages created, but segment log is empty (no segments matched lines).", base_dir)
             else:
-                write_to_log("Skipping line/segment pages (missing/empty).", base_dir)
+                # Provide a more actionable reason summary.
+                reason_bits = []
+                if lines_df is None or getattr(lines_df, 'empty', True):
+                    reason_bits.append("tbl_lines is empty")
+                if segments_df is None or getattr(segments_df, 'empty', True):
+                    reason_bits.append("tbl_segment_flat is empty")
+                if segments_df is not None and not getattr(segments_df, 'empty', True):
+                    missing = [c for c in ['name_gis','segment_id','sensitivity_code_max','sensitivity_code_min'] if c not in segments_df.columns]
+                    if missing:
+                        reason_bits.append(f"tbl_segment_flat missing columns: {', '.join(missing)}")
+                if lines_df is not None and not getattr(lines_df, 'empty', True):
+                    missing_l = [c for c in ['name_gis','length_m','geometry'] if c not in lines_df.columns]
+                    if missing_l:
+                        reason_bits.append(f"tbl_lines missing columns: {', '.join(missing_l)}")
+                msg = "; ".join(reason_bits) if reason_bits else "missing/invalid inputs"
+                write_to_log(f"Skipping line/segment pages ({msg}).", base_dir)
             set_progress(35, "Lines/segments processed.")
         else:
             write_to_log("Skipping lines/segments section (not selected).", base_dir)
@@ -4169,6 +4447,8 @@ def generate_report(base_dir: str,
             contents_lines.append("- Other maps (basic_mosaic)")
         if include_index_statistics:
             contents_lines.append("- Index statistics + maps (basic_mosaic)")
+        if include_lines_and_segments:
+            contents_lines.append("- Line overview (summary across all lines)")
         if include_atlas_maps and atlas_pages:
             contents_lines.append("- Atlas tile maps (per atlas object with inset)")
         if include_lines_and_segments:
@@ -4399,6 +4679,24 @@ def generate_report(base_dir: str,
         else:
             order_list.append(('text', "No index statistics could be generated (missing data/columns)."))
             order_list.append(('new_page', None))
+
+        # Insert line overview immediately before the Atlas section.
+        if include_lines_and_segments and pages_lines_overview:
+            order_list.append(('heading(2)', "Line overview"))
+            order_list.append(('text', "A short summary across all lines: overview map, distribution, and per-line totals."))
+            order_list.append(('rule', None))
+            order_list.extend(pages_lines_overview)
+
+        # Place line details immediately after the line overview.
+        if include_lines_and_segments and pages_lines:
+            order_list.append(('heading(2)', "Lines and segments"))
+            order_list.append(('text', "Images contain only cartography—no embedded titles. "
+                                       "Ribbons are fixed to 0.6 cm high and the full text width. "
+                                       "Distance markers are written as text before each ribbon."))
+            order_list.append(('rule', None))
+            order_list.append(('new_page', None))
+            order_list.extend(pages_lines)
+
         if atlas_pages:
             order_list.append(('heading(2)', "Atlas maps"))
             atlas_intro = ("Each atlas tile focuses on a subset of the study area. "
@@ -4408,14 +4706,9 @@ def generate_report(base_dir: str,
             order_list.append(('text', atlas_intro))
             order_list.extend(atlas_pages)
 
-        if include_lines_and_segments and pages_lines:
-            order_list.append(('heading(2)', "Lines and segments"))
-            order_list.append(('text', "Images contain only cartography—no embedded titles. "
-                                       "Ribbons are fixed to 0.6 cm high and the full text width. "
-                                       "Distance markers are written as text before each ribbon."))
-            order_list.append(('rule', None))
-            order_list.append(('new_page', None))
-            order_list.extend(pages_lines)
+        # Avoid creating a trailing blank page in DOCX/PDF when the report ends with a page break.
+        while order_list and isinstance(order_list[-1], tuple) and order_list[-1][0] == 'new_page':
+            order_list.pop()
 
         set_progress(86, "Composing Word report …")
         elements = line_up_to_pdf(order_list)
