@@ -12,8 +12,6 @@ import datetime
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib import cm  # still used for ScalarMappable (not deprecated)
-from matplotlib import colormaps as mpl_cmaps  # modern colormap access
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
 try:
@@ -31,36 +29,25 @@ except Exception:
 from matplotlib.patches import Rectangle, PathPatch
 from matplotlib.ticker import MaxNLocator
 
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Image, Spacer,
-    Table, TableStyle, PageBreak, HRFlowable
-)
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.units import cm as RL_CM
-from reportlab.lib.colors import HexColor
 from PIL import Image as PILImage
 import re
 import tkinter as tk
 from tkinter import scrolledtext
 import ttkbootstrap as tb
-from ttkbootstrap.constants import PRIMARY, WARNING
+from ttkbootstrap.constants import WARNING
 import threading
 from pathlib import Path
 import subprocess
 import io, math, time, urllib.request
 import sqlite3
 from docx import Document
-from docx.shared import Inches, Pt, Cm
+from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 # ---------------- UI / sizing constants ----------------
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
-MAX_MAP_CM_HEIGHT = 10.0           # map display cap inside PDF (cm)
 RIBBON_CM_HEIGHT   = 0.6           # ribbon display height inside PDF (cm)
 ATLAS_FIGURE_INCHES = (7.2, 7.2)   # atlas tiles render smaller to fit more per page
 ATLAS_DOC_WIDTH_SCALE = 0.75       # reduce displayed width of atlas images inside documents
@@ -527,100 +514,6 @@ def _geom_to_mpl_path(geom) -> MplPath | None:
         return MplPath(vertices, codes)
     except Exception:
         return None
-
-
-def _analysis_write_area_polygon_only_png(
-    polygons_3857: gpd.GeoDataFrame,
-    out_path: str,
-    *,
-    bounds_3857: tuple[float, float, float, float],
-    base_dir: str | None,
-    fill_alpha: float = 0.12,
-) -> bool:
-    """Fallback: basemap clipped to the study area polygon, with filled polygon."""
-    try:
-        if polygons_3857 is None or polygons_3857.empty:
-            return False
-
-        try:
-            if hasattr(polygons_3857, "union_all"):
-                union_geom = polygons_3857.union_all()
-            else:
-                union_geom = polygons_3857.unary_union
-        except Exception:
-            union_geom = None
-
-        if union_geom is None or getattr(union_geom, "is_empty", True):
-            return False
-
-        fig_h_in = 4.2
-        fig_w_in = 5.8
-        dpi = 180
-        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-        ax.set_axis_off()
-
-        minx, miny, maxx, maxy = bounds_3857
-        ax.set_xlim(minx, maxx)
-        ax.set_ylim(miny, maxy)
-        try:
-            ax.set_aspect('equal', adjustable='box')
-        except Exception:
-            pass
-
-        # Basemap should cover the full extent (do NOT clip it)
-        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
-
-        # Fill polygon (to make the study area stand out)
-        try:
-            polygons_3857.plot(
-                ax=ax,
-                color=LIGHT_PRIMARY_HEX,
-                alpha=float(max(0.0, min(1.0, fill_alpha))),
-                edgecolor='none',
-                linewidth=0.0,
-                zorder=9,
-            )
-        except Exception:
-            pass
-
-        # Intentionally no boundary outline here.
-        # Outlines (often blue) make multi-polygons look like separate highlighted shapes.
-
-        plt.savefig(out_path, bbox_inches='tight')
-        plt.close(fig)
-        return True
-    except Exception:
-        try:
-            plt.close('all')
-        except Exception:
-            pass
-        return False
-
-
-def _analysis_write_minimap_png(polygons_gdf: gpd.GeoDataFrame, out_path: str) -> bool:
-    try:
-        if polygons_gdf is None or polygons_gdf.empty or "geometry" not in polygons_gdf.columns:
-            return False
-        gdf = polygons_gdf.dropna(subset=["geometry"]).copy()
-        if gdf.empty:
-            return False
-        fig, ax = plt.subplots(figsize=(3.2, 2.2), dpi=170)
-        ax.set_axis_off()
-        try:
-            gdf.boundary.plot(ax=ax, linewidth=1.2, color="#2f3e46")
-            gdf.plot(ax=ax, color="#adb5bd", alpha=0.35, edgecolor="#2f3e46", linewidth=1.0)
-        except Exception:
-            gdf.plot(ax=ax, color="#adb5bd", alpha=0.35)
-        try:
-            ax.set_aspect("equal", adjustable="box")
-        except Exception:
-            pass
-        fig.tight_layout(pad=0.1)
-        fig.savefig(out_path, bbox_inches="tight")
-        plt.close(fig)
-        return True
-    except Exception:
-        return False
 
 
 def _analysis_write_sensitivity_bar_png(totals_df: pd.DataFrame, palette_A2E: dict, out_path: str, title: str) -> bool:
@@ -2562,206 +2455,6 @@ def render_mbtiles_to_png_best_fit(mbtiles_path: str,
         write_to_log(f"MBTiles render failed ({mbtiles_path}): {e}", base_dir)
         return False, str(e)
 
-
-def render_mbtiles_to_png_for_3857_bounds(
-    mbtiles_path: str,
-    out_png: str,
-    bounds_3857: tuple[float, float, float, float],
-    *,
-    base_dir: str | None = None,
-    overlay_alpha: float = 0.65,
-    clip_geom_3857=None,
-) -> tuple[bool, str]:
-    """Stitch MBTiles into a PNG for an arbitrary EPSG:3857 bounds.
-
-    The output is composited over a basemap; the MBTiles overlay is drawn with `overlay_alpha`.
-    """
-    try:
-        if not os.path.exists(mbtiles_path):
-            return False, "mbtiles not found"
-        if bounds_3857 is None or len(bounds_3857) != 4:
-            return False, "bounds missing"
-
-        minx, miny, maxx, maxy = bounds_3857
-        if not (math.isfinite(minx) and math.isfinite(miny) and math.isfinite(maxx) and math.isfinite(maxy)):
-            return False, "invalid bounds"
-        if maxx <= minx or maxy <= miny:
-            return False, "invalid bounds"
-
-        lon0, lat0 = merc_to_lonlat(minx, miny)
-        lon1, lat1 = merc_to_lonlat(maxx, maxy)
-        req_minlon = min(lon0, lon1)
-        req_maxlon = max(lon0, lon1)
-        req_minlat = min(lat0, lat1)
-        req_maxlat = max(lat0, lat1)
-
-        conn = sqlite3.connect(mbtiles_path)
-        try:
-            meta = _mbtiles_metadata(conn)
-            mb_bounds = _parse_mbtiles_bounds(meta)
-            if mb_bounds is None:
-                return False, "MBTiles missing bounds"
-            minz = _parse_mbtiles_zoom(meta, "minzoom", 0)
-            maxz = _parse_mbtiles_zoom(meta, "maxzoom", 19)
-
-            mb_minlon, mb_minlat, mb_maxlon, mb_maxlat = mb_bounds
-            # Clamp requested area to what the MBTiles contains.
-            minlon = max(req_minlon, mb_minlon)
-            maxlon = min(req_maxlon, mb_maxlon)
-            minlat = max(req_minlat, mb_minlat)
-            maxlat = min(req_maxlat, mb_maxlat)
-            if maxlon <= minlon or maxlat <= minlat:
-                return False, "requested bounds outside MBTiles"
-
-            tile_size = 256
-
-            # Pick a zoom that fits within our pixel caps.
-            chosen_z = maxz
-            while chosen_z > minz:
-                x_w, y_n = _lonlat_to_tile_fraction(minlon, maxlat, chosen_z)
-                x_e, y_s = _lonlat_to_tile_fraction(maxlon, minlat, chosen_z)
-                x0 = int(math.floor(min(x_w, x_e)))
-                x1 = int(math.floor(max(x_w, x_e)))
-                y0 = int(math.floor(min(y_n, y_s)))
-                y1 = int(math.floor(max(y_n, y_s)))
-                w_px = (x1 - x0 + 1) * tile_size
-                h_px = (y1 - y0 + 1) * tile_size
-                tiles = (x1 - x0 + 1) * (y1 - y0 + 1)
-                if w_px <= MAX_MAP_PX_WIDTH and h_px <= MAX_MAP_PX_HEIGHT and tiles <= 400:
-                    break
-                chosen_z -= 1
-
-            z = max(minz, chosen_z)
-
-            x_w, y_n = _lonlat_to_tile_fraction(minlon, maxlat, z)
-            x_e, y_s = _lonlat_to_tile_fraction(maxlon, minlat, z)
-            x0 = int(math.floor(min(x_w, x_e)))
-            x1 = int(math.floor(max(x_w, x_e)))
-            y0 = int(math.floor(min(y_n, y_s)))
-            y1 = int(math.floor(max(y_n, y_s)))
-
-            width = (x1 - x0 + 1) * tile_size
-            height = (y1 - y0 + 1) * tile_size
-            if width <= 0 or height <= 0:
-                return False, "Invalid tile bounds"
-
-            canvas = PILImage.new("RGBA", (width, height), (0, 0, 0, 0))
-            blank = PILImage.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
-
-            for xt in range(x0, x1 + 1):
-                for yt in range(y0, y1 + 1):
-                    tile_bytes = _get_mbtiles_tile_bytes(conn, z, xt, yt)
-                    if tile_bytes:
-                        try:
-                            tile_img = PILImage.open(io.BytesIO(tile_bytes)).convert("RGBA")
-                        except Exception:
-                            tile_img = blank
-                    else:
-                        tile_img = blank
-                    px = (xt - x0) * tile_size
-                    py = (yt - y0) * tile_size
-                    canvas.paste(tile_img, (px, py))
-
-            # Crop to exact requested bounds
-            left = int(round((min(x_w, x_e) - x0) * tile_size))
-            right = int(round((max(x_w, x_e) - x0) * tile_size))
-            top = int(round((min(y_n, y_s) - y0) * tile_size))
-            bottom = int(round((max(y_n, y_s) - y0) * tile_size))
-            left = max(0, min(width - 1, left))
-            right = max(left + 1, min(width, right))
-            top = max(0, min(height - 1, top))
-            bottom = max(top + 1, min(height, bottom))
-            canvas = canvas.crop((left, top, right, bottom))
-
-            # Final safety resize
-            if canvas.size[0] > MAX_MAP_PX_WIDTH or canvas.size[1] > MAX_MAP_PX_HEIGHT:
-                ratio = min(MAX_MAP_PX_WIDTH / canvas.size[0], MAX_MAP_PX_HEIGHT / canvas.size[1])
-                new_w = max(1, int(canvas.size[0] * ratio))
-                new_h = max(1, int(canvas.size[1] * ratio))
-                canvas = canvas.resize((new_w, new_h), PILImage.LANCZOS)
-
-            # Composite over basemap
-            try:
-                fig_h_in = 4.2
-                fig_w_in = 5.8
-                dpi = 180
-                fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-                ax.set_axis_off()
-
-                west_x, north_y = lonlat_to_merc(minlon, maxlat)
-                east_x, south_y = lonlat_to_merc(maxlon, minlat)
-                ax.set_xlim(west_x, east_x)
-                ax.set_ylim(south_y, north_y)
-                try:
-                    ax.set_aspect('equal', adjustable='box')
-                except Exception:
-                    pass
-
-                _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
-                overlay_im = ax.imshow(
-                    canvas,
-                    extent=[west_x, east_x, south_y, north_y],
-                    origin="upper",
-                    interpolation='nearest',
-                    alpha=float(max(0.0, min(1.0, overlay_alpha))),
-                    zorder=10,
-                )
-
-                # Optional: clip everything to the study area polygon and fill it
-                clip_patch = None
-                try:
-                    if clip_geom_3857 is not None and not getattr(clip_geom_3857, 'is_empty', True):
-                        clip_path = _geom_to_mpl_path(clip_geom_3857)
-                        if clip_path is not None:
-                            clip_patch = PathPatch(clip_path, facecolor='none', edgecolor='none', transform=ax.transData)
-                            ax.add_patch(clip_patch)
-                except Exception:
-                    clip_patch = None
-
-                if clip_patch is not None:
-                    # Clip only the overlay (basemap remains un-clipped)
-                    try:
-                        overlay_im.set_clip_path(clip_patch)
-                    except Exception:
-                        pass
-
-                    # Subtle fill to make study area stand out
-                    try:
-                        ax.add_patch(
-                            PathPatch(
-                                clip_patch.get_path(),
-                                transform=ax.transData,
-                                facecolor=LIGHT_PRIMARY_HEX,
-                                edgecolor='none',
-                                alpha=0.10,
-                                zorder=9,
-                            )
-                        )
-                    except Exception:
-                        pass
-
-                    # Intentionally no outline: avoid blue borders and per-part outlines.
-
-                _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=False)
-                plt.savefig(out_png, bbox_inches='tight')
-                plt.close(fig)
-                return True, ""
-            except Exception:
-                try:
-                    plt.close('all')
-                except Exception:
-                    pass
-                canvas.save(out_png)
-                return True, ""
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-    except Exception as e:
-        write_to_log(f"MBTiles bounds render failed ({mbtiles_path}): {e}", base_dir)
-        return False, str(e)
-
 # ---------------- tbl_flat (per-geocode maps) ----------------
 def load_tbl_flat(parquet_dir: str, base_dir: str | None = None) -> gpd.GeoDataFrame:
     fp = os.path.join(parquet_dir, "tbl_flat.parquet")
@@ -2793,23 +2486,6 @@ def compute_fixed_bounds_3857(flat_df: gpd.GeoDataFrame, base_dir: str | None = 
     except Exception as e:
         write_to_log(f"Failed computing fixed bounds: {e}", base_dir)
         return None
-
-def _legend_for_sensitivity(ax, palette: dict, desc: dict, base_dir: str | None = None):
-    try:
-        y0 = 0.02
-        dy = 0.06
-        for i, code in enumerate(['A','B','C','D','E']):
-            y = y0 + i*dy
-            ax.add_patch(plt.Rectangle((0.02, y), 0.04, 0.035,
-                                       transform=ax.transAxes,
-                                       color=palette.get(code, '#BDBDBD'),
-                                       ec='white', lw=0.8))
-            label = f"{code}: {desc.get(code,'')}".strip() or code
-            ax.text(0.07, y+0.005, label, transform=ax.transAxes,
-                    fontsize=9, color='white',
-                    bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.35, ec="none"))
-    except Exception as e:
-        write_to_log(f"Sensitivity legend failed: {e}", base_dir)
 
 def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
                                group_name: str,
@@ -3030,156 +2706,6 @@ def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
         return False
 
 # ---------------- Lines: context + segments map ----------------
-def draw_line_context_map(line_row: pd.Series, out_path: str,
-                          pad_ratio: float = 1.0,
-                          rect_buffer_ratio: float = 0.03,
-                          base_dir: str | None = None):
-    """
-    Draw a geographical context map for the line.
-    pad_ratio = 1.0 means a 100% buffer around the line's bounding box.
-    """
-    try:
-        geom = line_row.get('geometry', None)
-        if geom is None:
-            write_to_log(f"[{line_row.get('name_gis','?')}] Missing geometry; cannot draw context map.", base_dir)
-            return False
-
-        g = gpd.GeoDataFrame([{'name_gis': line_row.get('name_gis','(line)'), 'geometry': geom}], crs=None)
-        g = _safe_to_3857(g)
-        if g.empty or g.geometry.is_empty.all():
-            write_to_log(f"[{line_row.get('name_gis','?')}] Invalid geometry after reprojection.", base_dir)
-            return False
-
-        fig_h_in = 10.0
-        fig_w_in = 10.0
-        dpi = _dpi_for_fig_height(fig_h_in)
-        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-        ax.set_axis_off()
-
-        b = g.total_bounds
-        minx, miny, maxx, maxy = _expand_bounds(b, pad_ratio)
-        ax.set_xlim(minx, maxx)
-        ax.set_ylim(miny, maxy)
-
-        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
-
-        # Red rectangle around line bbox (slightly expanded)
-        bx0, by0, bx1, by1 = b
-        bw, bh = (bx1 - bx0), (by1 - by0)
-        rx0 = bx0 - bw * rect_buffer_ratio
-        ry0 = by0 - bh * rect_buffer_ratio
-        rw  = bw + 2 * bw * rect_buffer_ratio
-        rh  = bh + 2 * bh * rect_buffer_ratio
-        rect = Rectangle((rx0, ry0), rw, rh, fill=False, edgecolor='red', linewidth=2.0, alpha=0.95, zorder=20)
-        ax.add_patch(rect)
-
-        # Halo + line on top
-        try:
-            g.plot(ax=ax, color='none', edgecolor='white', linewidth=5.0, alpha=0.9, zorder=21)
-        except Exception:
-            pass
-        g.plot(ax=ax, color='none', edgecolor=PRIMARY_HEX, linewidth=2.2, alpha=1.0, zorder=22)
-
-        try:
-            minx, maxx = ax.get_xlim()
-            miny, maxy = ax.get_ylim()
-            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
-        except Exception:
-            pass
-
-        # Avoid bbox_inches='tight' here: for narrow/tall lines it can produce extremely
-        # tall/narrow images, which then overflow pages when inserted into DOCX.
-        plt.savefig(out_path)
-        plt.close(fig)
-        write_to_log(f"Line context map saved: {out_path}", base_dir)
-        return True
-    except Exception as e:
-        write_to_log(f"Context map failed for line: {e}", base_dir)
-        plt.close('all')
-        return False
-
-def draw_line_segments_map(segments_df: gpd.GeoDataFrame,
-                           line_name: str,
-                           palette: dict,
-                           out_path: str,
-                           mode: str = 'max',
-                           pad_ratio: float = 0.20,
-                           base_dir: str | None = None):
-    """
-    Draw segments for a given line, colored by sensitivity (max or min), with basemap.
-    """
-    try:
-        if segments_df.empty or 'geometry' not in segments_df.columns:
-            write_to_log(f"[{line_name}] No geometry in segments; skipping segments map.", base_dir)
-            return False
-
-        col = 'sensitivity_code_max' if mode == 'max' else 'sensitivity_code_min'
-        segs = segments_df[(segments_df['name_gis'] == line_name) & (segments_df['geometry'].notna())].copy()
-        if segs.empty:
-            write_to_log(f"[{line_name}] No segments found for segments map.", base_dir)
-            return False
-
-        segs = _safe_to_3857(segs)
-        if segs.empty:
-            write_to_log(f"[{line_name}] Segments reprojection failed.", base_dir)
-            return False
-
-        fig_h_in = 10.0
-        fig_w_in = 10.0
-        dpi = _dpi_for_fig_height(fig_h_in)
-        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-        ax.set_axis_off()
-
-        b = segs.total_bounds
-        minx, miny, maxx, maxy = _expand_bounds(b, pad_ratio)
-        ax.set_xlim(minx, maxx)
-        ax.set_ylim(miny, maxy)
-
-        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
-
-        polys = segs[segs.geometry.type.isin(['Polygon','MultiPolygon'])]
-        lines = segs[segs.geometry.type.isin(['LineString','MultiLineString'])]
-        value_col = 'sensitivity_max' if mode == 'max' else 'sensitivity_min'
-
-        if not polys.empty:
-            polys_ann = _prepare_sensitivity_annotations(polys, col, value_col)
-            colors_polys = _colors_from_annotations(polys_ann, palette)
-            polys_ann.plot(ax=ax,
-                           color=colors_polys,
-                           edgecolor='white',
-                           linewidth=0.4,
-                           alpha=0.95,
-                           zorder=12)
-
-        if not lines.empty:
-            lines_ann = _prepare_sensitivity_annotations(lines, col, value_col)
-            line_colors = _colors_from_annotations(lines_ann, palette)
-            line_colors_rgba = [mcolors.to_rgba(c, alpha=1.0) for c in line_colors]
-            try:
-                lines.plot(ax=ax, color='white', linewidth=4.2, alpha=0.9, zorder=13)
-            except Exception:
-                pass
-            lines.plot(ax=ax, color=line_colors_rgba, linewidth=2.4, alpha=1.0, zorder=14)
-
-        try:
-            minx, maxx = ax.get_xlim()
-            miny, maxy = ax.get_ylim()
-            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
-        except Exception:
-            pass
-
-        # Avoid bbox_inches='tight' here: for narrow/tall extents it can create very
-        # tall/narrow images that Word scales poorly.
-        plt.savefig(out_path)
-        plt.close(fig)
-        write_to_log(f"Segments map ({mode}) saved: {out_path}", base_dir)
-        return True
-    except Exception as e:
-        write_to_log(f"Segments map failed for {line_name}: {e}", base_dir)
-        plt.close('all')
-        return False
-
-
 def _normalize_bounds_aspect(bounds: tuple[float, float, float, float],
                              *,
                              min_aspect: float = 0.70,
@@ -3942,204 +3468,6 @@ def fetch_lines_and_segments(parquet_dir: str):
     except Exception:
         segments_df = gpd.GeoDataFrame()
     return lines_df, segments_df
-
-# ---------------- PDF helpers ----------------
-def line_up_to_pdf(order_list):
-    elements = []
-    styles = getSampleStyleSheet()
-
-    primary = HexColor(PRIMARY_HEX)
-    light_primary = HexColor(LIGHT_PRIMARY_HEX)
-    heading_styles = {
-        'H1': ParagraphStyle(
-            name='H1', fontSize=20, leading=24, spaceBefore=6, spaceAfter=8,
-            alignment=TA_CENTER, textColor=colors.black
-        ),
-        'H2Bar': ParagraphStyle(
-            name='H2Bar', fontSize=16, leading=20, spaceBefore=10, spaceAfter=6,
-            textColor=colors.white, backColor=light_primary, leftIndent=0, rightIndent=0
-        ),
-        'H3': ParagraphStyle(
-            name='H3', fontSize=13, leading=16, spaceBefore=4, spaceAfter=4,
-            textColor=primary
-        ),
-        'Body': styles['Normal']
-    }
-
-    # A4 text area constraints (points)
-    max_image_width_pts = 16 * RL_CM                 # usable frame width
-    default_max_image_height_pts = 24 * RL_CM
-    map_max_height_pts = MAX_MAP_CM_HEIGHT * RL_CM
-    line_map_max_height_pts = 14.0 * RL_CM
-
-    ribbon_height_pts = RIBBON_CM_HEIGHT * RL_CM
-    ribbon_width_pts  = max_image_width_pts          # <-- force ribbons to EXACT frame width
-
-    def _add_heading(level, text):
-        if level == 1:
-            elements.append(Paragraph(text, heading_styles['H1']))
-            elements.append(HRFlowable(width="100%", thickness=0.8, color=primary))
-        elif level == 2:
-            elements.append(Paragraph(text, heading_styles['H2Bar']))
-        else:
-            elements.append(Paragraph(text, heading_styles['H3']))
-        elements.append(Spacer(1, 6))
-
-    def _is_map_image(path: str) -> bool:
-        name = os.path.basename(path).lower()
-        return any(tok in name for tok in ['map_', '_segments_', '_context'])
-
-    def _is_line_map_image(path: str) -> bool:
-        name = os.path.basename(path).lower()
-        return name.startswith('line_') and ('segments' in name or 'context' in name)
-
-    def _is_atlas_image(path: str) -> bool:
-        return 'atlas' in os.path.basename(path).lower()
-
-    for item in order_list:
-        itype, ival = item
-
-        if itype == 'text':
-            if isinstance(ival, str) and os.path.isfile(ival):
-                with open(ival, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            else:
-                text = str(ival)
-            text = text.replace("\n", "<br/>")
-            elements.append(Paragraph(text, heading_styles['Body']))
-            elements.append(Spacer(1, 8))
-
-        elif itype == 'image':
-            # ival: (heading_str, path)
-            heading_str, path = ival
-            if not _file_ok(path):
-                elements.append(Paragraph(f"<i>(image missing: {os.path.basename(path)})</i>", heading_styles['Body']))
-                elements.append(Spacer(1, 6))
-                continue
-
-            _add_heading(3, heading_str)
-
-            # Cap stored pixel height for maps to keep file sizes reasonable.
-            if _is_map_image(path):
-                try:
-                    resize_image(path, max_width_px=1_000_000, max_height_px=MAX_MAP_PX_HEIGHT)
-                except Exception:
-                    pass
-
-            img = Image(path)
-            img.hAlign = 'CENTER'
-
-            # Dual constraint: width + height caps (atlas images get narrower bounds)
-            if _is_line_map_image(path):
-                max_h_pts = line_map_max_height_pts
-            else:
-                max_h_pts = map_max_height_pts if _is_map_image(path) else default_max_image_height_pts
-            width_cap_pts = max_image_width_pts
-            if _is_atlas_image(path):
-                width_cap_pts *= ATLAS_DOC_WIDTH_SCALE
-                if _is_map_image(path):
-                    max_h_pts = map_max_height_pts * ATLAS_DOC_WIDTH_SCALE
-            w0, h0 = float(getattr(img, 'imageWidth', 0) or 0), float(getattr(img, 'imageHeight', 0) or 0)
-            if w0 > 0 and h0 > 0:
-                scale = min(width_cap_pts / w0, max_h_pts / h0, 1.0)
-                img.drawWidth = w0 * scale
-                img.drawHeight = h0 * scale
-
-            elements.append(img)
-            elements.append(Spacer(1, 6))
-
-        elif itype == 'image_ribbon':
-            # ival: (heading_str, path)
-            heading_str, path = ival
-            if not _file_ok(path):
-                elements.append(Paragraph(f"<i>(image missing: {os.path.basename(path)})</i>", heading_styles['Body']))
-                elements.append(Spacer(1, 6))
-                continue
-            _add_heading(3, heading_str)
-
-            img = Image(path)
-            # FORCE exact same display size for all ribbons (no aspect scaling surprises)
-            img.drawWidth  = ribbon_width_pts
-            img.drawHeight = ribbon_height_pts
-            img.hAlign = 'CENTER'
-
-            elements.append(img)
-            elements.append(Spacer(1, 6))
-
-        elif itype == 'table':
-            df = pd.read_excel(ival)
-            data = [df.columns.tolist()] + df.values.tolist()
-            table = Table(data, repeatRows=1)
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), primary),
-                ('TEXTCOLOR',  (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('ALIGN',      (0, 0), (-1,-1), 'CENTER'),
-                ('GRID',       (0, 0), (-1,-1), 0.5, colors.HexColor("#A9A9A9")),
-                ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.97,0.97,0.97)])
-            ]))
-            elements.append(table)
-            elements.append(Spacer(1, 8))
-
-        elif itype == 'table_data':
-            title, data_ll = ival
-            _add_heading(3, title)
-            table = Table(data_ll, repeatRows=1)
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), primary),
-                ('TEXTCOLOR',  (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('ALIGN',      (0, 0), (-1,-1), 'CENTER'),
-                ('GRID',       (0, 0), (-1,-1), 0.5, colors.HexColor("#A9A9A9")),
-                ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.97,0.97,0.97)])
-            ]))
-            elements.append(table)
-            elements.append(Spacer(1, 8))
-
-        elif itype.startswith('heading'):
-            level = int(itype[-2])
-            _add_heading(level, ival)
-
-        elif itype == 'rule':
-            elements.append(HRFlowable(width="100%", thickness=0.8, color=primary))
-            elements.append(Spacer(1, 6))
-
-        elif itype == 'spacer':
-            lines = ival if ival else 1
-            elements.append(Spacer(1, lines * 10))
-
-        elif itype == 'new_page':
-            elements.append(PageBreak())
-
-    return elements
-
-def compile_pdf(output_pdf, elements):
-    doc = SimpleDocTemplate(output_pdf, pagesize=A4)
-    primary = HexColor(PRIMARY_HEX)
-
-    def add_header_footer(canvas, doc_obj):
-        width, height = A4
-        # Top steel-blue band
-        canvas.saveState()
-        canvas.setFillColor(primary)
-        canvas.rect(0, height - 16, width, 16, fill=1, stroke=0)
-        canvas.setFont('Helvetica-Bold', 10)
-        canvas.setFillColor(colors.white)
-        canvas.drawString(24, height - 12, "MESA – Report")
-        canvas.restoreState()
-
-        # Footer with page number
-        canvas.saveState()
-        canvas.setStrokeColor(primary)
-        canvas.setLineWidth(0.5)
-        canvas.line(24, 36, width - 24, 36)
-        canvas.setFont('Helvetica', 9)
-        canvas.setFillColor(colors.gray)
-        page_num = canvas.getPageNumber()
-        canvas.drawRightString(width - 24, 24, f"Page {page_num}")
-        canvas.restoreState()
-
-    doc.build(elements, onFirstPage=add_header_footer, onLaterPages=add_header_footer)
 
 def _clean_docx_text(txt: str) -> str:
     if txt is None:
@@ -5058,8 +4386,6 @@ def generate_report(base_dir: str,
             order_list.pop()
 
         set_progress(86, "Composing Word report …")
-        elements = line_up_to_pdf(order_list)
-
         ts_docx = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
         output_docx_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_docx}.docx")
         output_docx = str(output_docx_path)
@@ -5176,13 +4502,10 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     action_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
     action_frame.columnconfigure(1, weight=1)
 
-    contents_frame = tk.Frame(action_frame)
-    contents_frame.grid(row=0, column=0, columnspan=2, padx=6, pady=(6, 2), sticky="w")
-
-    contents_frame.columnconfigure(0, weight=1)
-    contents_frame.columnconfigure(1, weight=1)
-
-    tk.Label(contents_frame, text="Include in report:").grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 10))
+    include_frame = tb.LabelFrame(action_frame, text="Include in report", bootstyle="secondary")
+    include_frame.grid(row=0, column=0, columnspan=2, padx=6, pady=(6, 2), sticky="ew")
+    include_frame.columnconfigure(0, weight=1)
+    include_frame.columnconfigure(1, weight=1)
 
     include_assets_var = tk.BooleanVar(value=True)
     include_analysis_var = tk.BooleanVar(value=False)
@@ -5200,10 +4523,10 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
         ("Atlas maps (detailed)", include_atlas_maps_var),
     ]
     for idx, (label, var) in enumerate(_include_options):
-        row = 1 + (idx // 2)
+        row = idx // 2
         col = idx % 2
         tb.Checkbutton(
-            contents_frame,
+            include_frame,
             text=label,
             variable=var,
             bootstyle="round-toggle",
