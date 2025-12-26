@@ -825,6 +825,15 @@ def edit_atlas():
     else:
         run_subprocess_async([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
+def backup_restore_data():
+    python_script, exe_file = get_script_paths("backup_restore")
+    arg_tokens = ["--original_working_directory", original_working_directory]
+    if getattr(sys, "frozen", False):
+        _launch_gui_process([exe_file, *arg_tokens], "backup_restore exe")
+    else:
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "backup_restore script")
+
 def exit_program():
     root.destroy()
 
@@ -953,8 +962,7 @@ if __name__ == "__main__":
             log_to_logfile(f"Unable to load header graphic: {exc}")
 
     intro_text = (
-        "Launch core jobs from the Workflows-tab, then review the live counters \nin the Status-tab "
-        "to confirm imports, processing and publishing have completed."
+        "MESA tool version \n" + (mesa_version or "unknown")
     )
 
     header = ttk.Frame(root, padding=0)
@@ -1017,7 +1025,7 @@ if __name__ == "__main__":
     ttk.Label(
         workflows_container,
         text="Launch the workflows grouped by phase. Pick the task that matches what you are trying to achieve, "
-             "then glance at the Status tab to confirm progress.",
+             "then glance at the Status tab to confirm progress and find project statistics.",
         justify="left",
         wraplength=780
     ).pack(anchor="w", pady=(0, 10))
@@ -1043,10 +1051,10 @@ if __name__ == "__main__":
              "Generate atlas polygons used in the QGIS atlas and the report engine."),
         ]),
         ("Configure processing (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
-            ("Processing parameters", edit_processing_setup,
+            ("Area processing parameters", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
-              ("Set up area analysis", open_data_analysis_setup,
-               "Define analysis groups and study area polygons."),
+            ("Analysis design", open_data_analysis_setup,
+             "Define analysis groups and study area polygons."),
             ("Edit assets", edit_assets,
              "Add titles to imported layers, plus a short descriptive text."),
             ("Edit atlas", edit_atlas,
@@ -1822,6 +1830,8 @@ if __name__ == "__main__":
     settings_actions = [
         ("Edit config", edit_main_config,
          "Open the config.ini editor to review or adjust global settings."),
+           ("Backup / restore", backup_restore_data,
+            "Create a ZIP backup of input/, output/ and config.ini, or restore from a previous backup."),
         ("Edit geocodes", edit_geocodes,
          "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
     ]
