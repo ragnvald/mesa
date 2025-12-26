@@ -1113,8 +1113,6 @@ if __name__ == "__main__":
              "Processes line assets (roads, rivers, etc) into analysis-ready segments."),
               ("Process area analysis", open_analysis_process,
                "Processes the configured study areas into analysis tables."),
-            ("Raster tiles", open_create_raster_tiles,
-             "Optional: generate raster MBTiles for fast map viewing."),
         ]),
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map", open_asset_layers_viewer,
