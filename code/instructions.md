@@ -12,9 +12,11 @@ Most of our potential users are not in a position to download and run python cod
 
 ### Area analysis helper
 
-- `data_analysis.py` is a standalone helper that lets a power user digitise or import analysis polygons, intersect them with the asset catalogue and export a PDF summary (`output/MESA_area_analysis_report_YYYY_MM_DD.pdf`).
-- Geometry is stored in `output/geoparquet/tbl_analysis_polygons.parquet` so edits are shared between the .py and packaged .exe variants.
-- The helper mirrors the other Leaflet editors: drawing/editing happens inside a pywebview map, while the left-hand pane controls metadata and report generation.
+- `data_analysis_setup.py` is a setup-focused helper that lets a power user create analysis groups and digitise/import study area polygons.
+- `analysis_process.py` runs the heavy processing step that generates the analysis tables used by the compare dashboard and reporting.
+- `data_analysis_presentation.py` opens a dashboard for comparing the study groups.
+
+Geometry and results are stored under `output/geoparquet/` so edits are shared between the .py and packaged .exe variants.
 
 It is important that functional consistency is available for the system. THe separate python files should run separately as python programs, as compiled programs and as "slaves" under the mesa.py or mesa.exe programs. This involves some setups for where all modes are supported. It is particularly storage places (paths) which is of concern.
 
@@ -24,6 +26,7 @@ It is important that functional consistency is available for the system. THe sep
 
 1. **NEVER modify the core architecture** - This is a single-file script by design
 2. **NEVER add external dependencies** beyond the existing three: `requests`, `pandas`, `python-docx`
+2. **Avoid adding new external dependencies** unless necessary and explicitly requested/approved
 3. **NEVER change the configuration pattern** - Top-of-file variables must remain hardcoded
 4. **NEVER alter the main data flow** - Fetch → Transform → Generate Word doc pipeline is fixed
 5. **NEVER modify function signatures** without explicit permission
