@@ -293,6 +293,7 @@ def main() -> None:
         "atlas_create",
         "atlas_edit",
         "analysis_process",
+        "backup_restore",
         "create_raster_tiles",
         "data_import",
         "data_process",
