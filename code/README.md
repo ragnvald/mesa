@@ -5,7 +5,7 @@ The MESA (Methods for Environmental Sensitivity Assessment) tool is a Windows de
 
 ## Highlights
 - Environmental sensitivity assessment: systematic scoring of assets against importance and sensitivity indices.
-- Mapping capability: minimaps, atlases, and PDF summaries visualize hotspots for planners and responders.
+- Mapping capability: minimaps, atlases, and Word reports (`.docx`) support sharing and review.
 - User-friendly GUI: ttkbootstrap-styled interfaces keep workflows accessible to non-technical staff.
 - Compiled executable delivery: PyInstaller produces ready-to-run `.exe` files for Windows 11/10 (~1.7 GB / 0.7 GB).
 - Customizable framework: configuration and outputs are stored alongside the app so projects can be adapted to new regions.
@@ -27,7 +27,7 @@ The MESA (Methods for Environmental Sensitivity Assessment) tool is a Windows de
 - **Parameter setup (`tools\parametres_setup.exe`)** - Loads classification bins, valid ranges, and index weights from `config.ini`, enforces guard rails through dropdowns and fallback values, then writes the unified scoring matrices back to GeoParquet + JSON for other executables.
 - **Data prep (`tools\data_import.exe`, `tools\geocode*.exe`, `tools\lines_*.exe`)** - Wizard-style workflows that check encodings, CRS, geometry validity, and attribute completeness before anything reaches processing. They harmonize column headers, flag duplicates, and log every change.
 - **Processing (`tools\data_process.exe`)** - The CPU/RAM-intensive engine that chunks intersections, spins up workers when safe, streams minimap snapshots, and persists geometry plus status metrics into `output/geoparquet`. Progress is logged continuously to `log.txt`.
-- **Reporting (`tools\data_report.exe`, `tools\atlas_*.exe`, `tools\maps_overview.exe`)** - Turn GeoParquet data into PDF summaries, tiled atlases arranged by administrative units, and Leaflet-ready overview dashboards while reusing metadata captured during import and parameterization.
+- **Reporting (`tools\data_report.exe`, `tools\atlas_*.exe`, `tools\maps_overview.exe`)** - Turn GeoParquet data into Word reports (`.docx`), atlas artifacts, and Leaflet-ready overview dashboards while reusing metadata captured during import and parameterization.
 - **Raster support (`tools\create_raster_tiles.exe`)** - Converts processed vectors into raster tiles or high-resolution imagery aligned with the CRS/tiling scheme defined in `config.ini`, writing outputs into `qgis/` for immediate use in GIS viewers.
 
 All helpers can be opened directly from Windows Explorer, but most users launch them via `mesa.exe` so logs and context stay in one place.
@@ -36,7 +36,7 @@ All helpers can be opened directly from Windows Explorer, but most users launch 
 1. **Drop inputs** into `input/geocode` and `input/lines`, then use the import helpers to check formats and metadata.
 2. **Tune scoring** with `parametres_setup.exe`, saving vulnerability/importance settings to the shared GeoParquet store.
 3. **Process data** through `data_process.exe` to compute intersections, indices, and status grids. This is the heaviest step and may run for hours on complex geographies.
-4. **Generate outputs** with the atlas, report, or overview executables. PDF reports land in `output/` with timestamps.
+4. **Generate outputs** with the atlas, report, or overview executables. Word reports land in `output/reports/` with timestamps.
 5. **Distribute results** by copying the entire folder (including GeoParquet files) to partners or to another workstation; the executables auto-detect the structure.
 
 ## Processing capacity requirements
