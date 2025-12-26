@@ -25,6 +25,13 @@ import pyarrow.dataset as ds
 import math
 import time
 
+try:
+    from PIL import Image as PILImage
+    from PIL import ImageTk
+except Exception:
+    PILImage = None
+    ImageTk = None
+
 # ---------------------------------------------------------------------
 # Project/base resolution (works in dev and when frozen)
 # ---------------------------------------------------------------------
@@ -964,7 +971,19 @@ if __name__ == "__main__":
     banner_image_path = resolve_path(os.path.join("system_resources", "top_graphics.png"))
     if os.path.exists(banner_image_path):
         try:
-            banner_image = tk.PhotoImage(file=banner_image_path)
+            # Render the banner a bit narrower (e.g. ~90%) to avoid right-side cutoff.
+            banner_scale = 0.90
+            if PILImage is not None and ImageTk is not None:
+                pil_img = PILImage.open(banner_image_path)
+                src_w, src_h = pil_img.size
+                dst_w = max(1, int(round(src_w * banner_scale)))
+                dst_h = max(1, int(round(src_h * banner_scale)))
+                if (dst_w, dst_h) != (src_w, src_h):
+                    resample = getattr(PILImage, "Resampling", PILImage).LANCZOS
+                    pil_img = pil_img.resize((dst_w, dst_h), resample=resample)
+                banner_image = ImageTk.PhotoImage(pil_img)
+            else:
+                banner_image = tk.PhotoImage(file=banner_image_path)
             root._header_banner_image = banner_image  # stash reference to avoid GC
         except Exception as exc:
             banner_image = None
@@ -978,6 +997,7 @@ if __name__ == "__main__":
 
     banner_wrap = 760
     if banner_image is not None:
+        text_y_nudge = -15
         img_w = 800
         img_h = 80
         try:
@@ -999,8 +1019,8 @@ if __name__ == "__main__":
 
         # Title left (slightly larger)
         banner_canvas.create_text(
-            18,
-            max(14, img_h // 2 - 2),
+            24,
+            max(14, img_h // 2 - 2 + text_y_nudge),
             anchor="w",
             text="MESA tool",
             fill="#0f172a",
@@ -1010,11 +1030,11 @@ if __name__ == "__main__":
         # Version right
         banner_canvas.create_text(
             max(120, img_w - 100),
-            max(12, img_h // 2 + 14),
+            max(12, img_h // 2 + 14 + text_y_nudge),
             anchor="e",
-            text=(mesa_version or "unknown"),
+            text="Version " +(mesa_version or "unknown"),
             fill="#0f172a",
-            font=("Segoe UI", 11, "italic")
+            font=("Segoe UI", 9, "italic")
         )
     else:
         intro_text = "MESA tool  ·  " + (mesa_version or "unknown")
@@ -1874,7 +1894,13 @@ if __name__ == "__main__":
     about_box.columnconfigure(0, weight=1)
     about_text = (
         "Welcome to the MESA tool. The method is developed by UNEP-WCMC and the Norwegian Environment Agency. "
+        "The tool is a reflection of ongoing methods development done by UNEP-WCMC and NEA. "
         "The software streamlines sensitivity analysis, reducing the likelihood of manual errors in GIS workflows.\n\n"
+        "The project is Open Source. Although the software can be used (without guarantees), further work is pending, "
+        "including final conclusions on the methods development (to be subject to hearings with stakeholders), bug fixing, "
+        "and continued discussions and workshops.\n\n"
+        "Timeline: the aim is to conclude the work in May 2025 at a workshop in Nairobi. Broad inclusion is planned, "
+        "so not only stakeholders are welcome.\n\n"
         "Documentation and user guides are available on the MESA wiki.\n\n"
         "This release incorporates feedback from workshops with partners in Ghana, Tanzania, Uganda, Mozambique, "
         "and Kenya. Lead programmer: Ragnvald Larsen."
