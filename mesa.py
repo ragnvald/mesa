@@ -746,6 +746,15 @@ def open_present_files():
         python_exe = sys.executable or "python"
         _launch_gui_process([python_exe, python_script], "data_report script")
 
+
+def open_create_raster_tiles():
+    python_script, exe_file = get_script_paths("create_raster_tiles")
+    if getattr(sys, "frozen", False):
+        log_to_logfile(f"Running bundled exe: {exe_file}")
+        run_subprocess_async([exe_file], [], gpkg_file)
+    else:
+        run_subprocess_async([sys.executable or "python", python_script], [exe_file], gpkg_file)
+
 def open_data_analysis_setup():
     python_script, exe_file = get_script_paths("data_analysis_setup")
     arg_tokens = ["--original_working_directory", original_working_directory]
@@ -961,39 +970,56 @@ if __name__ == "__main__":
             banner_image = None
             log_to_logfile(f"Unable to load header graphic: {exc}")
 
-    intro_text = (
-        "MESA tool version \n" + (mesa_version or "unknown")
-    )
-
     header = ttk.Frame(root, padding=0)
     header.pack(fill="x", padx=0, pady=(6, 8))
 
-    banner_wrap = 760
-    if banner_image:
-        try:
-            banner_wrap = max(640, banner_image.width() - 80)
-        except Exception:
-            banner_wrap = 760
+    banner_host = ttk.Frame(header, padding=0)
+    banner_host.pack(side="left", fill="x", expand=True, padx=0, pady=0)
 
-    if banner_image:
-        intro_label = tk.Label(
-            header,
-            text=intro_text,
-            wraplength=banner_wrap,
-            justify="left",
-            anchor="w",
-            padx=10,
-            pady=8,
-            fg="#0f172a",
-            font=("Segoe UI", 11, "bold"),
-            compound="center",
-            image=banner_image
+    banner_wrap = 760
+    if banner_image is not None:
+        img_w = 800
+        img_h = 80
+        try:
+            img_w = int(banner_image.width())
+            img_h = int(banner_image.height())
+        except Exception:
+            pass
+
+        banner_canvas = tk.Canvas(
+            banner_host,
+            height=max(1, img_h),
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+            bg="#f3f4f6"
         )
-    if banner_image:
-        intro_label.pack(side="left", padx=0, pady=0)
+        banner_canvas.pack(fill="x", expand=True)
+        banner_canvas.create_image(0, 0, image=banner_image, anchor="nw")
+
+        # Title left (slightly larger)
+        banner_canvas.create_text(
+            18,
+            max(14, img_h // 2 - 2),
+            anchor="w",
+            text="MESA tool",
+            fill="#0f172a",
+            font=("Segoe UI", 14, "bold")
+        )
+
+        # Version right
+        banner_canvas.create_text(
+            max(120, img_w - 100),
+            max(12, img_h // 2 + 14),
+            anchor="e",
+            text=(mesa_version or "unknown"),
+            fill="#0f172a",
+            font=("Segoe UI", 11, "italic")
+        )
     else:
+        intro_text = "MESA tool  ·  " + (mesa_version or "unknown")
         intro_label = ttk.Label(
-            header,
+            banner_host,
             text=intro_text,
             wraplength=banner_wrap,
             justify="left",
@@ -1032,12 +1058,12 @@ if __name__ == "__main__":
 
     workflow_grid = ttk.Frame(workflows_container)
     workflow_grid.pack(fill="both", expand=True)
-    workflow_grid.columnconfigure(0, weight=1)
-    workflow_grid.columnconfigure(1, weight=1)
+    for col_idx in range(4):
+        workflow_grid.columnconfigure(col_idx, weight=1)
+    workflow_grid.rowconfigure(0, weight=1)
 
     workflow_section_frames = []
-    SINGLE_COLUMN_BREAKPOINT = 900
-    ACTION_COLUMNS = 2
+    ACTION_COLUMNS = 1
 
     workflow_sections = [
         ("Prepare data (step 1)", "Import new data and generate supporting geometries.", [
@@ -1050,7 +1076,7 @@ if __name__ == "__main__":
             ("Atlas", make_atlas,
              "Generate atlas polygons used in the QGIS atlas and the report engine."),
         ]),
-        ("Configure processing (step 2)", "Tune processing parameters and study areas before running heavy jobs.", [
+        ("Configure processing (step 2)", "Tune processing parameters/study areas before running heavy jobs.", [
             ("Area processing parameters", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
             ("Analysis design", open_data_analysis_setup,
@@ -1062,11 +1088,13 @@ if __name__ == "__main__":
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Process area", lambda: process_data(gpkg_file),
-             "Runs the main area pipeline to refresh GeoParquet, MBTiles and stats."),
+             "Runs main area pipeline to process data and statistics."),
             ("Process line", process_lines,
-             "Processes line assets (transport, rivers, utilities) into analysis-ready segments."),
+             "Processes line assets (roads, rivers, etc) into analysis-ready segments."),
               ("Process area analysis", open_analysis_process,
-               "Processes the configured study areas into analysis GeoParquet tables."),
+               "Processes the configured study areas into analysis tables."),
+            ("Raster tiles", open_create_raster_tiles,
+             "Optional: generate raster MBTiles for fast map viewing."),
         ]),
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map", open_asset_layers_viewer,
@@ -1081,15 +1109,15 @@ if __name__ == "__main__":
     ]
 
     for idx, (section_title, section_description, actions) in enumerate(workflow_sections):
-        row = idx // 2
-        col = idx % 2
+        row = 0
+        col = idx
         section_frame = ttk.LabelFrame(workflow_grid, text=section_title, padding=(12, 10))
         section_frame.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
         workflow_section_frames.append(section_frame)
         ttk.Label(
             section_frame,
             text=section_description,
-            wraplength=320,
+            wraplength=240,
             justify="left"
         ).pack(anchor="w", fill="x")
         actions_container = ttk.Frame(section_frame)
@@ -1110,25 +1138,9 @@ if __name__ == "__main__":
             ttk.Label(
                 action_block,
                 text=action_description,
-                wraplength=300,
+                wraplength=240,
                 justify="left"
             ).pack(anchor="w", pady=(2, 0))
-
-    def relayout_workflow_sections(event=None):
-        if event is not None and event.widget is not workflow_grid:
-            return
-        available_width = workflow_grid.winfo_width()
-        if not available_width:
-            available_width = workflows_container.winfo_width() or DEFAULT_WIDTH
-        columns = 2 if available_width >= SINGLE_COLUMN_BREAKPOINT else 1
-        if columns <= 0:
-            columns = 1
-        for col_index in range(2):
-            workflow_grid.columnconfigure(col_index, weight=1 if col_index < columns else 0)
-        for idx, frame in enumerate(workflow_section_frames):
-            row = idx // columns
-            col = idx % columns
-            frame.grid_configure(row=row, column=col, padx=8, pady=8, sticky="nsew")
 
     def resize_window_to_fit_contents():
         root.update_idletasks()
@@ -1145,10 +1157,7 @@ if __name__ == "__main__":
         root.geometry(f"{width_needed}x{height_needed}")
         root.after_idle(lambda: aspect_guard.update(active=False))
 
-    workflow_grid.bind("<Configure>", relayout_workflow_sections)
-
     root.update_idletasks()
-    relayout_workflow_sections()
     resize_window_to_fit_contents()
 
     # ------------------------------------------------------------------
