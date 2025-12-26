@@ -7,6 +7,8 @@ import sys
 import shutil
 import zipfile
 import datetime
+import threading
+import queue
 from pathlib import Path
 
 import tkinter as tk
@@ -39,7 +41,11 @@ def _iter_files(root: Path):
             yield Path(dirpath) / fn
 
 
-def create_backup_zip(base_dir: str, dest_folder: str) -> str:
+def create_backup_zip(
+    base_dir: str,
+    dest_folder: str,
+    progress_cb=None,
+) -> str:
     base = Path(base_dir)
     dest = Path(dest_folder)
     dest.mkdir(parents=True, exist_ok=True)
@@ -51,19 +57,29 @@ def create_backup_zip(base_dir: str, dest_folder: str) -> str:
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     zip_path = dest / f"mesa_backup_{ts}.zip"
 
+    files_to_add: list[tuple[Path, str]] = []
+    if config_path.is_file():
+        files_to_add.append((config_path, "config.ini"))
+
+    if input_dir.is_dir():
+        for file_path in _iter_files(input_dir):
+            if file_path.is_file():
+                files_to_add.append((file_path, _safe_relpath(file_path, base)))
+
+    if output_dir.is_dir():
+        for file_path in _iter_files(output_dir):
+            if file_path.is_file():
+                files_to_add.append((file_path, _safe_relpath(file_path, base)))
+
+    total = max(1, len(files_to_add))
+    if progress_cb:
+        progress_cb(0, total, "Preparing backup…")
+
     with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        if config_path.is_file():
-            zf.write(config_path, arcname="config.ini")
-
-        if input_dir.is_dir():
-            for file_path in _iter_files(input_dir):
-                if file_path.is_file():
-                    zf.write(file_path, arcname=_safe_relpath(file_path, base))
-
-        if output_dir.is_dir():
-            for file_path in _iter_files(output_dir):
-                if file_path.is_file():
-                    zf.write(file_path, arcname=_safe_relpath(file_path, base))
+        for idx, (file_path, arcname) in enumerate(files_to_add, start=1):
+            zf.write(file_path, arcname=arcname)
+            if progress_cb:
+                progress_cb(idx, total, f"Adding: {arcname}")
 
     return str(zip_path)
 
@@ -81,7 +97,34 @@ def _zip_members_safe(members: list[str]) -> list[str]:
     return safe
 
 
-def restore_from_zip(base_dir: str, zip_path: str) -> None:
+def _safe_extract_member(zf: zipfile.ZipFile, member: str, base: Path) -> None:
+    name = str(member).replace("\\", "/")
+    if name.startswith("/"):
+        raise ValueError(f"Unsafe ZIP member (absolute path): {member}")
+    parts = [p for p in name.split("/") if p]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"Unsafe ZIP member (path traversal): {member}")
+
+    # Directory entry
+    if name.endswith("/"):
+        target_dir = (base / Path(*parts)).resolve()
+        base_resolved = base.resolve()
+        if target_dir != base_resolved and base_resolved not in target_dir.parents:
+            raise ValueError(f"Unsafe ZIP member (outside base): {member}")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    target_path = (base / Path(*parts)).resolve()
+    base_resolved = base.resolve()
+    if target_path != base_resolved and base_resolved not in target_path.parents:
+        raise ValueError(f"Unsafe ZIP member (outside base): {member}")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with zf.open(member, "r") as src, open(target_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+
+def restore_from_zip(base_dir: str, zip_path: str, progress_cb=None) -> None:
     base = Path(base_dir)
     zip_path_p = Path(zip_path)
     if not zip_path_p.is_file():
@@ -90,11 +133,14 @@ def restore_from_zip(base_dir: str, zip_path: str) -> None:
     with zipfile.ZipFile(zip_path_p, mode="r") as zf:
         members = _zip_members_safe(zf.namelist())
 
-        # Only restore these top-level paths
-        allowed_prefixes = ("config.ini", "input/", "output/")
         to_extract = [m for m in members if m == "config.ini" or m.startswith("input/") or m.startswith("output/")]
+        total = max(1, len(to_extract))
+        if progress_cb:
+            progress_cb(0, total, "Preparing restore…")
 
         # Remove existing targets first (prevents mixing old/new files)
+        if progress_cb:
+            progress_cb(0, total, "Deleting current input/ and output/…")
         for folder in (base / "input", base / "output"):
             if folder.exists() and folder.is_dir():
                 shutil.rmtree(folder, ignore_errors=True)
@@ -106,9 +152,11 @@ def restore_from_zip(base_dir: str, zip_path: str) -> None:
             except Exception:
                 pass
 
-        # Extract
-        for member in to_extract:
-            zf.extract(member, path=base)
+        # Extract (manual + safe)
+        for idx, member in enumerate(to_extract, start=1):
+            _safe_extract_member(zf, member, base)
+            if progress_cb:
+                progress_cb(idx, total, f"Extracting: {member}")
 
 
 def _format_bytes(num: int) -> str:
@@ -149,6 +197,80 @@ def launch_gui(base_dir: str):
     container = ttk.Frame(root, padding=12)
     container.pack(fill="both", expand=True)
 
+    # ---------------- Warning ----------------
+    warning_text = (
+        "IMPORTANT:\n"
+        "- Close any open MESA files before backup/restore (reports, DOCX, Excel, etc.).\n"
+        "- Restoring a backup will DELETE and replace your current input/, output/ and config.ini.\n"
+        "  Make sure you have a backup of the current project first."
+    )
+    if tb:
+        warning = tb.Label(container, text=warning_text, justify="left", bootstyle="danger")
+    else:
+        warning = tk.Label(container, text=warning_text, justify="left", fg="red")
+    warning.pack(fill="x", pady=(0, 10))
+
+    # ---------------- Progress ----------------
+    op_status_var = tk.StringVar(value="Idle")
+    progress_var = tk.DoubleVar(value=0.0)
+    progress_max_var = tk.DoubleVar(value=1.0)
+
+    prog = ttk.Frame(container)
+    prog.pack(fill="x", pady=(0, 12))
+    ttk.Label(prog, textvariable=op_status_var, justify="left").pack(anchor="w")
+    progressbar = ttk.Progressbar(prog, variable=progress_var, maximum=progress_max_var.get())
+    progressbar.pack(fill="x", pady=(4, 0))
+
+    work_q: queue.Queue = queue.Queue()
+    work_running = {"active": False}
+
+    def _set_progress(current: int, total: int, msg: str):
+        total = max(1, int(total))
+        current = max(0, min(int(current), total))
+        progress_max_var.set(float(total))
+        progressbar.configure(maximum=progress_max_var.get())
+        progress_var.set(float(current))
+        op_status_var.set(f"{msg}  ({current}/{total})")
+        root.update_idletasks()
+
+    def _poll_work_queue(on_done=None):
+        try:
+            while True:
+                kind, payload = work_q.get_nowait()
+                if kind == "progress":
+                    cur, total, msg = payload
+                    _set_progress(cur, total, msg)
+                elif kind == "done":
+                    work_running["active"] = False
+                    if on_done:
+                        on_done(payload)
+                elif kind == "error":
+                    work_running["active"] = False
+                    messagebox.showerror("Operation failed", str(payload))
+        except queue.Empty:
+            pass
+
+        if work_running["active"]:
+            root.after(100, lambda: _poll_work_queue(on_done=on_done))
+
+    def _run_background(worker_fn, on_done=None):
+        if work_running["active"]:
+            return
+        work_running["active"] = True
+
+        def _progress_cb(cur, total, msg):
+            work_q.put(("progress", (cur, total, msg)))
+
+        def _thread_body():
+            try:
+                result = worker_fn(_progress_cb)
+                work_q.put(("done", result))
+            except Exception as exc:
+                work_q.put(("error", exc))
+
+        threading.Thread(target=_thread_body, daemon=True).start()
+        _poll_work_queue(on_done=on_done)
+
     # ---------------- Backup ----------------
     if tb:
         backup_box = tb.LabelFrame(container, text="1) Create backup ZIP", bootstyle="secondary")
@@ -180,13 +302,28 @@ def launch_gui(base_dir: str):
         if not folder:
             messagebox.showwarning("Missing destination", "Choose a destination folder first.")
             return
-        try:
-            out_zip = create_backup_zip(base_dir, folder)
-            status_var.set(f"Backup created: {out_zip}")
-        except Exception as exc:
-            messagebox.showerror("Backup failed", str(exc))
 
-    ttk.Button(backup_box, text="Create backup", command=_do_backup).pack(anchor="w", padx=8, pady=(0, 10))
+        def _worker(progress_cb):
+            return create_backup_zip(base_dir, folder, progress_cb=progress_cb)
+
+        def _done(out_zip):
+            _set_progress(1, 1, "Backup completed")
+            status_var.set(f"Backup created: {out_zip}")
+            for w in (backup_btn, restore_btn):
+                try:
+                    w.configure(state="normal")
+                except Exception:
+                    pass
+
+        for w in (backup_btn, restore_btn):
+            try:
+                w.configure(state="disabled")
+            except Exception:
+                pass
+        _run_background(_worker, on_done=_done)
+
+    backup_btn = ttk.Button(backup_box, text="Create backup", command=_do_backup)
+    backup_btn.pack(anchor="w", padx=8, pady=(0, 10))
 
     # ---------------- Restore ----------------
     if tb:
@@ -252,13 +389,28 @@ def launch_gui(base_dir: str):
         if not confirm:
             return
 
-        try:
-            restore_from_zip(base_dir, zip_path)
-            status_var.set(f"Restore completed from: {zip_path}")
-        except Exception as exc:
-            messagebox.showerror("Restore failed", str(exc))
+        def _worker(progress_cb):
+            restore_from_zip(base_dir, zip_path, progress_cb=progress_cb)
+            return zip_path
 
-    ttk.Button(btns, text="Restore selected", command=_do_restore).pack(side="left", padx=(8, 0))
+        def _done(restored_from):
+            _set_progress(1, 1, "Restore completed")
+            status_var.set(f"Restore completed from: {restored_from}")
+            for w in (backup_btn, restore_btn):
+                try:
+                    w.configure(state="normal")
+                except Exception:
+                    pass
+
+        for w in (backup_btn, restore_btn):
+            try:
+                w.configure(state="disabled")
+            except Exception:
+                pass
+        _run_background(_worker, on_done=_done)
+
+    restore_btn = ttk.Button(btns, text="Restore selected", command=_do_restore)
+    restore_btn.pack(side="left", padx=(8, 0))
 
     root.minsize(820, 520)
     root.mainloop()
