@@ -1205,12 +1205,21 @@ function boot(){
   bindAuto('f_seg_wid','segment_width');
   bindAuto('f_desc','description');
 
-  document.addEventListener('keydown', function(e){
-    if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
-    else if (e.key === 'E' || e.key === 'e'){ if (!document.getElementById('editBtn').disabled) toggleSingleEdit(); }
-    else if (e.key === 'Delete'){ if (!document.getElementById('delBtn').disabled) deleteSelected(); }
-    else if (e.key === 'Escape'){ cancelEdit(); }
-  });
+    document.addEventListener('keydown', function(e){
+        // Don’t trigger map/edit shortcuts while typing in form fields.
+        // (Otherwise typing “e” in Title triggers Edit, etc.)
+        const t = e.target;
+        const tag = (t && t.tagName) ? t.tagName.toLowerCase() : '';
+        const inFormField = (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable));
+
+        if ((e.ctrlKey || e.metaKey || e.altKey)) return;
+        if (inFormField && e.key !== 'Escape') return;
+
+        if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
+        else if (e.key === 'E' || e.key === 'e'){ if (!document.getElementById('editBtn').disabled) toggleSingleEdit(); }
+        else if (e.key === 'Delete'){ if (!document.getElementById('delBtn').disabled) deleteSelected(); }
+        else if (e.key === 'Escape'){ cancelEdit(); }
+    });
 
   if (window.pywebview && window.pywebview.api) {
     loadAll();
