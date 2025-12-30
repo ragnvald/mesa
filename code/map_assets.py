@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import base64
+import colorsys
 import configparser
 import hashlib
 import io
 import json
 import locale
 import os
+import random
 import sys
 import uuid
 from datetime import datetime
@@ -121,6 +123,45 @@ DEFAULT_STYLE_PAYLOAD: Dict[str, Any] = {
     "fill_opacity": 0.65,
     "border_weight": 1.2,
 }
+
+
+def _rgb_to_hex(rgb: tuple[float, float, float]) -> str:
+  r, g, b = rgb
+  ri = max(0, min(255, int(round(r * 255.0))))
+  gi = max(0, min(255, int(round(g * 255.0))))
+  bi = max(0, min(255, int(round(b * 255.0))))
+  return f"#{ri:02X}{gi:02X}{bi:02X}"
+
+
+def _generate_distinct_style_payloads(group_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+  """Generate local, visually distinct styles.
+
+  Used as a fallback when an OpenAI key is not configured.
+  """
+
+  if not group_ids:
+    return {}
+
+  # Randomise per invocation, but keep colors unique across the requested set.
+  rnd = random.Random()
+  hue0 = rnd.random()
+  step = 0.618033988749895  # golden ratio conjugate for good dispersion
+
+  updates: Dict[str, Dict[str, Any]] = {}
+  for idx, gid in enumerate(group_ids):
+    hue = (hue0 + idx * step) % 1.0
+
+    # Tuned for readability against dark basemap (#0f172a).
+    # Fill: fairly bright but not neon; Border: darker, slightly more saturated.
+    fill_rgb = colorsys.hsv_to_rgb(hue, 0.62, 0.85)
+    border_rgb = colorsys.hsv_to_rgb(hue, 0.78, 0.42)
+
+    style = _default_style_payload()
+    style["fill_color"] = _rgb_to_hex(fill_rgb)
+    style["border_color"] = _rgb_to_hex(border_rgb)
+    updates[gid] = style
+
+  return updates
 
 
 def _cfg_default_get(config: Optional[configparser.ConfigParser], option: str) -> Optional[str]:
@@ -985,7 +1026,17 @@ class Api:
         return {"ok": False, "error": "No active layers supplied"}
       api_key = _resolve_openai_key()
       if not api_key:
-        return {"ok": False, "error": "OpenAI API key missing"}
+        log_event(f"OpenAI API key missing; generating local random styles for groups={requested}")
+        updates = _generate_distinct_style_payloads(requested)
+        _apply_style_updates(updates)
+        return {
+          "ok": True,
+          "styles": updates,
+          "prompt_file": None,
+          "raw": None,
+          "fallback_groups": [],
+          "mode": "random",
+        }
       model = _resolve_openai_model()
       prompt_layers = _collect_prompt_layers(requested)
       prompt = _build_style_prompt(prompt_layers)
@@ -1016,6 +1067,7 @@ class Api:
         "prompt_file": str(STYLE_QUERY_FILE),
         "raw": response_text,
         "fallback_groups": missing,
+        "mode": "openai",
       }
 
     def clear_styles(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1153,7 +1205,7 @@ HTML_TEMPLATE = r"""
       <input id="opacity" type="range" min="20" max="100" value="85">
       <span id="opacityValue">85%</span>
     </div>
-    <button id="aiStyleBtn" class="btn" title="Create styles for all active layers">Create AI styles</button>
+    <button id="aiStyleBtn" class="btn" title="Create styles for all active layers">Create styles</button>
     <button id="clearStyleBtn" class="btn" title="Remove saved styles from active layers">Clear styles</button>
     <div class="spacer"></div>
     <span id="aiStatus" class="ai-status"></span>
@@ -2110,10 +2162,16 @@ function handleCreateAiStyles(){
     }
     const count = Object.keys(res.styles || {}).length;
     const fallback = Array.isArray(res.fallback_groups) ? res.fallback_groups.length : 0;
+    const mode = (res && res.mode) ? String(res.mode) : 'openai';
     const promptPath = STYLE_QUERY_PATH || 'style_query.txt';
-    let message = `Updated ${count} layer(s). Prompt saved to ${promptPath}.`;
-    if (fallback){
-      message += ` (${fallback} layer(s) used default styling.)`;
+    let message = `Updated ${count} layer(s).`;
+    if (mode === 'random'){
+      message += ' Generated local random styles (no OpenAI key).';
+    } else {
+      message += ` Prompt saved to ${promptPath}.`;
+      if (fallback){
+        message += ` (${fallback} layer(s) used default styling.)`;
+      }
     }
     setAiStatus(message);
   }).catch(err => {
