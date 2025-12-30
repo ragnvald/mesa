@@ -13,6 +13,7 @@ from pathlib import Path
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
+import tkinter.ttk as ttk_native
 
 try:
     import ttkbootstrap as tb
@@ -21,11 +22,49 @@ except Exception:
 
 
 def _normalize_base_dir(path: str | None) -> str:
+    """Resolve the MESA base folder.
+
+    When launched from inside the `code/` folder (dev) or from frozen builds,
+    we normalize to the project root that contains `input/` and `output/`.
+    """
+
+    candidates: list[Path] = []
+    try:
+        env_hint = os.environ.get("MESA_BASE_DIR")
+        if env_hint:
+            candidates.append(Path(env_hint))
+    except Exception:
+        pass
+
     if path:
-        return os.path.abspath(path)
+        candidates.append(Path(path))
+
     if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+        candidates.append(Path(sys.executable).resolve().parent)
+    else:
+        candidates.append(Path(__file__).resolve().parent)
+
+    candidates.append(Path(os.getcwd()).resolve())
+
+    def normalize(p: Path) -> Path:
+        p = p.resolve()
+        if p.name.lower() in {"tools", "system", "code"}:
+            p = p.parent
+        q = p
+        for _ in range(5):
+            if (q / "input").exists() and (q / "output").exists():
+                return q
+            if (q / "config.ini").exists() and ((q / "input").exists() or (q / "output").exists()):
+                return q
+            q = q.parent
+        return p
+
+    for c in candidates:
+        root = normalize(c)
+        if (root / "input").exists() or (root / "output").exists() or (root / "config.ini").exists():
+            return str(root)
+
+    return str(normalize(candidates[0]))
 
 
 def _safe_relpath(path: Path, base: Path) -> str:
@@ -190,7 +229,7 @@ def launch_gui(base_dir: str):
         ttk = tb
     else:
         root = tk.Tk()
-        ttk = tk
+        ttk = ttk_native
 
     root.title("MESA – Backup / Restore")
 
@@ -211,15 +250,42 @@ def launch_gui(base_dir: str):
     warning.pack(fill="x", pady=(0, 10))
 
     # ---------------- Progress ----------------
+    # Keep the same visual layout as other MESA tools:
+    # progress bar (bootstyle 'info') + percent label, plus a separate status line.
     op_status_var = tk.StringVar(value="Idle")
     progress_var = tk.DoubleVar(value=0.0)
-    progress_max_var = tk.DoubleVar(value=1.0)
 
     prog = ttk.Frame(container)
     prog.pack(fill="x", pady=(0, 12))
     ttk.Label(prog, textvariable=op_status_var, justify="left").pack(anchor="w")
-    progressbar = ttk.Progressbar(prog, variable=progress_var, maximum=progress_max_var.get())
-    progressbar.pack(fill="x", pady=(4, 0))
+
+    progress_frame = tk.Frame(prog)
+    # Center the bar+percent group (matches other MESA tools)
+    progress_frame.pack(pady=(4, 0))
+
+    if tb:
+        progress_bar = ttk.Progressbar(
+            progress_frame,
+            orient="horizontal",
+            length=260,
+            mode="determinate",
+            maximum=100,
+            variable=progress_var,
+            bootstyle="info",
+        )
+    else:
+        progress_bar = ttk.Progressbar(
+            progress_frame,
+            orient="horizontal",
+            length=260,
+            mode="determinate",
+            maximum=100,
+            variable=progress_var,
+        )
+    progress_bar.pack(side=tk.LEFT)
+
+    progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
+    progress_label.pack(side=tk.LEFT, padx=8)
 
     work_q: queue.Queue = queue.Queue()
     work_running = {"active": False}
@@ -227,9 +293,12 @@ def launch_gui(base_dir: str):
     def _set_progress(current: int, total: int, msg: str):
         total = max(1, int(total))
         current = max(0, min(int(current), total))
-        progress_max_var.set(float(total))
-        progressbar.configure(maximum=progress_max_var.get())
-        progress_var.set(float(current))
+        pct = (100.0 * float(current)) / float(total)
+        progress_var.set(pct)
+        try:
+            progress_label.config(text=f"{int(pct)}%")
+        except Exception:
+            pass
         op_status_var.set(f"{msg}  ({current}/{total})")
         root.update_idletasks()
 
