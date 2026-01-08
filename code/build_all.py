@@ -100,7 +100,9 @@ HELPER_COLLECTS = [
     "--collect-submodules", "geopandas",
     "--collect-data", "pandas",      # data only, avoid tests
     "--collect-data", "pyarrow",     # data only, avoid tests
-    "--collect-submodules", "ttkbootstrap",
+    # ttkbootstrap ships theme assets (tcl/images) that must be collected for
+    # frozen builds to work reliably on other machines.
+    "--collect-all", "ttkbootstrap",
     "--collect-all", "h3",
     "--collect-all", "webview",
 ]
@@ -129,7 +131,9 @@ MAIN_COLLECTS = [
     "--collect-all", "influxdb_client",
     "--collect-data", "pandas",
     "--collect-data", "pyarrow",
-    "--collect-submodules", "ttkbootstrap",
+    # ttkbootstrap ships theme assets (tcl/images) that must be collected for
+    # frozen builds to work reliably on other machines.
+    "--collect-all", "ttkbootstrap",
 ]
 MAIN_EXCLUDES = [
     "--exclude-module", "cupy",
