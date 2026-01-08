@@ -1169,8 +1169,9 @@ def _build_linework_and_coverage(
     if use_parallel:
         # Chunk size: tradeoff between overhead and per-worker memory.
         chunk_size = max(200, _cfg_int(cfg, "mosaic_extract_chunk_size", 2500))
-        maxtasks = max(1, _cfg_int(cfg, "mosaic_extract_maxtasksperchild", 4))
-        pool_chunksize = max(1, _cfg_int(cfg, "mosaic_extract_pool_chunksize", 1))
+        # Backward compatibility: earlier docs used mosaic_pool_* keys.
+        maxtasks = max(1, _cfg_int(cfg, "mosaic_extract_maxtasksperchild", _cfg_int(cfg, "mosaic_pool_maxtasksperchild", 4)))
+        pool_chunksize = max(1, _cfg_int(cfg, "mosaic_extract_pool_chunksize", _cfg_int(cfg, "mosaic_pool_chunksize", 1)))
 
         # Serialize geometries to WKB once in the parent to avoid GeoPandas objects
         # crossing processes.
@@ -1182,6 +1183,21 @@ def _build_linework_and_coverage(
                 wkbs.append(b"")
 
         chunks = [wkbs[i:i + chunk_size] for i in range(0, len(wkbs), chunk_size)]
+
+        # Order tasks to reduce tail-end stragglers (which otherwise makes CPU
+        # look "idle" near the end when only a few heavy chunks remain).
+        try:
+            order_mode = str(cfg["DEFAULT"].get("mosaic_task_order", "interleave")).strip().lower()
+        except Exception:
+            order_mode = "interleave"
+        if order_mode not in ("interleave", "heavy_first", "light_first"):
+            order_mode = "interleave"
+        try:
+            weights = [sum((len(b) for b in c if b), 0) for c in chunks]
+            order = _order_tasks(weights, order_mode)
+            chunks = [chunks[i] for i in order]
+        except Exception:
+            order_mode = "(default)"
 
         # Hook heartbeat/progress to real work units.
         STATS.tiles_total = int(len(chunks))
@@ -1197,7 +1213,7 @@ def _build_linework_and_coverage(
             extract_floor = extract_ceiling = None
 
         log_to_gui(
-            f"[Mosaic] Parallel boundary extraction: workers={workers}, chunks={len(chunks):,}, chunk_size={chunk_size:,}, maxtasksperchild={maxtasks}",
+            f"[Mosaic] Parallel boundary extraction: workers={workers}, chunks={len(chunks):,}, chunk_size={chunk_size:,}, maxtasksperchild={maxtasks}, task_order={order_mode}",
             "INFO",
         )
 
@@ -2305,7 +2321,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
     progress_var = tk.DoubleVar()
     pbar = (ttk.Progressbar(pframe, orient="horizontal", length=240, mode="determinate",
                             variable=progress_var, bootstyle="info")
-            if ttk else tk.Scale(pframe, orient="horizontal", length=240, from_=0, to=100))
+            if ttk else tk.Scale(pframe, orient="horizontal", length=240, from_=0, to=100, variable=progress_var, showvalue=0))
     pbar.pack(side=tk.LEFT, padx=6)
     progress_label = tk.Label(pframe, text="0%"); progress_label.pack(side=tk.LEFT)
 
