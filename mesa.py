@@ -704,6 +704,9 @@ def edit_processing_setup():
         )
 
 def process_data(gpkg_file):
+    # Explicit marker so Status->Recent activity can time the full run
+    # from the Process button press to MBTiles completion.
+    log_to_logfile("[Process] STARTED")
     python_script, exe_file = get_script_paths("data_process")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
@@ -1348,6 +1351,18 @@ if __name__ == "__main__":
                         continue
 
                     # run is active
+                    # If we encounter a new start marker while a run is active, it means the
+                    # previous run likely ended without a primary end marker (e.g., UI closed,
+                    # crash, or run stopped early). In that case, finalize the previous run
+                    # using the best available secondary end marker (if any), then begin a new run.
+                    if _has_any(line, start_markers):
+                        if secondary_end is not None:
+                            last_duration = (secondary_end - current_start).total_seconds()
+                            last_end = secondary_end
+                        current_start = ts
+                        secondary_end = None
+                        continue
+
                     if end_markers_secondary and _has_any(line, end_markers_secondary):
                         secondary_end = ts
 
@@ -1451,12 +1466,24 @@ if __name__ == "__main__":
 
         seconds["Processing"] = _scan_last_duration_from_log(
             log_path,
-            start_markers=["[Stage 1/4] Preparing workspace"],
-            end_markers_primary=["[Tiles] Completed.", "Error during processing:"],
-            end_markers_secondary=[
-                "Core processing (stages 1-3) finished",
-                "tbl_flat saved with",
+            start_markers=[
+                "[Process] STARTED",
+                # Backward-compatible fallbacks for older logs
+                "Attempting to run command:",
+                "[Stage 1/4] Preparing workspace",
             ],
+            end_markers_primary=[
+                # Full pipeline completion
+                "[Tiles] Completed.",
+                # Explicit tiles failure/skip markers (still ends the overall attempt)
+                "[Tiles] Skipping MBTiles stage because processing exited with code",
+                "[Tiles] tbl_flat not present or empty; skipping MBTiles generation.",
+                "[Tiles] create_raster_tiles exited with code",
+                "[Tiles] Error:",
+                # Core failure marker
+                "Error during processing:",
+            ],
+            end_markers_secondary=None,
         )
 
         seconds["Line processing"] = _scan_last_duration_from_log(
