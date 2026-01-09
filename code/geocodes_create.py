@@ -1220,6 +1220,8 @@ def _build_linework_and_coverage(
         ctx = mp.get_context("spawn")
         done = 0
         last_ui = 0.0
+        last_progress_ts = time.time()
+        last_wait_log_ts = time.time()
         try:
             with ctx.Pool(processes=int(workers), maxtasksperchild=int(maxtasks)) as pool:
                 it = pool.imap_unordered(
@@ -1227,8 +1229,43 @@ def _build_linework_and_coverage(
                     [(c, float(line_buf_m), float(point_buf_m)) for c in chunks],
                     chunksize=int(pool_chunksize),
                 )
-                for res in it:
+                # Use iterator timeouts so we can log “still working” heartbeats
+                # during long tails (few heavy chunks) or when a worker hangs.
+                hb_secs = None
+                try:
+                    hb_secs = float(cfg["DEFAULT"].get("heartbeat_secs", "10"))
+                except Exception:
+                    hb_secs = None
+                next_timeout = max(5.0, min(120.0, float(hb_secs or 10.0)))
+
+                while done < len(chunks):
+                    try:
+                        # multiprocessing.pool.IMapIterator supports next(timeout=...).
+                        res = it.next(timeout=next_timeout)  # type: ignore[attr-defined]
+                    except Exception as e:
+                        # Most commonly multiprocessing.TimeoutError.
+                        if type(e).__name__ == "TimeoutError":
+                            now = time.time()
+                            if (now - last_wait_log_ts) >= next_timeout:
+                                last_wait_log_ts = now
+                                alive = None
+                                try:
+                                    alive = sum(1 for p in getattr(pool, "_pool", []) if p is not None and p.is_alive())
+                                except Exception:
+                                    alive = None
+                                stalled_s = now - last_progress_ts
+                                msg = (
+                                    f"[Mosaic] Still working… {done:,}/{len(chunks):,} chunks completed; "
+                                    f"no completion for {stalled_s/60.0:.1f} min"
+                                )
+                                if alive is not None:
+                                    msg += f"; workers alive={alive}/{int(workers)}"
+                                log_to_gui(msg, "INFO")
+                            continue
+                        raise
+
                     done += 1
+                    last_progress_ts = time.time()
 
                     STATS.tiles_done = int(done)
                     if extract_floor is not None and extract_ceiling is not None:
