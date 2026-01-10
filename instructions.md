@@ -14,6 +14,9 @@ Use this document as the first stop before editing the `mesa` repository. Update
 ## 1.2 Keep this document current
 - Whenever you edit this file, update the **Last updated** line at the bottom with the current date **and time** in the format `YYYY-MM-DD HH:MM`.
 
+## 1.3 Time zone for logs
+- Any timestamps we add to logs, status messages, docs, or build output should be in **Norway local time** (`Europe/Oslo`, i.e. CET/CEST), since the lead programmer is in Norway. He likes things to be convenient for himself.
+
 ## 2. Repository layout (high level)
 | Path | Purpose |
 | --- | --- |
