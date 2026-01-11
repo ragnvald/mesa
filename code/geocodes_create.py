@@ -69,6 +69,61 @@ from shapely.ops import unary_union, polygonize
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
 
+# -----------------------------------------------------------------------------
+# Locale
+# -----------------------------------------------------------------------------
+# Avoid forcing "en_US.UTF-8" on Windows: many machines don't have that locale.
+
+def _patch_locale_setlocale_for_windows() -> None:
+    """Make locale.setlocale resilient on Windows.
+
+    ttkbootstrap calls locale.setlocale during import (DatePickerDialog). On some
+    Windows machines, setlocale(LC_TIME, "") can raise locale.Error.
+    """
+    try:
+        if os.name != "nt":
+            return
+        _orig = locale.setlocale
+
+        def _safe_setlocale(category, value=None):
+            try:
+                if value is None:
+                    return _orig(category)
+                return _orig(category, value)
+            except locale.Error:
+                for fallback in ("", "C"):
+                    try:
+                        return _orig(category, fallback)
+                    except Exception:
+                        continue
+                try:
+                    return _orig(category)
+                except Exception:
+                    return "C"
+
+        locale.setlocale = _safe_setlocale  # type: ignore[assignment]
+    except Exception:
+        pass
+
+
+_patch_locale_setlocale_for_windows()
+
+try:
+    if os.name == "nt":
+        for _k in ("LC_ALL", "LC_CTYPE", "LANG"):
+            _v = os.environ.get(_k)
+            if _v and ("utf-8" in _v.lower()) and ("_" in _v) and ("." in _v):
+                os.environ.pop(_k, None)
+except Exception:
+    pass
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except Exception:
+    try:
+        locale.setlocale(locale.LC_ALL, "C")
+    except Exception:
+        pass
+
 try:
     import fiona
 except Exception:
@@ -95,12 +150,100 @@ except Exception:
 # GUI / ttkbootstrap
 import tkinter as tk
 from tkinter import scrolledtext
-try:
-    import ttkbootstrap as ttk
-    from ttkbootstrap.constants import PRIMARY, INFO, WARNING
-except Exception:
-    ttk = None
-    PRIMARY = INFO = WARNING = None
+from tkinter import messagebox
+import json
+from pathlib import Path
+
+
+def _import_ttkbootstrap():
+    """Import ttkbootstrap with a locale-safe fallback.
+
+    On some Windows machines, a forced/unsupported locale can cause ttkbootstrap (or its
+    import chain) to raise locale.Error('unsupported locale setting'). In that case,
+    retry after switching to a safe locale.
+    """
+    try:
+        import ttkbootstrap as _ttk
+        from ttkbootstrap.constants import PRIMARY as _PRIMARY, INFO as _INFO, WARNING as _WARNING
+        return _ttk, _PRIMARY, _INFO, _WARNING, None, None
+    except Exception as e:
+        err1 = repr(e)
+        tb1 = traceback.format_exc()
+
+        try:
+            is_locale_problem = isinstance(e, locale.Error) or ("unsupported locale" in str(e).lower())
+        except Exception:
+            is_locale_problem = False
+
+        if is_locale_problem:
+            try:
+                # Prefer user default; fall back to the C locale.
+                for loc in ("", "C"):
+                    try:
+                        locale.setlocale(locale.LC_ALL, loc)
+                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                # Clear partially imported modules before retry.
+                for name in list(sys.modules.keys()):
+                    if name == "ttkbootstrap" or name.startswith("ttkbootstrap."):
+                        sys.modules.pop(name, None)
+            except Exception:
+                pass
+
+            try:
+                import ttkbootstrap as _ttk
+                from ttkbootstrap.constants import PRIMARY as _PRIMARY, INFO as _INFO, WARNING as _WARNING
+                return _ttk, _PRIMARY, _INFO, _WARNING, None, None
+            except Exception as e2:
+                err2 = f"{err1} | retry: {repr(e2)}"
+                tb2 = tb1 + "\n--- retry ---\n" + traceback.format_exc()
+                return None, None, None, None, err2, tb2
+
+        return None, None, None, None, err1, tb1
+
+
+ttk, PRIMARY, INFO, WARNING, _TTKBOOTSTRAP_IMPORT_ERROR, _TTKBOOTSTRAP_IMPORT_TRACE = _import_ttkbootstrap()
+
+
+def _ttkbootstrap_diagnostics() -> dict:
+    """Best-effort diagnostics for ttkbootstrap import failures in frozen builds."""
+    d: dict = {}
+    try:
+        d["frozen"] = bool(getattr(sys, "frozen", False))
+    except Exception:
+        d["frozen"] = False
+    try:
+        d["executable"] = sys.executable
+    except Exception:
+        pass
+    try:
+        d["cwd"] = os.getcwd()
+    except Exception:
+        pass
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        d["_MEIPASS"] = meipass
+        if meipass:
+            root = Path(meipass)
+            d["meipass_exists"] = root.exists()
+            d["meipass_ttkbootstrap_dir_exists"] = (root / "ttkbootstrap").exists()
+    except Exception:
+        pass
+    try:
+        d["ttkbootstrap_import_error"] = _TTKBOOTSTRAP_IMPORT_ERROR
+    except Exception:
+        pass
+    try:
+        if _TTKBOOTSTRAP_IMPORT_TRACE:
+            d["ttkbootstrap_import_trace_tail"] = _TTKBOOTSTRAP_IMPORT_TRACE[-1200:]
+    except Exception:
+        pass
+    return d
 
 
 # -----------------------------------------------------------------------------
@@ -124,14 +267,6 @@ AVG_HEX_AREA_KM2 = {
 }
 
 # -----------------------------------------------------------------------------
-# Locale
-# -----------------------------------------------------------------------------
-try:
-    locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
-except locale.Error:
-    pass
-
-# -----------------------------------------------------------------------------
 # GUI globals + heartbeat
 # -----------------------------------------------------------------------------
 root: Optional[tk.Tk] = None
@@ -141,6 +276,8 @@ progress_label: Optional[tk.Label] = None
 original_working_directory: Optional[str] = None
 mosaic_status_var: Optional[tk.StringVar] = None
 size_levels_var: Optional[tk.StringVar] = None
+dissolve_similar_var: Optional[tk.BooleanVar] = None
+dissolve_aggressive_var: Optional[tk.BooleanVar] = None
 
 HEARTBEAT_SECS = 10
 
@@ -857,6 +994,195 @@ def _geom_to_polygonal_metric(geom, *, line_buf_m: float, point_buf_m: float):
     return None
 
 
+def _explode_polygons(geom) -> list[Polygon]:
+    """Explode polygonal geometry into individual Polygon parts (no MultiPolygon output)."""
+    g = _extract_polygonal(geom)
+    if g is None:
+        return []
+    if isinstance(g, Polygon):
+        return [g]
+    if isinstance(g, MultiPolygon):
+        return [p for p in g.geoms if isinstance(p, Polygon) and not p.is_empty]
+    return []
+
+
+def _default_dissolve_group_columns(df: pd.DataFrame) -> list[str]:
+    """Pick non-geometry columns likely useful for dissolve grouping.
+
+    Goal: ignore obvious unique identifiers so that "same attributes" can match.
+    """
+    import re
+
+    cols = [c for c in df.columns if c != "geometry"]
+    if not cols:
+        return []
+
+    # Common identifier patterns (keep conservative; users can still pre-clean inputs).
+    ignore = re.compile(r"(^id$|.*_id$|^id_.*|uuid|guid|objectid|fid)", re.IGNORECASE)
+    group_cols = [c for c in cols if not ignore.search(str(c))]
+    return group_cols
+
+
+def _prepare_assets_polygonal_metric(a_metric: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
+    """Convert asset geometries into polygonal metric geometries (buffering lines/points)."""
+    line_buf_m = _cfg_float(cfg, "default_line_buffer_m", 10.0)
+    point_buf_m = _cfg_float(cfg, "default_point_buffer_m", 10.0)
+
+    out = a_metric.copy()
+    polys = []
+    for geom in out.geometry:
+        polyish = _geom_to_polygonal_metric(geom, line_buf_m=line_buf_m, point_buf_m=point_buf_m)
+        if polyish is None:
+            polys.append(None)
+            continue
+        polyish = _fix_valid(polyish)
+        polyish = _extract_polygonal(polyish)
+        if polyish is None or getattr(polyish, "is_empty", True):
+            polys.append(None)
+            continue
+        polys.append(polyish)
+    out["geometry"] = polys
+    out = out[out["geometry"].notna()].copy()
+    try:
+        out = out[~out.geometry.is_empty].copy()
+    except Exception:
+        pass
+    return out
+
+
+def _dissolve_assets_by_attributes(a_poly: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
+    hb_secs = _cfg_float(cfg, "heartbeat_secs", 60.0)
+    last_log = time.time()
+    last_ui = 0.0
+
+    group_cols = _default_dissolve_group_columns(a_poly)
+    if not group_cols:
+        log_to_gui("[Mosaic] Dissolve-by-attributes: no suitable non-ID columns found; skipping dissolve.", "WARN")
+        return a_poly[["geometry"]].copy()
+
+    try:
+        ng = int(a_poly.groupby(group_cols, dropna=False, sort=False).ngroups)
+    except Exception:
+        ng = 0
+    log_to_gui(
+        f"[Mosaic] Dissolve-by-attributes: grouping by {len(group_cols)} column(s){f' across {ng:,} group(s)' if ng else ''}…",
+        "INFO",
+    )
+
+    rows = []
+    grouped = a_poly.groupby(group_cols, dropna=False, sort=False)
+    i = 0
+    for key, sub in grouped:
+        i += 1
+        now = time.time()
+        if (now - last_log) >= max(10.0, hb_secs):
+            last_log = now
+            try:
+                log_to_gui(f"[Mosaic] Dissolve-by-attributes: processed {i:,}/{ng:,} group(s)…", "INFO")
+            except Exception:
+                log_to_gui(f"[Mosaic] Dissolve-by-attributes: processed {i:,} group(s)…", "INFO")
+        # Provide a gentle progress tick during dissolve without conflicting with later stages.
+        if ng > 0 and (now - last_ui) >= 0.25:
+            last_ui = now
+            update_progress(_progress_lerp(10.0, 12.0, i / max(1, ng)))
+
+        geoms = [g for g in sub.geometry.tolist() if g is not None and not g.is_empty]
+        if not geoms:
+            continue
+
+        merged = _unary_union_safe(geoms, label="dissolve_attrs")
+        parts = _explode_polygons(merged)
+        if not parts:
+            continue
+
+        # key is scalar for 1-col groupby; tuple otherwise
+        if len(group_cols) == 1:
+            key_vals = (key,)
+        else:
+            key_vals = tuple(key)
+
+        base_row = dict(zip(group_cols, key_vals))
+        for p in parts:
+            r = dict(base_row)
+            r["geometry"] = p
+            rows.append(r)
+
+    out = gpd.GeoDataFrame(rows, geometry="geometry", crs=a_poly.crs)
+    # Avoid MultiPolygon rows: explode already ensures Polygon parts.
+    return out if not out.empty else gpd.GeoDataFrame(geometry=[], crs=a_poly.crs)
+
+
+def _dissolve_assets_aggressive_with_attrs_json(a_poly: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
+    hb_secs = _cfg_float(cfg, "heartbeat_secs", 60.0)
+    last_log = time.time()
+    last_ui = 0.0
+
+    attr_cols = [c for c in a_poly.columns if c != "geometry"]
+
+    geoms = [g for g in a_poly.geometry.tolist() if g is not None and not g.is_empty]
+    if not geoms:
+        return gpd.GeoDataFrame(geometry=[], crs=a_poly.crs)
+
+    merged = _unary_union_safe(geoms, label="dissolve_aggressive")
+    parts = _explode_polygons(merged)
+    if not parts:
+        return gpd.GeoDataFrame(geometry=[], crs=a_poly.crs)
+
+    log_to_gui(f"[Mosaic] Dissolve-aggressive: produced {len(parts):,} polygon(s); attaching source attributes as JSON…", "INFO")
+
+    sidx = None
+    try:
+        sidx = a_poly.sindex
+    except Exception:
+        sidx = None
+
+    rows = []
+    for i, p in enumerate(parts, start=1):
+        now = time.time()
+        if (now - last_log) >= max(10.0, hb_secs):
+            last_log = now
+            log_to_gui(f"[Mosaic] Dissolve-aggressive: processed {i:,}/{len(parts):,} polygon(s)…", "INFO")
+        if (now - last_ui) >= 0.25:
+            last_ui = now
+            update_progress(_progress_lerp(10.0, 12.0, i / max(1, len(parts))))
+
+        attrs_list = []
+        try:
+            if sidx is not None:
+                try:
+                    cand = list(sidx.query(p, predicate="intersects"))
+                except Exception:
+                    cand = list(sidx.query(p))
+                sub = a_poly.iloc[cand]
+            else:
+                sub = a_poly
+
+            try:
+                mask = sub.intersects(p)
+                sub = sub.loc[mask]
+            except Exception:
+                pass
+
+            if not sub.empty and attr_cols:
+                for _, r0 in sub[attr_cols].iterrows():
+                    d = {}
+                    for c in attr_cols:
+                        v = r0.get(c, None)
+                        if pd.isna(v):
+                            v = None
+                        d[str(c)] = v
+                    attrs_list.append(d)
+        except Exception:
+            attrs_list = []
+
+        rows.append({
+            "geometry": p,
+            "dissolve_source_attributes_json": json.dumps(attrs_list, ensure_ascii=False, default=str),
+        })
+
+    return gpd.GeoDataFrame(rows, geometry="geometry", crs=a_poly.crs)
+
+
 def _iter_boundary_lines(polyish):
     """Yield LineString boundary parts from a polygonal geometry."""
     if polyish is None:
@@ -943,6 +1269,13 @@ def _tree_reduce_unions(
     last_log = started
     round_idx = 0
 
+    # Total rounds is known up-front for this pairwise reduction strategy.
+    total_rounds = 0
+    n_tmp = len(unions)
+    while n_tmp > max_partials:
+        total_rounds += 1
+        n_tmp = (n_tmp + 1) // 2
+
     while len(unions) > max_partials:
         round_idx += 1
         n_in = len(unions)
@@ -952,7 +1285,7 @@ def _tree_reduce_unions(
         if now - last_log >= hb:
             elapsed = now - started
             log_to_gui(
-                f"[Mosaic] Reducing {label}: round {round_idx} starting (n={n_in:,} -> <= {max_partials:,}); merges={merges_total:,}; elapsed {elapsed:.0f}s…",
+                f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} starting (n={n_in:,} -> <= {max_partials:,}); merges={merges_total:,}; elapsed {elapsed:.0f}s…",
                 "INFO",
             )
             last_log = now
@@ -974,7 +1307,7 @@ def _tree_reduce_unions(
                 elapsed = now - started
                 pct = (merge_i / max(1, merges_total)) * 100.0
                 log_to_gui(
-                    f"[Mosaic] Reducing {label}: round {round_idx} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
+                    f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
                     "INFO",
                 )
                 last_log = now
@@ -984,7 +1317,7 @@ def _tree_reduce_unions(
         if now - last_log >= hb:
             elapsed = now - started
             log_to_gui(
-                f"[Mosaic] Reducing {label}: round {round_idx} complete; n={len(unions):,}; elapsed {elapsed:.0f}s",
+                f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} complete; n={len(unions):,}; elapsed {elapsed:.0f}s",
                 "INFO",
             )
             last_log = now
@@ -1888,6 +2221,8 @@ def mosaic_faces_from_assets_parallel(
     buffer_m: float,
     grid_size_m: float,
     workers: int | None = None,
+    *,
+    dissolve_mode: str = "none",
 ) -> gpd.GeoDataFrame:
     """Build basic_mosaic faces from global linework.
 
@@ -1916,14 +2251,43 @@ def mosaic_faces_from_assets_parallel(
         log_to_gui("[Mosaic] No assets loaded; nothing to do.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Reduce memory: only geometry column.
-    a = gpd.GeoDataFrame(a[["geometry"]].copy(), geometry="geometry", crs=a.crs)
+    # Reduce memory unless we need attributes for dissolve.
+    if str(dissolve_mode).strip().lower() in ("none", "off", "false", "0", ""):
+        a = gpd.GeoDataFrame(a[["geometry"]].copy(), geometry="geometry", crs=a.crs)
+        dissolve_mode = "none"
+    else:
+        dissolve_mode = str(dissolve_mode).strip().lower()
+        if dissolve_mode not in ("similar", "aggressive"):
+            dissolve_mode = "none"
 
     metric_crs = working_metric_crs_for(a, cfg)
     t0 = time.time()
     a_metric = a.to_crs(metric_crs)
     log_to_gui(f"[Mosaic] Loaded {len(a_metric):,} assets; projected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
     update_progress(10)
+
+    # Optional dissolve pre-processing (before linework extraction/polygonize).
+    if dissolve_mode != "none":
+        t0 = time.time()
+        log_to_gui(f"[Mosaic] Dissolve enabled: mode={dissolve_mode} (pre-processing assets)…", "INFO")
+        n0 = int(len(a_metric))
+        a_poly = _prepare_assets_polygonal_metric(a_metric, cfg)
+        if dissolve_mode == "similar":
+            a_metric = _dissolve_assets_by_attributes(a_poly, cfg)
+        elif dissolve_mode == "aggressive":
+            a_metric = _dissolve_assets_aggressive_with_attrs_json(a_poly, cfg)
+        else:
+            a_metric = a_poly[["geometry"]].copy()
+
+        # Keep only polygon rows (no MultiPolygon output); dissolve functions already explode.
+        try:
+            a_metric = a_metric[~a_metric.geometry.is_empty].copy()
+        except Exception:
+            pass
+        log_to_gui(
+            f"[Mosaic] Dissolve finished: {n0:,} -> {len(a_metric):,} polygon(s) in {time.time()-t0:.2f}s.",
+            "INFO",
+        )
 
     STATS.stage = "linework"
     STATS.faces_total = 0
@@ -2239,7 +2603,7 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
 # -----------------------------------------------------------------------------
 # Mosaic runner
 # -----------------------------------------------------------------------------
-def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None):
+def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None, dissolve_mode: str = "none"):
     update_progress(0)
     log_to_gui("Step [Mosaic] STARTED")
     success = False
@@ -2282,7 +2646,16 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
             log_msg += f" [{auto_reason}]"
         log_to_gui(log_msg, "INFO")
 
-        faces = mosaic_faces_from_assets_parallel(base_dir, buffer_m, grid_size_m, workers)
+        if dissolve_mode and str(dissolve_mode).strip().lower() not in ("none", "off", "false", "0", ""):
+            log_to_gui(f"[Mosaic] UI dissolve mode: {dissolve_mode}", "INFO")
+
+        faces = mosaic_faces_from_assets_parallel(
+            base_dir,
+            buffer_m,
+            grid_size_m,
+            workers,
+            dissolve_mode=str(dissolve_mode).strip().lower() if dissolve_mode else "none",
+        )
         if faces.empty:
             status_detail = "No faces produced to publish."
             log_to_gui(status_detail, "WARN")
@@ -2334,7 +2707,7 @@ def format_level_size_list(levels: list[int]) -> str:
 # GUI
 # -----------------------------------------------------------------------------
 def build_gui(base: Path, cfg: configparser.ConfigParser):
-    global root, log_widget, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var
+    global root, log_widget, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var, dissolve_similar_var, dissolve_aggressive_var
     original_working_directory = str(base)
 
     # heartbeat secs
@@ -2345,8 +2718,36 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
         pass
 
     theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if ttk else None
+
+    frozen = bool(getattr(sys, "frozen", False))
+    if ttk is None:
+        try:
+            diag = _ttkbootstrap_diagnostics()
+            log_to_gui(f"[UI] ttkbootstrap unavailable. Diagnostics: {diag}", "WARN")
+        except Exception:
+            pass
+        log_to_gui(
+            "ttkbootstrap is not available; using Tk fallback UI. "
+            + ("(This is unexpected in a packaged .exe build.) " if frozen else "")
+            + f"Details: {_TTKBOOTSTRAP_IMPORT_ERROR}; executable={sys.executable}",
+            "WARN",
+        )
+
     root = ttk.Window(themename=theme) if ttk else tk.Tk()
     root.title("Create geocodes (H3 / Mosaic)")
+
+    if frozen and ttk is None:
+        try:
+            messagebox.showwarning(
+                "MESA UI theme unavailable",
+                "ttkbootstrap could not be loaded, so a fallback UI is used.\n\n"
+                "Details:\n"
+                f"{_TTKBOOTSTRAP_IMPORT_ERROR}\n\n"
+                "If the error mentions 'DLL load failed', install the Microsoft Visual C++ 2015–2022 x64 Redistributable on the target machine.\n"
+                "If it mentions 'No module named ttkbootstrap', the packaged tool is incomplete/outdated.",
+            )
+        except Exception:
+            pass
 
     frame = ttk.LabelFrame(root, text="Log", bootstyle="info") if ttk else tk.LabelFrame(root, text="Log")
     frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
@@ -2456,11 +2857,68 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
             except Exception: pass
         mp.get_start_method(allow_none=True)
         import threading
-        threading.Thread(target=run_mosaic, args=(base, buf, grid, _after), daemon=True).start()
+
+        mode = "none"
+        try:
+            if dissolve_aggressive_var is not None and bool(dissolve_aggressive_var.get()):
+                mode = "aggressive"
+            elif dissolve_similar_var is not None and bool(dissolve_similar_var.get()):
+                mode = "similar"
+        except Exception:
+            mode = "none"
+
+        threading.Thread(target=run_mosaic, args=(base, buf, grid, _after, mode), daemon=True).start()
 
     start_btn = (ttk.Button(mosaic_frame, text="Build mosaic", width=16, bootstyle=PRIMARY, command=_run_mosaic_inline)
                  if ttk else tk.Button(mosaic_frame, text="Build mosaic", width=16, command=_run_mosaic_inline))
     start_btn.grid(row=0, column=2, padx=4, pady=2, sticky="e")
+
+    # Dissolve options (applied only when pressing Build mosaic)
+    dissolve_similar_var = tk.BooleanVar(value=False)
+    dissolve_aggressive_var = tk.BooleanVar(value=False)
+
+    def _sync_dissolve_options(changed: str):
+        # Keep them mutually exclusive.
+        try:
+            if changed == "similar" and dissolve_similar_var.get():
+                dissolve_aggressive_var.set(False)
+            elif changed == "aggressive" and dissolve_aggressive_var.get():
+                dissolve_similar_var.set(False)
+        except Exception:
+            pass
+
+    opt_frame = tk.Frame(mosaic_frame)
+    opt_frame.grid(row=1, column=0, columnspan=3, padx=4, pady=(2, 4), sticky="w")
+    tk.Label(opt_frame, text="Dissolve:").pack(side=tk.LEFT)
+
+    if ttk:
+        ttk.Checkbutton(
+            opt_frame,
+            text="Similar attributes",
+            variable=dissolve_similar_var,
+            bootstyle=INFO,
+            command=lambda: _sync_dissolve_options("similar"),
+        ).pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Checkbutton(
+            opt_frame,
+            text="Aggressive (ignore attrs; store JSON)",
+            variable=dissolve_aggressive_var,
+            bootstyle=WARNING,
+            command=lambda: _sync_dissolve_options("aggressive"),
+        ).pack(side=tk.LEFT)
+    else:
+        tk.Checkbutton(
+            opt_frame,
+            text="Similar attributes",
+            variable=dissolve_similar_var,
+            command=lambda: _sync_dissolve_options("similar"),
+        ).pack(side=tk.LEFT, padx=(6, 6))
+        tk.Checkbutton(
+            opt_frame,
+            text="Aggressive (ignore attrs; store JSON)",
+            variable=dissolve_aggressive_var,
+            command=lambda: _sync_dissolve_options("aggressive"),
+        ).pack(side=tk.LEFT)
 
     exit_frame = tk.Frame(root); exit_frame.pack(fill=tk.X, pady=6, padx=10)
     (ttk.Button(exit_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: _run_in_thread(run_import_geocodes, base, cfg)) if ttk
