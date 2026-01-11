@@ -4,10 +4,58 @@
 # Minimap opens in a separate, low-priority helper process (pywebview + Leaflet + OSM).
 
 import locale
+
+def _patch_locale_setlocale_for_windows() -> None:
+    """Make locale.setlocale resilient on Windows.
+
+    ttkbootstrap calls locale.setlocale during import (DatePickerDialog). On some
+    Windows machines, setlocale(LC_TIME, "") can raise locale.Error.
+    """
+    try:
+        if os.name != "nt":
+            return
+        _orig = locale.setlocale
+
+        def _safe_setlocale(category, value=None):
+            try:
+                if value is None:
+                    return _orig(category)
+                return _orig(category, value)
+            except locale.Error:
+                for fallback in ("", "C"):
+                    try:
+                        return _orig(category, fallback)
+                    except Exception:
+                        continue
+                try:
+                    return _orig(category)
+                except Exception:
+                    return "C"
+
+        locale.setlocale = _safe_setlocale  # type: ignore[assignment]
+    except Exception:
+        pass
+
+
+_patch_locale_setlocale_for_windows()
+
 try:
-    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    if os.name == "nt":
+        for _k in ("LC_ALL", "LC_CTYPE", "LANG"):
+            _v = os.environ.get(_k)
+            if _v and ("utf-8" in _v.lower()) and ("_" in _v) and ("." in _v):
+                os.environ.pop(_k, None)
 except Exception:
     pass
+
+try:
+    # Use OS default locale when available; fall back to the C locale.
+    locale.setlocale(locale.LC_ALL, "")
+except Exception:
+    try:
+        locale.setlocale(locale.LC_ALL, "C")
+    except Exception:
+        pass
 
 import os, sys, math, re, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
 import configparser
@@ -34,8 +82,95 @@ except Exception:
 # GUI
 import tkinter as tk
 from tkinter import scrolledtext
-import ttkbootstrap as tb
-from ttkbootstrap.constants import PRIMARY, WARNING
+from tkinter import ttk
+from tkinter import messagebox
+
+# Try ttkbootstrap; fall back to standard ttk if missing/broken.
+import traceback as _traceback
+
+
+def _import_ttkbootstrap():
+    """Import ttkbootstrap with a locale-safe fallback (Windows-friendly)."""
+    try:
+        import ttkbootstrap as _tb
+        from ttkbootstrap.constants import PRIMARY as _PRIMARY, WARNING as _WARNING, INFO as _INFO
+        return _tb, _PRIMARY, _WARNING, _INFO, None, None
+    except Exception as e:
+        err1 = repr(e)
+        tb1 = _traceback.format_exc()
+
+        try:
+            is_locale_problem = isinstance(e, locale.Error) or ("unsupported locale" in str(e).lower())
+        except Exception:
+            is_locale_problem = False
+
+        if is_locale_problem:
+            try:
+                for loc in ("", "C"):
+                    try:
+                        locale.setlocale(locale.LC_ALL, loc)
+                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            try:
+                for name in list(sys.modules.keys()):
+                    if name == "ttkbootstrap" or name.startswith("ttkbootstrap."):
+                        sys.modules.pop(name, None)
+            except Exception:
+                pass
+
+            try:
+                import ttkbootstrap as _tb
+                from ttkbootstrap.constants import PRIMARY as _PRIMARY, WARNING as _WARNING, INFO as _INFO
+                return _tb, _PRIMARY, _WARNING, _INFO, None, None
+            except Exception as e2:
+                err2 = f"{err1} | retry: {repr(e2)}"
+                tb2 = tb1 + "\n--- retry ---\n" + _traceback.format_exc()
+                return None, None, None, None, err2, tb2
+
+        return None, None, None, None, err1, tb1
+
+
+tb, PRIMARY, WARNING, INFO, _TTKBOOTSTRAP_IMPORT_ERROR, _TTKBOOTSTRAP_IMPORT_TRACE = _import_ttkbootstrap()
+
+
+def _ttkbootstrap_diagnostics() -> dict:
+    """Best-effort diagnostics for ttkbootstrap import failures in frozen builds."""
+    d: dict = {}
+    try:
+        d["frozen"] = bool(getattr(sys, "frozen", False))
+    except Exception:
+        d["frozen"] = False
+    try:
+        d["executable"] = sys.executable
+    except Exception:
+        pass
+    try:
+        d["cwd"] = os.getcwd()
+    except Exception:
+        pass
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        d["_MEIPASS"] = meipass
+        if meipass:
+            root = Path(meipass)
+            d["meipass_exists"] = root.exists()
+            d["meipass_ttkbootstrap_dir_exists"] = (root / "ttkbootstrap").exists()
+    except Exception:
+        pass
+    try:
+        d["ttkbootstrap_import_error"] = _TTKBOOTSTRAP_IMPORT_ERROR
+    except Exception:
+        pass
+    try:
+        if _TTKBOOTSTRAP_IMPORT_TRACE:
+            d["ttkbootstrap_import_trace_tail"] = _TTKBOOTSTRAP_IMPORT_TRACE[-1200:]
+    except Exception:
+        pass
+    return d
 
 # ----------------------------
 # Globals
@@ -1443,6 +1578,45 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     if geocodes.empty:
         log_to_gui(log_widget, "ERROR: Missing or empty tbl_geocode_object.parquet; aborting stacked build.")
         return
+
+    # Accept projects that only have the basic mosaic geocodes.
+    # Ensure the geocode-group label exists so later stages (stats/tiles) behave consistently.
+    try:
+        basic_group = (cfg["DEFAULT"].get("basic_group_name", _DEFAULT_BASIC_GROUP_NAME) or _DEFAULT_BASIC_GROUP_NAME)
+        basic_group = basic_group.strip().lower() if basic_group else _DEFAULT_BASIC_GROUP_NAME
+    except Exception:
+        basic_group = _DEFAULT_BASIC_GROUP_NAME
+
+    if "name_gis_geocodegroup" not in geocodes.columns:
+        log_to_gui(
+            log_widget,
+            f"[geocodes] Missing column 'name_gis_geocodegroup' in tbl_geocode_object; assuming all geocodes belong to '{basic_group}'.",
+        )
+        try:
+            geocodes = geocodes.copy()
+            geocodes["name_gis_geocodegroup"] = basic_group
+        except Exception:
+            pass
+
+    try:
+        present = (
+            geocodes["name_gis_geocodegroup"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
+            .str.lower()
+        )
+        groups_present = sorted({g for g in present.unique().tolist() if g})
+    except Exception:
+        groups_present = []
+
+    if groups_present:
+        log_to_gui(log_widget, f"[geocodes] Geocode group(s) present: {', '.join(groups_present)}")
+        if len(groups_present) == 1 and groups_present[0] == basic_group:
+            log_to_gui(
+                log_widget,
+                f"[geocodes] Only '{basic_group}' geocodes are available; continuing processing with basic mosaic only.",
+            )
 
     # Guardrail: importance/susceptibility are required to compute sensitivity.
     # If these are not set (typically via parametres_setup), we must stop early
@@ -3228,7 +3402,33 @@ if __name__ == "__main__":
 
     ttk_theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 
-    root = tb.Window(themename=ttk_theme)
+    # GUI root: use the same method as Atlas tools.
+    if tb is not None:
+        try:
+            root = tb.Window(themename=ttk_theme)
+        except Exception:
+            root = tb.Window(themename="flatly")
+    else:
+        root = tk.Tk()
+
+    frozen = bool(getattr(sys, 'frozen', False))
+    if frozen and tb is None:
+        try:
+            diag = _ttkbootstrap_diagnostics()
+            log_to_gui(None, f"[UI] ttkbootstrap unavailable. Diagnostics: {diag}")
+        except Exception:
+            pass
+        try:
+            messagebox.showwarning(
+                "MESA UI theme unavailable",
+                "ttkbootstrap could not be loaded, so a fallback UI is used.\n\n"
+                "Details:\n"
+                f"{_TTKBOOTSTRAP_IMPORT_ERROR}\n\n"
+                "If the error mentions 'DLL load failed', install the Microsoft Visual C++ 2015–2022 x64 Redistributable on the target machine.\n"
+                "If it mentions 'No module named ttkbootstrap', the packaged tool is incomplete/outdated.",
+            )
+        except Exception:
+            pass
     root.title("Process analysis & presentation (GeoParquet)")
     try:
         # Keep backward-compat path for the icon
@@ -3244,22 +3444,39 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    # panes
-    paned = tk.PanedWindow(root, orient=tk.HORIZONTAL)
+    # panes (prefer themed ttk widgets so the bootstrap theme is visible)
+    paned = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
     paned.pack(fill=tk.BOTH, expand=True)
-    left = tk.Frame(paned); right = tk.Frame(paned, width=660)
+    left = ttk.Frame(paned)
+    right = ttk.Frame(paned, width=660)
     paned.add(left); paned.add(right)
 
     # left
     log_widget = scrolledtext.ScrolledText(left, height=14)
     log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-    progress_frame = tk.Frame(left); progress_frame.pack(pady=5)
+    progress_frame = ttk.Frame(left)
+    progress_frame.pack(pady=5)
     progress_var = tk.DoubleVar(value=0.0)
-    progress_bar = tb.Progressbar(progress_frame, orient="horizontal", length=260,
-                                  mode="determinate", variable=progress_var, bootstyle='info')
+    if tb is not None:
+        progress_bar = tb.Progressbar(
+            progress_frame,
+            orient="horizontal",
+            length=260,
+            mode="determinate",
+            variable=progress_var,
+            bootstyle="info",
+        )
+    else:
+        progress_bar = ttk.Progressbar(
+            progress_frame,
+            orient="horizontal",
+            length=260,
+            mode="determinate",
+            variable=progress_var,
+        )
     progress_bar.pack(side=tk.LEFT)
-    progress_label = tk.Label(progress_frame, text=_current_progress_display(), bg="light grey")
+    progress_label = ttk.Label(progress_frame, text=_current_progress_display())
     progress_label.pack(side=tk.LEFT, padx=8)
 
     info = (f"This is where all calculations are made. Information is provided every {HEARTBEAT_SECS} seconds.\n"
@@ -3268,7 +3485,7 @@ if __name__ == "__main__":
             "increase the processing time. All resulting data is saved in the GeoParquet\n"
             "vector data format. Raster MBTiles are generated automatically at the end for\n"
             "faster viewing of your data in the map viewer.")
-    tk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
+    ttk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
 
     def _await_processing_then_tiles(proc_handle):
         try:
@@ -3295,17 +3512,29 @@ if __name__ == "__main__":
         if proc_snapshot is not None:
             threading.Thread(target=lambda: _await_processing_then_tiles(proc_snapshot), daemon=True).start()
 
-    btn_frame = tk.Frame(left); btn_frame.pack(pady=6)
-    tb.Button(btn_frame, text="Process", bootstyle=PRIMARY,
-              command=_run).pack(side=tk.LEFT, padx=5)
-    tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.LEFT, padx=5)
+    btn_frame = ttk.Frame(left)
+    btn_frame.pack(pady=6)
+    if tb is not None:
+        tb.Button(btn_frame, text="Process", bootstyle=PRIMARY, command=_run).pack(side=tk.LEFT, padx=5)
+        tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.LEFT, padx=5)
+    else:
+        ttk.Button(btn_frame, text="Process", command=_run).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Exit", command=root.destroy).pack(side=tk.LEFT, padx=5)
 
     # right
-    tk.Label(right, text="Processing progress map", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
-    tk.Label(right, text=("For more complex calculations this will give the user a better \n"
-                          "understanding of the progress of when the calculation\n"),
-             justify="left").pack(padx=10, anchor="w")
-    tb.Button(right, text="Progress map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
+    ttk.Label(right, text="Processing progress map", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
+    ttk.Label(
+        right,
+        text=(
+            "For more complex calculations this will give the user a better \n"
+            "understanding of the progress of when the calculation\n"
+        ),
+        justify="left",
+    ).pack(padx=10, anchor="w")
+    if tb is not None:
+        tb.Button(right, text="Progress map", command=open_minimap_window, bootstyle=INFO).pack(padx=10, pady=10, anchor="w")
+    else:
+        ttk.Button(right, text="Progress map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
 
     log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
     root.mainloop()
