@@ -1,6 +1,16 @@
 @echo off
 setlocal EnableExtensions
 
+REM Force a full build (main + all helpers) when running this script with no parameters.
+REM This avoids surprises if the user environment has lingering MESA_* overrides.
+set "MESA_BUILD_MAIN=1"
+set "MESA_BUILD_HELPERS=1"
+set "MESA_BUILD_CLEAN=0"
+set "MESA_HELPERS="
+set "MESA_HELPERS_SKIP="
+
+echo [MESA] Full build enforced: MESA_BUILD_MAIN=1, MESA_BUILD_HELPERS=1
+
 REM Capture start time (FileTime ticks) to compute total duration later
 for /f %%I in ('powershell -NoLogo -Command "(Get-Date).ToFileTimeUtc()"') do set "START_TICKS=%%I"
 
