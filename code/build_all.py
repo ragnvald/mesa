@@ -59,10 +59,18 @@ def resolve_main_script() -> Path:
 # Setup / Cleanup
 # ---------------------------------------------------------------------------
 def clean_and_prepare() -> None:
-    log("Cleaning previous build/dist...")
+    log("Preparing build folders...")
 
-    # Only remove our app’s dist folder (keep siblings under dist/)
-    shutil.rmtree(FINAL_DIST, ignore_errors=True)
+    # IMPORTANT:
+    # - When building the main app (mesa.exe), we want a clean dist to avoid stale DLLs/files.
+    # - When building helpers only (MESA_BUILD_MAIN=0), do NOT wipe FINAL_DIST, otherwise we
+    #   unintentionally delete an existing mesa.exe distribution.
+    if BUILD_MAIN:
+        log(f"Cleaning previous dist for main build: {FINAL_DIST}")
+        # Only remove our app’s dist folder (keep siblings under dist/)
+        shutil.rmtree(FINAL_DIST, ignore_errors=True)
+    else:
+        log(f"[NOTE] BUILD_MAIN=0 -> preserving existing dist folder (if any): {FINAL_DIST}")
 
     # Optionally remove build cache to force a clean rebuild.
     if CLEAN_BUILD:
@@ -471,6 +479,16 @@ def main() -> None:
             for p in sorted(FINAL_DIST.rglob("*")):
                 if p.is_file():
                     log(f"  - {p.relative_to(FINAL_DIST)}")
+    else:
+        # Helper-only builds are useful, but they do not produce mesa.exe.
+        if exe_path.exists():
+            log(f"[NOTE] BUILD_MAIN=0 -> existing mesa.exe is present and was preserved: {exe_path}")
+        else:
+            log(
+                "[WARN] BUILD_MAIN=0 -> mesa.exe was NOT built and is not present in the dist folder. "
+                "This is expected for helper-only builds; the dist will contain tools/resources only. "
+                "To build mesa.exe, re-run with MESA_BUILD_MAIN=1."
+            )
 
     log(f"\nDistribution ready at:\n  {FINAL_DIST}\n")
     sys.exit(0)
