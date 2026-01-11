@@ -183,6 +183,10 @@ progress_stage_text = "Preparations"
 _progress_value = 0.0
 HEARTBEAT_SECS = 60
 
+# When true, GUI log updates are driven by the log tailer (tailing log.txt).
+# Avoid also inserting via log_to_gui() to prevent duplicate lines.
+_GUI_LOG_TAILER_ACTIVE = False
+
 def _mp_allowed() -> bool:
     """Multiprocessing Pool is unsafe from a non-main thread in frozen builds (PyInstaller/Windows).
     Return True only when it's safe to create a Pool.
@@ -467,7 +471,7 @@ def log_to_gui(widget, message: str):
     timestamp = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted = f"{timestamp} - {message}"
     try:
-        if widget and widget.winfo_exists():
+        if widget and widget.winfo_exists() and not _GUI_LOG_TAILER_ACTIVE:
             widget.insert(tk.END, formatted + "\n")
             widget.see(tk.END)
     except tk.TclError:
@@ -3091,6 +3095,9 @@ def _start_log_tailer(root_obj: tk.Misc,
 
     if not candidates:
         return
+
+    global _GUI_LOG_TAILER_ACTIVE
+    _GUI_LOG_TAILER_ACTIVE = True
 
     # Start reading from current EOF to avoid dumping old logs
     state: dict[str, int] = {}
