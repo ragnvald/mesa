@@ -506,54 +506,76 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
 # ----------------------- Worker globals & worker -----------------------
 _G_GEOMS: List = []
 _G_SENS_CODES: List[Optional[str]] = []
-_G_NUMVALS: List[Optional[float]] = []   # used by groupstotal/assetstotal + index layers
-_G_FILL_MODE: str = "sensitivity"        # "sensitivity" | "groupstotal" | "assetstotal" | "importance_max" | "index_importance" | "index_sensitivity" | "index_owa"
-_G_PALETTE: Dict[str, Tuple[int,int,int,int]] = {}
+_G_VALS_BY_MODE: Dict[str, List[Optional[float]]] = {}
+_G_PALETTES_BY_MODE: Dict[str, Dict] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
-_G_NUM_MIN: float = 0.0
-_G_NUM_MAX: float = 1.0
 
-def _worker_init(geoms, sens_codes, numvals, fill_mode, palette, stroke_rgba, stroke_w, num_min, num_max):
-    global _G_GEOMS, _G_SENS_CODES, _G_NUMVALS, _G_FILL_MODE, _G_PALETTE, _G_STROKE_RGBA, _G_STROKE_W, _G_NUM_MIN, _G_NUM_MAX
+def _worker_init(
+    geoms,
+    sens_codes,
+    vals_by_mode,
+    palettes_by_mode,
+    stroke_rgba,
+    stroke_w,
+):
+    global _G_GEOMS, _G_SENS_CODES, _G_VALS_BY_MODE, _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W
     _G_GEOMS = geoms
     _G_SENS_CODES = sens_codes
-    _G_NUMVALS = numvals
-    _G_FILL_MODE = fill_mode
-    _G_PALETTE = palette
+    _G_VALS_BY_MODE = vals_by_mode or {}
+    _G_PALETTES_BY_MODE = palettes_by_mode or {}
     _G_STROKE_RGBA = stroke_rgba
     _G_STROKE_W = float(stroke_w)
-    _G_NUM_MIN = float(num_min)
-    _G_NUM_MAX = float(num_max)
 
 def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
     """
-    task = (z, x, y, cand_idx_list)
+    task = (z, x, y, cand_idx_list, mode, num_min, num_max)
     Uses globals for data and styling; returns (z,x,y,png_bytes) or None if empty.
     """
     try:
-        z, x, y, cand_idx = task
+        z, x, y, cand_idx, mode, num_min, num_max = task
         img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0,0,0,0))  # transparent background
         draw = ImageDraw.Draw(img, "RGBA")
         painted = False
+
+        palette = _G_PALETTES_BY_MODE.get(mode, {})
+        numvals = _G_VALS_BY_MODE.get(mode)
 
         for i in cand_idx:
             geom = _G_GEOMS[i]
             if geom is None or geom.is_empty:
                 continue
 
-            if _G_FILL_MODE == "sensitivity":
+            if mode == "sensitivity":
                 code = _G_SENS_CODES[i]
-                fill_rgba = _G_PALETTE.get(code, (0,0,0,0)) if code is not None else (0,0,0,0)
-            elif _G_FILL_MODE in ("groupstotal", "assetstotal"):
-                alpha = _G_PALETTE.get("blue_alpha", 0.70)
-                fill_rgba = blue_ramp_rgba(_G_NUMVALS[i], _G_NUM_MIN, _G_NUM_MAX, alpha=alpha)
-            elif _G_FILL_MODE == "importance_max":
-                imp_pal = _G_PALETTE.get("importance_max_colors", {})
-                fill_rgba = importance_max_color(_G_NUMVALS[i], imp_pal)
-            elif _G_FILL_MODE in ("index_importance", "index_sensitivity", "index_owa"):
-                gradient = _G_PALETTE.get("gradient", [])
-                fill_rgba = index_layer_color(_G_NUMVALS[i], gradient)
+                fill_rgba = palette.get(code, (0,0,0,0)) if code is not None else (0,0,0,0)
+            elif mode in ("groupstotal", "assetstotal"):
+                alpha = palette.get("blue_alpha", 0.70)
+                v = None
+                if numvals is not None:
+                    try:
+                        v = numvals[i]
+                    except Exception:
+                        v = None
+                fill_rgba = blue_ramp_rgba(v, float(num_min), float(num_max), alpha=alpha)
+            elif mode == "importance_max":
+                imp_pal = palette.get("importance_max_colors", {})
+                v = None
+                if numvals is not None:
+                    try:
+                        v = numvals[i]
+                    except Exception:
+                        v = None
+                fill_rgba = importance_max_color(v, imp_pal)
+            elif mode in ("index_importance", "index_sensitivity", "index_owa"):
+                gradient = palette.get("gradient", [])
+                v = None
+                if numvals is not None:
+                    try:
+                        v = numvals[i]
+                    except Exception:
+                        v = None
+                fill_rgba = index_layer_color(v, gradient)
             else:
                 continue
 
@@ -721,12 +743,6 @@ def run_one_layer(group_name: str,
     wp.start()
     in_q.put(("__INIT__", mbt_name, int(minzoom), int(maxzoom), bounds))
 
-    # Prepare worker pool globals
-    geoms   = list(gdf.geometry.values)
-    senslst = list(sens_codes.values)
-    numlst  = list(numvals.values)
-    init_args = (geoms, senslst, numlst, layer_mode, palette, stroke_rgba, stroke_w, vmin, vmax)
-
     # Use pre-calculated tasks
     total_tiles = len(tasks)
     written = 0
@@ -737,13 +753,22 @@ def run_one_layer(group_name: str,
         progress_every = 1000
     progress_every = max(1, progress_every)
 
+    # Fallback implementation (kept for direct calls) now renders via a short-lived pool.
+    # The main() path uses a shared pool per group for performance.
+    geoms = list(gdf.geometry.values)
+    senslst = list(sens_codes.values)
+    vals_by_mode = {layer_mode: list(numvals.values)}
+    palettes_by_mode = {layer_mode: palette}
+    init_args = (geoms, senslst, vals_by_mode, palettes_by_mode, stroke_rgba, stroke_w)
+
+    layer_tasks = [(z, x, y, idx, layer_mode, vmin, vmax) for (z, x, y, idx) in tasks]
+
     procs = max(1, int(procs))
     with mp.get_context("spawn").Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
-        for i, out in enumerate(pool.imap_unordered(_render_one_tile, tasks, chunksize=64), 1):
+        for i, out in enumerate(pool.imap_unordered(_render_one_tile, layer_tasks, chunksize=64), 1):
             if out is not None:
                 in_q.put(out)
                 written += 1
-            # Throttle progress logging to reduce noise in log.txt / UI tail.
             if i % progress_every == 0 or i == total_tiles:
                 log(f"[progress] {mbt_name}: {i}/{total_tiles}")
 
@@ -761,7 +786,17 @@ def main():
     ap.add_argument("--minzoom", type=int, default=6)
     ap.add_argument("--maxzoom", type=int, default=12)
     ap.add_argument("--only-groups", default=None, help="Comma-separated allow-list of groups")
-    ap.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 8)//2), help="Worker processes (default ~= half cores)")
+    def _default_procs() -> int:
+        try:
+            cpu = int(os.cpu_count() or 8)
+        except Exception:
+            cpu = 8
+        # Frozen builds pay a heavy cost per worker start on Windows.
+        if getattr(sys, "frozen", False):
+            return max(1, min(4, cpu // 4))
+        return max(1, cpu // 2)
+
+    ap.add_argument("--procs", type=int, default=_default_procs(), help="Worker processes (default ~= half cores; frozen builds cap lower)")
     ap.add_argument("--stroke", default="#000000", help="Stroke color hex")
     ap.add_argument("--stroke-alpha", type=float, default=0.0, help="Stroke alpha 0..1")
     # Optional fill alpha overrides (0..1). If not provided, values are read from config.ini or default to 1.0
@@ -916,6 +951,8 @@ def main():
     log(f"Output: {out_dir}")
     log(f"Groups: {groups}")
 
+    ctx = mp.get_context("spawn")
+
     for gv in groups:
         slug = slugify(gv)
         gdf = gdf_all[gdf_all[args.group_col] == gv]
@@ -940,145 +977,152 @@ def main():
         tasks = plan_tile_tasks(bounds_c, args.minzoom, args.maxzoom, sindex, gdf)
         log(f"  → planned {len(tasks):,} tiles (shared across layers)")
 
-        # SENSITIVITY layer
-        log(f"  → building {slug}_sensitivity_max.mbtiles …")
-        run_one_layer(
-            group_name=slug,
-            gdf=gdf,
-            layer_mode="sensitivity",
-            palette=sensitivity_palette,
-            ranges_map=ranges_map,
-            out_dir=out_dir,
-            minzoom=args.minzoom,
-            maxzoom=args.maxzoom,
-            stroke_rgba=stroke_rgba,
-            stroke_w=args.stroke_width,
-            procs=args.procs,
-            tasks=tasks,
-            progress_every=tiles_progress_every,
-        )
+        # Precompute per-feature values for all supported layers once per group.
+        sens_codes = gdf.get("sensitivity_code_max", pd.Series(index=gdf.index, dtype="string")).astype("string").str.strip().str.upper()
+        if sens_codes.isna().any() or (sens_codes == "<NA>").any():
+            fallback = []
+            sens_num = pd.to_numeric(gdf.get("sensitivity_max", pd.Series(index=gdf.index, dtype="float")), errors="coerce")
+            for i in gdf.index:
+                c = None
+                if pd.notna(sens_codes.at[i]) and sens_codes.at[i] != "<NA>":
+                    c = str(sens_codes.at[i]).strip().upper()
+                else:
+                    c = build_code_from_numeric_if_missing(sens_num.at[i], ranges_map)
+                fallback.append(c)
+            sens_codes = pd.Series(fallback, index=gdf.index, dtype="object")
+        senslst = list(sens_codes.values)
 
-        # ASSET GROUPS TOTAL (light->dark blue, per-group min/max)
+        vals_by_mode: Dict[str, List[Optional[float]]] = {}
+        group_minmax: Dict[str, Tuple[float, float]] = {}
+
         if groups_total_available:
-            log(f"  → building {slug}_groupstotal.mbtiles …")
-            run_one_layer(
-                group_name=slug,
-                gdf=gdf,
-                layer_mode="groupstotal",
-                palette=blue_palette,
-                ranges_map=ranges_map,  # unused
-                out_dir=out_dir,
-                minzoom=args.minzoom,
-                maxzoom=args.maxzoom,
-                stroke_rgba=stroke_rgba,
-                stroke_w=args.stroke_width,
-                procs=args.procs,
-                tasks=tasks,
-                progress_every=tiles_progress_every,
-            )
-        else:
-            log("  → skipping groupstotal tiles (asset_groups_total column missing)")
+            s = pd.to_numeric(gdf.get("asset_groups_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+            vals = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
+            vals_by_mode["groupstotal"] = vals
+            try:
+                vmin = float(np.nanmin(s.values)) if len(s) else 0.0
+                vmax = float(np.nanmax(s.values)) if len(s) else 1.0
+            except Exception:
+                vmin, vmax = 0.0, 1.0
+            if not np.isfinite(vmin):
+                vmin = 0.0
+            if not np.isfinite(vmax):
+                vmax = 1.0
+            group_minmax["groupstotal"] = (vmin, vmax)
 
-        # ASSETS OVERLAP TOTAL (light->dark blue, per-group min/max)
         if assets_total_available:
-            log(f"  → building {slug}_assetstotal.mbtiles …")
-            run_one_layer(
-                group_name=slug,
-                gdf=gdf,
-                layer_mode="assetstotal",
-                palette=blue_palette,
-                ranges_map=ranges_map,  # unused
-                out_dir=out_dir,
-                minzoom=args.minzoom,
-                maxzoom=args.maxzoom,
-                stroke_rgba=stroke_rgba,
-                stroke_w=args.stroke_width,
-                procs=args.procs,
-                tasks=tasks,
-                progress_every=tiles_progress_every,
-            )
-        else:
-            log("  → skipping assetstotal tiles (assets_overlap_total column missing)")
+            s = pd.to_numeric(gdf.get("assets_overlap_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+            vals = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
+            vals_by_mode["assetstotal"] = vals
+            try:
+                vmin = float(np.nanmin(s.values)) if len(s) else 0.0
+                vmax = float(np.nanmax(s.values)) if len(s) else 1.0
+            except Exception:
+                vmin, vmax = 0.0, 1.0
+            if not np.isfinite(vmin):
+                vmin = 0.0
+            if not np.isfinite(vmax):
+                vmax = 1.0
+            group_minmax["assetstotal"] = (vmin, vmax)
 
         if importance_max_available:
-            log(f"  → building {slug}_importance_max.mbtiles …")
-            run_one_layer(
-                group_name=slug,
-                gdf=gdf,
-                layer_mode="importance_max",
-                palette=importance_max_palette,
-                ranges_map=ranges_map,
-                out_dir=out_dir,
-                minzoom=args.minzoom,
-                maxzoom=args.maxzoom,
-                stroke_rgba=stroke_rgba,
-                stroke_w=args.stroke_width,
-                procs=args.procs,
-                tasks=tasks,
-                progress_every=tiles_progress_every,
-            )
-        else:
-            log("  → skipping importance_max tiles (importance_max column missing)")
+            s = pd.to_numeric(gdf.get("importance_max", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+            vals_by_mode["importance_max"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
 
         if importance_index_available:
-            log(f"  → building {slug}_index_importance.mbtiles …")
-            run_one_layer(
-                group_name=slug,
-                gdf=gdf,
-                layer_mode="index_importance",
-                palette=importance_index_palette,
-                ranges_map=ranges_map,
-                out_dir=out_dir,
-                minzoom=args.minzoom,
-                maxzoom=args.maxzoom,
-                stroke_rgba=stroke_rgba,
-                stroke_w=args.stroke_width,
-                procs=args.procs,
-                tasks=tasks,
-                progress_every=tiles_progress_every,
-            )
-        else:
-            log("  → skipping index_importance tiles (index_importance column missing)")
+            s = pd.to_numeric(gdf.get("index_importance", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+            vals_by_mode["index_importance"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
 
         if sensitivity_index_available:
-            log(f"  → building {slug}_index_sensitivity.mbtiles …")
-            run_one_layer(
-                group_name=slug,
-                gdf=gdf,
-                layer_mode="index_sensitivity",
-                palette=sensitivity_index_palette,
-                ranges_map=ranges_map,
-                out_dir=out_dir,
-                minzoom=args.minzoom,
-                maxzoom=args.maxzoom,
-                stroke_rgba=stroke_rgba,
-                stroke_w=args.stroke_width,
-                procs=args.procs,
-                tasks=tasks,
-                progress_every=tiles_progress_every,
-            )
-        else:
-            log("  → skipping index_sensitivity tiles (index_sensitivity column missing)")
+            s = pd.to_numeric(gdf.get("index_sensitivity", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+            vals_by_mode["index_sensitivity"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
 
         if index_owa_available:
-            log(f"  → building {slug}_index_owa.mbtiles …")
-            run_one_layer(
-                group_name=slug,
-                gdf=gdf,
-                layer_mode="index_owa",
-                palette=sensitivity_index_palette,
-                ranges_map=ranges_map,
-                out_dir=out_dir,
-                minzoom=args.minzoom,
-                maxzoom=args.maxzoom,
-                stroke_rgba=stroke_rgba,
-                stroke_w=args.stroke_width,
-                procs=args.procs,
-                tasks=tasks,
-                progress_every=tiles_progress_every,
-            )
-        else:
-            log("  → skipping index_owa tiles (index_owa column missing)")
+            s = pd.to_numeric(gdf.get("index_owa", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
+            vals_by_mode["index_owa"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
+
+        palettes_by_mode: Dict[str, Dict] = {
+            "sensitivity": sensitivity_palette,
+            "groupstotal": blue_palette,
+            "assetstotal": blue_palette,
+            "importance_max": importance_max_palette,
+            "index_importance": importance_index_palette,
+            "index_sensitivity": sensitivity_index_palette,
+            "index_owa": sensitivity_index_palette,
+        }
+
+        # Shared worker pool for this group (reused across all layers)
+        geoms = list(gdf.geometry.values)
+        init_args = (geoms, senslst, vals_by_mode, palettes_by_mode, stroke_rgba, args.stroke_width)
+
+        procs = max(1, int(args.procs))
+        with ctx.Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
+            def _run_layer(mbt_name: str, mode: str, num_min: float, num_max: float):
+                out_path = out_dir / f"{mbt_name}.mbtiles"
+                in_q = mp.Queue(maxsize=1000)
+                done_q = mp.Queue()
+                wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
+                wp.start()
+                in_q.put(("__INIT__", mbt_name, int(args.minzoom), int(args.maxzoom), bounds_c))
+
+                layer_tasks = [(z, x, y, idx, mode, num_min, num_max) for (z, x, y, idx) in tasks]
+                total_tiles = len(layer_tasks)
+                written = 0
+
+                for i, out in enumerate(pool.imap_unordered(_render_one_tile, layer_tasks, chunksize=64), 1):
+                    if out is not None:
+                        in_q.put(out)
+                        written += 1
+                    if i % tiles_progress_every == 0 or i == total_tiles:
+                        log(f"[progress] {mbt_name}: {i}/{total_tiles}")
+
+                in_q.put("__CLOSE__")
+                status = done_q.get()
+                if status[0] != "ok":
+                    raise RuntimeError(f"Writer failed: {status[1] if len(status)>1 else 'unknown'}")
+                log(f"    {mbt_name}: tiles written {written:,} / scheduled {total_tiles:,} → {out_path}")
+
+            # SENSITIVITY layer
+            log(f"  → building {slug}_sensitivity_max.mbtiles …")
+            _run_layer(f"{slug}_sensitivity_max", "sensitivity", 0.0, 1.0)
+
+            if groups_total_available:
+                log(f"  → building {slug}_groupstotal.mbtiles …")
+                vmin, vmax = group_minmax.get("groupstotal", (0.0, 1.0))
+                _run_layer(f"{slug}_groupstotal", "groupstotal", vmin, vmax)
+            else:
+                log("  → skipping groupstotal tiles (asset_groups_total column missing)")
+
+            if assets_total_available:
+                log(f"  → building {slug}_assetstotal.mbtiles …")
+                vmin, vmax = group_minmax.get("assetstotal", (0.0, 1.0))
+                _run_layer(f"{slug}_assetstotal", "assetstotal", vmin, vmax)
+            else:
+                log("  → skipping assetstotal tiles (assets_overlap_total column missing)")
+
+            if importance_max_available:
+                log(f"  → building {slug}_importance_max.mbtiles …")
+                _run_layer(f"{slug}_importance_max", "importance_max", 1.0, 5.0)
+            else:
+                log("  → skipping importance_max tiles (importance_max column missing)")
+
+            if importance_index_available:
+                log(f"  → building {slug}_index_importance.mbtiles …")
+                _run_layer(f"{slug}_index_importance", "index_importance", 1.0, 100.0)
+            else:
+                log("  → skipping index_importance tiles (index_importance column missing)")
+
+            if sensitivity_index_available:
+                log(f"  → building {slug}_index_sensitivity.mbtiles …")
+                _run_layer(f"{slug}_index_sensitivity", "index_sensitivity", 1.0, 100.0)
+            else:
+                log("  → skipping index_sensitivity tiles (index_sensitivity column missing)")
+
+            if index_owa_available:
+                log(f"  → building {slug}_index_owa.mbtiles …")
+                _run_layer(f"{slug}_index_owa", "index_owa", 1.0, 100.0)
+            else:
+                log("  → skipping index_owa tiles (index_owa column missing)")
 
     log("All done.")
 
