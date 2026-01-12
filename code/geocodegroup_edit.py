@@ -1,11 +1,6 @@
-import locale
-try:
-    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, '')
-    except Exception:
-        pass
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import tkinter as tk
 from tkinter import messagebox

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import locale
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import os
 import sys

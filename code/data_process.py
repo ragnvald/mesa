@@ -636,7 +636,45 @@ def _find_tiles_runner() -> tuple[Path | None, bool]:
 
     return None, False
 
-def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
+def _tiles_procs_from_config() -> int | None:
+    """Choose a reasonable worker count for create_raster_tiles.
+
+    Notes:
+    - The tiles helper has its own multiprocessing pool.
+    - Frozen Windows builds have higher process-spawn overhead, so we cap lower.
+    - If config.ini sets max_workers, reuse it as a sensible user-controlled hint.
+    """
+    try:
+        cpu = int(os.cpu_count() or 8)
+    except Exception:
+        cpu = 8
+
+    max_workers = 0
+    try:
+        cfg_path = base_dir() / "config.ini"
+        cfg_local = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
+        cfg_local.read(cfg_path, encoding="utf-8")
+        if "DEFAULT" in cfg_local:
+            raw = (cfg_local["DEFAULT"].get("max_workers", "0") or "0").strip()
+            max_workers = int(raw) if raw else 0
+    except Exception:
+        max_workers = 0
+
+    # If user did not specify workers, pick a moderate default.
+    if max_workers <= 0:
+        max_workers = max(1, cpu // 2)
+
+    # Avoid oversubscription.
+    max_workers = max(1, min(max_workers, cpu))
+
+    # Frozen builds: keep the pool moderate to limit spawn overhead.
+    if getattr(sys, "frozen", False):
+        return max(2, min(8, max_workers))
+
+    return max_workers
+
+
+def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None, procs: int | None = None):
     runner_path, is_exe = _find_tiles_runner()
     if not runner_path:
         log_to_gui(log_widget, "[Tiles] Missing raster-tiles helper (looked for create_raster_tiles.py/.exe)")
@@ -650,6 +688,8 @@ def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None):
         args += ["--minzoom", str(minzoom)]
     if isinstance(maxzoom, int):
         args += ["--maxzoom", str(maxzoom)]
+    if isinstance(procs, int) and procs > 0:
+        args += ["--procs", str(procs)]
 
     env = dict(os.environ)
     # ensure UTF-8 stdout/stderr inside the child process
@@ -698,7 +738,10 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
         update_progress(tile_floor)
         log_to_gui(log_widget, "[Tiles] Stage 4/4 - integrating MBTiles build (create_raster_tiles)...")
 
-        proc = _spawn_tiles_subprocess(minzoom=minzoom, maxzoom=maxzoom)
+        tiles_procs = _tiles_procs_from_config()
+        if isinstance(tiles_procs, int) and tiles_procs > 0:
+            log_to_gui(log_widget, f"[Tiles] Using {tiles_procs} worker process(es) for MBTiles rendering.")
+        proc = _spawn_tiles_subprocess(minzoom=minzoom, maxzoom=maxzoom, procs=tiles_procs)
 
         if proc is None:
             log_to_gui(log_widget, "[Tiles] Unable to start create_raster_tiles subprocess.")
@@ -2383,15 +2426,42 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     index_weights = _load_index_weight_settings(cfg_local)
 
     # 3. Run Parallel Map
-    log_to_gui(log_widget, f"Flattening {len(files)} partitions in parallel…")
     partials = []
-    
-    # Determine workers
+
+    # Determine workers (use same semantics as Stage 2 auto workers)
+    cpu_cap = 1
+    try:
+        cpu_cap = max(1, multiprocessing.cpu_count())
+    except Exception:
+        cpu_cap = 1
+
     try:
         max_workers = cfg_get_int(cfg_local, "max_workers", 0)
-        if max_workers <= 0: max_workers = max(1, multiprocessing.cpu_count())
-    except:
-        max_workers = 4
+    except Exception:
+        max_workers = 0
+
+    try:
+        auto_min_workers = max(1, cfg_get_int(cfg_local, "auto_workers_min", 1))
+    except Exception:
+        auto_min_workers = 1
+    try:
+        auto_max_override = cfg_get_int(cfg_local, "auto_workers_max", 0)
+    except Exception:
+        auto_max_override = 0
+
+    if max_workers <= 0:
+        # "Auto": start with CPU count, then apply optional auto cap/min.
+        max_workers = cpu_cap
+        if auto_max_override > 0:
+            max_workers = min(max_workers, max(auto_min_workers, auto_max_override))
+        max_workers = max(max_workers, auto_min_workers)
+    else:
+        max_workers = max(1, max_workers)
+
+    # Never spawn more processes than work items.
+    max_workers = max(1, min(max_workers, cpu_cap, len(files)))
+
+    log_to_gui(log_widget, f"Flattening {len(files)} partitions using {max_workers} workers…")
 
     if _mp_allowed() and max_workers > 1:
         with multiprocessing.get_context("spawn").Pool(max_workers) as pool:
@@ -2719,6 +2789,7 @@ def process_all(config_file: Path):
             pass
 
         working_epsg = str(cfg["DEFAULT"].get("workingprojection_epsg","4326")).strip()
+        raw_max_workers = str(cfg["DEFAULT"].get("max_workers", "")).strip()
         max_workers = cfg_get_int(cfg, "max_workers", 0)
         cell_size   = cfg_get_int(cfg, "cell_size", 18000)
         chunk_size  = cfg_get_int(cfg, "chunk_size", 40000)
@@ -2730,15 +2801,17 @@ def process_all(config_file: Path):
 
         chunk_display = f"{chunk_size:,}" if chunk_size > 0 else "auto"
         worker_display = "auto" if max_workers == 0 else f"{max_workers}"
+        worker_display_cfg = raw_max_workers if raw_max_workers else "(missing)"
         log_to_gui(log_widget,
-             ("Config snapshot -> cell_size=%s m, chunk_size=%s rows, max_workers=%s, "
+             ("Config snapshot -> cell_size=%s m, chunk_size=%s rows, max_workers=%s (config=%s), "
                 "approx_gb_per_worker=%.2f, mem_target_frac=%.2f, asset_soft_limit=%s, geocode_soft_limit=%s") %
-               (f"{cell_size:,}", chunk_display, worker_display, approx_gb_per_worker, mem_target_frac,
+               (f"{cell_size:,}", chunk_display, worker_display, worker_display_cfg, approx_gb_per_worker, mem_target_frac,
                 f"{asset_soft_limit:,}", f"{geocode_soft_limit:,}"))
         _log_memory_snapshot("config-loaded",
                      {"cell_m": cell_size,
                       "chunk_size": chunk_display,
-                      "max_workers": worker_display,
+                  "max_workers": worker_display,
+                  "max_workers_cfg": worker_display_cfg,
                       "approx_gb_per_worker": f"{approx_gb_per_worker:.2f}"},
                      force=True)
 

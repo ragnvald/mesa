@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import locale
+import os
 import queue
 import threading
 import uuid
@@ -35,6 +37,65 @@ import tkinter.scrolledtext as scrolledtext
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+
+
+
+def _patch_locale_setlocale_for_windows() -> None:
+    """Make locale.setlocale resilient on Windows.
+
+    Some Windows machines/environments raise locale.Error('unsupported locale setting')
+    for calls like setlocale(LC_TIME, ""). ttkbootstrap calls setlocale during import
+    (e.g. DatePickerDialog), so we must not allow this to crash the app.
+    """
+    try:
+        if os.name != "nt":
+            return
+        _orig = locale.setlocale
+
+        def _safe_setlocale(category, value=None):
+            try:
+                if value is None:
+                    return _orig(category)
+                return _orig(category, value)
+            except locale.Error:
+                for fallback in ("", "C"):
+                    try:
+                        return _orig(category, fallback)
+                    except Exception:
+                        pass
+                try:
+                    return _orig(category)
+                except Exception:
+                    return "C"
+
+        locale.setlocale = _safe_setlocale  # type: ignore[assignment]
+    except Exception:
+        pass
+
+
+# Locale is surprisingly fragile on Windows:
+# - Many machines do not support POSIX locale names like "en_US.UTF-8".
+# - Some environments set LANG/LC_ALL to POSIX values, and `setlocale(LC_ALL, "")`
+#   can raise locale.Error("unsupported locale setting").
+try:
+    if os.name == "nt":
+        for _k in ("LC_ALL", "LC_CTYPE", "LANG"):
+            _v = os.environ.get(_k)
+            if _v and ("utf-8" in _v.lower()) and ("_" in _v) and ("." in _v):
+                os.environ.pop(_k, None)
+except Exception:
+    pass
+
+_patch_locale_setlocale_for_windows()
+
+try:
+    locale.setlocale(locale.LC_ALL, "")
+except Exception:
+    try:
+        locale.setlocale(locale.LC_ALL, "C")
+    except Exception:
+        pass
+
 import ttkbootstrap as tb
 
 

@@ -6,11 +6,9 @@
 # - Uses DEFAULT.parquet_folder (defaults to output/geoparquet)
 # - Writes ONLY GeoParquet outputs
 
-import locale
-try:
-    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-except Exception:
-    pass
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import os, sys, argparse, threading, datetime, configparser, time
 from pathlib import Path

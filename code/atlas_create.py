@@ -6,14 +6,9 @@
 # - Writes tbl_atlas.parquet alongside other geoparquet outputs
 # - Preserves existing logic; improves robustness
 
-import locale
-try:
-    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, '')
-    except Exception:
-        pass
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import os
 import sys

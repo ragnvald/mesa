@@ -2,14 +2,9 @@
 # -*- coding: utf-8 -*-
 """GUI helper for editing config.ini with simple section/key management."""
 
-import locale
-try:
-    locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, "")
-    except Exception:
-        pass
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import argparse
 import configparser

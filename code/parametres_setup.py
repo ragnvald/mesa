@@ -2,8 +2,9 @@
 # MESA – Setup & Registration (2 tabs: Start and Vulnerability)
 # Persistence: GeoParquet + JSON only (GPKG removed)
 
-import locale
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import os
 import sys

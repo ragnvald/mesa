@@ -5,14 +5,9 @@
 # - Atomic writes; logs to <BASE_DIR>/log.txt
 # - ttkbootstrap optional (falls back to standard Tk)
 
-import locale
-try:
-    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, '')
-    except Exception:
-        pass
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
 
 import os, sys, argparse, configparser, datetime, tempfile, json
 from pathlib import Path

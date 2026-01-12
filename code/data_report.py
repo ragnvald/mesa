@@ -5,6 +5,10 @@ except Exception:
     # Fall back silently if locale isn't available on this system
     pass
 
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
+
 import geopandas as gpd
 import pandas as pd
 import configparser

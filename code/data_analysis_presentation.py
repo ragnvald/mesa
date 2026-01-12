@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import configparser
 import datetime as dt
-import locale
 import math
 import os
 import subprocess
@@ -30,20 +29,16 @@ import tkinter as tk
 from tkinter import messagebox
 from openpyxl.drawing.image import Image as XLImage
 
+from mesa_locale import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
+
 try:
     import ttkbootstrap as tb
     from ttkbootstrap import ttk
     from ttkbootstrap.constants import INFO, PRIMARY, SECONDARY, SUCCESS, WARNING
 except ModuleNotFoundError as exc:  # pragma: no cover - ttkbootstrap required at runtime
     raise SystemExit("ttkbootstrap is required (pip install ttkbootstrap).") from exc
-
-try:
-    locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, "")
-    except Exception:
-        pass
 
 try:
     import matplotlib

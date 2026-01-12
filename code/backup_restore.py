@@ -11,9 +11,13 @@ import threading
 import queue
 from pathlib import Path
 
+from mesa_locale import harden_locale_for_ttkbootstrap
+
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import tkinter.ttk as ttk_native
+
+harden_locale_for_ttkbootstrap()
 
 try:
     import ttkbootstrap as tb
