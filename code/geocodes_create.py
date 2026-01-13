@@ -54,6 +54,7 @@ import time
 import shutil
 import multiprocessing as mp
 import traceback
+import warnings
 from pathlib import Path
 from typing import Union, Optional, List, Tuple
 
@@ -68,6 +69,55 @@ from shapely.geometry import mapping as shp_mapping
 from shapely.ops import unary_union, polygonize
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
+
+try:
+    from shapely import force_2d as _shp_force_2d  # Shapely >= 2
+except Exception:
+    _shp_force_2d = None
+
+# pyogrio (used by GeoPandas by default when installed) warns that measured (M)
+# geometries are not supported and will be converted. Shapely/GEOS does not
+# preserve M anyway, so treat this as expected and keep stdout clean.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Measured \(M\) geometry types are not supported\..*",
+    category=UserWarning,
+    module=r"pyogrio\..*",
+)
+
+
+def _force_2d_geom(geom):
+    """Drop Z/M from a single geometry, returning a 2D geometry."""
+    if geom is None:
+        return None
+    try:
+        if getattr(geom, "is_empty", False):
+            return geom
+    except Exception:
+        return geom
+
+    if _shp_force_2d is not None:
+        try:
+            return _shp_force_2d(geom)
+        except Exception:
+            pass
+
+    try:
+        return shp_wkb.loads(shp_wkb.dumps(geom, output_dimension=2))
+    except Exception:
+        return geom
+
+# Optional: faster union_all (Shapely >= 2)
+try:
+    from shapely import union_all as shapely_union_all
+except Exception:
+    shapely_union_all = None
+
+# Optional: STRtree for fast point-in-coverage checks (used when skipping global coverage union)
+try:
+    from shapely.strtree import STRtree as ShapelySTRtree
+except Exception:
+    ShapelySTRtree = None
 
 # -----------------------------------------------------------------------------
 # Locale
@@ -276,8 +326,6 @@ progress_label: Optional[tk.Label] = None
 original_working_directory: Optional[str] = None
 mosaic_status_var: Optional[tk.StringVar] = None
 size_levels_var: Optional[tk.StringVar] = None
-dissolve_similar_var: Optional[tk.BooleanVar] = None
-dissolve_aggressive_var: Optional[tk.BooleanVar] = None
 
 HEARTBEAT_SECS = 10
 
@@ -558,7 +606,21 @@ def log_to_gui(message: str, level: str = "INFO"):
         except Exception:
             pass
     if log_widget is None:
-        print(formatted)
+        try:
+            print(formatted)
+        except UnicodeEncodeError:
+            # Some Windows consoles/pipes use legacy encodings (e.g. cp1252) and will
+            # raise on characters like '≈' or '²'. Never let logging crash the tool.
+            try:
+                s = formatted + "\n"
+                if hasattr(sys.stdout, "buffer") and sys.stdout.buffer is not None:
+                    sys.stdout.buffer.write(s.encode("utf-8", errors="replace"))
+                    sys.stdout.buffer.flush()
+                else:
+                    safe = formatted.encode("ascii", errors="backslashreplace").decode("ascii")
+                    print(safe)
+            except Exception:
+                pass
 
 
 def _run_in_thread(fn, *args, **kwargs):
@@ -704,6 +766,11 @@ def _read_and_reproject_vector(filepath: Path, layer: str | None, working_epsg: 
             data = data.to_crs(epsg=int(working_epsg))
         if data.geometry.name != "geometry":
             data = data.set_geometry(data.geometry.name).rename_geometry("geometry")
+        # Enforce 2D geometries (drop Z/M)
+        try:
+            data["geometry"] = data.geometry.apply(_force_2d_geom)
+        except Exception:
+            pass
         return data
     except Exception as e:
         log_to_gui(f"Read fail {filepath} (layer={layer}): {e}", "ERROR")
@@ -719,6 +786,11 @@ def _read_parquet_vector(fp: Path, working_epsg: int) -> gpd.GeoDataFrame:
             gdf = gdf.to_crs(epsg=int(working_epsg))
         if gdf.geometry.name != "geometry":
             gdf = gdf.set_geometry(gdf.geometry.name).rename_geometry("geometry")
+        # Enforce 2D geometries (drop Z/M)
+        try:
+            gdf["geometry"] = gdf.geometry.apply(_force_2d_geom)
+        except Exception:
+            pass
         return gdf
     except Exception as e:
         log_to_gui(f"Read fail (parquet) {fp.name}: {e}", "ERROR")
@@ -776,15 +848,10 @@ def import_geocodes_from_folder(input_folder: Path, working_epsg: int) -> tuple[
                 code = str(row.get("code"))
             else:
                 code = str(object_id)
-
-            attrs = "; ".join(
-                [f"{c}: {row[c]}" for c in gdf.columns if c != gdf.geometry.name and c != "geometry"]
-            )
             objects.append({
                 "code": code,
                 "ref_geocodegroup": group_id,
                 "name_gis_geocodegroup": name_gis_geocodegroup,
-                "attributes": attrs,
                 "geometry": row.geometry,
             })
             object_id += 1
@@ -1223,27 +1290,39 @@ def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200):
     if not geoms:
         return None
     try:
+        # Shapely 2.x: union_all is typically faster but equivalent.
+        if shapely_union_all is not None:
+            return shapely_union_all(geoms)
         return unary_union(geoms)
     except MemoryError:
         log_to_gui(f"[Mosaic] MemoryError during unary_union ({label}) for n={len(geoms):,}; retrying smaller chunks…", "WARN")
     except Exception as e:
         log_to_gui(f"[Mosaic] unary_union failed ({label}) for n={len(geoms):,}: {e}; retrying smaller chunks…", "WARN")
 
+    # Retry with chunking + balanced (pyramid) reduction to reduce peak memory.
     step = max(min_step, len(geoms) // 4)
-    out = None
     while step >= min_step:
         ok = True
-        out = None
+        partials = []
         for i in range(0, len(geoms), step):
             chunk = geoms[i:i+step]
             try:
-                cu = unary_union(chunk)
+                if shapely_union_all is not None:
+                    cu = shapely_union_all(chunk)
+                else:
+                    cu = unary_union(chunk)
             except Exception:
                 ok = False
                 break
-            out = cu if out is None else unary_union([out, cu])
+            if cu is not None:
+                partials.append(cu)
         if ok:
-            return out
+            if not partials:
+                return None
+            if len(partials) == 1:
+                return partials[0]
+            partials = _tree_reduce_unions(partials, max_partials=1, label=f"{label}:retry", heartbeat_s=10.0)
+            return partials[0] if partials else None
         step = max(min_step, step // 2)
     return None
 
@@ -1325,6 +1404,46 @@ def _tree_reduce_unions(
     return unions
 
 
+def _maybe_sort_partials_before_reduction(
+    unions: list,
+    *,
+    cfg: configparser.ConfigParser,
+    kind: str,
+) -> list:
+    """Optionally sort partial geometries by a cheap size proxy before reduction.
+
+    Motivation: union performance can be highly order-dependent. Sorting so that
+    smaller geometries are merged first often reduces intermediate complexity.
+
+    Controlled by config: mosaic_reduce_sort_partials (default: false).
+    """
+    try:
+        v = str(cfg["DEFAULT"].get("mosaic_reduce_sort_partials", "false")).strip().lower()
+        enabled = v in ("1", "true", "yes", "on")
+    except Exception:
+        enabled = False
+    if not enabled or not unions or len(unions) < 3:
+        return unions
+
+    kind = (kind or "").strip().lower()
+
+    def key_fn(g):
+        if g is None:
+            return float("inf")
+        try:
+            if kind == "coverage":
+                return float(getattr(g, "area", 0.0) or 0.0)
+            # edges/linework (and default)
+            return float(getattr(g, "length", 0.0) or 0.0)
+        except Exception:
+            return float("inf")
+
+    try:
+        return sorted(unions, key=key_fn)
+    except Exception:
+        return unions
+
+
 def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict:
     """Worker: extract boundary linework + coverage polygons for a chunk.
 
@@ -1349,26 +1468,51 @@ def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict
         if len(geoms) == 1:
             return geoms[0]
         try:
+            if shapely_union_all is not None:
+                return shapely_union_all(geoms)
             return unary_union(geoms)
         except Exception:
             # Retry in smaller pieces; avoid logging from workers.
             nonlocal union_retries
             union_retries += 1
             step = max(50, len(geoms) // 4)
-            out = None
             while step >= 50:
                 ok = True
-                out = None
+                partials = []
                 for i in range(0, len(geoms), step):
                     chunk = geoms[i:i + step]
                     try:
-                        cu = unary_union(chunk)
+                        if shapely_union_all is not None:
+                            cu = shapely_union_all(chunk)
+                        else:
+                            cu = unary_union(chunk)
                     except Exception:
                         ok = False
                         break
-                    out = cu if out is None else unary_union([out, cu])
+                    if cu is not None:
+                        partials.append(cu)
                 if ok:
-                    return out
+                    if not partials:
+                        return None
+                    # Quiet balanced reduction (no GUI logging from worker).
+                    while len(partials) > 1:
+                        merged = []
+                        it = iter(partials)
+                        for a in it:
+                            b = next(it, None)
+                            if b is None:
+                                merged.append(a)
+                            else:
+                                try:
+                                    if shapely_union_all is not None:
+                                        u = shapely_union_all([a, b])
+                                    else:
+                                        u = unary_union([a, b])
+                                except Exception:
+                                    u = a
+                                merged.append(u)
+                        partials = merged
+                    return partials[0]
                 step = max(50, step // 2)
             return None
 
@@ -1466,6 +1610,16 @@ def _build_linework_and_coverage(
     cov_batch: list = []
     cov_partials: list = []
 
+    # Coverage union is used for: (1) filtering polygonize faces to covered areas,
+    # and (2) sanity-checking area. The full global union can be expensive.
+    # If disabled, we keep coverage as a list of partial unions and do
+    # point-in-coverage checks via STRtree in the caller.
+    try:
+        v = str(cfg["DEFAULT"].get("mosaic_coverage_union", "true")).strip().lower()
+        coverage_union_enabled = v in ("1", "true", "yes", "on")
+    except Exception:
+        coverage_union_enabled = True
+
     def flush_boundary():
         if not boundary_batch:
             return
@@ -1474,6 +1628,7 @@ def _build_linework_and_coverage(
             line_partials.append(u)
             stats["union_batches"] += 1
             if len(line_partials) > max_partials:
+                line_partials[:] = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
                 line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
         boundary_batch.clear()
 
@@ -1484,6 +1639,7 @@ def _build_linework_and_coverage(
         if u is not None:
             cov_partials.append(u)
             if len(cov_partials) > max_partials:
+                cov_partials[:] = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
                 cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
         cov_batch.clear()
 
@@ -1656,8 +1812,10 @@ def _build_linework_and_coverage(
                 "INFO",
             )
             if len(line_partials) > max_partials:
+                line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
                 line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
             if cov_partials and len(cov_partials) > max_partials:
+                cov_partials = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
                 cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
             if progress_floor is not None and progress_ceiling is not None:
                 update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.97))
@@ -1718,6 +1876,7 @@ def _build_linework_and_coverage(
     STATS.detail = "final noding"
     if progress_floor is not None and progress_ceiling is not None:
         update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.985))
+    line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
     line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)")
     edge_net = _unary_union_safe(line_partials, label="linework_final", min_step=2)
     if edge_net is None:
@@ -1725,10 +1884,15 @@ def _build_linework_and_coverage(
 
     coverage = None
     if cov_partials:
-        cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)")
-        coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2)
-        if coverage is None:
-            coverage = cov_partials[0]
+        if coverage_union_enabled:
+            cov_partials = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
+            cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)")
+            coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2)
+            if coverage is None:
+                coverage = cov_partials[0]
+        else:
+            # Keep partials as-is (already reduced to <=max_partials earlier).
+            coverage = list(cov_partials)
 
     if progress_floor is not None and progress_ceiling is not None:
         update_progress(float(progress_ceiling))
@@ -1992,6 +2156,18 @@ def _merge_and_write_geocodes(base_dir: Path,
     existing_g, existing_o = _load_existing_geocodes(base_dir)
     out_dir = gpq_dir(base_dir)
 
+    # Geocode objects should not carry source attributes.
+    if not existing_o.empty and "attributes" in existing_o.columns:
+        try:
+            existing_o = existing_o.drop(columns=["attributes"]).copy()
+        except Exception:
+            pass
+    if new_objects_gdf is not None and "attributes" in new_objects_gdf.columns:
+        try:
+            new_objects_gdf = new_objects_gdf.drop(columns=["attributes"]).copy()
+        except Exception:
+            pass
+
     if not existing_g.empty and "name_gis_geocodegroup" in existing_g and refresh_group_names:
         rm_mask = existing_g["name_gis_geocodegroup"].isin(refresh_group_names)
         rm_ids = set(existing_g.loc[rm_mask, "id"].astype(int).tolist())
@@ -2015,8 +2191,25 @@ def _merge_and_write_geocodes(base_dir: Path,
     groups_out = ensure_wgs84(gpd.GeoDataFrame(groups_out, geometry="geometry"))
     objects_out = ensure_wgs84(gpd.GeoDataFrame(objects_out, geometry="geometry"))
 
-    groups_out.to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
-    objects_out.to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+    def _atomic_to_parquet(gdf: gpd.GeoDataFrame, final_path: Path) -> None:
+        tmp_path = final_path.with_name(final_path.name + f".tmp_{uuid.uuid4().hex}")
+        gdf.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, final_path)
+
+    # Windows can hold file locks briefly (AV scans, other readers). Retry a few times.
+    last_err: Exception | None = None
+    for delay_s in (0.0, 0.25, 0.75, 1.5):
+        if delay_s:
+            time.sleep(delay_s)
+        try:
+            _atomic_to_parquet(groups_out, out_dir / "tbl_geocode_group.parquet")
+            _atomic_to_parquet(objects_out, out_dir / "tbl_geocode_object.parquet")
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+    if last_err is not None:
+        raise last_err
 
     return len(new_groups_gdf), len(new_objects_gdf), len(groups_out), len(objects_out)
 
@@ -2221,8 +2414,6 @@ def mosaic_faces_from_assets_parallel(
     buffer_m: float,
     grid_size_m: float,
     workers: int | None = None,
-    *,
-    dissolve_mode: str = "none",
 ) -> gpd.GeoDataFrame:
     """Build basic_mosaic faces from global linework.
 
@@ -2251,43 +2442,14 @@ def mosaic_faces_from_assets_parallel(
         log_to_gui("[Mosaic] No assets loaded; nothing to do.", "WARN")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Reduce memory unless we need attributes for dissolve.
-    if str(dissolve_mode).strip().lower() in ("none", "off", "false", "0", ""):
-        a = gpd.GeoDataFrame(a[["geometry"]].copy(), geometry="geometry", crs=a.crs)
-        dissolve_mode = "none"
-    else:
-        dissolve_mode = str(dissolve_mode).strip().lower()
-        if dissolve_mode not in ("similar", "aggressive"):
-            dissolve_mode = "none"
+    # Always drop non-geometry columns: basic mosaic is geometry-only.
+    a = gpd.GeoDataFrame(a[["geometry"]].copy(), geometry="geometry", crs=a.crs)
 
     metric_crs = working_metric_crs_for(a, cfg)
     t0 = time.time()
     a_metric = a.to_crs(metric_crs)
     log_to_gui(f"[Mosaic] Loaded {len(a_metric):,} assets; projected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
     update_progress(10)
-
-    # Optional dissolve pre-processing (before linework extraction/polygonize).
-    if dissolve_mode != "none":
-        t0 = time.time()
-        log_to_gui(f"[Mosaic] Dissolve enabled: mode={dissolve_mode} (pre-processing assets)…", "INFO")
-        n0 = int(len(a_metric))
-        a_poly = _prepare_assets_polygonal_metric(a_metric, cfg)
-        if dissolve_mode == "similar":
-            a_metric = _dissolve_assets_by_attributes(a_poly, cfg)
-        elif dissolve_mode == "aggressive":
-            a_metric = _dissolve_assets_aggressive_with_attrs_json(a_poly, cfg)
-        else:
-            a_metric = a_poly[["geometry"]].copy()
-
-        # Keep only polygon rows (no MultiPolygon output); dissolve functions already explode.
-        try:
-            a_metric = a_metric[~a_metric.geometry.is_empty].copy()
-        except Exception:
-            pass
-        log_to_gui(
-            f"[Mosaic] Dissolve finished: {n0:,} -> {len(a_metric):,} polygon(s) in {time.time()-t0:.2f}s.",
-            "INFO",
-        )
 
     STATS.stage = "linework"
     STATS.faces_total = 0
@@ -2309,13 +2471,31 @@ def mosaic_faces_from_assets_parallel(
     )
     prepared_cov = None
     cov_area = None
+    cov_tree = None
+    cov_parts = None
     if coverage is not None:
-        try:
-            prepared_cov = prep(coverage)
-            cov_area = float(getattr(coverage, "area", 0.0))
-        except Exception:
-            prepared_cov = None
-            cov_area = None
+        # coverage can be either a single polygonal geometry (union) or a list of
+        # partial unions (when mosaic_coverage_union=false).
+        if isinstance(coverage, list):
+            cov_parts = [g for g in coverage if g is not None and not getattr(g, "is_empty", False)]
+            if cov_parts and ShapelySTRtree is not None:
+                try:
+                    cov_tree = ShapelySTRtree(cov_parts)
+                    log_to_gui(f"[Mosaic] Coverage union disabled; using STRtree over {len(cov_parts):,} coverage part(s) for face filtering.", "INFO")
+                except Exception:
+                    cov_tree = None
+            elif cov_parts:
+                log_to_gui(
+                    f"[Mosaic] Coverage union disabled but STRtree unavailable; falling back to linear scan over {len(cov_parts):,} coverage part(s).",
+                    "WARN",
+                )
+        else:
+            try:
+                prepared_cov = prep(coverage)
+                cov_area = float(getattr(coverage, "area", 0.0))
+            except Exception:
+                prepared_cov = None
+                cov_area = None
 
     flush_batch = max(10_000, _cfg_int(cfg, "mosaic_faces_flush_batch", 250_000))
     tmp_dir = gpq_dir(base_dir) / "__mosaic_faces_tmp"
@@ -2349,6 +2529,7 @@ def mosaic_faces_from_assets_parallel(
         face_wkb_batch = []
         log_to_gui(f"[Mosaic] Flushed {len(gdf):,} faces to {part.name}; kept so far {faces_kept:,}.", "INFO")
 
+    polygonize_error: Exception | None = None
     try:
         for poly in polygonize(edge_net):
             faces_total += 1
@@ -2364,7 +2545,39 @@ def mosaic_faces_from_assets_parallel(
             if prepared_cov is not None:
                 try:
                     rp = poly.representative_point()
-                    if not prepared_cov.contains(rp):
+                    # Use covers() instead of contains() to avoid edge/precision exclusions.
+                    if not prepared_cov.covers(rp):
+                        continue
+                except Exception:
+                    pass
+            elif cov_parts is not None:
+                try:
+                    rp = poly.representative_point()
+                    inside = False
+                    if cov_tree is not None:
+                        try:
+                            # Avoid STRtree predicate operand-order ambiguity across Shapely versions.
+                            # Query by bbox only, then explicitly validate with covers().
+                            hits = cov_tree.query(rp)
+                            if hits is None or len(hits) == 0:
+                                inside = False
+                            elif isinstance(hits[0], (int, np.integer)):
+                                inside = any(cov_parts[int(i)].covers(rp) for i in hits)
+                            else:
+                                inside = any(getattr(g, "covers")(rp) for g in hits)
+                        except TypeError:
+                            # No predicate support
+                            hits = cov_tree.query(rp)
+                            if hits is None or len(hits) == 0:
+                                inside = False
+                            elif isinstance(hits[0], (int, np.integer)):
+                                inside = any(cov_parts[int(i)].covers(rp) for i in hits)
+                            else:
+                                inside = any(g.covers(rp) for g in hits)
+                    else:
+                        # Linear scan fallback
+                        inside = any(g.covers(rp) for g in cov_parts)
+                    if not inside:
                         continue
                 except Exception:
                     pass
@@ -2376,8 +2589,22 @@ def mosaic_faces_from_assets_parallel(
                 _flush_faces()
             if faces_total % 200_000 == 0:
                 log_to_gui(f"[Mosaic] polygonize progress: produced {faces_total:,} faces; kept {faces_kept + len(face_wkb_batch):,}", "INFO")
+    except Exception as e:
+        polygonize_error = e
+        raise
     finally:
         _flush_faces()
+
+        if polygonize_error is None:
+            log_to_gui(
+                f"[Mosaic] polygonize(edge_net) completed: produced {faces_total:,} faces; kept {faces_kept:,} (flush_batch={flush_batch:,}).",
+                "INFO",
+            )
+        else:
+            log_to_gui(
+                f"[Mosaic] polygonize(edge_net) failed after producing {faces_total:,} faces; kept {faces_kept:,}. Error: {polygonize_error}",
+                "ERROR",
+            )
 
     if not part_files:
         log_to_gui("[Mosaic] No faces produced; mosaic empty.", "WARN")
@@ -2455,8 +2682,7 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
     obj = faces.copy()
     obj["code"] = codes
     obj["name_gis_geocodegroup"] = group_name
-    obj["attributes"] = None
-    obj = obj[["code", "name_gis_geocodegroup", "attributes", "geometry"]]
+    obj = obj[["code", "name_gis_geocodegroup", "geometry"]]
 
     bbox_poly = _bbox_polygon_from(faces)
     bbox_area_km2 = None
@@ -2554,9 +2780,8 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
                 log_to_gui(f"No H3 cells produced for resolution {r}.", "WARN")
                 continue
             gdf = gdf.rename(columns={"h3_index": "code"})
-            if "attributes" not in gdf.columns: gdf["attributes"] = None
             gdf["name_gis_geocodegroup"] = group_name
-            gdf = gdf[["code", "name_gis_geocodegroup", "attributes", "geometry"]]
+            gdf = gdf[["code", "name_gis_geocodegroup", "geometry"]]
             objects_parts.append(gdf)
             log_to_gui(f"H3 R{r}: prepared {len(gdf):,} cells.")
             groups_rows.append({
@@ -2603,13 +2828,15 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
 # -----------------------------------------------------------------------------
 # Mosaic runner
 # -----------------------------------------------------------------------------
-def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None, dissolve_mode: str = "none"):
+def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None):
     update_progress(0)
     log_to_gui("Step [Mosaic] STARTED")
     success = False
     status_detail = None
     try:
-        _clear_geocode_groups(base_dir, [BASIC_MOSAIC_GROUP])
+        # Do NOT clear existing basic_mosaic up-front.
+        # publish_mosaic_as_geocode() refreshes the group during the merge-write; pre-clearing risks
+        # leaving the project with no basic_mosaic if a later step fails (e.g. file lock during write).
         cfg = read_config(config_path(base_dir))
         # Optional force-serial (via config or ENV)
         force_serial = False
@@ -2646,15 +2873,11 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
             log_msg += f" [{auto_reason}]"
         log_to_gui(log_msg, "INFO")
 
-        if dissolve_mode and str(dissolve_mode).strip().lower() not in ("none", "off", "false", "0", ""):
-            log_to_gui(f"[Mosaic] UI dissolve mode: {dissolve_mode}", "INFO")
-
         faces = mosaic_faces_from_assets_parallel(
             base_dir,
             buffer_m,
             grid_size_m,
             workers,
-            dissolve_mode=str(dissolve_mode).strip().lower() if dissolve_mode else "none",
         )
         if faces.empty:
             status_detail = "No faces produced to publish."
@@ -2707,7 +2930,7 @@ def format_level_size_list(levels: list[int]) -> str:
 # GUI
 # -----------------------------------------------------------------------------
 def build_gui(base: Path, cfg: configparser.ConfigParser):
-    global root, log_widget, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var, dissolve_similar_var, dissolve_aggressive_var
+    global root, log_widget, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var
     original_working_directory = str(base)
 
     # heartbeat secs
@@ -2858,67 +3081,11 @@ def build_gui(base: Path, cfg: configparser.ConfigParser):
         mp.get_start_method(allow_none=True)
         import threading
 
-        mode = "none"
-        try:
-            if dissolve_aggressive_var is not None and bool(dissolve_aggressive_var.get()):
-                mode = "aggressive"
-            elif dissolve_similar_var is not None and bool(dissolve_similar_var.get()):
-                mode = "similar"
-        except Exception:
-            mode = "none"
-
-        threading.Thread(target=run_mosaic, args=(base, buf, grid, _after, mode), daemon=True).start()
+        threading.Thread(target=run_mosaic, args=(base, buf, grid, _after), daemon=True).start()
 
     start_btn = (ttk.Button(mosaic_frame, text="Build mosaic", width=16, bootstyle=PRIMARY, command=_run_mosaic_inline)
                  if ttk else tk.Button(mosaic_frame, text="Build mosaic", width=16, command=_run_mosaic_inline))
     start_btn.grid(row=0, column=2, padx=4, pady=2, sticky="e")
-
-    # Dissolve options (applied only when pressing Build mosaic)
-    dissolve_similar_var = tk.BooleanVar(value=False)
-    dissolve_aggressive_var = tk.BooleanVar(value=False)
-
-    def _sync_dissolve_options(changed: str):
-        # Keep them mutually exclusive.
-        try:
-            if changed == "similar" and dissolve_similar_var.get():
-                dissolve_aggressive_var.set(False)
-            elif changed == "aggressive" and dissolve_aggressive_var.get():
-                dissolve_similar_var.set(False)
-        except Exception:
-            pass
-
-    opt_frame = tk.Frame(mosaic_frame)
-    opt_frame.grid(row=1, column=0, columnspan=3, padx=4, pady=(2, 4), sticky="w")
-    tk.Label(opt_frame, text="Dissolve:").pack(side=tk.LEFT)
-
-    if ttk:
-        ttk.Checkbutton(
-            opt_frame,
-            text="Similar attributes",
-            variable=dissolve_similar_var,
-            bootstyle=INFO,
-            command=lambda: _sync_dissolve_options("similar"),
-        ).pack(side=tk.LEFT, padx=(6, 6))
-        ttk.Checkbutton(
-            opt_frame,
-            text="Aggressive (ignore attrs; store JSON)",
-            variable=dissolve_aggressive_var,
-            bootstyle=WARNING,
-            command=lambda: _sync_dissolve_options("aggressive"),
-        ).pack(side=tk.LEFT)
-    else:
-        tk.Checkbutton(
-            opt_frame,
-            text="Similar attributes",
-            variable=dissolve_similar_var,
-            command=lambda: _sync_dissolve_options("similar"),
-        ).pack(side=tk.LEFT, padx=(6, 6))
-        tk.Checkbutton(
-            opt_frame,
-            text="Aggressive (ignore attrs; store JSON)",
-            variable=dissolve_aggressive_var,
-            command=lambda: _sync_dissolve_options("aggressive"),
-        ).pack(side=tk.LEFT)
 
     exit_frame = tk.Frame(root); exit_frame.pack(fill=tk.X, pady=6, padx=10)
     (ttk.Button(exit_frame, text="Import geocodes", bootstyle=PRIMARY, command=lambda: _run_in_thread(run_import_geocodes, base, cfg)) if ttk

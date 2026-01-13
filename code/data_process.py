@@ -893,15 +893,35 @@ def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
     alt_file  = in_root / f"{name}.parquet"
     alt_dir   = in_root / name
 
+    def _read_any(path_like):
+        """Read GeoParquet when possible; fall back to plain Parquet.
+
+        Some tables (e.g. tbl_asset_group) are non-spatial and are written as
+        plain Parquet without GeoParquet metadata. GeoPandas will raise:
+        "Missing geo metadata in Parquet/Feather file. Use pandas.read_parquet() instead."
+        """
+        try:
+            return gpd.read_parquet(path_like)
+        except Exception as e:
+            msg = str(e)
+            if "Missing geo metadata" in msg or "Use pandas.read_parquet" in msg:
+                try:
+                    df = pd.read_parquet(path_like)
+                    # Wrap as GeoDataFrame for downstream code that expects a GeoDataFrame.
+                    return gpd.GeoDataFrame(df, geometry=None, crs=None)
+                except Exception:
+                    raise
+            raise
+
     try:
         if file_path.exists():
-            return gpd.read_parquet(file_path)
+            return _read_any(file_path)
         if dir_path.exists() and dir_path.is_dir():
-            return gpd.read_parquet(str(dir_path))
+            return _read_any(str(dir_path))
         if alt_file.exists():
-            return gpd.read_parquet(alt_file)
+            return _read_any(alt_file)
         if alt_dir.exists() and alt_dir.is_dir():
-            return gpd.read_parquet(str(alt_dir))
+            return _read_any(str(alt_dir))
         log_to_gui(log_widget, f"[read] Not found: {name} under {out_root} or {in_root}")
         return gpd.GeoDataFrame(geometry=[], crs=None)
     except Exception as e:
@@ -915,14 +935,25 @@ def write_parquet(name: str, gdf: gpd.GeoDataFrame):
     log_to_gui(log_widget, f"Wrote {path}")
 
 def _rm_rf(path: Path):
-    try:
-        if not path.exists(): return
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-    except Exception as e:
-        log_to_gui(log_widget, f"Error removing {path.name}: {e}")
+    if not path.exists():
+        return
+    # Windows can hold file locks briefly (e.g. Explorer preview, AV, parquet readers).
+    delays = [0.0, 0.25, 0.75, 1.5]
+    last_err = None
+    for d in delays:
+        try:
+            if d:
+                time.sleep(d)
+            if not path.exists():
+                return
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            return
+        except Exception as e:
+            last_err = e
+    log_to_gui(log_widget, f"Error removing {path.name}: {last_err}")
 
 def cleanup_outputs():
     for fn in ["tbl_stacked.parquet","tbl_flat.parquet"]:

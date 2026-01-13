@@ -10,6 +10,8 @@ from mesa_locale import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
+import warnings
+
 import os, sys, argparse, threading, datetime, configparser, time
 from pathlib import Path
 
@@ -26,6 +28,54 @@ import geopandas as gpd
 import pandas as pd
 import fiona
 from shapely.geometry import box
+from shapely import wkb as _shp_wkb
+
+try:
+    from shapely import force_2d as _shp_force_2d  # Shapely >= 2
+except Exception:
+    _shp_force_2d = None
+
+# pyogrio (used by GeoPandas by default when installed) warns that measured (M)
+# geometries are not supported and will be converted. Shapely/GEOS does not
+# preserve M anyway, so treat this as expected and keep stdout clean.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Measured \(M\) geometry types are not supported\..*",
+    category=UserWarning,
+    module=r"pyogrio\..*",
+)
+
+
+def _force_2d_geom(geom):
+    """Drop Z/M from a single geometry, returning a 2D geometry.
+
+    Shapely/GEOS is effectively 2D for most operations, and pyogrio already drops
+    M. We explicitly drop any remaining Z to keep the entire pipeline 2D.
+    """
+    if geom is None:
+        return None
+    try:
+        if getattr(geom, "is_empty", False):
+            return geom
+    except Exception:
+        return geom
+
+    if _shp_force_2d is not None:
+        try:
+            return _shp_force_2d(geom)
+        except Exception:
+            pass
+
+    try:
+        return _shp_wkb.loads(_shp_wkb.dumps(geom, output_dimension=2))
+    except Exception:
+        return geom
+
+# Optional: make_valid (Shapely >=2)
+try:
+    from shapely.validation import make_valid as shapely_make_valid
+except Exception:
+    shapely_make_valid = None
 
 # ----------------------------
 # Globals / UI
@@ -199,6 +249,12 @@ def _ensure_cfg() -> configparser.ConfigParser:
     cfg["DEFAULT"].setdefault("ttk_bootstrap_theme", "flatly")
     cfg["DEFAULT"].setdefault("workingprojection_epsg", "4326")
 
+    # Import quality controls (opt-in via GUI checkboxes)
+    cfg["DEFAULT"].setdefault("import_validate_geometries", "false")
+    cfg["DEFAULT"].setdefault("import_simplify_geometries", "false")
+    cfg["DEFAULT"].setdefault("import_simplify_tolerance_m", "1.0")
+    cfg["DEFAULT"].setdefault("import_simplify_preserve_topology", "true")
+
     _CFG = cfg
     return _CFG
 
@@ -245,13 +301,125 @@ def _resolve_input_folder(label: str, configured_path: str | Path) -> Path:
 
 def load_settings(cfg: configparser.ConfigParser) -> dict:
     d = cfg["DEFAULT"]
+    def _bool(key: str, default: bool = False) -> bool:
+        try:
+            v = str(d.get(key, str(default))).strip().lower()
+            return v in ("1", "true", "yes", "on")
+        except Exception:
+            return bool(default)
+
     return {
         "input_folder_asset":   d.get("input_folder_asset",   "input/asset"),
         "segment_width":        int(d.get("segment_width", "600")),
         "segment_length":       int(d.get("segment_length","1000")),
         "ttk_theme":            d.get("ttk_bootstrap_theme", "flatly"),
         "working_epsg":         int(d.get("workingprojection_epsg","4326")),
+        "import_validate_geometries": _bool("import_validate_geometries", False),
+        "import_simplify_geometries": _bool("import_simplify_geometries", False),
+        "import_simplify_tolerance_m": float(d.get("import_simplify_tolerance_m", "1.0")),
+        "import_simplify_preserve_topology": _bool("import_simplify_preserve_topology", True),
     }
+
+# ----------------------------
+# Geometry quality controls (optional)
+# ----------------------------
+def _approx_meters_to_degrees(meters: float) -> float:
+    # Approx conversion at the equator; acceptable for small tolerances.
+    # Prefer projected working_epsg for strict metric behavior.
+    return float(meters) / 111_320.0
+
+def _validate_geometry(geom):
+    if geom is None:
+        return None
+    try:
+        if geom.is_empty:
+            return geom
+    except Exception:
+        pass
+    try:
+        if shapely_make_valid is not None:
+            return shapely_make_valid(geom)
+    except Exception:
+        pass
+    try:
+        # Classic fallback for polygon self-intersections
+        return geom.buffer(0)
+    except Exception:
+        return geom
+
+def _apply_quality_controls(
+    gdf: gpd.GeoDataFrame,
+    *,
+    working_epsg: int,
+    validate_geometries: bool,
+    simplify_geometries: bool,
+    simplify_tolerance_m: float,
+    simplify_preserve_topology: bool,
+    label: str,
+):
+    if gdf is None or gdf.empty or "geometry" not in gdf.columns:
+        return gdf
+
+    if not (validate_geometries or simplify_geometries):
+        return gdf
+
+    log_to_gui(
+        f"{label}: quality controls => validate={bool(validate_geometries)}, simplify={bool(simplify_geometries)}",
+        "INFO",
+    )
+
+    out = gdf
+
+    if validate_geometries:
+        t0 = time.time()
+        try:
+            out = out.copy()
+            out["geometry"] = out.geometry.apply(_validate_geometry)
+            try:
+                out = out[out.geometry.notna()].copy()
+                out = out[~out.geometry.is_empty].copy()
+            except Exception:
+                pass
+            method = "make_valid" if shapely_make_valid is not None else "buffer(0)"
+            log_to_gui(f"{label}: validate geometries ({method}) done in {time.time() - t0:.2f}s.")
+        except Exception as e:
+            log_to_gui(f"{label}: validate geometries failed: {e}", "WARN")
+
+    if simplify_geometries:
+        t0 = time.time()
+        try:
+            tol_m = max(0.0, float(simplify_tolerance_m))
+        except Exception:
+            tol_m = 0.0
+        if tol_m <= 0.0:
+            log_to_gui(
+                f"{label}: simplify enabled but import_simplify_tolerance_m<=0; skipping simplify.",
+                "WARN",
+            )
+            return out
+
+        try:
+            if int(working_epsg) == 4326:
+                tol = _approx_meters_to_degrees(tol_m)
+                tol_unit = "deg (~m)"
+            else:
+                tol = tol_m
+                tol_unit = "m"
+
+            out = out.copy()
+            out["geometry"] = out.geometry.simplify(tol, preserve_topology=bool(simplify_preserve_topology))
+            try:
+                out = out[out.geometry.notna()].copy()
+                out = out[~out.geometry.is_empty].copy()
+            except Exception:
+                pass
+            log_to_gui(
+                f"{label}: simplify geometries done in {time.time() - t0:.2f}s (tolerance={tol_m:g} m, preserve_topology={bool(simplify_preserve_topology)}, applied={tol:g} {tol_unit})."
+            )
+        except Exception as e:
+            log_to_gui(f"{label}: simplify geometries failed: {e}", "WARN")
+
+    return out
 
 # ----------------------------
 # Geo helpers
@@ -290,6 +458,11 @@ def read_and_reproject(filepath: Path, layer: str | None, working_epsg: int) -> 
             data = data.to_crs(epsg=int(working_epsg))
         if data.geometry.name != "geometry":
             data = data.set_geometry(data.geometry.name).rename_geometry("geometry")
+        # Enforce 2D geometries (drop Z/M)
+        try:
+            data["geometry"] = data.geometry.apply(_force_2d_geom)
+        except Exception:
+            pass
         return data
     except Exception as e:
         log_to_gui(f"Read fail {filepath} (layer={layer}): {e}", level="ERROR")
@@ -304,6 +477,11 @@ def read_parquet_vector(fp: Path, working_epsg: int) -> gpd.GeoDataFrame:
             gdf = gdf.to_crs(epsg=int(working_epsg))
         if gdf.geometry.name != "geometry":
             gdf = gdf.set_geometry(gdf.geometry.name).rename_geometry("geometry")
+        # Enforce 2D geometries (drop Z/M)
+        try:
+            gdf["geometry"] = gdf.geometry.apply(_force_2d_geom)
+        except Exception:
+            pass
         return gdf
     except Exception as e:
         log_to_gui(f"Read fail (parquet) {fp.name}: {e}", level="ERROR")
@@ -344,6 +522,14 @@ def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
     log_to_gui(f"Asset files found: {len(files)}")
     update_progress(2)
 
+    # Read config for optional quality controls
+    cfg = _ensure_cfg()
+    st = load_settings(cfg)
+    validate_geometries = bool(st.get("import_validate_geometries", False))
+    simplify_geometries = bool(st.get("import_simplify_geometries", False))
+    simplify_tolerance_m = float(st.get("import_simplify_tolerance_m", 1.0))
+    simplify_preserve_topology = bool(st.get("import_simplify_preserve_topology", True))
+
     for i, fp in enumerate(files, start=1):
         # Scale progress toward 90%; final 100% is set by the caller after the step finishes.
         update_progress(5 + 85 * (i / max(1, len(files))))
@@ -357,6 +543,15 @@ def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
                     gdf = read_and_reproject(fp, layer, working_epsg)
                     if gdf.empty:
                         continue
+                    gdf = _apply_quality_controls(
+                        gdf,
+                        working_epsg=working_epsg,
+                        validate_geometries=validate_geometries,
+                        simplify_geometries=simplify_geometries,
+                        simplify_tolerance_m=simplify_tolerance_m,
+                        simplify_preserve_topology=simplify_preserve_topology,
+                        label=f"Assets:{fp.name}:{layer}",
+                    )
                     bbox_polygon = box(*gdf.total_bounds)
                     cnt = len(gdf)
                     asset_groups.append({
@@ -394,6 +589,15 @@ def import_spatial_data_asset(input_folder_asset: Path, working_epsg: int):
                 gdf = read_and_reproject(fp, None, working_epsg)
             if gdf.empty:
                 continue
+            gdf = _apply_quality_controls(
+                gdf,
+                working_epsg=working_epsg,
+                validate_geometries=validate_geometries,
+                simplify_geometries=simplify_geometries,
+                simplify_tolerance_m=simplify_tolerance_m,
+                simplify_preserve_topology=simplify_preserve_topology,
+                label=f"Assets:{fp.name}",
+            )
             bbox_polygon = box(*gdf.total_bounds)
             cnt = len(gdf)
             layer = filename
@@ -438,6 +642,17 @@ def run_import_asset(input_folder_asset: Path, working_epsg: int):
     log_to_gui("Step [Assets] STARTED")
     try:
         log_to_gui("Importing assets…")
+        # Log selected quality-control settings (from config + GUI defaults).
+        cfg = _ensure_cfg()
+        st = load_settings(cfg)
+        log_to_gui(
+            "Import options => "
+            f"validate={st.get('import_validate_geometries')}, "
+            f"simplify={st.get('import_simplify_geometries')}, "
+            f"tolerance_m={st.get('import_simplify_tolerance_m')}, "
+            f"preserve_topology={st.get('import_simplify_preserve_topology')}",
+            "INFO",
+        )
         a_obj, a_grp = import_spatial_data_asset(input_folder_asset, working_epsg)
         save_parquet("tbl_asset_object", a_obj)
         save_parquet("tbl_asset_group",  a_grp)
@@ -477,6 +692,10 @@ if __name__ == "__main__":
         # ttkbootstrap missing: fallback to standard Tk
         root = tk.Tk()
     root.title("Import to GeoParquet")
+
+    # Quality controls default from config (must be created after root exists)
+    validate_var = tk.BooleanVar(master=root, value=bool(st.get("import_validate_geometries", False)))
+    simplify_var = tk.BooleanVar(master=root, value=bool(st.get("import_simplify_geometries", False)))
     try:
         ico = BASE_DIR / "system_resources" / "mesa.ico"
         if ico.exists() and hasattr(root, "iconbitmap"):
@@ -515,14 +734,33 @@ if __name__ == "__main__":
 
     btns = tk.Frame(root); btns.pack(pady=8)
 
+    # Options (checkboxes)
+    opt = tk.Frame(root)
+    opt.pack(pady=(0, 6))
+    if tb is not None:
+        tb.Checkbutton(opt, text="Validate geometries", variable=validate_var, bootstyle=PRIMARY).pack(side=tk.LEFT, padx=8)
+        tb.Checkbutton(opt, text="Simplify geometries", variable=simplify_var, bootstyle=PRIMARY).pack(side=tk.LEFT, padx=8)
+    else:
+        tk.Checkbutton(opt, text="Validate geometries", variable=validate_var).pack(side=tk.LEFT, padx=8)
+        tk.Checkbutton(opt, text="Simplify geometries", variable=simplify_var).pack(side=tk.LEFT, padx=8)
+
     def _btn(cmd):
         return lambda: threading.Thread(target=cmd, daemon=True).start()
 
+    def _sync_import_options_to_config():
+        # Keep behavior consistent between UI and background worker by updating the in-memory config.
+        try:
+            cfg0 = _ensure_cfg()
+            cfg0["DEFAULT"]["import_validate_geometries"] = "true" if bool(validate_var.get()) else "false"
+            cfg0["DEFAULT"]["import_simplify_geometries"] = "true" if bool(simplify_var.get()) else "false"
+        except Exception:
+            pass
+
     if tb is not None:
-        tb.Button(btns, text="Import assets",   bootstyle=PRIMARY, command=_btn(lambda: run_import_asset(input_folder_asset, working_epsg))).grid(row=0, column=0, padx=8, pady=4)
+        tb.Button(btns, text="Import assets",   bootstyle=PRIMARY, command=_btn(lambda: (_sync_import_options_to_config(), run_import_asset(input_folder_asset, working_epsg)))).grid(row=0, column=0, padx=8, pady=4)
         tb.Button(btns, text="Exit", bootstyle=WARNING, command=root.destroy).grid(row=0, column=1, padx=8, pady=4)
     else:
-        tk.Button(btns, text="Import assets",   command=_btn(lambda: run_import_asset(input_folder_asset, working_epsg))).grid(row=0, column=0, padx=8, pady=4)
+        tk.Button(btns, text="Import assets",   command=_btn(lambda: (_sync_import_options_to_config(), run_import_asset(input_folder_asset, working_epsg)))).grid(row=0, column=0, padx=8, pady=4)
         tk.Button(btns, text="Exit",            command=root.destroy).grid(row=0, column=1, padx=8, pady=4)
 
     root.mainloop()
