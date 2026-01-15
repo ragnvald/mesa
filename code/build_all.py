@@ -359,7 +359,14 @@ def flatten_onedir_output() -> None:
 def copy_resources() -> None:
     # Copy runtime dirs next to mesa.exe (recursive)
     for folder in ["qgis", "docs", "input", "output", "system_resources"]:
-        candidates = [CODE_DIR / folder, PROJECT_ROOT / folder]
+        # IMPORTANT: qgis/ must be taken from repo root (same level as mesa.py).
+        # Avoid accidentally copying a stale/partial code/qgis folder.
+        if folder == "qgis":
+            candidates = [PROJECT_ROOT / folder]
+        else:
+            # Prefer repo root; fall back to code/ for legacy layouts.
+            candidates = [PROJECT_ROOT / folder, CODE_DIR / folder]
+
         src = next((c for c in candidates if c.exists()), None)
         if not src:
             continue
