@@ -77,14 +77,11 @@ from ttkbootstrap.constants import *
 import pandas as pd
 import geopandas as gpd
 import configparser
-import sqlite3
 import socket
-import uuid
 import datetime
-from datetime import datetime, timedelta
+from datetime import datetime
 import threading
 import sys
-from shapely import wkb
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
 import math
