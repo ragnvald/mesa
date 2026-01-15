@@ -16,7 +16,6 @@ import datetime as dt
 import locale
 import math
 import os
-import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
@@ -32,21 +31,6 @@ from shapely.geometry.base import BaseGeometry
 
 import tkinter as tk
 from tkinter import filedialog
-
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
-
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    Table,
-    TableStyle,
-    PageBreak,
-)
 
 try:
     locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
