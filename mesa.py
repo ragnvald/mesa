@@ -1,5 +1,16 @@
 import os
 import locale
+import warnings
+
+# pyogrio (used by GeoPandas by default when installed) warns that measured (M)
+# geometries are not supported and will be converted. Shapely/GEOS does not
+# preserve M anyway, so treat this as expected and keep stdout clean.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Measured \(M\) geometry types are not supported\..*",
+    category=UserWarning,
+    module=r"pyogrio\..*",
+)
 
 def _patch_locale_setlocale_for_windows() -> None:
     """Make locale.setlocale resilient on Windows.
