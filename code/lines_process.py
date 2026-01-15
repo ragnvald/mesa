@@ -8,13 +8,10 @@ harden_locale_for_ttkbootstrap()
 import os
 import sys
 import math
-import json
 import argparse
 import datetime
 import configparser
-import subprocess
 from pathlib import Path
-from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -23,7 +20,7 @@ import pyproj
 from shapely.geometry import (
     box, LineString, Point, Polygon, MultiLineString, MultiPolygon
 )
-from shapely.ops import unary_union, split, polygonize, linemerge, transform
+from shapely.ops import unary_union, linemerge, transform
 
 import tkinter as tk
 import tkinter.scrolledtext as scrolledtext
