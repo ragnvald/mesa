@@ -36,6 +36,7 @@ APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path
 
 # ---- constant *relative* paths we join to a discovered base dir ----
 PARQUET_ASSET_GROUP  = os.path.join("output", "geoparquet", "tbl_asset_group.parquet")
+PARQUET_ASSET_OBJECT = os.path.join("output", "geoparquet", "tbl_asset_object.parquet")
 ASSET_GROUP_OVERRIDE: Optional[Path] = None
 
 # UI grid helpers
@@ -279,6 +280,39 @@ def update_config_with_values(cfg_path: str, **kwargs) -> None:
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
+def _is_blankish(v) -> bool:
+    try:
+        s = ("" if v is None else str(v)).strip().lower()
+    except Exception:
+        return True
+    return (not s) or (s in {"nil", "none", "null", "nan"}) or (not any(ch.isdigit() for ch in s))
+
+def _cfg_get_any(cfg: configparser.ConfigParser, option: str, fallback: str = "") -> str:
+    """Get a config value regardless of section.
+
+    Prefer [DEFAULT], then [VALID_VALUES], then any other section.
+    Treat blank/"nil" values as missing so we can fall back.
+    """
+    for section in ("DEFAULT", "VALID_VALUES"):
+        try:
+            if cfg.has_option(section, option):
+                v = cfg.get(section, option, fallback="")
+                if not _is_blankish(v):
+                    return v
+        except Exception:
+            pass
+    for section in cfg.sections():
+        if section in {"DEFAULT", "VALID_VALUES"}:
+            continue
+        try:
+            if cfg.has_option(section, option):
+                v = cfg.get(section, option, fallback="")
+                if not _is_blankish(v):
+                    return v
+        except Exception:
+            pass
+    return fallback
+
 def _parse_weight_line(text: str, default: list[int]) -> list[int]:
     try:
         if not text:
@@ -296,7 +330,7 @@ def load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, list
     settings: dict[str, list[int]] = {}
     for key, option in INDEX_WEIGHT_KEYS.items():
         default = INDEX_WEIGHT_DEFAULTS[key]
-        raw = cfg["DEFAULT"].get(option, "")
+        raw = _cfg_get_any(cfg, option, fallback="")
         settings[key] = _parse_weight_line(raw, default)
     return settings
 
@@ -396,6 +430,99 @@ def _empty_asset_group_frame() -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(columns=cols, geometry='geometry', crs=f"EPSG:{workingprojection_epsg}")
 
 
+def _candidate_asset_object_paths(base_dir: str) -> list[Path]:
+    base = Path(base_dir).resolve()
+    primary = (base / PARQUET_ASSET_OBJECT).resolve()
+    candidates = [primary]
+    if base.name.lower() != "code":
+        candidates.append((base / "code" / PARQUET_ASSET_OBJECT).resolve())
+    return candidates
+
+
+def _build_asset_groups_from_asset_object(base_dir: str) -> gpd.GeoDataFrame:
+    """Best-effort reconstruction of tbl_asset_group when missing.
+
+    If tbl_asset_object exists, aggregate by ref_asset_group and derive:
+    - id
+    - name_gis_assetgroup
+    - name_original (fallback to name_gis_assetgroup)
+    - total_asset_objects
+    Then seed default vulnerability values.
+    """
+    target: Optional[Path] = None
+    for cand in _candidate_asset_object_paths(base_dir):
+        if cand.exists():
+            target = cand
+            break
+    if target is None:
+        return _empty_asset_group_frame()
+
+    try:
+        a = gpd.read_parquet(target)
+    except Exception:
+        try:
+            a = pd.read_parquet(target)
+        except Exception as e:
+            log_to_file(f"Failed reading tbl_asset_object for asset-group reconstruction: {e}")
+            return _empty_asset_group_frame()
+
+    if a is None or len(a) == 0:
+        return _empty_asset_group_frame()
+
+    if "ref_asset_group" not in a.columns:
+        return _empty_asset_group_frame()
+
+    ref = pd.to_numeric(a["ref_asset_group"], errors="coerce")
+    if ref.notna().sum() == 0:
+        return _empty_asset_group_frame()
+
+    # Prefer a readable group name when present.
+    name_col = None
+    for c in ("name_gis_assetgroup", "name_original", "asset_group", "group", "layer"):
+        if c in a.columns:
+            name_col = c
+            break
+
+    tmp = pd.DataFrame({"ref_asset_group": ref})
+    if name_col is not None:
+        tmp["name_hint"] = a[name_col].astype("string")
+    else:
+        tmp["name_hint"] = pd.NA
+
+    grouped = tmp.groupby("ref_asset_group", dropna=True).agg(
+        total_asset_objects=("ref_asset_group", "size"),
+        name_hint=("name_hint", lambda x: next((v for v in x.dropna().astype(str).tolist() if v.strip()), "")),
+    ).reset_index()
+
+    grouped.rename(columns={"ref_asset_group": "id"}, inplace=True)
+    grouped["id"] = pd.to_numeric(grouped["id"], errors="coerce").astype("Int64")
+    grouped = grouped[grouped["id"].notna()].copy()
+    grouped["id"] = grouped["id"].astype(int)
+
+    # Stable GIS name.
+    grouped["name_gis_assetgroup"] = grouped["id"].apply(lambda i: f"layer_{int(i):03d}")
+    grouped["name_original"] = grouped["name_hint"].where(grouped["name_hint"].astype(str).str.len() > 0, grouped["name_gis_assetgroup"])
+    grouped["title_fromuser"] = ""
+
+    # Geometry is optional for this helper; keep it nullable.
+    grouped["geometry"] = None
+
+    gdf = gpd.GeoDataFrame(grouped[
+        [
+            "id",
+            "name_original",
+            "name_gis_assetgroup",
+            "title_fromuser",
+            "total_asset_objects",
+            "geometry",
+        ]
+    ], geometry="geometry", crs=f"EPSG:{workingprojection_epsg}")
+
+    gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
+    enforce_vuln_dtypes_inplace(gdf)
+    return gdf
+
+
 def _coerce_geometry_series(raw: pd.Series):
     def _to_geom(val):
         if val is None:
@@ -460,9 +587,14 @@ def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
         target = candidates[0]
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            empty = _empty_asset_group_frame()
-            empty.to_parquet(target, index=False)
-            log_to_file(f"Initialized blank tbl_asset_group at {target}")
+            seeded = _build_asset_groups_from_asset_object(base_dir)
+            if seeded is None or seeded.empty:
+                seeded = _empty_asset_group_frame()
+                # Ensure schema exists on disk even when no rows are available.
+                seeded = sanitize_vulnerability(seeded, valid_input_values, FALLBACK_VULN)
+                enforce_vuln_dtypes_inplace(seeded)
+            seeded.to_parquet(target, index=False)
+            log_to_file(f"Initialized tbl_asset_group at {target} (rows={len(seeded)})")
         except Exception as e:
             log_to_file(f"Failed to initialise blank asset group parquet at {target}: {e}")
         return _empty_asset_group_frame()
@@ -482,6 +614,18 @@ def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
         return _empty_asset_group_frame()
 
     if gdf is None or gdf.empty:
+        # If the asset-group table exists but is empty, try seeding from tbl_asset_object.
+        try:
+            seeded = _build_asset_groups_from_asset_object(base_dir)
+            if seeded is not None and not seeded.empty:
+                try:
+                    seeded.to_parquet(target, index=False)
+                    log_to_file(f"Seeded tbl_asset_group from tbl_asset_object (rows={len(seeded)})")
+                except Exception as e:
+                    log_to_file(f"Failed writing seeded tbl_asset_group: {e}")
+                return seeded
+        except Exception:
+            pass
         return _empty_asset_group_frame()
 
     if gdf.crs is None:
@@ -491,6 +635,12 @@ def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
             gdf.set_crs(f"EPSG:{workingprojection_epsg}", inplace=True, allow_override=True)
     gdf = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
     enforce_vuln_dtypes_inplace(gdf)
+
+    # Ensure defaults are persisted even if the user never clicks "Save".
+    try:
+        gdf.to_parquet(target, index=False)
+    except Exception as e:
+        log_to_file(f"Failed to persist sanitized tbl_asset_group defaults: {e}")
     return gdf
 
 def save_asset_group_to_parquet(gdf: gpd.GeoDataFrame, base_dir: str):
@@ -683,7 +833,7 @@ def build_indexes_tab(parent):
 
     sections = [
         ("importance", "Importance index weights (1–5)", list(range(1, 6))),
-        ("sensitivity", "Sensitivity weights (importance×susceptibility)", SENSITIVITY_PRODUCT_VALUES),
+        ("sensitivity", "Sensitivity index (OWA)", SENSITIVITY_PRODUCT_VALUES),
     ]
     weight_vars: dict[str, list[tk.StringVar]] = {}
 
@@ -831,9 +981,9 @@ if __name__ == "__main__":
     original_working_directory = str(resolved_base)
 
     # ---- tiny diagnostics (helps catch path mistakes fast)
-    print("[parametres_setup] start_cwd:", START_CWD)
-    print("[parametres_setup] app_dir  :", APP_DIR)
-    print("[parametres_setup] base_dir :", original_working_directory)
+    log_to_file(f"[parametres_setup] start_cwd: {START_CWD}")
+    log_to_file(f"[parametres_setup] app_dir  : {APP_DIR}")
+    log_to_file(f"[parametres_setup] base_dir : {original_working_directory}")
 
     # Config
     config_file = os.path.join(original_working_directory, "config.ini")
@@ -842,18 +992,31 @@ if __name__ == "__main__":
     valid_input_values = get_valid_values(config)
     FALLBACK_VULN = get_fallback_value(config, valid_input_values)
     index_weight_settings = load_index_weight_settings(config)
-    missing_weight_keys = [opt for opt in INDEX_WEIGHT_KEYS.values() if opt not in config['DEFAULT']]
-    if missing_weight_keys:
+
+    # Seed defaults when weights are missing OR present but blank/"nil".
+    seed_needed = []
+    try:
+        for opt in INDEX_WEIGHT_KEYS.values():
+            if _is_blankish(_cfg_get_any(config, opt, fallback="")):
+                seed_needed.append(opt)
+    except Exception:
+        seed_needed = list(INDEX_WEIGHT_KEYS.values())
+
+    if seed_needed:
         try:
             persist_index_weight_settings(config_file, index_weight_settings)
             log_to_file("Seeded default index weights in config.ini")
         except Exception as err:
             log_to_file(f"Unable to seed index weights: {err}")
-    ttk_bootstrap_theme = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
-    workingprojection_epsg = config['DEFAULT'].get('workingprojection_epsg', '4326')
+    ttk_bootstrap_theme = _cfg_get_any(config, 'ttk_bootstrap_theme', fallback='flatly') or 'flatly'
+    workingprojection_epsg = (
+        _cfg_get_any(config, 'working_projection_epsg', fallback='')
+        or _cfg_get_any(config, 'workingprojection_epsg', fallback='4326')
+        or '4326'
+    )
     # Asset groups
     gdf_asset_group = load_asset_group(original_working_directory)
-    print("[parametres_setup] asset grp:", _parquet_asset_group_path(original_working_directory))
+    log_to_file(f"[parametres_setup] asset grp: {_parquet_asset_group_path(original_working_directory)}")
     if gdf_asset_group is None:
         log_to_file("Failed to load tbl_asset_group (Parquet).")
         sys.exit(1)
@@ -968,6 +1131,13 @@ if __name__ == "__main__":
 
     # Default view
     show_view("sensitivity")
+
+    # Keep the window stable when switching views (avoid auto-shrinking to content).
+    try:
+        root.update_idletasks()
+        root.minsize(root.winfo_width(), root.winfo_height())
+    except Exception:
+        pass
 
     try:
         root.protocol("WM_DELETE_WINDOW", close_application)
