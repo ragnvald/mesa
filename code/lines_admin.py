@@ -36,7 +36,6 @@ except ModuleNotFoundError:
 
 import pandas as pd
 import geopandas as gpd
-import pyarrow as pa  # ensure available
 from shapely.geometry import shape as shp_from_geojson, mapping as shp_to_geojson
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
