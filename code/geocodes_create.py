@@ -65,8 +65,7 @@ import uuid
 from shapely.geometry import (
     Polygon, MultiPolygon, GeometryCollection, LineString, MultiLineString, box
 )
-from shapely.geometry import mapping as shp_mapping
-from shapely.ops import unary_union, polygonize
+from shapely.ops import linemerge
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
 
