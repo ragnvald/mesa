@@ -11,7 +11,6 @@ import sys
 import argparse
 import configparser
 import datetime
-import time
 from pathlib import Path
 
 import numpy as np
