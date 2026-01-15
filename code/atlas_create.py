@@ -12,7 +12,6 @@ harden_locale_for_ttkbootstrap()
 
 import os
 import sys
-import glob
 import argparse
 import datetime
 import threading
