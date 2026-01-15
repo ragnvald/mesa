@@ -14,7 +14,6 @@ import locale
 import os
 import random
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
