@@ -2,14 +2,17 @@
 
 Use this document as the first stop before editing the `mesa` repository. Update it whenever new conventions emerge so the next contributor can stay aligned without re-reading the full chat history.
 
+**AI (GPT-5.2 / Copilot) must-read:** Before making changes, running commands, or proposing decisions, always open and read this entire file (`instructions.md`). If you have not read it in the current session, do so first.
+
 ## 1. Scope & goals
 - Maintain the desktop launcher (`mesa.py`/`mesa.exe`) and helper tools that automate the MESA 5 workflow: import → configure → process → review/publish.
 - Keep the packaged experience friendly for non-technical analysts; advanced wiring and build steps belong in developer docs, not the UI.
 - Ensure every change keeps GeoParquet/MBTiles outputs reproducible from the public source.
 
 ## 1.1 Review-before-commit rule
-- Never `git add`, `git commit`, `git push`, or otherwise publish changes unless the user explicitly asks for it after reviewing the proposed diffs/text.
+- **Never execute `git add`, `git commit`, `git push`, or otherwise publish changes unless the user explicitly asks for it** after reviewing the proposed diffs/text.
 - Default workflow: make changes locally → report what changed → wait for approval → then (and only then) stage/commit/push.
+- **Important**: Phrases like "create commit messages" or "set up commits" mean **prepare the text only**, not execute the commits. Only commit when told "commit this" or "run the commits" or similar explicit instructions.
 
 ## 1.2 Keep this document current
 - Whenever you edit this file, update the **Last updated** line at the bottom with the current date **and time** in the format `YYYY-MM-DD HH:MM`.
@@ -79,4 +82,4 @@ Use this document as the first stop before editing the `mesa` repository. Update
 **Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `code/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
 
 ---
-_Last updated: 2026-01-10 00:00_
+_Last updated: 2026-01-15 22:30_
