@@ -58,6 +58,16 @@ Use this document as the first stop before editing the `mesa` repository. Update
 - Maintain backwards compatibility with both the .py and compiled .exe launch paths (check `get_script_paths` usage before moving code).
 - Log meaningful events via `log_to_logfile` instead of printing directly to stdout from GUI callbacks.
 
+## 6.1 Lazy imports for faster startup
+To minimize startup time, especially for compiled executables, follow these guidelines:
+- **UI launchers** (mesa.py, UI-focused helpers): Import heavy dependencies (geopandas, shapely, matplotlib) **inside functions** that actually use them, not at module top-level.
+- **Processing scripts** (data_process.py, geocodes_create.py, etc.): Top-level imports are fine since these tools are launched specifically to do heavy work.
+- **When lazy-importing GIS stack in helpers**: The helper .exe won't bundle GIS libs, but will load them from the system Python environment when needed. Verify helpers work both standalone and when launched from mesa.exe.
+- **Current lazy-import examples**:
+  - `mesa.py`: geopandas lazy-loaded in `_total_area_km2_from_asset_objects()` and `_total_length_km_from_lines()`
+  - `geocodegroup_edit.py`: geopandas lazy-loaded in `load_spatial_data()` and `atomic_write_geoparquet()`
+- **build_all.py awareness**: The build script detects top-level imports to decide what to bundle. Helpers in the `never_gis` set (assetgroup_edit, geocodegroup_edit, edit_config, backup_restore) won't bundle GIS even if used internally.
+
 ## 7. Testing expectations
 - After UI changes, run `python mesa.py` and manually verify: window sizing, tab ordering, button commands, Status counters.
 - For backend scripts, run the relevant helper (e.g., `python code/data_process.py --help`) using sample data in `input/`.
@@ -78,8 +88,20 @@ Use this document as the first stop before editing the `mesa` repository. Update
 - The project is packaged via PyInstaller; any new data files must be added to the spec before release.
 - Keep executable launch parity: workflows triggered from `mesa.py` must still be runnable by double-clicking the compiled helper exe.
 - Document new build steps or flags here if the release pipeline changes.
+- **Bundle optimization**: mesa.exe uses onedir (flattened) for faster startup. Helpers use onefile for portability. GIS stack (geopandas/shapely/pyproj/fiona) is excluded from mesa.exe and select helpers that lazy-import it.
+- **Compression toggle**: Set `MESA_NO_COMPRESS=1` to build uncompressed helpers (faster startup, larger .exe). Default is compressed (slower startup, smaller .exe).
+
+**Expected build warnings:**
+- `WARNING: Datas for pyproj not found` / `WARNING: Hidden import "fiona._shim" not found!`  
+  **Harmless.** Helpers use system Python for GIS operations. PyInstaller scans source code but doesn't bundle GIS for lazy-import helpers.
+  
+- `WARNING: Failed to collect submodules for 'webview.platforms.android'` / `No module named 'jnius'`  
+  **Harmless.** Webview attempts to collect all platform backends. Windows app doesn't need Android support.
+
+- `UserWarning: The numpy.array_api submodule is still experimental`  
+  **Harmless.** NumPy development warning that doesn't affect runtime.
 
 **Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `code/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
 
 ---
-_Last updated: 2026-01-15 22:30_
+_Last updated: 2026-01-22 15:45_
