@@ -39,6 +39,12 @@ CLEAN_BUILD = os.environ.get("MESA_BUILD_CLEAN", "0").strip().lower() in {"1", "
 BUILD_HELPERS = os.environ.get("MESA_BUILD_HELPERS", "1").strip().lower() not in {"0", "false", "no"}
 BUILD_MAIN = os.environ.get("MESA_BUILD_MAIN", "1").strip().lower() not in {"0", "false", "no"}
 
+# Compression toggle for onefile helpers:
+# - Compressed (default): smaller .exe, slower startup (decompression overhead)
+# - Uncompressed: larger .exe, faster startup (no decompression, less AV scanning)
+# Set MESA_NO_COMPRESS=1 to build uncompressed helpers for faster startup.
+NO_COMPRESS = os.environ.get("MESA_NO_COMPRESS", "0").strip().lower() in {"1", "true", "yes"}
+
 def resolve_main_script() -> Path:
     """
     Locate the mesa entry-point. Prefer code/mesa.py, but fall back to the
@@ -155,15 +161,16 @@ HELPER_EXCLUDES = [
     "--exclude-module", "pysqlite2",
     "--exclude-module", "MySQLdb",
     "--exclude-module", "psycopg2",
+    # Exclude Android platform to avoid jnius warnings (Windows-only app)
+    "--exclude-module", "jnius",
+    "--exclude-module", "webview.platforms.android",
 ]
 
 MAIN_COLLECTS = [
-    "--collect-all", "tkinterweb",
-    "--collect-all", "geopandas",
-    "--collect-all", "shapely",
-    "--collect-all", "pyproj",
-    "--collect-all", "fiona",
-    "--collect-all", "influxdb_client",
+    # Mesa.py is a UI launcher that reads parquet files and spawns helper processes.
+    # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported only when Status
+    # metrics need geometry calculations, so we exclude it from the main bundle for
+    # faster startup. Helpers that need GIS will bundle it themselves (onefile).
     "--collect-data", "pandas",
     "--collect-data", "pyarrow",
     # ttkbootstrap ships theme assets (tcl/images). Use collect-all to reliably
@@ -185,6 +192,14 @@ MAIN_EXCLUDES = [
     "--exclude-module", "pysqlite2",
     "--exclude-module", "MySQLdb",
     "--exclude-module", "psycopg2",
+    # GIS stack excluded from main (helpers bundle it when needed)
+    "--exclude-module", "geopandas",
+    "--exclude-module", "shapely",
+    "--exclude-module", "pyproj",
+    "--exclude-module", "fiona",
+    "--exclude-module", "pyogrio",
+    "--exclude-module", "tkinterweb",
+    "--exclude-module", "influxdb_client",
 ]
 
 FLAGS_HELPER = [
@@ -193,6 +208,10 @@ FLAGS_HELPER = [
     "--onefile",
     "--log-level=WARN",
 ] + HELPER_EXCLUDES
+
+# Add compression flags based on NO_COMPRESS setting
+if NO_COMPRESS:
+    FLAGS_HELPER.extend(["--noupx", "--no-compress"])
 
 if CLEAN_BUILD:
     FLAGS_HELPER.insert(4, "--clean")
@@ -240,11 +259,28 @@ def helper_collects_for(basename: str) -> list[str]:
 
     Goal: keep most helper EXEs smaller/faster to build by only bundling large
     dependency stacks when the script actually needs them.
+
+    Some helpers lazy-import GIS (geopandas, shapely, etc.) to speed up UI init.
+    We still bundle GIS if we detect top-level imports OR if the helper's purpose
+    clearly requires spatial processing.
     """
 
     src = _read_helper_source(basename)
 
-    uses_gis = _imports_any_module(src, {"geopandas", "shapely", "fiona", "pyproj"})
+    # Helpers that don't bundle GIS (either they don't use it, or they lazy-import it)
+    # - assetgroup_edit: pure pandas table editor, no GIS
+    # - geocodegroup_edit: lazy-imports geopandas only when loading/saving data
+    # - edit_config: config.ini editor only
+    # - backup_restore: ZIP backup/restore, no data processing
+    #
+    # Note: PyInstaller may still show warnings like "Datas for pyproj not found" for
+    # lazy-import helpers because it scans source code, but no GIS code is actually bundled.
+    never_gis = {"assetgroup_edit", "geocodegroup_edit", "edit_config", "backup_restore"}
+    uses_gis = (
+        basename not in never_gis
+        and _imports_any_module(src, {"geopandas", "shapely", "fiona", "pyproj"})
+    )
+
     uses_webview = _imports_any_module(src, {"webview"})
     uses_h3 = _imports_any_module(src, {"h3"})
 
@@ -304,7 +340,9 @@ def build_helper(basename: str) -> None:
     run_pyinstaller(args)
 
 def build_main() -> None:
-    # Keep the main app lean; do not embed GIS or tools here.
+    # Keep the main app lean; UI launcher only needs ttkbootstrap, pandas, and pyarrow.
+    # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported in mesa.py only when
+    # Status metrics need geometry calculations, and will be loaded from system Python.
     data_args: list[str] = []
 
     # Optional: embed system_resources into onedir (redundant but harmless)
@@ -415,6 +453,7 @@ def main() -> None:
     log(f"CLEAN_BUILD   = {CLEAN_BUILD}")
     log(f"BUILD_HELPERS = {BUILD_HELPERS}")
     log(f"BUILD_MAIN    = {BUILD_MAIN}\n")
+    log(f"NO_COMPRESS   = {NO_COMPRESS} (faster startup, larger .exe)\n")
 
     clean_and_prepare()
     ensure_pyinstaller()
