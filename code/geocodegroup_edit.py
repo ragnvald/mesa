@@ -7,7 +7,7 @@ from tkinter import messagebox
 import configparser
 import argparse
 import datetime
-import geopandas as gpd
+# Lazy import: geopandas only needed when loading/saving spatial data, not at UI init
 import ttkbootstrap as ttk  # ttkbootstrap UI
 from ttkbootstrap.constants import *
 import os
@@ -165,8 +165,9 @@ def gpq_path_geocode_group(base_dir: str, cfg: configparser.ConfigParser, *, for
     )
     return str(root / GEOCODE_GROUP_FILE)
 
-def atomic_write_geoparquet(gdf: gpd.GeoDataFrame, path: str):
+def atomic_write_geoparquet(gdf, path: str):
     """Write GeoParquet atomically to avoid partial writes."""
+    import geopandas as gpd  # Lazy import
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), suffix=".parquet", delete=False) as tmp:
         tmp_path = tmp.name
@@ -203,10 +204,11 @@ def save_changes():
     update_records()
     save_spatial_data()
 
-def load_spatial_data(gpq_file: str) -> gpd.GeoDataFrame:
+def load_spatial_data(gpq_file: str):
     """
     Load GeoParquet → GeoDataFrame (including geometry).
     """
+    import geopandas as gpd  # Lazy import to avoid loading GIS stack at startup
     if not os.path.exists(gpq_file):
         write_to_log(f"GeoParquet not found: {gpq_file}")
         messagebox.showerror("Missing file", f"GeoParquet not found:\n{gpq_file}")

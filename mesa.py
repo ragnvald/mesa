@@ -75,7 +75,6 @@ import webbrowser
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import pandas as pd
-import geopandas as gpd
 import configparser
 import socket
 import datetime
@@ -1760,6 +1759,7 @@ if __name__ == "__main__":
         if not asset_object_path or not os.path.exists(asset_object_path):
             return None
         try:
+            import geopandas as gpd  # Lazy import to avoid loading GIS stack at startup
             mtime = _path_mtime(asset_object_path)
             if (
                 mtime
@@ -1797,6 +1797,7 @@ if __name__ == "__main__":
         if not lines_path or not os.path.exists(lines_path):
             return None
         try:
+            import geopandas as gpd  # Lazy import to avoid loading GIS stack at startup
             mtime = _path_mtime(lines_path)
             if (
                 mtime

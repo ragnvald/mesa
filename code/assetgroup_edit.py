@@ -12,6 +12,7 @@ harden_locale_for_ttkbootstrap()
 import os, sys, argparse, configparser, datetime, tempfile, json
 from pathlib import Path
 import pandas as pd
+# Note: This script does not use GIS; pandas is sufficient for editing attribute tables.
 
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
