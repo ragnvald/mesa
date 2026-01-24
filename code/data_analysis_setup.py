@@ -16,11 +16,14 @@ import datetime as dt
 import locale
 import math
 import os
+import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import unquote
 import sys
 
 import pandas as pd
@@ -44,16 +47,19 @@ os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 os.environ.setdefault("PYWEBVIEW_LOG", "error")
 os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-logging --log-level=3")
 
-try:
-    import webview
+
+def _require_webview() -> Any:
+  try:
+    import webview  # type: ignore
 
     try:
-        webview.logger.disabled = True
+      webview.logger.disabled = True
     except Exception:
-        pass
-except ModuleNotFoundError as exc:
+      pass
+    return webview
+  except ModuleNotFoundError as exc:
     raise SystemExit(
-        "pywebview is required for data_analysis.py (pip install pywebview==4.*)"
+      "pywebview is required for data_analysis_setup.py (pip install pywebview)"
     ) from exc
 
 # ---------------------------------------------------------------------------
@@ -1449,7 +1455,7 @@ class WebApi:
             return {"ok": False, "error": str(exc)}
 
     def exit_app(self) -> None:
-        threading.Timer(0.05, webview.destroy_window).start()
+      threading.Timer(0.05, _require_webview().destroy_window).start()
 
 
 # HTML payload inserted in the pywebview window (truncated for brevity in code review).
@@ -2637,6 +2643,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     storage = AnalysisStorage(base_dir, cfg)
     analyzer = AnalysisPreviewProvider(base_dir, cfg, storage.storage_epsg)
     api = WebApi(storage, analyzer, base_dir)
+
+    webview = _require_webview()
 
     window = webview.create_window(
         title="MESA Area Analysis",
