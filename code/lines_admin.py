@@ -24,15 +24,25 @@ try:
 except Exception:
     pass
 
-try:
-    import webview
+webview = None
+
+
+def _require_webview():
+    global webview
+    if webview is not None:
+        return webview
     try:
-        webview.logger.disabled = True
-    except Exception:
-        pass
-except ModuleNotFoundError:
-    sys.stderr.write("ERROR: 'pywebview' not installed. pip install pywebview\n")
-    raise
+        import webview as _wv
+
+        try:
+            _wv.logger.disabled = True
+        except Exception:
+            pass
+        webview = _wv
+        return _wv
+    except ModuleNotFoundError as exc:
+        sys.stderr.write("ERROR: 'pywebview' not installed. pip install pywebview\n")
+        raise SystemExit(1) from exc
 
 import pandas as pd
 import geopandas as gpd
@@ -713,7 +723,7 @@ class Api:
 
     def exit_app(self):
         try:
-            threading.Timer(0.05, webview.destroy_window).start()
+            threading.Timer(0.05, _require_webview().destroy_window).start()
         except Exception:
             os._exit(0)
 
@@ -1053,8 +1063,8 @@ function toggleSingleEdit(){
 function applyEdit(){
   if (!SINGLE_EDIT_HANDLER) return;
   try{
-    if (typeof SINGLE_EDIT_HANDLER._save === 'function') SINGLE_EDIT_HANDLER._save();
-    else if (typeof SINGLE_EDIT_HANDLER.save === 'function') SINGLE_EDIT_HANDLER.save();
+        if (typeof SINGLE_EDIT_HANDLER.save === 'function') SINGLE_EDIT_HANDLER.save();
+        else if (typeof SINGLE_EDIT_HANDLER._save === 'function') SINGLE_EDIT_HANDLER._save();
   }catch(e){}
   cleanupSingleHandlers();
   reloadSelected();
@@ -1259,6 +1269,8 @@ def main():
     _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
 
     api = Api(base_dir, cfg)
+    global webview
+    webview = _require_webview()
     window = webview.create_window(title="Edit line (GeoParquet)", html=HTML, js_api=api, width=1280, height=860)
 
     try:

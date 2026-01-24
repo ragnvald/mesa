@@ -25,14 +25,29 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import mapping
 
-try:
-    import webview  # type: ignore
-except ModuleNotFoundError:
+webview = None
+
+
+def _require_webview():
+  """Import pywebview only when needed (keeps import-time lightweight)."""
+  global webview
+  if webview is not None:
+    return webview
+  try:
+    import webview as _wv  # type: ignore
+
+    try:
+      _wv.logger.disabled = True
+    except Exception:
+      pass
+    webview = _wv
+    return _wv
+  except ModuleNotFoundError:
     sys.stderr.write(
-        "ERROR: 'pywebview' is not installed in the Python environment launching map_assets.py.\n"
-        "Install it in that environment, e.g.:  pip install pywebview\n"
+      "ERROR: 'pywebview' is not installed in the Python environment launching map_assets.py.\n"
+      "Install it in that environment, e.g.:  pip install pywebview\n"
     )
-    sys.exit(1)
+    raise SystemExit(1)
 
 try:
     locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
@@ -2474,6 +2489,8 @@ if (document.readyState === 'loading'){
 
 
 def main() -> None:
+    global webview
+    webview = _require_webview()
     window = webview.create_window(
         title="Asset Layers",
         html=HTML_TEMPLATE,
