@@ -991,6 +991,33 @@ ttk_bootstrap_theme     = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 mesa_version            = config['DEFAULT'].get('mesa_version', 'MESA 5')
 workingprojection_epsg  = config['DEFAULT'].get('working_projection_epsg', '4326')
 
+
+def _format_display_version(version: str) -> str:
+    """Human-friendly version string.
+
+    We treat config.ini's mesa_version as the *release* label. During development
+    runs (not frozen), append a short git SHA when available so testers can
+    identify the exact code revision without having to bump config.ini.
+    """
+    v = (version or "").strip() or "MESA"
+    try:
+        if getattr(sys, "frozen", False):
+            return v
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=PROJECT_BASE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if sha:
+            return f"{v} (dev {sha})"
+    except Exception:
+        pass
+    return v
+
+
+mesa_version_display = _format_display_version(mesa_version)
+
 check_and_create_folders()
 
 # ---------------------------------------------------------------------
@@ -998,7 +1025,7 @@ check_and_create_folders()
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     root = ttk.Window(themename=ttk_bootstrap_theme)
-    root.title(mesa_version or "MESA")
+    root.title(mesa_version_display or "MESA")
     try:
         root.iconbitmap(resolve_path(os.path.join("system_resources", "mesa.ico")))
     except Exception:
@@ -1109,12 +1136,12 @@ if __name__ == "__main__":
             max(120, img_w - 100),
             max(12, img_h // 2 + 14 + text_y_nudge),
             anchor="e",
-            text="Version " +(mesa_version or "unknown"),
+            text="Version " + (mesa_version_display or "unknown"),
             fill="#0f172a",
             font=("Segoe UI", 9, "italic")
         )
     else:
-        intro_text = "MESA tool  ·  " + (mesa_version or "unknown")
+        intro_text = "MESA tool  ·  " + (mesa_version_display or "unknown")
         intro_label = ttk.Label(
             banner_host,
             text=intro_text,
