@@ -30,6 +30,7 @@ code/input/asset/OSM/forest_landuse_osm.qmd
 mesa_4.0.0-alpha/qgis/mesa.qgz
 mesa_4.0.0-alpha.zip
 .venv/
+win/
 .vscode/
 .geoparquet/
 mbtiles/
