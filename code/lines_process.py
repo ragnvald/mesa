@@ -20,7 +20,7 @@ import pyproj
 from shapely.geometry import (
     box, LineString, Point, Polygon, MultiLineString, MultiPolygon
 )
-from shapely.ops import unary_union, linemerge, transform
+from shapely.ops import unary_union, linemerge, transform, polygonize
 
 import tkinter as tk
 import tkinter.scrolledtext as scrolledtext
@@ -334,29 +334,54 @@ def create_segments_from_buffered_lines(log_widget):
         geom     = row.geometry
         if name_gis not in counter:
             counter[name_gis] = 1
+
         try:
-            perp = create_perpendicular_lines(geom, seg_w, seg_l)
+            seg_w_f = float(seg_w)
+            seg_l_f = float(seg_l)
+        except Exception:
+            log_to_gui(log_widget, f"Invalid segment parameters for {name_gis}: length={seg_l} width={seg_w}")
+            continue
+        if not (seg_l_f > 0 and seg_w_f > 0):
+            log_to_gui(log_widget, f"Non-positive segment parameters for {name_gis}: length={seg_l_f} width={seg_w_f}")
+            continue
+
+        try:
+            perp = create_perpendicular_lines(geom, seg_w_f, seg_l_f)
         except Exception as e:
             log_to_gui(log_widget, f"Perpendicular gen failed {name_gis}: {e}")
             continue
         blines = buffered[buffered['name_gis'] == name_gis]
         if blines.empty:
             continue
+        t0 = datetime.datetime.now()
         log_to_gui(log_widget, f"Segmenting {name_gis}")
         for _, brow in blines.iterrows():
             bgeom = brow.geometry
             if not isinstance(bgeom, Polygon):
                 continue
-            segs = cut_into_segments(perp, bgeom)
-            segs = segs[segs.is_valid]
+            try:
+                segs = cut_into_segments(perp, bgeom)
+            except Exception as e:
+                log_to_gui(log_widget, f"Segmentation failed {name_gis}: {e}")
+                continue
+            try:
+                segs = segs[segs.is_valid]
+            except Exception:
+                pass
             if segs.empty:
                 continue
             segs['segment_id'] = [f"{name_gis}_{counter[name_gis]+i}" for i in range(len(segs))]
             counter[name_gis] += len(segs)
             segs['name_gis'] = name_gis
             segs['name_user'] = row['name_user']
-            segs['segment_length'] = seg_l
+            segs['segment_length'] = seg_l_f
             all_segments.append(segs)
+
+        try:
+            dt_s = (datetime.datetime.now() - t0).total_seconds()
+            log_to_gui(log_widget, f"Segmented {name_gis} in {dt_s:.2f}s")
+        except Exception:
+            pass
 
     if not all_segments:
         log_to_gui(log_widget, "No segments produced.")
