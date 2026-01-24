@@ -664,6 +664,19 @@ def _launch_gui_process(cmd: list[str], label: str):
         log_to_logfile(f"No command provided for {label}; skipping launch")
         return
     log_to_logfile(f"Launching {label}: {cmd}")
+
+    # On Windows, launching GUI scripts via python.exe will typically open a console.
+    # Prefer pythonw.exe when available to avoid the popup.
+    try:
+        if os.name == "nt" and cmd and isinstance(cmd[0], str):
+            exe0 = os.path.abspath(cmd[0])
+            if exe0.lower().endswith("python.exe"):
+                candidate = exe0[:-len("python.exe")] + "pythonw.exe"
+                if os.path.exists(candidate):
+                    cmd = [candidate, *cmd[1:]]
+    except Exception:
+        pass
+
     base_dir = _infer_base_dir_from_cmd(cmd) or PROJECT_BASE
     popen_kwargs = {
         "cwd": base_dir,
