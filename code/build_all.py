@@ -390,8 +390,14 @@ def build_helper(basename: str) -> None:
         log(f"[NOTE] Skipping helper '{basename}' (not found).")
         return
 
+    hidden_imports: list[str] = []
+    # process_all runs the area pipeline by importing the internal module.
+    # Add an explicit hidden import so PyInstaller always bundles it.
+    if basename == "process_all":
+        hidden_imports += ["--hidden-import", "_data_process_internal"]
+
     # Ensure Tcl/Tk data is bundled for helpers too (many use ttkbootstrap/tkinter).
-    args = FLAGS_HELPER + tcltk_data_args() + helper_collects_for(basename) + [
+    args = FLAGS_HELPER + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + [
         "--name", basename,
         "--distpath", str(TOOLS_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{basename}_build"),
@@ -529,11 +535,9 @@ def main() -> None:
             "assetgroup_edit",
             "atlas_create",
             "atlas_edit",
-            "analysis_process",
             "backup_restore",
             "create_raster_tiles",
             "data_import",
-            "data_process",
             "data_report",
             "data_analysis_setup",
             "data_analysis_presentation",
@@ -541,10 +545,10 @@ def main() -> None:
             "geocodegroup_edit",
             "geocodes_create",
             "lines_admin",
-            "lines_process",
             "map_assets",
             "maps_overview",
             "parametres_setup",
+            "process_all",
         ]
 
         # Optional helper selection:
