@@ -4,12 +4,12 @@
 
 Goal
 - Provide a single UI for batch-processing:
-  - data_process (presentation processing)
-  - lines_process (segment processing)
-  - analysis_process (study area analysis)
+    - Data processing (presentation processing)
+    - Lines processing (segment processing)
+    - Analysis processing (study area analysis)
 
 Notes
-- This script does NOT modify mesa.py wiring yet (by request).
+- This tool is intended to replace the separate processing helpers.
 - It tries to be safe for both dev (.py) runs and future frozen builds.
 
 UI behavior
@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -301,32 +302,24 @@ def run_data_process(
     log_fn: Callable[[str], None],
     progress_fn: Callable[[float], None],
 ) -> None:
-    """Run data_process in headless mode via subprocess.
+    """Run the data-processing pipeline.
 
-    Rationale: code/data_process.py is large and relies on many globals initialized
-    in its __main__ guard. Calling it via subprocess keeps it isolated and closer
-    to how mesa.exe launches helpers.
+    Important: when frozen (PyInstaller), calling a .py via `sys.executable` does not work.
+    We therefore run the pipeline in-process by importing the internal module.
     """
 
     progress_fn(0.0)
-
-    script = base_dir / "code" / "data_process.py"
-    if not script.exists():
-        # fallback for legacy layout
-        script = Path(__file__).resolve().parent / "data_process.py"
-
-    argv = [
-        sys.executable,
-        str(script),
-        "--original_working_directory",
-        str(base_dir),
-        "--headless",
-    ]
-
     _log_line(base_dir, log_fn, "DATA PROCESS START")
-    rc = _run_subprocess(base_dir, log_fn, argv)
-    if rc != 0:
-        raise RuntimeError(f"data_process failed (exit={rc})")
+
+    try:
+        # Import on-demand so the main UI stays light until the user actually
+        # runs the Area step.
+        import _data_process_internal as dpi
+
+        dpi.run_headless(str(base_dir))
+    except Exception as exc:
+        _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
+        raise
 
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "DATA PROCESS COMPLETED")
@@ -842,8 +835,271 @@ def run_analysis_process(
     log_fn: Callable[[str], None],
     progress_fn: Callable[[float], None],
 ) -> None:
-    from analysis_process import AssetAnalyzer
-    from data_analysis_setup import AnalysisStorage
+    # Embedded (minimal) analysis processor so we can remove analysis_process.py.
+    # This intentionally avoids importing heavy GIS modules at process_all import time.
+    import geopandas as gpd
+    import numpy as np
+    import pandas as pd
+
+    from data_analysis_setup import (
+        DEFAULT_ANALYSIS_GEOCODE,
+        AnalysisStorage,
+        analysis_flat_path,
+        analysis_stacked_path,
+        find_dataset_dir,
+        find_parquet_file,
+    )
+
+    class AssetAnalyzer:
+        """Run the actual analysis processing (clipping tbl_flat/tbl_stacked to polygons)."""
+
+        def __init__(self, base_dir: Path, cfg_local, storage_epsg: int = 4326) -> None:
+            self.base_dir = base_dir
+            self.cfg = cfg_local
+            self.storage_epsg = storage_epsg or 4326
+            try:
+                self.area_epsg = int(str(cfg_local["DEFAULT"].get("area_projection_epsg", "3035")))
+            except Exception:
+                self.area_epsg = 3035
+
+            self._DEFAULT_GEOCODE = DEFAULT_ANALYSIS_GEOCODE
+            self._find_parquet_file = find_parquet_file
+            self._find_dataset_dir = find_dataset_dir
+            self.analysis_flat_path = analysis_flat_path(base_dir, cfg_local)
+            self.analysis_stacked_path = analysis_stacked_path(base_dir, cfg_local)
+
+            self._flat_dataset: gpd.GeoDataFrame | None = None
+            self._stacked_dataset: gpd.GeoDataFrame | None = None
+
+        def _load_flat_dataset(self) -> gpd.GeoDataFrame:
+            if self._flat_dataset is not None:
+                return self._flat_dataset
+            path = self._find_parquet_file(self.base_dir, self.cfg, "tbl_flat.parquet")
+            if not path:
+                raise FileNotFoundError("Presentation table missing (tbl_flat.parquet).")
+            gdf = gpd.read_parquet(path)
+            if gdf.crs is None:
+                gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+            self._flat_dataset = gdf
+            return gdf
+
+        def _load_stacked_dataset(self) -> gpd.GeoDataFrame:
+            if self._stacked_dataset is not None:
+                return self._stacked_dataset
+            path = self._find_dataset_dir(self.base_dir, self.cfg, "tbl_stacked")
+            if not path:
+                raise FileNotFoundError("Stacked table missing (tbl_stacked).")
+            gdf = gpd.read_parquet(path)
+            if gdf.crs is None:
+                gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+            self._stacked_dataset = gdf
+            return gdf
+
+        @staticmethod
+        def _subset_by_polygon(gdf: gpd.GeoDataFrame, polygon) -> gpd.GeoDataFrame:
+            if gdf.empty:
+                return gdf.iloc[0:0].copy()
+            try:
+                sindex = gdf.sindex
+                candidates = list(sindex.intersection(polygon.bounds))
+                subset = gdf.iloc[candidates].copy() if candidates else gdf.iloc[0:0].copy()
+            except Exception:
+                subset = gdf.copy()
+            if subset.empty:
+                return subset
+            subset = subset[subset.geometry.intersects(polygon)]
+            return subset.copy()
+
+        def _clip_to_polygon(
+            self,
+            base_gdf: gpd.GeoDataFrame,
+            polygon,
+            group,
+            record,
+            geocode: str,
+            run_id: str,
+            run_ts: str,
+        ) -> gpd.GeoDataFrame:
+            subset = self._subset_by_polygon(base_gdf, polygon)
+            if subset.empty:
+                return subset.iloc[0:0].copy()
+
+            clipped_geoms = []
+            for geom in subset.geometry:
+                try:
+                    inter = geom.intersection(polygon)
+                except Exception:
+                    try:
+                        inter = geom.buffer(0).intersection(polygon)
+                    except Exception:
+                        inter = None
+                if inter is None or inter.is_empty:
+                    clipped_geoms.append(None)
+                else:
+                    clipped_geoms.append(inter)
+
+            subset = subset.assign(geometry=clipped_geoms)
+            subset = subset[subset.geometry.notna()]
+            subset = subset[~subset.geometry.is_empty]
+            if subset.empty:
+                return subset.iloc[0:0].copy()
+
+            subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=base_gdf.crs).copy()
+            metric = subset.to_crs(self.area_epsg)
+            subset["analysis_area_m2"] = metric.geometry.area.astype("float64")
+            subset = subset[subset["analysis_area_m2"] > 0]
+            if subset.empty:
+                return subset.iloc[0:0].copy()
+
+            base_area = pd.to_numeric(subset.get("area_m2"), errors="coerce")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                subset["analysis_area_fraction"] = np.where(
+                    base_area > 0,
+                    subset["analysis_area_m2"] / base_area.astype("float64"),
+                    np.nan,
+                )
+
+            subset["analysis_group_id"] = getattr(group, "identifier", "")
+            subset["analysis_group_name"] = getattr(group, "name", "")
+            subset["analysis_polygon_id"] = getattr(record, "identifier", "")
+            subset["analysis_polygon_title"] = getattr(record, "title", "")
+            subset["analysis_polygon_notes"] = getattr(record, "notes", "")
+            subset["analysis_geocode"] = geocode
+            subset["analysis_run_id"] = run_id
+            subset["analysis_timestamp"] = run_ts
+            return subset.reset_index(drop=True)
+
+        def _write_analysis_output(self, path: Path, group_id: str, new_gdf: gpd.GeoDataFrame) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                try:
+                    existing = gpd.read_parquet(path)
+                except Exception:
+                    existing = gpd.GeoDataFrame(columns=new_gdf.columns, geometry="geometry", crs=new_gdf.crs)
+            else:
+                existing = gpd.GeoDataFrame(columns=new_gdf.columns, geometry="geometry", crs=new_gdf.crs)
+
+            if "analysis_group_id" in existing.columns:
+                mask = existing["analysis_group_id"].astype(str).fillna("") != str(group_id)
+                existing = existing.loc[mask].reset_index(drop=True)
+            else:
+                existing = existing.iloc[0:0].copy()
+
+            combined = existing if new_gdf.empty else pd.concat([existing, new_gdf], ignore_index=True)
+            if not isinstance(combined, gpd.GeoDataFrame):
+                combined = gpd.GeoDataFrame(combined, geometry="geometry", crs=new_gdf.crs)
+            combined.to_parquet(path, index=False)
+
+        def run_group_analysis(
+            self,
+            group,
+            records,
+            geocode: str | None = None,
+            progress_callback: Callable[[int, int], None] | None = None,
+        ) -> dict:
+            if not records:
+                raise ValueError("No analysis polygons selected.")
+
+            category = self._DEFAULT_GEOCODE
+            flat_base = self._load_flat_dataset()
+            stacked_base = self._load_stacked_dataset()
+
+            if "name_gis_geocodegroup" in flat_base.columns:
+                flat_base = flat_base[flat_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
+            if "name_gis_geocodegroup" in stacked_base.columns:
+                stacked_base = stacked_base[stacked_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
+
+            run_id = uuid.uuid4().hex
+            run_ts = datetime.datetime.utcnow().isoformat()
+
+            total_records = len(records)
+            if progress_callback is not None:
+                try:
+                    progress_callback(0, total_records)
+                except Exception:
+                    pass
+
+            flat_results: list[gpd.GeoDataFrame] = []
+            stacked_results: list[gpd.GeoDataFrame] = []
+
+            for record_index, record in enumerate(records, start=1):
+                poly_storage = gpd.GeoDataFrame(
+                    [{"geometry": getattr(record, "geometry", None)}],
+                    geometry="geometry",
+                    crs=f"EPSG:{self.storage_epsg}",
+                )
+                polygon = poly_storage.to_crs(flat_base.crs).geometry.iloc[0]
+
+                clipped_flat = self._clip_to_polygon(flat_base, polygon, group, record, category, run_id, run_ts)
+                if not clipped_flat.empty:
+                    flat_results.append(clipped_flat)
+
+                clipped_stacked = self._clip_to_polygon(stacked_base, polygon, group, record, category, run_id, run_ts)
+                if not clipped_stacked.empty:
+                    stacked_results.append(clipped_stacked)
+
+                if progress_callback is not None:
+                    try:
+                        progress_callback(record_index, total_records)
+                    except Exception:
+                        pass
+
+            extra_cols = [
+                "analysis_group_id",
+                "analysis_group_name",
+                "analysis_polygon_id",
+                "analysis_polygon_title",
+                "analysis_polygon_notes",
+                "analysis_geocode",
+                "analysis_run_id",
+                "analysis_timestamp",
+                "analysis_area_m2",
+                "analysis_area_fraction",
+            ]
+
+            if flat_results:
+                flat_gdf = gpd.GeoDataFrame(
+                    pd.concat(flat_results, ignore_index=True),
+                    geometry="geometry",
+                    crs=flat_results[0].crs,
+                )
+            else:
+                flat_gdf = gpd.GeoDataFrame(
+                    columns=list(flat_base.columns) + extra_cols,
+                    geometry="geometry",
+                    crs=flat_base.crs,
+                )
+
+            if stacked_results:
+                stacked_gdf = gpd.GeoDataFrame(
+                    pd.concat(stacked_results, ignore_index=True),
+                    geometry="geometry",
+                    crs=stacked_results[0].crs,
+                )
+            else:
+                stacked_gdf = gpd.GeoDataFrame(
+                    columns=list(stacked_base.columns) + extra_cols,
+                    geometry="geometry",
+                    crs=stacked_base.crs,
+                )
+
+            flat_gdf = flat_gdf.reset_index(drop=True)
+            stacked_gdf = stacked_gdf.reset_index(drop=True)
+
+            self._write_analysis_output(self.analysis_flat_path, getattr(group, "identifier", ""), flat_gdf)
+            self._write_analysis_output(self.analysis_stacked_path, getattr(group, "identifier", ""), stacked_gdf)
+
+            return {
+                "analysis_group_id": getattr(group, "identifier", ""),
+                "analysis_group_name": getattr(group, "name", ""),
+                "analysis_geocode": category,
+                "flat_path": str(self.analysis_flat_path),
+                "stacked_path": str(self.analysis_stacked_path),
+                "flat_rows": int(len(flat_gdf)),
+                "stacked_rows": int(len(stacked_gdf)),
+                "run_id": run_id,
+                "run_timestamp": run_ts,
+            }
 
     def set_progress(v: float) -> None:
         try:
