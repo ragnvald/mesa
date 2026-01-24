@@ -114,6 +114,66 @@ def add_data_arg(src_path: Path, dest_name: str) -> list[str]:
     """Build a --add-data argument. On Windows, separator is ';'."""
     return ["--add-data", f"{str(src_path)}{os.pathsep}{dest_name}"]
 
+def tcltk_data_args() -> list[str]:
+    """Return --add-data args to bundle Tcl/Tk runtime data.
+
+    PyInstaller's tkinter runtime hook expects these folders to exist under
+    sys._MEIPASS (onedir: typically <dist>/_internal/):
+      - _tcl_data
+      - _tk_data
+
+    On some setups, the default hook detection can fail, producing:
+      Failed to execute script 'pyi_rth__tkinter' ... Tk data directory ... not found
+    """
+
+    if os.environ.get("MESA_SKIP_TCLTK", "0").strip().lower() in {"1", "true", "yes"}:
+        log("[NOTE] MESA_SKIP_TCLTK=1 -> skipping Tcl/Tk data collection")
+        return []
+
+    try:
+        from tkinter import Tcl  # type: ignore
+    except Exception as e:
+        log(f"[NOTE] tkinter not available in build environment; skipping Tcl/Tk data collection. Details: {e}")
+        return []
+
+    tcl = Tcl()
+
+    tcl_dir: Path | None = None
+    tk_dir: Path | None = None
+
+    try:
+        # Typically returns .../tcl/tcl8.6
+        tcl_dir = Path(tcl.eval("info library"))
+    except Exception as e:
+        log(f"[NOTE] Could not resolve Tcl 'info library'; skipping Tcl/Tk data collection. Details: {e}")
+        return []
+
+    try:
+        # Load Tk into the interpreter (does not need to open a window).
+        tcl.eval("package require Tk")
+        tk_dir = Path(tcl.eval("set tk_library"))
+    except Exception:
+        # Fallback: infer from Tcl layout
+        candidate = (tcl_dir.parent / "tk8.6")
+        if candidate.exists():
+            tk_dir = candidate
+
+    args: list[str] = []
+
+    if tcl_dir and tcl_dir.exists():
+        log(f"Including Tcl data: {tcl_dir} -> _tcl_data")
+        args += add_data_arg(tcl_dir, "_tcl_data")
+    else:
+        log(f"[NOTE] Tcl data dir not found: {tcl_dir}")
+
+    if tk_dir and tk_dir.exists():
+        log(f"Including Tk data: {tk_dir} -> _tk_data")
+        args += add_data_arg(tk_dir, "_tk_data")
+    else:
+        log(f"[NOTE] Tk data dir not found: {tk_dir}")
+
+    return args
+
 # ---------------------------------------------------------------------------
 # Build profiles
 #   Helpers: full GIS stack, onefile
@@ -330,7 +390,8 @@ def build_helper(basename: str) -> None:
         log(f"[NOTE] Skipping helper '{basename}' (not found).")
         return
 
-    args = FLAGS_HELPER + helper_collects_for(basename) + [
+    # Ensure Tcl/Tk data is bundled for helpers too (many use ttkbootstrap/tkinter).
+    args = FLAGS_HELPER + tcltk_data_args() + helper_collects_for(basename) + [
         "--name", basename,
         "--distpath", str(TOOLS_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{basename}_build"),
@@ -344,6 +405,10 @@ def build_main() -> None:
     # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported in mesa.py only when
     # Status metrics need geometry calculations, and will be loaded from system Python.
     data_args: list[str] = []
+
+    # Ensure Tcl/Tk data is bundled for tkinter/ttkbootstrap.
+    # (Fixes runtime error: "Tk data directory ... not found" in compiled builds.)
+    data_args += tcltk_data_args()
 
     # Optional: embed system_resources into onedir (redundant but harmless)
     sysres = CODE_DIR / "system_resources"
