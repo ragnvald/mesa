@@ -1,6 +1,10 @@
 import os
 import locale
 import warnings
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import geopandas as gpd
 
 # pyogrio (used by GeoPandas by default when installed) warns that measured (M)
 # geometries are not supported and will be converted. Shapely/GEOS does not
@@ -777,28 +781,19 @@ def edit_processing_setup():
             gpkg_file
         )
 
-def process_data(gpkg_file):
-    # Explicit marker so Status->Recent activity can time the full run
-    # from the Process button press to MBTiles completion.
+def open_process_all():
+    # Explicit marker so Status->Recent activity can time the full run.
     log_to_logfile("[Process] STARTED")
-    python_script, exe_file = get_script_paths("data_process")
+    python_script, exe_file = get_script_paths("process_all")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
+        _launch_gui_process([exe_file, *arg_tokens], "process_all exe")
     else:
-        run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "process_all script")
 
 def make_atlas():
     python_script, exe_file = get_script_paths("atlas_create")
-    if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
-    else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
-
-def process_lines():
-    python_script, exe_file = get_script_paths("lines_process")
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
         run_subprocess([exe_file], [], gpkg_file)
@@ -841,15 +836,6 @@ def open_create_raster_tiles():
 
 def open_data_analysis_setup():
     python_script, exe_file = get_script_paths("data_analysis_setup")
-    arg_tokens = ["--original_working_directory", original_working_directory]
-    if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
-    else:
-        run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
-
-def open_analysis_process():
-    python_script, exe_file = get_script_paths("analysis_process")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
@@ -1211,12 +1197,8 @@ if __name__ == "__main__":
              "Edit atlas tile titles/metadata after creating/importing atlas tiles."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
-            ("Process area", lambda: process_data(gpkg_file),
-             "Runs main area pipeline to process data and statistics."),
-            ("Process line", process_lines,
-             "Processes line assets (roads, rivers, etc) into analysis-ready segments."),
-              ("Process analysis", open_analysis_process,
-               "Processes the configured study areas into analysis tables."),
+            ("Process", open_process_all,
+             "Runs area, line, and analysis processing in one tool."),
         ]),
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map", open_asset_layers_viewer,
