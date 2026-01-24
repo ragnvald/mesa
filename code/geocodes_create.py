@@ -65,7 +65,8 @@ import uuid
 from shapely.geometry import (
     Polygon, MultiPolygon, GeometryCollection, LineString, MultiLineString, box
 )
-from shapely.ops import linemerge
+from shapely.geometry import mapping as shp_mapping
+from shapely.ops import linemerge, unary_union
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
 
@@ -1970,17 +1971,19 @@ def _read_parquet_gdf(path: Path, default_crs: str = "EPSG:4326") -> gpd.GeoData
 def union_from_asset_groups_or_objects(base_dir: Path):
     cfg = read_config(config_path(base_dir))
     pq_groups = geoparquet_path(base_dir, "tbl_asset_group")
-    g = _read_parquet_gdf(pq_groups); g = ensure_wgs84(g)
+    g = _read_parquet_gdf(pq_groups)
+    g = ensure_wgs84(g)
     if not g.empty and "geometry" in g:
         try:
             u = unary_union(g.geometry); u = _extract_polygonal(u)
             if u and not u.is_empty:
                 log_to_gui("Union source: GeoParquet tbl_asset_group", "INFO")
                 return u
-        except Exception:
-            pass
+        except Exception as e:
+            log_to_gui(f"H3 union: tbl_asset_group union failed: {e}", "WARN")
     pq_objs = geoparquet_path(base_dir, "tbl_asset_object")
-    ao = _read_parquet_gdf(pq_objs); ao = ensure_wgs84(ao)
+    ao = _read_parquet_gdf(pq_objs)
+    ao = ensure_wgs84(ao)
     if not ao.empty and "geometry" in ao:
         try:
             poly_mask = ao.geometry.geom_type.isin(["Polygon","MultiPolygon","GeometryCollection"])
@@ -2004,6 +2007,17 @@ def union_from_asset_groups_or_objects(base_dir: Path):
                     u_wgs84 = ensure_wgs84(gpd.GeoSeries([u], crs=aom.crs)).iloc[0]
                     log_to_gui(f"Union source: GeoParquet tbl_asset_object (buffer {buf_m} m)", "INFO")
                     return u_wgs84
+        except Exception as e:
+            log_to_gui(f"H3 union: tbl_asset_object union failed: {e}", "WARN")
+
+        # Last-resort fallback: use bbox of whatever geometry we have. This is less precise
+        # than the union, but it prevents H3 from being blocked by union/topology issues.
+        try:
+            minx, miny, maxx, maxy = ao.total_bounds
+            arr = np.array([minx, miny, maxx, maxy], dtype=float)
+            if np.isfinite(arr).all() and maxx > minx and maxy > miny:
+                log_to_gui("Union source: tbl_asset_object bbox (fallback)", "WARN")
+                return box(minx, miny, maxx, maxy)
         except Exception:
             pass
     return None
