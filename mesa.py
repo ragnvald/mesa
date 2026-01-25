@@ -80,6 +80,9 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import pandas as pd
 import configparser
+import platform
+import shutil
+import json
 import socket
 import datetime
 from datetime import datetime
@@ -89,6 +92,14 @@ import pyarrow.parquet as pq
 import pyarrow.dataset as ds
 import math
 import time
+import struct
+import ctypes
+import re
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 try:
     from PIL import Image as PILImage
@@ -959,6 +970,405 @@ def add_text_to_labelframe(labelframe, text):
         label.config(wraplength=labelframe.winfo_width() - 20)
     labelframe.bind('<Configure>', update_wrap)
 
+
+# ---------------------------------------------------------------------
+# Host capability snapshot (written once to output/geoparquet)
+# ---------------------------------------------------------------------
+def _powershell_json(command: str) -> object | None:
+    if os.name != "nt":
+        return None
+    try:
+        # Allow environments with strict policy to disable PowerShell probing.
+        if str(os.environ.get("MESA_NO_POWERSHELL", "")).strip().lower() in ("1", "true", "yes", "on"):
+            return None
+        flags = 0
+        try:
+            flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+        except Exception:
+            flags = 0
+        out = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            creationflags=flags,
+        )
+        out = (out or "").strip()
+        if not out:
+            return None
+        return json.loads(out)
+    except Exception:
+        return None
+
+
+def _windows_global_memory_status() -> dict | None:
+    """Best-effort RAM info on Windows using ctypes (no admin required)."""
+    if os.name != "nt":
+        return None
+    try:
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return None
+        return {
+            "ram_total_gb": round(float(stat.ullTotalPhys) / (1024 ** 3), 2),
+            "ram_available_gb": round(float(stat.ullAvailPhys) / (1024 ** 3), 2),
+        }
+    except Exception:
+        return None
+
+
+def _wmic_list(command_args: list[str]) -> list[dict] | None:
+    """Run WMIC and parse /format:list output into a list of dicts."""
+    if os.name != "nt":
+        return None
+    try:
+        if str(os.environ.get("MESA_NO_WMIC", "")).strip().lower() in ("1", "true", "yes", "on"):
+            return None
+        flags = 0
+        try:
+            flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+        except Exception:
+            flags = 0
+        out = subprocess.check_output(
+            command_args,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            creationflags=flags,
+        )
+        txt = (out or "").strip()
+        if not txt:
+            return None
+        blocks: list[dict] = []
+        cur: dict = {}
+        for raw in txt.splitlines():
+            line = raw.strip("\r\n")
+            if not line:
+                if cur:
+                    blocks.append(cur)
+                    cur = {}
+                continue
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip()
+            if k:
+                cur[k] = v
+        if cur:
+            blocks.append(cur)
+        return blocks or None
+    except Exception:
+        return None
+
+
+def _collect_gpu_info_windows() -> dict:
+    """GPU info collection with layered fallbacks (PowerShell -> WMIC -> none)."""
+    out: dict = {}
+    # 1) PowerShell (preferred)
+    try:
+        gpu = _powershell_json(
+            "Get-CimInstance Win32_VideoController | "
+            "Select-Object Name, DriverVersion, AdapterRAM | ConvertTo-Json -Depth 2"
+        )
+        gpus: list[dict] = []
+        if isinstance(gpu, list):
+            gpus = [g for g in gpu if isinstance(g, dict)]
+        elif isinstance(gpu, dict):
+            gpus = [gpu]
+        if gpus:
+            out["gpu_probe_method"] = "powershell_cim"
+            names = [str(g.get("Name") or "").strip() for g in gpus if str(g.get("Name") or "").strip()]
+            drivers = [str(g.get("DriverVersion") or "").strip() for g in gpus if str(g.get("DriverVersion") or "").strip()]
+            ram = []
+            for g in gpus:
+                try:
+                    v = g.get("AdapterRAM")
+                    if v is None:
+                        continue
+                    ram.append(round(float(v) / (1024 ** 3), 2))
+                except Exception:
+                    continue
+            out["gpu_count"] = len(gpus)
+            out["gpu_names"] = "; ".join(names) if names else None
+            out["gpu_driver_versions"] = "; ".join(drivers) if drivers else None
+            out["gpu_adapter_ram_gb"] = "; ".join(str(x) for x in ram) if ram else None
+            return out
+    except Exception:
+        pass
+
+    # 2) WMIC fallback (deprecated on some systems)
+    try:
+        blocks = _wmic_list(["wmic", "path", "Win32_VideoController", "get", "Name,DriverVersion,AdapterRAM", "/format:list"])
+        if blocks:
+            out["gpu_probe_method"] = "wmic"
+            names = [str(b.get("Name") or "").strip() for b in blocks if str(b.get("Name") or "").strip()]
+            drivers = [str(b.get("DriverVersion") or "").strip() for b in blocks if str(b.get("DriverVersion") or "").strip()]
+            ram = []
+            for b in blocks:
+                try:
+                    v = b.get("AdapterRAM")
+                    if v is None:
+                        continue
+                    # Some WMIC builds return integers as strings.
+                    v2 = float(re.sub(r"[^0-9.]", "", str(v)))
+                    if v2:
+                        ram.append(round(v2 / (1024 ** 3), 2))
+                except Exception:
+                    continue
+            out["gpu_count"] = len(blocks)
+            out["gpu_names"] = "; ".join(names) if names else None
+            out["gpu_driver_versions"] = "; ".join(drivers) if drivers else None
+            out["gpu_adapter_ram_gb"] = "; ".join(str(x) for x in ram) if ram else None
+            return out
+    except Exception:
+        pass
+
+    out["gpu_probe_method"] = "unavailable"
+    return out
+
+
+def _collect_system_capabilities() -> dict:
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    try:
+        if ZoneInfo is not None:
+            now_local = datetime.now(ZoneInfo("Europe/Oslo")).replace(microsecond=0).isoformat()
+        else:
+            now_local = datetime.now().replace(microsecond=0).isoformat()
+    except Exception:
+        now_local = datetime.now().replace(microsecond=0).isoformat()
+
+    out: dict = {
+        "collected_at_utc": now_utc,
+        "collected_at_local": now_local,
+        "mesa_version": mesa_version_display,
+        "python_version": platform.python_version(),
+        "python_executable": sys.executable,
+        "os_name": platform.system(),
+        "os_release": platform.release(),
+        "os_version": platform.version(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "cpu_count_logical": os.cpu_count() or None,
+        "project_base": PROJECT_BASE,
+        "working_dir": original_working_directory,
+    }
+
+    # RAM / CPU core details (best effort)
+    try:
+        import psutil  # type: ignore
+
+        vm = psutil.virtual_memory()
+        out["ram_total_gb"] = round(float(vm.total) / (1024 ** 3), 2)
+        out["ram_available_gb"] = round(float(vm.available) / (1024 ** 3), 2)
+        out["cpu_count_physical"] = psutil.cpu_count(logical=False)
+        try:
+            out["cpu_freq_mhz"] = getattr(psutil.cpu_freq(), "current", None)
+        except Exception:
+            pass
+    except Exception:
+        # Standard-library fallback for RAM on Windows (no psutil required)
+        try:
+            m = _windows_global_memory_status()
+            if m:
+                out.update(m)
+                out.setdefault("ram_probe_method", "ctypes_globalmemorystatusex")
+        except Exception:
+            pass
+
+    # Disk free (on the output drive)
+    try:
+        usage = shutil.disk_usage(original_working_directory)
+        out["disk_total_gb"] = round(float(usage.total) / (1024 ** 3), 2)
+        out["disk_free_gb"] = round(float(usage.free) / (1024 ** 3), 2)
+    except Exception:
+        pass
+
+    # GPU (Windows best effort via CIM)
+    try:
+        if os.name == "nt":
+            out.update(_collect_gpu_info_windows())
+    except Exception:
+        pass
+
+    return out
+
+
+def _write_system_capabilities_parquet(geoparquet_dir: str, row: dict) -> str | None:
+    try:
+        os.makedirs(geoparquet_dir, exist_ok=True)
+        out_path = os.path.join(geoparquet_dir, "tbl_system_capabilities.parquet")
+
+        # Write as GeoParquet (WKB geometry) without requiring geopandas/shapely.
+        # Use a harmless POINT(0 0) placeholder so GeoParquet readers can load it.
+        df = pd.DataFrame([row])
+        try:
+            wkb_point_0_0 = struct.pack("<BIdd", 1, 1, 0.0, 0.0)
+        except Exception:
+            wkb_point_0_0 = b""
+        df["geometry"] = [wkb_point_0_0]
+
+        import pyarrow as pa  # local import: keeps top-level import surface smaller
+
+        table = pa.Table.from_pandas(df, preserve_index=False)
+        try:
+            # Minimal GeoParquet metadata (v1.0 style) so tools recognize geometry.
+            geo_md = {
+                "version": "1.0.0",
+                "primary_column": "geometry",
+                "columns": {
+                    "geometry": {
+                        "encoding": "WKB",
+                        "geometry_types": ["Point"],
+                        "crs": {"id": {"authority": "EPSG", "code": 4326}},
+                    }
+                },
+            }
+            md = dict(table.schema.metadata or {})
+            md[b"geo"] = json.dumps(geo_md, ensure_ascii=True).encode("utf-8")
+            table = table.replace_schema_metadata(md)
+        except Exception:
+            # If metadata fails for any reason, still write a normal Parquet.
+            pass
+
+        pq.write_table(table, out_path)
+        return out_path
+    except Exception as e:
+        try:
+            log_to_logfile(f"[system] Failed to write system capabilities parquet: {e}")
+        except Exception:
+            pass
+        return None
+
+
+def _ensure_system_capabilities_snapshot(cfg: configparser.ConfigParser) -> None:
+    """If config.ini lacks system capability fields, write a snapshot parquet once."""
+    try:
+        # If config already includes any system capability info, treat as "present".
+        present_keys = (
+            "system_os",
+            "system_ram_gb",
+            "system_cpu",
+            "system_cores",
+            "system_gpu",
+            "gpu_names",
+            "cpu_count_logical",
+        )
+        default = cfg["DEFAULT"] if cfg and "DEFAULT" in cfg else {}
+        has_info = any(str(default.get(k, "")).strip() for k in present_keys)
+        if "SYSTEM" in cfg and cfg["SYSTEM"]:
+            has_info = True
+
+        geoparquet_dir = _detect_geoparquet_dir()
+        out_path = os.path.join(geoparquet_dir, "tbl_system_capabilities.parquet")
+        if has_info:
+            return
+        if os.path.exists(out_path):
+            return
+
+        row = _collect_system_capabilities()
+        written = _write_system_capabilities_parquet(geoparquet_dir, row)
+        if written:
+            log_to_logfile(f"[system] Wrote host capabilities snapshot: {written}")
+    except Exception:
+        # Never let this block UI startup.
+        pass
+
+
+def _read_system_capabilities_latest_row() -> dict | None:
+    """Read the latest row from tbl_system_capabilities.parquet (best-effort)."""
+    try:
+        geoparquet_dir = _detect_geoparquet_dir()
+        path = os.path.join(geoparquet_dir, "tbl_system_capabilities.parquet")
+        if not os.path.exists(path):
+            return None
+        df = pd.read_parquet(path)
+        if df is None or df.empty:
+            return None
+        row = dict(df.iloc[-1].to_dict())
+        # GeoParquet placeholder geometry is not meaningful for display.
+        row.pop("geometry", None)
+        return row
+    except Exception:
+        return None
+
+
+def _format_system_capabilities_for_about(row: dict | None) -> str:
+    if not row:
+        geoparquet_dir = _detect_geoparquet_dir()
+        path = os.path.join(geoparquet_dir, "tbl_system_capabilities.parquet")
+        return (
+            "System profile not available yet.\n\n"
+            "MESA writes a one-time host capability snapshot to:\n"
+            f"{path}\n\n"
+            "It will be created automatically on first run."
+        )
+
+    def _g(key: str) -> str:
+        v = row.get(key)
+        if v is None:
+            return "--"
+        s = str(v).strip()
+        return s if s else "--"
+
+    lines: list[str] = []
+    lines.append(f"Collected (local): {_g('collected_at_local')}")
+    lines.append(f"Collected (UTC):   {_g('collected_at_utc')}")
+    lines.append("")
+    lines.append(f"OS:        {_g('os_name')} {_g('os_release')}")
+    lines.append(f"Platform:  {_g('platform')}")
+    lines.append(f"Machine:   {_g('machine')}")
+    lines.append("")
+
+    cpu = _g("processor")
+    if cpu == "--":
+        cpu = _g("cpu")
+    lines.append(f"CPU:       {cpu}")
+    lines.append(f"Cores:     physical={_g('cpu_count_physical')}  logical={_g('cpu_count_logical')}")
+    lines.append(f"RAM (GB):  total={_g('ram_total_gb')}  available={_g('ram_available_gb')}")
+    lines.append("")
+
+    lines.append(f"GPU:       {_g('gpu_names')}")
+    lines.append(f"GPU drv:   {_g('gpu_driver_versions')}")
+    lines.append(f"GPU RAM:   {_g('gpu_adapter_ram_gb')}")
+    lines.append(f"GPU probe: {_g('gpu_probe_method')}")
+    lines.append("")
+
+    lines.append(f"Disk (GB): total={_g('disk_total_gb')}  free={_g('disk_free_gb')}")
+    lines.append("")
+
+    lines.append(f"Python:    {_g('python_version')}")
+    lines.append(f"Exe:       {_g('python_executable')}")
+    lines.append("")
+    lines.append(f"MESA:      {_g('mesa_version')}")
+
+    # Probe methods are helpful for locked-down systems.
+    if str(row.get("ram_probe_method") or "").strip():
+        lines.append("")
+        lines.append(f"RAM probe: {_g('ram_probe_method')}")
+
+    return "\n".join(lines)
+
 # ---------------------------------------------------------------------
 # Main setup
 # ---------------------------------------------------------------------
@@ -1025,6 +1435,17 @@ if __name__ == "__main__":
 
     root.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}")
     root.minsize(MIN_WIDTH, MIN_HEIGHT)
+
+    # Best-effort: write a one-time system capability snapshot to output/geoparquet
+    # if config.ini does not already include such info.
+    try:
+        threading.Thread(
+            target=_ensure_system_capabilities_snapshot,
+            args=(config,),
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
 
     aspect_guard = {"active": False}
 
@@ -1198,7 +1619,7 @@ if __name__ == "__main__":
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Process", open_process_all,
-             "Runs area, line, and analysis processing in one tool."),
+             "Runs area, line, and analysis processing."),
         ]),
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map", open_asset_layers_viewer,
@@ -1999,8 +2420,17 @@ if __name__ == "__main__":
     about_container = ttk.Frame(about_tab, padding=12)
     about_container.pack(fill="both", expand=True)
 
-    about_box = ttk.LabelFrame(about_container, text="About MESA", bootstyle='secondary')
-    about_box.pack(fill='x', expand=False, padx=5, pady=(0, 10))
+    # Split view: About MESA (left) + About your system (right)
+    about_grid = ttk.Frame(about_container)
+    about_grid.pack(fill="both", expand=True)
+    # Left pane should have more space than the system pane.
+    # Use a uniform group so requested widget widths don't overpower the split.
+    about_grid.columnconfigure(0, weight=8, uniform="about")
+    about_grid.columnconfigure(1, weight=1, uniform="about", minsize=320)
+    about_grid.rowconfigure(0, weight=1)
+
+    about_box = ttk.LabelFrame(about_grid, text="About MESA", bootstyle='secondary')
+    about_box.grid(row=0, column=0, sticky="nsew", padx=(5, 6), pady=(0, 10))
     about_box.columnconfigure(0, weight=1)
     about_text = (
         "Welcome to the MESA tool. The method is developed by UNEP-WCMC and the Norwegian Environment Agency. "
@@ -2023,6 +2453,17 @@ if __name__ == "__main__":
     )
     about_label.pack(fill='x', expand=False, padx=10, pady=(10, 6))
 
+    # Keep wrapping responsive so text doesn't look cut off when the pane is narrow.
+    def _update_about_wrap(_event=None):
+        try:
+            w = max(300, about_box.winfo_width() - 40)
+            about_label.configure(wraplength=w)
+        except Exception:
+            pass
+
+    about_box.bind("<Configure>", _update_about_wrap)
+    _update_about_wrap()
+
     links_frame = ttk.Frame(about_box)
     links_frame.pack(fill='x', expand=False, padx=10, pady=(0, 10))
     links_frame.columnconfigure(0, weight=1)
@@ -2032,6 +2473,36 @@ if __name__ == "__main__":
 
     ttk.Label(links_frame, text="Lead programmer (LinkedIn):", justify="left").grid(row=1, column=0, sticky="w", pady=(6, 0))
     create_link_icon(links_frame, "https://www.linkedin.com/in/ragnvald/", 1, 1, 6, 6)
+
+    system_box = ttk.LabelFrame(about_grid, text="About your system", bootstyle='secondary')
+    system_box.grid(row=0, column=1, sticky="nsew", padx=(6, 5), pady=(0, 10))
+    system_box.columnconfigure(0, weight=1)
+    system_box.rowconfigure(0, weight=1)
+
+    system_text_frame = ttk.Frame(system_box)
+    system_text_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 10))
+    system_text_frame.columnconfigure(0, weight=1)
+    system_text_frame.rowconfigure(0, weight=1)
+
+    system_text = tk.Text(system_text_frame, wrap="word", height=18, width=36, borderwidth=0)
+    system_scroll = ttk.Scrollbar(system_text_frame, orient="vertical", command=system_text.yview)
+    system_text.configure(yscrollcommand=system_scroll.set)
+    system_text.grid(row=0, column=0, sticky="nsew")
+    system_scroll.grid(row=0, column=1, sticky="ns")
+
+    def _refresh_system_about_text():
+        try:
+            row = _read_system_capabilities_latest_row()
+            txt = _format_system_capabilities_for_about(row)
+        except Exception:
+            txt = "Unable to read system profile."
+        system_text.configure(state="normal")
+        system_text.delete("1.0", "end")
+        system_text.insert("1.0", txt)
+        system_text.configure(state="disabled")
+
+    # Populate once on startup.
+    _refresh_system_about_text()
 
     # ------------------------------------------------------------------
     # Footer
