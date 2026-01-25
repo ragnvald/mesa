@@ -66,7 +66,7 @@ from shapely.geometry import (
     Polygon, MultiPolygon, GeometryCollection, LineString, MultiLineString, box
 )
 from shapely.geometry import mapping as shp_mapping
-from shapely.ops import linemerge, unary_union
+from shapely.ops import linemerge, polygonize, unary_union
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
 
@@ -1658,6 +1658,24 @@ def _build_linework_and_coverage(
     if use_parallel:
         # Chunk size: tradeoff between overhead and per-worker memory.
         chunk_size = max(200, _cfg_int(cfg, "mosaic_extract_chunk_size", 2500))
+
+        # Hint for very large asset datasets: smaller extract chunks tend to reduce
+        # “long tail” stalls (a few heavy chunks keeping the whole pool alive).
+        # We only log here; the user can tune via config.ini.
+        try:
+            asset_count = int(len(a_metric))
+            if asset_count >= 500_000 and chunk_size > 250:
+                log_to_gui(
+                    f"[Mosaic] Large asset dataset detected ({asset_count:,} features). Consider setting mosaic_extract_chunk_size=250 (current={chunk_size:,}) for better load balancing.",
+                    "INFO",
+                )
+            elif asset_count >= 200_000 and chunk_size > 500:
+                log_to_gui(
+                    f"[Mosaic] Large asset dataset detected ({asset_count:,} features). Consider setting mosaic_extract_chunk_size=500 (or 250) (current={chunk_size:,}) for better load balancing.",
+                    "INFO",
+                )
+        except Exception:
+            pass
         # Backward compatibility: earlier docs used mosaic_pool_* keys.
         maxtasks = max(1, _cfg_int(cfg, "mosaic_extract_maxtasksperchild", _cfg_int(cfg, "mosaic_pool_maxtasksperchild", 4)))
         pool_chunksize = max(1, _cfg_int(cfg, "mosaic_extract_pool_chunksize", _cfg_int(cfg, "mosaic_pool_chunksize", 1)))
