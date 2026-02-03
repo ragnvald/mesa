@@ -693,11 +693,26 @@ def _launch_gui_process(cmd: list[str], label: str):
         pass
 
     base_dir = _infer_base_dir_from_cmd(cmd) or PROJECT_BASE
+
+    # Capture output to log.txt so failures aren't silent when using pythonw.exe
+    stdout_target = subprocess.DEVNULL
+    stderr_target = subprocess.DEVNULL
+    log_handle = None
+    try:
+        log_path = os.path.join(base_dir, "log.txt")
+        log_handle = open(log_path, "a", encoding="utf-8")
+        log_handle.write(f"\n--- launch {label} {datetime.now().strftime('%Y.%m.%d %H:%M:%S')} ---\n")
+        log_handle.flush()
+        stdout_target = log_handle
+        stderr_target = log_handle
+    except Exception as exc:
+        log_to_logfile(f"Unable to open child log file for {label}: {exc}")
+
     popen_kwargs = {
         "cwd": base_dir,
         "env": _sub_env(base_dir),
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": stdout_target,
+        "stderr": stderr_target,
     }
     if os.name == "nt":
         creationflags = 0
@@ -711,6 +726,12 @@ def _launch_gui_process(cmd: list[str], label: str):
         subprocess.Popen(cmd, **popen_kwargs)
     except Exception as exc:
         log_to_logfile(f"Failed to launch {label}: {exc}")
+    finally:
+        try:
+            if log_handle is not None:
+                log_handle.close()
+        except Exception:
+            pass
 
 def _resolve_tool_path(*rel_candidates: str) -> str:
     """Find the first existing helper path across system/, project root, or code/."""
@@ -830,11 +851,12 @@ def open_asset_layers_viewer():
 
 def open_present_files():
     python_script, exe_file = get_script_paths("data_report")
+    arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        _launch_gui_process([exe_file], "data_report exe")
+        _launch_gui_process([exe_file, *arg_tokens], "data_report exe")
     else:
         python_exe = sys.executable or "python"
-        _launch_gui_process([python_exe, python_script], "data_report script")
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "data_report script")
 
 
 def open_create_raster_tiles():
@@ -857,10 +879,11 @@ def open_data_analysis_setup():
 def open_data_analysis_presentation():
     python_script, exe_file = get_script_paths("data_analysis_presentation")
     if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
+        _launch_gui_process([exe_file], "data_analysis_presentation exe")
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        python_exe = sys.executable or "python"
+        arg_tokens = ["--original_working_directory", original_working_directory]
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "data_analysis_presentation script")
 
 def edit_assets():
     python_script, exe_file = get_script_paths("assetgroup_edit")
