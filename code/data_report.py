@@ -102,6 +102,11 @@ progress_label = None
 last_report_path = None
 link_var = None  # hyperlink label StringVar
 
+# When running long jobs in a background thread, set_progress() messages were
+# only written to the GUI widget (not to log.txt). Keep a best-effort base_dir
+# so progress is also persisted to disk.
+_LOG_BASE_DIR: str | None = None
+
 SENSITIVITY_ORDER = ['A', 'B', 'C', 'D', 'E']
 SENSITIVITY_UNKNOWN_COLOR = "#FF00F2"
 _SENSITIVITY_NUMERIC_RANGES: list[tuple[str, float, float]] = []
@@ -3805,7 +3810,7 @@ def set_progress(pct: float, message: str | None = None):
         if progress_label is not None:
             progress_label.config(text=f"{int(pct)}%")
         if message:
-            write_to_log(message)
+            write_to_log(message, _LOG_BASE_DIR)
     except Exception:
         pass
 
@@ -3826,6 +3831,8 @@ def generate_report(base_dir: str,
                     analysis_area_right: str | None = None):
     engine: ReportEngine | None = None
     try:
+        global _LOG_BASE_DIR
+        _LOG_BASE_DIR = base_dir
         set_progress(3, "Initializing report generation …")
         cfg       = read_config(config_file)
 
@@ -4370,8 +4377,21 @@ def generate_report(base_dir: str,
 
     except Exception as e:
         write_to_log(f"ERROR during report generation: {e}", base_dir)
+        try:
+            import traceback
+
+            tb = traceback.format_exc()
+            for line in (tb or "").splitlines():
+                if line.strip():
+                    write_to_log(line, base_dir)
+        except Exception:
+            pass
         set_progress(100, "Report failed.")
     finally:
+        try:
+            _LOG_BASE_DIR = None
+        except Exception:
+            pass
         if engine is not None:
             try:
                 engine.cleanup()
