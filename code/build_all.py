@@ -4,6 +4,7 @@
 import sys
 import os
 import shutil
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,24 @@ def clean_and_prepare() -> None:
 # ---------------------------------------------------------------------------
 # PyInstaller
 # ---------------------------------------------------------------------------
+def _pyinstaller_log_level() -> str:
+    """Return a PyInstaller log level.
+
+    Default is WARN to keep helper builds concise. Override via env var:
+      MESA_PYINSTALLER_LOG_LEVEL=INFO
+    """
+
+    raw = os.environ.get("MESA_PYINSTALLER_LOG_LEVEL", "WARN").strip().upper()
+    if raw == "WARNING":
+        raw = "WARN"
+
+    allowed = {"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "CRITICAL"}
+    if raw not in allowed:
+        log(f"[NOTE] Invalid MESA_PYINSTALLER_LOG_LEVEL='{raw}', using WARN")
+        return "WARN"
+
+    return raw
+
 def ensure_pyinstaller() -> None:
     try:
         import PyInstaller  # noqa: F401
@@ -213,6 +232,25 @@ COLLECT_DOCX = [
     # resources are bundled into frozen helper executables.
     "--collect-all", "docx",
 ]
+
+# setuptools/pkg_resources runtime deps
+#
+# PyInstaller may bundle pkg_resources (via transitive deps), which in newer
+# setuptools versions imports jaraco.* modules at runtime. If these aren't
+# bundled, frozen helpers can fail immediately with:
+#   ModuleNotFoundError: No module named 'jaraco'
+#
+# NOTE: 'jaraco' is a namespace package; bundling the concrete subpackages is
+# more reliable than trying to collect the namespace root.
+PKG_RESOURCES_HIDDEN_IMPORTS: list[str] = [
+    "--hidden-import", "jaraco.text",
+    "--hidden-import", "jaraco.functools",
+    "--hidden-import", "jaraco.context",
+    "--hidden-import", "more_itertools",
+    "--hidden-import", "platformdirs",
+    "--hidden-import", "autocommand",
+    "--hidden-import", "backports.tarfile",
+]
 HELPER_EXCLUDES = [
     "--exclude-module", "cupy",
     "--exclude-module", "cupy_backends",
@@ -272,7 +310,7 @@ FLAGS_HELPER = [
     "--windowed",
     "--noconfirm",
     "--onefile",
-    "--log-level=WARN",
+    f"--log-level={_pyinstaller_log_level()}",
 ] + HELPER_EXCLUDES
 
 # Add compression flags based on NO_COMPRESS setting
@@ -361,6 +399,9 @@ def helper_collects_for(basename: str) -> list[str]:
 
     collects: list[str] = []
     collects += COLLECT_TTKBOOTSTRAP
+    # Always include these small runtime deps to prevent frozen-startup failures
+    # caused by transitive pkg_resources imports.
+    collects += PKG_RESOURCES_HIDDEN_IMPORTS
 
     if uses_gis:
         collects += COLLECT_GIS_STACK
@@ -385,7 +426,7 @@ def helper_collects_for(basename: str) -> list[str]:
 FLAGS_MAIN = [
     "--windowed",
     "--noconfirm",
-    "--log-level=WARN",
+    f"--log-level={_pyinstaller_log_level()}",
 ] + MAIN_COLLECTS + MAIN_EXCLUDES
 
 if CLEAN_BUILD:
@@ -399,6 +440,9 @@ def build_helper(basename: str) -> None:
     if not pyfile.exists():
         log(f"[NOTE] Skipping helper '{basename}' (not found).")
         return
+
+    start = time.perf_counter()
+    log(f"[HELPER] Building '{basename}'...")
 
     hidden_imports: list[str] = []
     # process_all runs the area pipeline by importing the internal module.
@@ -415,8 +459,12 @@ def build_helper(basename: str) -> None:
         str(pyfile),
     ]
     run_pyinstaller(args)
+    elapsed = time.perf_counter() - start
+    log(f"[HELPER] Finished '{basename}' in {elapsed:.1f}s")
 
 def build_main() -> None:
+    start = time.perf_counter()
+    log("[MAIN] Building 'mesa'...")
     # Keep the main app lean; UI launcher only needs ttkbootstrap, pandas, and pyarrow.
     # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported in mesa.py only when
     # Status metrics need geometry calculations, and will be loaded from system Python.
@@ -441,6 +489,8 @@ def build_main() -> None:
     ] + data_args + [str(entry_point)]
 
     run_pyinstaller(args)
+    elapsed = time.perf_counter() - start
+    log(f"[MAIN] Finished 'mesa' in {elapsed:.1f}s")
 
 def flatten_onedir_output() -> None:
     """
