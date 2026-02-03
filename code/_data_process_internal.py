@@ -2736,6 +2736,48 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         tbl_flat["index_owa"] = 0
     tbl_flat["index_owa"] = pd.to_numeric(tbl_flat["index_owa"], errors="coerce").fillna(0).round().astype("Int64")
 
+    # 6c. Optional: explode MultiPolygons in tbl_flat into individual Polygon rows.
+    # We do this *after* all index merges that require unique codes to avoid
+    # many-to-many merges on the 'code' key.
+    if bool(globals().get("_EXPLODE_TBL_FLAT_MULTIPOLYGONS", False)):
+        try:
+            before_n = len(tbl_flat)
+            try:
+                gt = tbl_flat.geometry.geom_type
+                mp_mask = gt == "MultiPolygon"
+            except Exception:
+                mp_mask = None
+
+            if mp_mask is not None and hasattr(mp_mask, "any") and bool(mp_mask.any()):
+                others = tbl_flat.loc[~mp_mask].copy()
+                mps = tbl_flat.loc[mp_mask].copy()
+                try:
+                    mps_ex = mps.explode(index_parts=True, ignore_index=True)
+                except TypeError:
+                    try:
+                        mps_ex = mps.explode(index_parts=True)
+                        mps_ex = mps_ex.reset_index(drop=True)
+                    except Exception:
+                        mps_ex = mps.explode().reset_index(drop=True)
+
+                tbl_flat = pd.concat([others, mps_ex], ignore_index=True)
+                tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=f"EPSG:{working_epsg}")
+                try:
+                    tbl_flat = tbl_flat[tbl_flat.geometry.notna() & ~tbl_flat.geometry.is_empty].copy()
+                except Exception:
+                    pass
+
+                # Recompute area for the exploded parts (the earlier area_m2 was for the full MultiPolygon).
+                try:
+                    metric2 = tbl_flat.to_crs(area_epsg)
+                    tbl_flat["area_m2"] = metric2.geometry.area.astype("float64").round().astype("Int64")
+                except Exception as e:
+                    log_to_gui(log_widget, f"Area recomputation failed after MultiPolygon split ({area_epsg}): {e}")
+
+                log_to_gui(log_widget, f"[tbl_flat] Split MultiPolygons -> rows {before_n:,} → {len(tbl_flat):,}.")
+        except Exception as e:
+            log_to_gui(log_widget, f"[tbl_flat] MultiPolygon split failed; continuing without split: {e}")
+
     # 7. Select Columns & Write
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
@@ -2765,7 +2807,22 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     # 9. Parallel Backfill
     try:
         log_to_gui(log_widget, "Backfilling area_m2 to tbl_stacked partitions…")
-        area_map = tbl_flat[['code','area_m2']].dropna().drop_duplicates(subset=['code'])
+        # If tbl_flat contains multiple polygon parts per code (optional MultiPolygon split),
+        # sum the per-part areas back to a single area_m2 per code.
+        area_map = tbl_flat[["code", "area_m2"]].dropna().copy()
+        try:
+            area_map["code"] = area_map["code"].astype(str)
+        except Exception:
+            pass
+        try:
+            area_map["area_m2"] = pd.to_numeric(area_map["area_m2"], errors="coerce")
+        except Exception:
+            pass
+        area_map = area_map.groupby("code", as_index=False)["area_m2"].sum()
+        try:
+            area_map["area_m2"] = area_map["area_m2"].round().astype("Int64")
+        except Exception:
+            pass
         area_map['code'] = area_map['code'].astype(str)
         
         if files:
@@ -3453,7 +3510,10 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
 
 
 
-def run_headless(original_working_directory_arg: str | None = None) -> None:
+_EXPLODE_TBL_FLAT_MULTIPOLYGONS: bool = False
+
+
+def run_headless(original_working_directory_arg: str | None = None, *, explode_flat_multipolygons: bool = False) -> None:
     """Entry point for headless processing (callable from other modules).
 
     This mirrors the __main__ headless initialization without calling sys.exit.
@@ -3500,6 +3560,8 @@ def run_headless(original_working_directory_arg: str | None = None) -> None:
     global MINIMAP_STATUS_PATH
     MINIMAP_STATUS_PATH = gpq_dir() / "__chunk_status.json"
     _init_idle_status()
+    global _EXPLODE_TBL_FLAT_MULTIPOLYGONS
+    _EXPLODE_TBL_FLAT_MULTIPOLYGONS = bool(explode_flat_multipolygons)
 
     process_all(cfg_path)
 
@@ -3523,6 +3585,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process stacked/flat GeoParquet with A..E categorisation")
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     parser.add_argument('--headless', action='store_true', help='Run without GUI (CLI mode)')
+    parser.add_argument('--explode-flat-multipolygons', action='store_true', help='Split MultiPolygon geometries in tbl_flat into individual Polygon rows')
     args = parser.parse_args()
     original_working_directory = args.original_working_directory or os.getcwd()
     try:
@@ -3555,7 +3618,7 @@ if __name__ == "__main__":
 
     if args.headless:
         try:
-            run_headless(args.original_working_directory)
+            run_headless(args.original_working_directory, explode_flat_multipolygons=bool(args.explode_flat_multipolygons))
         except Exception:
             sys.exit(1)
         sys.exit(0)
