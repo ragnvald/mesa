@@ -34,5 +34,14 @@ tqdm==4.66.1
 python-docx==1.2.0
 lxml==6.0.2
 
+# setuptools/pkg_resources runtime deps (needed in frozen builds)
+jaraco.text==4.0.0
+jaraco.functools==4.4.0
+jaraco.context==6.1.0
+more-itertools==10.8.0
+platformdirs==4.5.1
+autocommand==2.2.2
+backports.tarfile==1.2.0
+
 # Some scripts reference H3
 h3==4.2.2
