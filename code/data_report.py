@@ -102,6 +102,11 @@ progress_label = None
 last_report_path = None
 link_var = None  # hyperlink label StringVar
 
+# Tk widgets must only be updated from the thread that owns the Tk event loop.
+# The report generation runs in a background thread, so we schedule UI updates
+# via root.after(0, ...) to avoid hangs/deadlocks.
+_UI_ROOT = None
+
 # When running long jobs in a background thread, set_progress() messages were
 # only written to the GUI widget (not to log.txt). Keep a best-effort base_dir
 # so progress is also persisted to disk.
@@ -1258,11 +1263,16 @@ class ReportEngine:
                 lines_work['length_m'] = 0.0
 
         total = len(lines_work)
-        for idx, line in lines_work.iterrows():
+        for n, (_, line) in enumerate(lines_work.iterrows(), start=1):
             ln_visible = line['name_gis']
             ln_safe = _safe_name(ln_visible)
             length_m = float(line.get('length_m', 0) or 0)
             length_km = length_m / 1000.0
+            try:
+                write_to_log(f"Rendering line segments ({n}/{total}): {ln_visible}", base_dir)
+            except Exception:
+                pass
+
             segment_records = sort_segments_numerically(segments_df[segments_df['name_gis'] == ln_visible]).copy()
 
             if not segment_records.empty:
@@ -1359,7 +1369,10 @@ class ReportEngine:
                 })
 
             if set_progress_callback:
-                set_progress_callback(idx+1, total)
+                try:
+                    set_progress_callback(n, total)
+                except Exception:
+                    pass
 
         return pages_lines, log_data
 
@@ -1465,11 +1478,22 @@ def write_to_log(message: str, base_dir: str | None = None):
                 f.write(formatted + "\n")
     except Exception:
         pass
+    # GUI log update (thread-safe)
+    def _append_gui():
+        try:
+            if log_widget and log_widget.winfo_exists():
+                log_widget.insert(tk.END, formatted + "\n")
+                log_widget.see(tk.END)
+        except Exception:
+            pass
+
     try:
-        if log_widget and log_widget.winfo_exists():
-            log_widget.insert(tk.END, formatted + "\n")
-            log_widget.see(tk.END)
+        if _UI_ROOT is not None and getattr(_UI_ROOT, "winfo_exists", lambda: False)():
+            _UI_ROOT.after(0, _append_gui)
+        else:
+            _append_gui()
     except Exception:
+        # Never let logging break report generation.
         pass
 
 _OUTPUT_ROOT: Path | None = None
@@ -3805,12 +3829,25 @@ def _urls_to_footnotes(text: str) -> str:
 def set_progress(pct: float, message: str | None = None):
     try:
         pct = max(0.0, min(100.0, float(pct)))
-        if progress_var is not None:
-            progress_var.set(pct)
-        if progress_label is not None:
-            progress_label.config(text=f"{int(pct)}%")
         if message:
             write_to_log(message, _LOG_BASE_DIR)
+
+        def _update_gui():
+            try:
+                if progress_var is not None:
+                    progress_var.set(pct)
+                if progress_label is not None:
+                    progress_label.config(text=f"{int(pct)}%")
+            except Exception:
+                pass
+
+        try:
+            if _UI_ROOT is not None and getattr(_UI_ROOT, "winfo_exists", lambda: False)():
+                _UI_ROOT.after(0, _update_gui)
+            else:
+                _update_gui()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -3975,6 +4012,12 @@ def generate_report(base_dir: str,
 
             def _progress_segments(done: int, total: int):
                 set_progress(25 + int(10 * done / max(1, total)), f"Rendering line segment maps ({done}/{total})")
+
+            try:
+                # Ensure we always move past 23% when starting the segments stage.
+                _progress_segments(0, len(lines_df) if lines_df is not None else 0)
+            except Exception:
+                pass
 
             pages_lines, log_data = engine.render_segments(lines_df, segments_df, palette_A2E, base_dir, _progress_segments)
 
@@ -4439,8 +4482,9 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
     ).start()
 
 def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str):
-    global log_widget, progress_var, progress_label, link_var
+    global log_widget, progress_var, progress_label, link_var, _UI_ROOT
     root = tb.Window(themename=theme)
+    _UI_ROOT = root
     root.title("MESA – Report generator")
     try:
         ico = Path(base_dir) / "system_resources" / "mesa.ico"
