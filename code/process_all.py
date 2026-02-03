@@ -173,6 +173,7 @@ class ProcessAvailability:
 @dataclass(frozen=True)
 class ProcessPlan:
     run_data: bool
+    explode_flat_multipolygons: bool
     run_lines: bool
     run_analysis: bool
 
@@ -301,6 +302,8 @@ def run_data_process(
     base_dir: Path,
     log_fn: Callable[[str], None],
     progress_fn: Callable[[float], None],
+    *,
+    explode_flat_multipolygons: bool = False,
 ) -> None:
     """Run the data-processing pipeline.
 
@@ -316,7 +319,7 @@ def run_data_process(
         # runs the Area step.
         import _data_process_internal as dpi
 
-        dpi.run_headless(str(base_dir))
+        dpi.run_headless(str(base_dir), explode_flat_multipolygons=bool(explode_flat_multipolygons))
     except Exception as exc:
         _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
         raise
@@ -1218,7 +1221,12 @@ def run_selected(
 
     if plan.run_data:
         try:
-            run_data_process(base_dir, log_fn, make_slice_progress(current_offset))
+            run_data_process(
+                base_dir,
+                log_fn,
+                make_slice_progress(current_offset),
+                explode_flat_multipolygons=bool(plan.explode_flat_multipolygons),
+            )
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
         current_offset += slice_size
@@ -1269,7 +1277,8 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
             root.iconbitmap(str(ico))
     except Exception:
         pass
-    root.geometry("820x520")
+    # Slightly bigger default window (requested): more room for options and log.
+    root.geometry("900x560")
 
     # Make the log area the resizable region so buttons never get pushed off-screen.
     root.grid_rowconfigure(0, weight=1)
@@ -1282,6 +1291,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
 
     # Defaults: checked if available
     var_data = tk.BooleanVar(value=avail_data.available)
+    var_data_explode = tk.BooleanVar(value=False)
     var_lines = tk.BooleanVar(value=avail_lines.available)
     var_analysis = tk.BooleanVar(value=avail_analysis.available)
 
@@ -1355,14 +1365,17 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
     controls.grid_columnconfigure(0, weight=0)
     controls.grid_columnconfigure(1, weight=1)
     controls.grid_columnconfigure(2, weight=1)
+    controls.grid_columnconfigure(3, weight=0)
 
     # Header row
     hdr1 = tk.Label(controls, text="Process", anchor="w")
     hdr2 = tk.Label(controls, text="Status", anchor="w")
     hdr3 = tk.Label(controls, text="Current results", anchor="w")
+    hdr4 = tk.Label(controls, text="Options", anchor="w")
     hdr1.grid(row=0, column=0, sticky="w")
     hdr2.grid(row=0, column=1, sticky="w", padx=10)
     hdr3.grid(row=0, column=2, sticky="w", padx=10)
+    hdr4.grid(row=0, column=3, sticky="w", padx=10)
 
     gpq = parquet_dir(base_dir, cfg)
     stats_data = _format_stats(
@@ -1390,9 +1403,35 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
             cb.configure(state=tk.DISABLED)
             var.set(False)
 
-    _mk_row(1, "Data processing (presentation)", var_data, avail_data, stats_data)
+        return cb
+
+    cb_data = _mk_row(1, "Data processing (presentation)", var_data, avail_data, stats_data)
     _mk_row(2, "Lines processing (segments)", var_lines, avail_lines, stats_lines)
     _mk_row(3, "Analysis processing (study areas)", var_analysis, avail_analysis, stats_analysis)
+
+    # Optional: explode MultiPolygons into individual Polygon rows in tbl_flat.
+    # This only affects the data-processing step.
+    opt_data = tk.Checkbutton(
+        controls,
+        text="Split MultiPolygons in tbl_flat",
+        variable=var_data_explode,
+    )
+    opt_data.grid(row=1, column=3, sticky="w", padx=10)
+
+    def _sync_data_option_state(*_args) -> None:
+        try:
+            enabled = bool(var_data.get()) and bool(avail_data.available)
+            opt_data.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
+            if not enabled:
+                var_data_explode.set(False)
+        except Exception:
+            pass
+
+    try:
+        var_data.trace_add("write", _sync_data_option_state)
+    except Exception:
+        pass
+    _sync_data_option_state()
 
     buttons = tk.Frame(main_frame)
     buttons.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 10))
@@ -1421,6 +1460,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
         try:
             plan = ProcessPlan(
                 run_data=bool(var_data.get()),
+                explode_flat_multipolygons=bool(var_data_explode.get()),
                 run_lines=bool(var_lines.get()),
                 run_analysis=bool(var_analysis.get()),
             )
@@ -1466,6 +1506,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="Print planned actions and exit")
 
     p.add_argument("--no-data", action="store_true", help="Do not run data processing")
+    p.add_argument(
+        "--explode-flat-multipolygons",
+        action="store_true",
+        help="When running data processing, split MultiPolygon geometries in tbl_flat into individual Polygon rows",
+    )
     p.add_argument("--no-lines", action="store_true", help="Do not run lines processing")
     p.add_argument("--no-analysis", action="store_true", help="Do not run analysis processing")
 
@@ -1483,6 +1528,7 @@ def main() -> None:
 
     default_plan = ProcessPlan(
         run_data=avail_data.available and not bool(args.no_data),
+        explode_flat_multipolygons=bool(args.explode_flat_multipolygons),
         run_lines=avail_lines.available and not bool(args.no_lines),
         run_analysis=avail_analysis.available and not bool(args.no_analysis),
     )
