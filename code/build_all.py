@@ -207,6 +207,12 @@ COLLECT_H3 = [
 COLLECT_WEBVIEW = [
     "--collect-all", "webview",
 ]
+
+COLLECT_DOCX = [
+    # python-docx uses package data (templates). Collect-all ensures those
+    # resources are bundled into frozen helper executables.
+    "--collect-all", "docx",
+]
 HELPER_EXCLUDES = [
     "--exclude-module", "cupy",
     "--exclude-module", "cupy_backends",
@@ -343,6 +349,7 @@ def helper_collects_for(basename: str) -> list[str]:
 
     uses_webview = _imports_any_module(src, {"webview"})
     uses_h3 = _imports_any_module(src, {"h3"})
+    uses_docx = _imports_any_module(src, {"docx"})
 
     uses_pandas = uses_gis or _imports_any_module(src, {"pandas"})
 
@@ -369,6 +376,9 @@ def helper_collects_for(basename: str) -> list[str]:
 
     if uses_h3:
         collects += COLLECT_H3
+
+    if uses_docx:
+        collects += COLLECT_DOCX
 
     return collects
 
