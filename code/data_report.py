@@ -44,11 +44,31 @@ from pathlib import Path
 import subprocess
 import io, math, time, urllib.request
 import sqlite3
-from docx import Document
-from docx.shared import Pt, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+try:
+    from docx import Document
+    from docx.shared import Pt, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+except ModuleNotFoundError as exc:
+    msg = (
+        "Report engine dependency missing: python-docx\n\n"
+        "Install it in the same environment that runs MESA, for example:\n"
+        "  pip install python-docx\n\n"
+        "If you use the bundled MESA requirements, add/install it from:\n"
+        "  requirements_compile_win311.txt (or requirements_all_win311.txt)\n\n"
+        f"Original error: {exc}"
+    )
+    try:
+        from tkinter import messagebox
+
+        _root = tk.Tk()
+        _root.withdraw()
+        messagebox.showerror("MESA report engine", msg)
+        _root.destroy()
+    except Exception:
+        pass
+    raise
 
 # ---------------- UI / sizing constants ----------------
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
