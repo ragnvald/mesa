@@ -1351,6 +1351,49 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
         progress_var.set(p)
         progress_label.config(text=f"{int(p)}%")
 
+    # Tail base_dir/log.txt for detailed progress output (data processing writes there).
+    _tail_state: dict[str, int] = {}
+
+    def _start_log_tailer(interval_ms: int = 750) -> None:
+        candidates = [base_dir / "log.txt", base_dir / "code" / "log.txt"]
+
+        def _tail_once() -> None:
+            try:
+                for p in candidates:
+                    try:
+                        if not p.exists():
+                            continue
+                        key = str(p)
+                        with open(p, "r", encoding="utf-8", errors="replace") as f:
+                            pos = _tail_state.get(key, 0)
+                            try:
+                                f.seek(pos)
+                            except Exception:
+                                pos = 0
+                                f.seek(0)
+                            data = f.read()
+                            _tail_state[key] = f.tell()
+                        if data:
+                            for line in data.splitlines():
+                                if line.strip():
+                                    ui_log(line)
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    root.after(interval_ms, _tail_once)
+                except Exception:
+                    pass
+
+        # Start at current EOF to avoid dumping old logs
+        for p in candidates:
+            try:
+                if p.exists():
+                    _tail_state[str(p)] = p.stat().st_size
+            except Exception:
+                pass
+        root.after(interval_ms, _tail_once)
+
     # Info text (like other tools)
     info_label_text = (
         "Run one or more processing steps in one batch. "
@@ -1447,13 +1490,37 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
 
     if tb is not None:
         process_btn = Button(buttons, text="Process selected", width=button_width, bootstyle="primary")
+        map_btn = Button(buttons, text="Progress map", width=button_width, bootstyle="info")
         exit_btn = Button(buttons, text="Exit", command=root.destroy, width=button_width, bootstyle="warning")
     else:
         process_btn = Button(buttons, text="Process selected", width=button_width)
+        map_btn = Button(buttons, text="Progress map", width=button_width)
         exit_btn = Button(buttons, text="Exit", command=root.destroy, width=button_width)
 
     process_btn.pack(side=tk.LEFT, padx=button_padx, pady=button_pady)
+    map_btn.pack(side=tk.LEFT, padx=button_padx, pady=button_pady)
     exit_btn.pack(side=tk.RIGHT, padx=button_padx, pady=button_pady)
+
+    def open_progress_map() -> None:
+        try:
+            import _data_process_internal as dpi
+            try:
+                os.environ["MESA_BASE_DIR"] = str(base_dir)
+            except Exception:
+                pass
+            try:
+                dpi.original_working_directory = str(base_dir)
+            except Exception:
+                pass
+            try:
+                # Ensure status path is initialized so the minimap has something to read.
+                dpi.MINIMAP_STATUS_PATH = dpi.gpq_dir() / "__chunk_status.json"
+                dpi._init_idle_status()
+            except Exception:
+                pass
+            dpi.open_minimap_window()
+        except Exception as exc:
+            ui_log(f"{_ts()} - Progress map unavailable: {exc}")
 
     def worker() -> None:
         process_btn.configure(state=tk.DISABLED)
@@ -1486,9 +1553,12 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
         t.start()
 
     process_btn.configure(command=on_click)
+    map_btn.configure(command=open_progress_map)
 
     # Initial log
     ui_log(f"{_ts()} - Base dir: {base_dir}")
+
+    _start_log_tailer()
 
     root.mainloop()
 
