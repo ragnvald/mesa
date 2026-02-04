@@ -1470,28 +1470,7 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    aspect_guard = {"active": False}
-
-    def enforce_aspect(event):
-        if event.widget is not root or aspect_guard["active"]:
-            return
-        width, height = max(event.width, MIN_WIDTH), max(event.height, MIN_HEIGHT)
-        if height == 0:
-            return
-        ratio = width / height
-        if abs(ratio - TARGET_ASPECT_RATIO) < 0.01:
-            return
-        aspect_guard["active"] = True
-        if ratio > TARGET_ASPECT_RATIO:
-            width = int(height * TARGET_ASPECT_RATIO)
-        else:
-            height = int(width / TARGET_ASPECT_RATIO)
-        width = max(width, MIN_WIDTH)
-        height = max(height, MIN_HEIGHT)
-        root.geometry(f"{width}x{height}")
-        root.after_idle(lambda: aspect_guard.update(active=False))
-
-    root.bind("<Configure>", enforce_aspect)
+    # Allow free resizing; keep only minimum size constraints.
 
     style = ttk.Style()
     style.configure(
@@ -1617,6 +1596,7 @@ if __name__ == "__main__":
     workflow_grid.rowconfigure(0, weight=1)
 
     workflow_section_frames = []
+    workflow_wrap_targets: list[tuple[ttk.Frame, list[ttk.Label]]] = []
     ACTION_COLUMNS = 1
 
     workflow_sections = [
@@ -1647,8 +1627,8 @@ if __name__ == "__main__":
         ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map", open_asset_layers_viewer,
              "Inspect layers with AI-assisted styling controls."),
-            ("Results map", open_maps_overview,
-             "Review current background layers together with processed assets."),
+              ("Results map", open_maps_overview,
+               "Review current background layers together with processed assets."),
             ("Compare study areas", open_data_analysis_presentation,
              "Open the dashboard for comparing study groups."),
             ("Report engine", open_present_files,
@@ -1662,16 +1642,19 @@ if __name__ == "__main__":
         section_frame = ttk.LabelFrame(workflow_grid, text=section_title, padding=(12, 10))
         section_frame.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
         workflow_section_frames.append(section_frame)
-        ttk.Label(
+        section_desc_label = ttk.Label(
             section_frame,
             text=section_description,
             wraplength=240,
-            justify="left"
-        ).pack(anchor="w", fill="x")
+            justify="left",
+            font=("Segoe UI", 9, "bold")
+        )
+        section_desc_label.pack(anchor="w", fill="x", pady=(0, 6))
         actions_container = ttk.Frame(section_frame)
-        actions_container.pack(fill="x", pady=(10, 0))
+        actions_container.pack(fill="x", pady=(16, 0))
         for col_index in range(ACTION_COLUMNS):
             actions_container.columnconfigure(col_index, weight=1)
+        action_desc_labels: list[ttk.Label] = []
         for action_index, (action_label, action_command, action_description) in enumerate(actions):
             col_idx = action_index % ACTION_COLUMNS
             row_idx = action_index // ACTION_COLUMNS
@@ -1682,28 +1665,59 @@ if __name__ == "__main__":
                 text=action_label,
                 command=action_command,
                 width=20
-            ).pack(anchor="w")
-            ttk.Label(
+            ).pack(anchor="center")
+            action_desc = ttk.Label(
                 action_block,
                 text=action_description,
                 wraplength=240,
                 justify="left"
-            ).pack(anchor="w", pady=(2, 0))
+            )
+            action_desc.pack(anchor="w", fill="x", pady=(2, 0))
+            action_desc_labels.append(action_desc)
+        workflow_wrap_targets.append((section_frame, [section_desc_label] + action_desc_labels))
+
+    _wrap_after_id = {"id": None}
+    _wrap_cache: dict[int, int] = {}
+
+    def _apply_workflow_wraps() -> None:
+        _wrap_after_id["id"] = None
+        for frame, labels in workflow_wrap_targets:
+            try:
+                width = max(220, frame.winfo_width() - 24)
+            except Exception:
+                width = 240
+            key = id(frame)
+            if _wrap_cache.get(key) == width:
+                continue
+            _wrap_cache[key] = width
+            for lbl in labels:
+                try:
+                    lbl.configure(wraplength=width)
+                except Exception:
+                    pass
+
+    def _schedule_workflow_wraps(_event=None) -> None:
+        if _wrap_after_id["id"] is not None:
+            try:
+                workflows_container.after_cancel(_wrap_after_id["id"])
+            except Exception:
+                pass
+        _wrap_after_id["id"] = workflows_container.after(120, _apply_workflow_wraps)
+
+    workflows_container.bind("<Configure>", _schedule_workflow_wraps)
+    _schedule_workflow_wraps()
 
     def resize_window_to_fit_contents():
         root.update_idletasks()
         required_height = root.winfo_reqheight()
         required_width = root.winfo_reqwidth()
-        width_for_height = math.ceil(required_height * TARGET_ASPECT_RATIO)
-        width_needed = max(DEFAULT_WIDTH, required_width, width_for_height)
-        height_needed = int(width_needed / TARGET_ASPECT_RATIO)
+        width_needed = max(DEFAULT_WIDTH, required_width)
+        height_needed = max(DEFAULT_HEIGHT, required_height)
         current_width = root.winfo_width()
         current_height = root.winfo_height()
         if width_needed <= current_width and height_needed <= current_height:
             return
-        aspect_guard["active"] = True
         root.geometry(f"{width_needed}x{height_needed}")
-        root.after_idle(lambda: aspect_guard.update(active=False))
 
     root.update_idletasks()
     resize_window_to_fit_contents()
@@ -2000,6 +2014,7 @@ if __name__ == "__main__":
                 "[Stage 1/4] Preparing workspace",
             ],
             end_markers_primary=[
+                "[Process] COMPLETED",
                 # Full pipeline completion
                 "[Tiles] Completed.",
                 # Explicit tiles failure/skip markers (still ends the overall attempt)
