@@ -837,6 +837,10 @@ def _auto_run_tiles_stage(minzoom, maxzoom):
         update_progress(100.0)
     finally:
         _update_status_phase("completed")
+        try:
+            log_to_gui(log_widget, "[Process] COMPLETED")
+        except Exception:
+            pass
 
 # ----------------------------
 # A..E classification helpers
@@ -3184,6 +3188,15 @@ def _start_processing_worker(cfg_path: Path) -> None:
 
 def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> None:
     """Periodically read the status JSON (same as minimap) and reflect progress in the GUI bar."""
+    last_log = {
+        "ts": 0.0,
+        "phase": None,
+        "done": -1,
+        "running": -1,
+        "total": -1,
+    }
+    log_interval = 10.0
+
     def _poll():
         try:
             p = _status_path()
@@ -3193,6 +3206,9 @@ def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> N
                 total = int(st.get("chunks_total", 0) or 0)
                 done = int(st.get("done", 0) or 0)
                 phase = (st.get("phase", "") or "").lower()
+                running = st.get("running", []) or []
+                running_count = len(running) if isinstance(running, list) else 0
+                queued = max(0, total - done - running_count)
                 set_progress_stage(_stage_from_phase(phase))
                 # Map intersect progress to ~35..50% like the worker side uses
                 pct: float | None
@@ -3210,6 +3226,40 @@ def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> N
                     pct = 10.0
                 if pct is not None:
                     update_progress(pct)
+
+                # Emit detailed progress lines periodically ("loud" mode)
+                now = time.time()
+                if (
+                    phase != last_log["phase"]
+                    or done != last_log["done"]
+                    or running_count != last_log["running"]
+                    or total != last_log["total"]
+                    or (now - last_log["ts"]) >= log_interval
+                ):
+                    last_log.update(
+                        {
+                            "ts": now,
+                            "phase": phase,
+                            "done": done,
+                            "running": running_count,
+                            "total": total,
+                        }
+                    )
+                    try:
+                        if total > 0:
+                            pct_done = (done / max(total, 1)) * 100.0
+                            log_to_gui(
+                                log_widget,
+                                f"[Progress] {phase or 'preparing'}: {done}/{total} chunks "
+                                f"({pct_done:.1f}%) • running {running_count} • queued {queued}",
+                            )
+                        else:
+                            log_to_gui(
+                                log_widget,
+                                f"[Progress] {phase or 'preparing'}: waiting for chunk status…",
+                            )
+                    except Exception:
+                        pass
         except Exception:
             pass
         finally:
