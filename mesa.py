@@ -2009,12 +2009,26 @@ if __name__ == "__main__":
             log_path,
             start_markers=[
                 "[Process] STARTED",
+                # process_all.py markers
+                "DATA PROCESS START",
+                "LINES PROCESS START",
+                "LINES PROCESS START (Parquet)",
+                "ANALYSIS PROCESS START",
                 # Backward-compatible fallbacks for older logs
                 "Attempting to run command:",
                 "[Stage 1/4] Preparing workspace",
             ],
             end_markers_primary=[
                 "[Process] COMPLETED",
+                "[Process] FAILED",
+                # process_all.py completion markers
+                "DATA PROCESS COMPLETED",
+                "LINES PROCESS COMPLETED",
+                "ANALYSIS PROCESS COMPLETED",
+                # process_all.py failure markers
+                "ERROR: data processing failed",
+                "ERROR: lines processing failed",
+                "ERROR: analysis processing failed",
                 # Full pipeline completion
                 "[Tiles] Completed.",
                 # Explicit tiles failure/skip markers (still ends the overall attempt)
@@ -2030,8 +2044,17 @@ if __name__ == "__main__":
 
         seconds["Line processing"] = _scan_last_duration_from_log(
             log_path,
-            start_markers=["SEGMENT PROCESS START"],
-            end_markers_primary=["COMPLETED: Segment processing", "FAILED: Segment processing"],
+            start_markers=[
+                "SEGMENT PROCESS START",
+                "LINES PROCESS START",
+                "LINES PROCESS START (Parquet)",
+            ],
+            end_markers_primary=[
+                "COMPLETED: Segment processing",
+                "FAILED: Segment processing",
+                "LINES PROCESS COMPLETED",
+                "ERROR: lines processing failed",
+            ],
         )
 
         seconds["Newest report export"] = _scan_last_duration_from_log(
