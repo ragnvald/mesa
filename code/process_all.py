@@ -174,6 +174,7 @@ class ProcessAvailability:
 class ProcessPlan:
     run_data: bool
     explode_flat_multipolygons: bool
+    run_tiles: bool
     run_lines: bool
     run_analysis: bool
 
@@ -189,8 +190,8 @@ def detect_data_processing(base_dir: Path, cfg: configparser.ConfigParser) -> Pr
     gpq = parquet_dir(base_dir, cfg)
 
     required: list[tuple[str, list[Path]]] = [
-        ("tbl_flat.parquet", [gpq / "tbl_flat.parquet"]),
-        ("tbl_stacked dataset", [gpq / "tbl_stacked", gpq / "tbl_stacked.parquet"]),
+        ("tbl_asset_object.parquet", [gpq / "tbl_asset_object.parquet"]),
+        ("tbl_geocode_object.parquet", [gpq / "tbl_geocode_object.parquet"]),
     ]
 
     missing: list[str] = []
@@ -229,9 +230,6 @@ def detect_analysis_processing(base_dir: Path, cfg: configparser.ConfigParser) -
     required = [
         ("tbl_analysis_group.parquet", [gpq / "tbl_analysis_group.parquet"]),
         ("tbl_analysis_polygons.parquet", [gpq / "tbl_analysis_polygons.parquet"]),
-        # The analysis processing also needs the base presentation tables to clip.
-        ("tbl_flat.parquet", [gpq / "tbl_flat.parquet"]),
-        ("tbl_stacked dataset", [gpq / "tbl_stacked", gpq / "tbl_stacked.parquet"]),
     ]
 
     missing: list[str] = []
@@ -241,6 +239,19 @@ def detect_analysis_processing(base_dir: Path, cfg: configparser.ConfigParser) -
 
     if missing:
         return ProcessAvailability(False, ["Missing: " + ", ".join(missing)])
+
+    return ProcessAvailability(True, [])
+
+
+def detect_tiles_processing(base_dir: Path, cfg: configparser.ConfigParser) -> ProcessAvailability:
+    runner_path, _is_exe = _find_tiles_runner(base_dir)
+    if not runner_path:
+        return ProcessAvailability(False, ["Missing: create_raster_tiles helper"])
+
+    gpq = parquet_dir(base_dir, cfg)
+    flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
+    if not flat_exists:
+        return ProcessAvailability(True, ["tbl_flat.parquet missing (run data first)"])
 
     return ProcessAvailability(True, [])
 
@@ -291,6 +302,113 @@ def _run_subprocess(
     except Exception as e:
         _log_line(base_dir, log_fn, f"ERROR: failed to run process: {e}")
         return 2
+
+
+def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
+    """Find create_raster_tiles (returns path, is_executable)."""
+    frozen = bool(getattr(sys, "frozen", False))
+
+    def _dedup(paths: Iterable[Path | None]) -> list[Path]:
+        out: list[Path] = []
+        seen: set[Path] = set()
+        for p in paths:
+            if p is None:
+                continue
+            try:
+                resolved = p.resolve()
+            except Exception:
+                resolved = p
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(resolved)
+        return out
+
+    exe_candidates = _dedup(
+        [
+            base_dir / "tools" / "create_raster_tiles.exe",
+            base_dir / "create_raster_tiles.exe",
+            base_dir / "code" / "create_raster_tiles.exe",
+            base_dir / "system" / "create_raster_tiles.exe",
+            Path(sys.executable).resolve().parent / "create_raster_tiles.exe" if frozen else None,
+        ]
+    )
+    py_candidates = _dedup(
+        [
+            base_dir / "create_raster_tiles.py",
+            base_dir / "system" / "create_raster_tiles.py",
+            base_dir / "code" / "create_raster_tiles.py",
+            (Path(__file__).resolve().parent / "create_raster_tiles.py") if "__file__" in globals() else None,
+        ]
+    )
+
+    def _pick(candidates: list[Path]) -> Path | None:
+        for c in candidates:
+            try:
+                if c.exists():
+                    return c
+            except Exception:
+                continue
+        return None
+
+    if frozen:
+        exe_path = _pick(exe_candidates)
+        if exe_path:
+            return exe_path, True
+        script_path = _pick(py_candidates)
+        if script_path:
+            return script_path, False
+        return None, False
+
+    script_path = _pick(py_candidates)
+    if script_path:
+        return script_path, False
+
+    exe_path = _pick(exe_candidates)
+    if exe_path:
+        return exe_path, True
+
+    return None, False
+
+
+def run_tiles_process(
+    base_dir: Path,
+    cfg: configparser.ConfigParser,
+    log_fn: Callable[[str], None],
+    progress_fn: Callable[[float], None],
+) -> None:
+    """Run the raster tiles (MBTiles) helper."""
+    progress_fn(0.0)
+    _log_line(base_dir, log_fn, "TILES PROCESS START")
+
+    runner_path, is_exe = _find_tiles_runner(base_dir)
+    if not runner_path:
+        _log_line(base_dir, log_fn, "ERROR: create_raster_tiles helper not found")
+        raise RuntimeError("Missing create_raster_tiles helper")
+
+    args = [str(runner_path)] if is_exe else [sys.executable, str(runner_path)]
+
+    try:
+        minzoom = int(str(cfg["DEFAULT"].get("tiles_minzoom", "")).strip() or 0)
+        maxzoom = int(str(cfg["DEFAULT"].get("tiles_maxzoom", "")).strip() or 0)
+        if minzoom > 0:
+            args += ["--minzoom", str(minzoom)]
+        if maxzoom > 0:
+            args += ["--maxzoom", str(maxzoom)]
+    except Exception:
+        pass
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["MESA_BASE_DIR"] = str(base_dir)
+
+    code = _run_subprocess(base_dir, log_fn, args, env=env)
+    if code != 0:
+        raise RuntimeError(f"Raster tiles failed (exit={code})")
+
+    progress_fn(100.0)
+    _log_line(base_dir, log_fn, "TILES PROCESS COMPLETED")
 
 
 # ---------------------------------------------------------------------------
@@ -1198,6 +1316,7 @@ def run_selected(
 ) -> None:
     selected = [
         ("data", plan.run_data),
+        ("tiles", plan.run_data and plan.run_tiles),
         ("lines", plan.run_lines),
         ("analysis", plan.run_analysis),
     ]
@@ -1206,6 +1325,9 @@ def run_selected(
         _log_line(base_dir, log_fn, "Nothing selected; exiting.")
         progress_fn(0.0)
         return
+
+    had_errors = False
+    _log_line(base_dir, log_fn, "[Process] STARTED")
 
     # Allocate progress evenly across selected processes.
     slice_size = 100.0 / float(len(active))
@@ -1229,13 +1351,25 @@ def run_selected(
             )
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
+            had_errors = True
         current_offset += slice_size
+
+    if plan.run_data and plan.run_tiles:
+        try:
+            run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
+        except Exception as exc:
+            _log_line(base_dir, log_fn, f"ERROR: raster tiles failed: {exc}")
+            had_errors = True
+        current_offset += slice_size
+    elif plan.run_tiles and not plan.run_data:
+        _log_line(base_dir, log_fn, "Tiles requested but data processing was not selected; skipping.")
 
     if plan.run_lines:
         try:
             run_lines_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: lines processing failed: {exc}")
+            had_errors = True
         current_offset += slice_size
 
     if plan.run_analysis:
@@ -1243,9 +1377,11 @@ def run_selected(
             run_analysis_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: analysis processing failed: {exc}")
+            had_errors = True
         current_offset += slice_size
 
     progress_fn(100.0)
+    _log_line(base_dir, log_fn, "[Process] FAILED" if had_errors else "[Process] COMPLETED")
 
 
 # ---------------------------------------------------------------------------
@@ -1286,12 +1422,17 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
 
     # Availability
     avail_data = detect_data_processing(base_dir, cfg)
+    avail_tiles = detect_tiles_processing(base_dir, cfg)
     avail_lines = detect_lines_processing(base_dir, cfg)
     avail_analysis = detect_analysis_processing(base_dir, cfg)
 
     # Defaults: checked if available
     var_data = tk.BooleanVar(value=avail_data.available)
     var_data_explode = tk.BooleanVar(value=False)
+    gpq = parquet_dir(base_dir, cfg)
+    tiles_flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
+    tiles_default = bool(avail_tiles.available and (tiles_flat_exists or avail_data.available))
+    var_tiles = tk.BooleanVar(value=tiles_default)
     var_lines = tk.BooleanVar(value=avail_lines.available)
     var_analysis = tk.BooleanVar(value=avail_analysis.available)
 
@@ -1407,59 +1548,44 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
     controls.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 6))
     controls.grid_columnconfigure(0, weight=0)
     controls.grid_columnconfigure(1, weight=1)
-    controls.grid_columnconfigure(2, weight=1)
-    controls.grid_columnconfigure(3, weight=0)
+    controls.grid_columnconfigure(2, weight=0)
 
     # Header row
     hdr1 = tk.Label(controls, text="Process", anchor="w")
     hdr2 = tk.Label(controls, text="Status", anchor="w")
-    hdr3 = tk.Label(controls, text="Current results", anchor="w")
-    hdr4 = tk.Label(controls, text="Options", anchor="w")
+    hdr3 = tk.Label(controls, text="Options", anchor="w")
     hdr1.grid(row=0, column=0, sticky="w")
     hdr2.grid(row=0, column=1, sticky="w", padx=10)
     hdr3.grid(row=0, column=2, sticky="w", padx=10)
-    hdr4.grid(row=0, column=3, sticky="w", padx=10)
 
-    gpq = parquet_dir(base_dir, cfg)
-    stats_data = _format_stats(
-        _parquet_num_rows(gpq / "tbl_flat.parquet"),
-        _parquet_num_rows(gpq / "tbl_stacked") or _parquet_num_rows(gpq / "tbl_stacked.parquet"),
-    )
-    stats_lines = _format_stats(
-        _parquet_num_rows(gpq / "tbl_segment_flat.parquet"),
-        _parquet_num_rows(gpq / "tbl_segment_stacked.parquet"),
-    )
-    stats_analysis = _format_stats(
-        _parquet_num_rows(gpq / "tbl_analysis_flat.parquet"),
-        _parquet_num_rows(gpq / "tbl_analysis_stacked.parquet"),
-    )
-
-    def _mk_row(row: int, text: str, var: tk.BooleanVar, avail: ProcessAvailability, stats: str):
+    def _mk_row(row: int, text: str, var: tk.BooleanVar, avail: ProcessAvailability):
         cb = tk.Checkbutton(controls, text=text, variable=var)
         cb.grid(row=row, column=0, sticky="w")
         status = "Ready" if avail.available else ("; ".join(avail.reasons) if avail.reasons else "Missing inputs")
         lbl = tk.Label(controls, text=status, anchor="w")
         lbl.grid(row=row, column=1, sticky="w", padx=10)
-        st = tk.Label(controls, text=stats, anchor="w")
-        st.grid(row=row, column=2, sticky="w", padx=10)
         if not avail.available:
             cb.configure(state=tk.DISABLED)
             var.set(False)
 
         return cb
 
-    cb_data = _mk_row(1, "Data processing (presentation)", var_data, avail_data, stats_data)
-    _mk_row(2, "Lines processing (segments)", var_lines, avail_lines, stats_lines)
-    _mk_row(3, "Analysis processing (study areas)", var_analysis, avail_analysis, stats_analysis)
+    cb_data = _mk_row(1, "Data processing (presentation)", var_data, avail_data)
+    cb_tiles = _mk_row(2, "Tiles processing (MBTiles)", var_tiles, avail_tiles)
+    _mk_row(3, "Lines processing (segments)", var_lines, avail_lines)
+    _mk_row(4, "Analysis processing (study areas)", var_analysis, avail_analysis)
 
-    # Optional: explode MultiPolygons into individual Polygon rows in tbl_flat.
-    # This only affects the data-processing step.
+    # Optional data-processing settings.
+    options_frame = tk.Frame(controls)
+    options_frame.grid(row=1, column=2, sticky="w", padx=10)
+
+    # Explode MultiPolygons into individual Polygon rows in tbl_flat.
     opt_data = tk.Checkbutton(
-        controls,
+        options_frame,
         text="Split MultiPolygons in tbl_flat",
         variable=var_data_explode,
     )
-    opt_data.grid(row=1, column=3, sticky="w", padx=10)
+    opt_data.pack(anchor="w")
 
     def _sync_data_option_state(*_args) -> None:
         try:
@@ -1470,11 +1596,25 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
         except Exception:
             pass
 
+    def _sync_tiles_state(*_args) -> None:
+        try:
+            helper_ok = bool(avail_tiles.available)
+            data_ok = bool(var_data.get()) and bool(avail_data.available)
+            flat_ok = bool(tiles_flat_exists)
+            enabled = helper_ok and (data_ok or flat_ok)
+            cb_tiles.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
+            if not enabled:
+                var_tiles.set(False)
+        except Exception:
+            pass
+
     try:
         var_data.trace_add("write", _sync_data_option_state)
+        var_data.trace_add("write", _sync_tiles_state)
     except Exception:
         pass
     _sync_data_option_state()
+    _sync_tiles_state()
 
     buttons = tk.Frame(main_frame)
     buttons.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 10))
@@ -1528,6 +1668,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
             plan = ProcessPlan(
                 run_data=bool(var_data.get()),
                 explode_flat_multipolygons=bool(var_data_explode.get()),
+                run_tiles=bool(var_tiles.get()),
                 run_lines=bool(var_lines.get()),
                 run_analysis=bool(var_analysis.get()),
             )
@@ -1581,6 +1722,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When running data processing, split MultiPolygon geometries in tbl_flat into individual Polygon rows",
     )
+    p.add_argument("--no-tiles", action="store_true", help="Do not run raster tiles (MBTiles) after data processing")
     p.add_argument("--no-lines", action="store_true", help="Do not run lines processing")
     p.add_argument("--no-analysis", action="store_true", help="Do not run analysis processing")
 
@@ -1599,6 +1741,7 @@ def main() -> None:
     default_plan = ProcessPlan(
         run_data=avail_data.available and not bool(args.no_data),
         explode_flat_multipolygons=bool(args.explode_flat_multipolygons),
+        run_tiles=avail_data.available and not bool(args.no_data) and not bool(args.no_tiles),
         run_lines=avail_lines.available and not bool(args.no_lines),
         run_analysis=avail_analysis.available and not bool(args.no_analysis),
     )
@@ -1614,6 +1757,8 @@ def main() -> None:
         selected = []
         if default_plan.run_data:
             selected.append("data")
+        if default_plan.run_tiles:
+            selected.append("tiles")
         if default_plan.run_lines:
             selected.append("lines")
         if default_plan.run_analysis:
