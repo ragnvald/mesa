@@ -7,7 +7,8 @@ Enable users with low-capacity computers to offload the main vector processing w
 - Server specs: 128 GB RAM, fast local SSD. GPU optional.
 - Server OS: Ubuntu latest LTS.
 - PostGIS is installed and available on the server.
-- Processing is sequential (single worker). Requests are queued.
+- Job dispatch is sequential (single worker); requests are queued.
+- Within a job, processing can be parallel (GPU-based and/or multi-core CPU), depending on the resource used (PostGIS/CPU/GPU). Some stages may run CPU parallelism alongside GPU work.
 - Initial scope: only the main processing step (not projects, not lines).
 - Users authenticate using a token issued at registration.
 - Minimal upload payload: 100 MB GeoParquet tables, zipped into a single workload.
@@ -102,6 +103,12 @@ Goal: maximize speed. Energy cost is not considered.
 - Client creates a zipped workload locally before upload.
 - MESA downloads outputs using signed URLs.
 - Optional compression for outputs if large (zip or tar.gz).
+
+## Retention, notifications, and download windows
+- Uploaded data is deleted after download or after 48 hours (whichever comes first).
+- The user receives an email when results are ready to download.
+- Downloads are time-limited (default 48 hours).
+- Admin can set a per-user lag/retention window; the admin-defined default may be longer than 48 hours.
 
 ## Admin console features
 - View queue, job details, and live logs tail.
