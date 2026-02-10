@@ -1840,4 +1840,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    try:
+        import multiprocessing as _mp
+        _mp.freeze_support()
+    except Exception:
+        pass
     main()
