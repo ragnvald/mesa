@@ -304,6 +304,46 @@ def _run_subprocess(
         return 2
 
 
+def _run_subprocess_streaming(
+    base_dir: Path,
+    log_fn: Callable[[str], None],
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    line_prefix: str = "[child]",
+) -> int:
+    try:
+        _log_line(base_dir, log_fn, "Running: " + " ".join(argv))
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(base_dir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        if proc.stdout:
+            prefix = line_prefix or ""
+            for line in proc.stdout:
+                if line:
+                    _log_line(base_dir, log_fn, f"{prefix} {line.rstrip()}".rstrip())
+                else:
+                    _log_line(base_dir, log_fn, prefix)
+        proc.wait()
+        if proc.returncode != 0:
+            _log_line(base_dir, log_fn, f"ERROR: process failed (exit={proc.returncode})")
+        return int(proc.returncode or 0)
+    except FileNotFoundError as e:
+        _log_line(base_dir, log_fn, f"ERROR: failed to start process: {e}")
+        return 2
+    except Exception as e:
+        _log_line(base_dir, log_fn, f"ERROR: failed to run process: {e}")
+        return 2
+
+
 def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
     """Find create_raster_tiles (returns path, is_executable)."""
     frozen = bool(getattr(sys, "frozen", False))
@@ -403,7 +443,7 @@ def run_tiles_process(
     env["PYTHONUTF8"] = "1"
     env["MESA_BASE_DIR"] = str(base_dir)
 
-    code = _run_subprocess(base_dir, log_fn, args, env=env)
+    code = _run_subprocess_streaming(base_dir, log_fn, args, env=env, line_prefix="[tiles]")
     if code != 0:
         raise RuntimeError(f"Raster tiles failed (exit={code})")
 
@@ -1316,7 +1356,7 @@ def run_selected(
 ) -> None:
     selected = [
         ("data", plan.run_data),
-        ("tiles", plan.run_data and plan.run_tiles),
+        ("tiles", plan.run_tiles),
         ("lines", plan.run_lines),
         ("analysis", plan.run_analysis),
     ]
@@ -1354,15 +1394,16 @@ def run_selected(
             had_errors = True
         current_offset += slice_size
 
-    if plan.run_data and plan.run_tiles:
+    if plan.run_tiles:
         try:
+            gpq = parquet_dir(base_dir, cfg)
+            if not _exists_any([gpq / "tbl_flat.parquet"]):
+                raise FileNotFoundError("tbl_flat.parquet is missing; run data processing first")
             run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: raster tiles failed: {exc}")
             had_errors = True
         current_offset += slice_size
-    elif plan.run_tiles and not plan.run_data:
-        _log_line(base_dir, log_fn, "Tiles requested but data processing was not selected; skipping.")
 
     if plan.run_lines:
         try:
@@ -1558,10 +1599,19 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
     hdr2.grid(row=0, column=1, sticky="w", padx=10)
     hdr3.grid(row=0, column=2, sticky="w", padx=10)
 
-    def _mk_row(row: int, text: str, var: tk.BooleanVar, avail: ProcessAvailability):
+    def _mk_row(
+        row: int,
+        text: str,
+        var: tk.BooleanVar,
+        avail: ProcessAvailability,
+        status_override: str | None = None,
+    ):
         cb = tk.Checkbutton(controls, text=text, variable=var)
         cb.grid(row=row, column=0, sticky="w")
-        status = "Ready" if avail.available else ("; ".join(avail.reasons) if avail.reasons else "Missing inputs")
+        if status_override is not None:
+            status = status_override
+        else:
+            status = "Ready" if avail.available else ("; ".join(avail.reasons) if avail.reasons else "Missing inputs")
         lbl = tk.Label(controls, text=status, anchor="w")
         lbl.grid(row=row, column=1, sticky="w", padx=10)
         if not avail.available:
@@ -1571,7 +1621,8 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
         return cb
 
     cb_data = _mk_row(1, "Data processing (presentation)", var_data, avail_data)
-    cb_tiles = _mk_row(2, "Tiles processing (MBTiles)", var_tiles, avail_tiles)
+    tiles_status = "Run data processing first" if not tiles_flat_exists else None
+    cb_tiles = _mk_row(2, "Tiles processing (MBTiles)", var_tiles, avail_tiles, tiles_status)
     _mk_row(3, "Lines processing (segments)", var_lines, avail_lines)
     _mk_row(4, "Analysis processing (study areas)", var_analysis, avail_analysis)
 
@@ -1644,6 +1695,13 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
     def open_progress_map() -> None:
         try:
             import _data_process_internal as dpi
+            try:
+                import importlib.util as _importlib_util
+                if _importlib_util.find_spec("webview") is None:
+                    ui_log(f"{_ts()} - Progress map requires pywebview (Edge WebView2). It is not available in this build.")
+                    return
+            except Exception:
+                pass
             try:
                 os.environ["MESA_BASE_DIR"] = str(base_dir)
             except Exception:

@@ -3103,7 +3103,11 @@ def _map_process_entry(status_path_str: str):
         import webview  # type: ignore
         try: webview.logger.disabled = True
         except Exception: pass
-    except Exception:
+    except Exception as exc:
+        try:
+            log_to_gui(None, f"[Minimap] pywebview import failed: {exc}")
+        except Exception:
+            pass
         return
 
     class MapApi:
@@ -3117,11 +3121,29 @@ def _map_process_entry(status_path_str: str):
                 return {"phase":"idle","chunks_total":0,"done":0,"running":[],"cells":[],"home_bounds":None}
 
     api = MapApi(Path(status_path_str))
-    webview.create_window(title="Minimap — chunks", html=MAP_HTML, js_api=api, width=600, height=600)
+    try:
+        webview.create_window(title="Minimap — chunks", html=MAP_HTML, js_api=api, width=600, height=600)
+    except Exception as exc:
+        try:
+            log_to_gui(None, f"[Minimap] create_window failed: {exc}")
+        except Exception:
+            pass
+        return
     try:
         webview.start(gui='edgechromium', debug=False)
-    except Exception:
-        webview.start(debug=False)
+    except Exception as exc:
+        try:
+            log_to_gui(None, f"[Minimap] webview start failed (edgechromium): {exc}")
+        except Exception:
+            pass
+        try:
+            webview.start(debug=False)
+        except Exception as exc2:
+            try:
+                log_to_gui(None, f"[Minimap] webview start failed (fallback): {exc2}")
+            except Exception:
+                pass
+            return
 
 def open_minimap_window():
     """Spawn the map helper process (single instance)."""
@@ -3136,6 +3158,22 @@ def open_minimap_window():
     _MAP_PROC = ctx.Process(target=_map_process_entry, args=(str(_status_path()),), daemon=True)
     _MAP_PROC.start()
     log_to_gui(log_widget, "Opening minimap (separate process)…")
+
+    def _check_minimap_proc() -> None:
+        try:
+            time.sleep(2.0)
+            if _MAP_PROC is not None and not _MAP_PROC.is_alive():
+                log_to_gui(
+                    log_widget,
+                    f"Minimap closed immediately (exit={_MAP_PROC.exitcode}). Check WebView2 runtime and logs.",
+                )
+        except Exception:
+            pass
+
+    try:
+        threading.Thread(target=_check_minimap_proc, daemon=True).start()
+    except Exception:
+        pass
 
 """
 """
