@@ -235,6 +235,15 @@ Goal: allow the admin to export a single file that the client can import to conf
 - Send a completion email with links or instructions to download results.
 - ETA can be derived from historical step timings, current queue depth, and rolling averages of similar job sizes.
 
+## Multi-server awareness (seeded by admin)
+Goal: allow multiple servers to discover each other and share basic metadata for routing and redundancy.
+
+- Admin can seed each server with a shared "cluster seed" (list of peer URLs + public keys).
+- Servers periodically exchange lightweight status (capacity, queue length, health, versions).
+- A server can offer a read-only "cluster view" endpoint for admin diagnostics.
+- Job routing remains simple: client uses its configured server unless admin enables routing.
+- Seed data is updated by the admin and signed to prevent spoofing.
+
 ## Integration in MESA
 - Add a Settings section: server URL + token + mode toggle.
 - Add a "Process in cloud" option in the processing workflow.
