@@ -40,6 +40,11 @@ CLEAN_BUILD = os.environ.get("MESA_BUILD_CLEAN", "0").strip().lower() in {"1", "
 BUILD_HELPERS = os.environ.get("MESA_BUILD_HELPERS", "1").strip().lower() not in {"0", "false", "no"}
 BUILD_MAIN = os.environ.get("MESA_BUILD_MAIN", "1").strip().lower() not in {"0", "false", "no"}
 
+# Helper dependency strategy:
+# - Default: per-helper detection to keep bundles smaller.
+# - Set MESA_HELPERS_FULL_DEPS=1 to bundle full dependency stacks for all helpers.
+HELPERS_FULL_DEPS = os.environ.get("MESA_HELPERS_FULL_DEPS", "0").strip().lower() in {"1", "true", "yes"}
+
 # Compression toggle for onefile helpers:
 # - Compressed (default): smaller .exe, slower startup (decompression overhead)
 # - Uncompressed: larger .exe, faster startup (no decompression, less AV scanning)
@@ -115,7 +120,7 @@ def ensure_pyinstaller() -> None:
     except Exception as e:
         fail(
             "PyInstaller is missing. Activate your venv and run:\n"
-            "  pip install -U pyinstaller _pyinstaller_hooks_contrib\n"
+            "  pip install -U pyinstaller pyinstaller-hooks-contrib\n"
             f"Details: {e}"
         )
 
@@ -369,6 +374,18 @@ def helper_collects_for(basename: str) -> list[str]:
     clearly requires spatial processing.
     """
 
+    if HELPERS_FULL_DEPS:
+        collects: list[str] = []
+        collects += COLLECT_TTKBOOTSTRAP
+        collects += PKG_RESOURCES_HIDDEN_IMPORTS
+        collects += COLLECT_GIS_STACK
+        collects += COLLECT_PANDAS
+        collects += COLLECT_PYARROW
+        collects += COLLECT_WEBVIEW
+        collects += COLLECT_H3
+        collects += COLLECT_DOCX
+        return collects
+
     src = _read_helper_source(basename)
 
     # Helpers that don't bundle GIS (either they don't use it, or they lazy-import it)
@@ -445,13 +462,16 @@ def build_helper(basename: str) -> None:
     log(f"[HELPER] Building '{basename}'...")
 
     hidden_imports: list[str] = []
+    extra_collects: list[str] = []
     # process_all runs the area pipeline by importing the internal module.
     # Add an explicit hidden import so PyInstaller always bundles it.
     if basename == "process_all":
         hidden_imports += ["--hidden-import", "_data_process_internal"]
+        # Minimap uses pywebview from the internal module.
+        extra_collects += COLLECT_WEBVIEW
 
     # Ensure Tcl/Tk data is bundled for helpers too (many use ttkbootstrap/tkinter).
-    args = FLAGS_HELPER + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + [
+    args = FLAGS_HELPER + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + extra_collects + [
         "--name", basename,
         "--distpath", str(TOOLS_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{basename}_build"),
