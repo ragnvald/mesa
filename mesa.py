@@ -730,11 +730,12 @@ def get_script_paths(file_name: str):
     log_to_logfile(f"Executable file path: {exe_file}")
     return python_script, exe_file
 
+
 # ---------------------------------------------------------------------
 # Button handlers (now pass args as separate tokens; always set cwd/env)
 # ---------------------------------------------------------------------
 def geocodes_grids():
-    python_script, exe_file = get_script_paths("geocodes_create")
+    python_script, exe_file = get_script_paths("geocode_create")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
@@ -757,14 +758,14 @@ def import_assets(gpkg_file):
 
 def edit_processing_setup():
     script_candidates = [
-        os.path.join("system", "parametres_setup.py"),
-        "parametres_setup.py",
+        os.path.join("system", "processing_setup.py"),
+        "processing_setup.py",
         os.path.join("system", "params_edit.py"),
         "params_edit.py",
     ]
     exe_candidates = [
-        os.path.join("system", "parametres_setup.exe"),
-        "parametres_setup.exe",
+        os.path.join("system", "processing_setup.exe"),
+        "processing_setup.exe",
         os.path.join("system", "params_edit.exe"),
         "params_edit.exe",
     ]
@@ -785,13 +786,13 @@ def edit_processing_setup():
 def open_process_all():
     # Explicit marker so Status->Recent activity can time the full run.
     log_to_logfile("[Process] STARTED")
-    python_script, exe_file = get_script_paths("process_all")
+    python_script, exe_file = get_script_paths("processing_pipeline_run")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        _launch_gui_process([exe_file, *arg_tokens], "process_all exe")
+        _launch_gui_process([exe_file, *arg_tokens], "processing_pipeline_run exe")
     else:
         python_exe = sys.executable or "python"
-        _launch_gui_process([python_exe, python_script, *arg_tokens], "process_all script")
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "processing_pipeline_run script")
 
 def make_atlas():
     python_script, exe_file = get_script_paths("atlas_create")
@@ -802,34 +803,34 @@ def make_atlas():
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def open_maps_overview():
-    python_script, exe_file = get_script_paths("maps_overview")
+    python_script, exe_file = get_script_paths("map_overview")
     if getattr(sys, "frozen", False):
-        _launch_gui_process([exe_file], "maps_overview exe")
+        _launch_gui_process([exe_file], "map_overview exe")
     else:
         python_exe = sys.executable or "python"
-        _launch_gui_process([python_exe, python_script], "maps_overview script")
+        _launch_gui_process([python_exe, python_script], "map_overview script")
 
 
 def open_asset_layers_viewer():
-    python_script, exe_file = get_script_paths("map_assets")
+    python_script, exe_file = get_script_paths("asset_map_view")
     if getattr(sys, "frozen", False):
-        _launch_gui_process([exe_file], "map_assets exe")
+        _launch_gui_process([exe_file], "asset_map_view exe")
     else:
         python_exe = sys.executable or "python"
-        _launch_gui_process([python_exe, python_script], "map_assets script")
+        _launch_gui_process([python_exe, python_script], "asset_map_view script")
 
 def open_present_files():
-    python_script, exe_file = get_script_paths("data_report")
+    python_script, exe_file = get_script_paths("report_generate")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        _launch_gui_process([exe_file, *arg_tokens], "data_report exe")
+        _launch_gui_process([exe_file, *arg_tokens], "report_generate exe")
     else:
         python_exe = sys.executable or "python"
-        _launch_gui_process([python_exe, python_script, *arg_tokens], "data_report script")
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "report_generate script")
 
 
 def open_data_analysis_setup():
-    python_script, exe_file = get_script_paths("data_analysis_setup")
+    python_script, exe_file = get_script_paths("analysis_setup")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
@@ -838,16 +839,16 @@ def open_data_analysis_setup():
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def open_data_analysis_presentation():
-    python_script, exe_file = get_script_paths("data_analysis_presentation")
+    python_script, exe_file = get_script_paths("analysis_present")
     if getattr(sys, "frozen", False):
-        _launch_gui_process([exe_file], "data_analysis_presentation exe")
+        _launch_gui_process([exe_file], "analysis_present exe")
     else:
         python_exe = sys.executable or "python"
         arg_tokens = ["--original_working_directory", original_working_directory]
-        _launch_gui_process([python_exe, python_script, *arg_tokens], "data_analysis_presentation script")
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "analysis_present script")
 
 def edit_assets():
-    python_script, exe_file = get_script_paths("assetgroup_edit")
+    python_script, exe_file = get_script_paths("asset_group_edit")
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
         run_subprocess([exe_file], [], gpkg_file)
@@ -855,7 +856,7 @@ def edit_assets():
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_geocodes():
-    python_script, exe_file = get_script_paths("geocodegroup_edit")
+    python_script, exe_file = get_script_paths("geocode_group_edit")
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
         run_subprocess([exe_file], [], gpkg_file)
@@ -863,10 +864,10 @@ def edit_geocodes():
         run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_lines():
-    python_script, exe_file = get_script_paths("lines_admin")
+    python_script, exe_file = get_script_paths("line_manage")
     chosen_base = _preferred_lines_base_dir()
     arg_tokens = ["--original_working_directory", chosen_base]
-    log_to_logfile(f"Launching lines_admin with base_dir={chosen_base}")
+    log_to_logfile(f"Launching line_manage with base_dir={chosen_base}")
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
         run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
@@ -879,7 +880,7 @@ def edit_lines():
 
 
 def edit_main_config():
-    python_script, exe_file = get_script_paths("edit_config")
+    python_script, exe_file = get_script_paths("config_edit")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
@@ -1922,7 +1923,7 @@ if __name__ == "__main__":
             log_path,
             start_markers=[
                 "[Process] STARTED",
-                # process_all.py markers
+                # processing_pipeline_run.py markers
                 "DATA PROCESS START",
                 "LINES PROCESS START",
                 "LINES PROCESS START (Parquet)",
@@ -1934,11 +1935,11 @@ if __name__ == "__main__":
             end_markers_primary=[
                 "[Process] COMPLETED",
                 "[Process] FAILED",
-                # process_all.py completion markers
+                # processing_pipeline_run.py completion markers
                 "DATA PROCESS COMPLETED",
                 "LINES PROCESS COMPLETED",
                 "ANALYSIS PROCESS COMPLETED",
-                # process_all.py failure markers
+                # processing_pipeline_run.py failure markers
                 "ERROR: data processing failed",
                 "ERROR: lines processing failed",
                 "ERROR: analysis processing failed",
@@ -1947,7 +1948,7 @@ if __name__ == "__main__":
                 # Explicit tiles failure/skip markers (still ends the overall attempt)
                 "[Tiles] Skipping MBTiles stage because processing exited with code",
                 "[Tiles] tbl_flat not present or empty; skipping MBTiles generation.",
-                "[Tiles] create_raster_tiles exited with code",
+                "[Tiles] tiles_create_raster exited with code",
                 "[Tiles] Error:",
                 # Core failure marker
                 "Error during processing:",

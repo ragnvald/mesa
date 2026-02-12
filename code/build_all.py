@@ -389,14 +389,19 @@ def helper_collects_for(basename: str) -> list[str]:
     src = _read_helper_source(basename)
 
     # Helpers that don't bundle GIS (either they don't use it, or they lazy-import it)
-    # - assetgroup_edit: pure pandas table editor, no GIS
-    # - geocodegroup_edit: lazy-imports geopandas only when loading/saving data
-    # - edit_config: config.ini editor only
+    # - asset_group_edit: pure pandas table editor, no GIS
+    # - geocode_group_edit: lazy-imports geopandas only when loading/saving data
+    # - config_edit: config.ini editor only
     # - backup_restore: ZIP backup/restore, no data processing
     #
     # Note: PyInstaller may still show warnings like "Datas for pyproj not found" for
     # lazy-import helpers because it scans source code, but no GIS code is actually bundled.
-    never_gis = {"assetgroup_edit", "geocodegroup_edit", "edit_config", "backup_restore"}
+    never_gis = {
+        "asset_group_edit",
+        "geocode_group_edit",
+        "config_edit",
+        "backup_restore",
+    }
     uses_gis = (
         basename not in never_gis
         and _imports_any_module(src, {"geopandas", "shapely", "fiona", "pyproj"})
@@ -463,10 +468,10 @@ def build_helper(basename: str) -> None:
 
     hidden_imports: list[str] = []
     extra_collects: list[str] = []
-    # process_all runs the area pipeline by importing the internal module.
+    # processing_pipeline_run runs the area pipeline by importing the internal module.
     # Add an explicit hidden import so PyInstaller always bundles it.
-    if basename == "process_all":
-        hidden_imports += ["--hidden-import", "_data_process_internal"]
+    if basename == "processing_pipeline_run":
+        hidden_imports += ["--hidden-import", "processing_internal"]
         # Minimap uses pywebview from the internal module.
         extra_collects += COLLECT_WEBVIEW
 
@@ -612,23 +617,23 @@ def main() -> None:
     if BUILD_HELPERS:
         log("Building helper tools (onefile, per-tool dependency profiles)...")
         helpers = [
-            "assetgroup_edit",
+            "asset_group_edit",
             "atlas_create",
             "atlas_edit",
             "backup_restore",
-            "create_raster_tiles",
+            "tiles_create_raster",
             "data_import",
-            "data_report",
-            "data_analysis_setup",
-            "data_analysis_presentation",
-            "edit_config",
-            "geocodegroup_edit",
-            "geocodes_create",
-            "lines_admin",
-            "map_assets",
-            "maps_overview",
-            "parametres_setup",
-            "process_all",
+            "report_generate",
+            "analysis_setup",
+            "analysis_present",
+            "config_edit",
+            "geocode_group_edit",
+            "geocode_create",
+            "line_manage",
+            "asset_map_view",
+            "map_overview",
+            "processing_setup",
+            "processing_pipeline_run",
         ]
 
         # Optional helper selection:

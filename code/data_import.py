@@ -6,7 +6,7 @@
 # - Uses DEFAULT.parquet_folder (defaults to output/geoparquet)
 # - Writes ONLY GeoParquet outputs
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 

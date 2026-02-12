@@ -6,7 +6,7 @@
 # - Writes tbl_atlas.parquet alongside other geoparquet outputs
 # - Preserves existing logic; improves robustness
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 

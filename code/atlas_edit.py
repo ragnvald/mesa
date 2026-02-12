@@ -6,7 +6,7 @@
 # - Atomic writes; preserves geometry & CRS
 # - ttkbootstrap optional (falls back to standard Tk widgets)
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 

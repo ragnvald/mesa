@@ -12,9 +12,9 @@ Most of our potential users are not in a position to download and run python cod
 
 ### Area analysis helper
 
-- `data_analysis_setup.py` is a setup-focused helper that lets a power user create analysis groups and digitise/import study area polygons.
+- `analysis_setup.py` is a setup-focused helper that lets a power user create analysis groups and digitise/import study area polygons.
 - `analysis_process.py` runs the heavy processing step that generates the analysis tables used by the compare dashboard and reporting.
-- `data_analysis_presentation.py` opens a dashboard for comparing the study groups.
+- `analysis_present.py` opens a dashboard for comparing the study groups.
 
 Geometry and results are stored under `output/geoparquet/` so edits are shared between the .py and packaged .exe variants.
 

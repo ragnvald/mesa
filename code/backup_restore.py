@@ -11,7 +11,7 @@ import threading
 import queue
 from pathlib import Path
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 import tkinter as tk
 from tkinter import messagebox, filedialog

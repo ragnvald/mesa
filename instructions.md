@@ -58,15 +58,22 @@ Use this document as the first stop before editing the `mesa` repository. Update
 - Maintain backwards compatibility with both the .py and compiled .exe launch paths (check `get_script_paths` usage before moving code).
 - Log meaningful events via `log_to_logfile` instead of printing directly to stdout from GUI callbacks.
 
+## 6.2 Helper file naming convention
+- Use `domain_action.py` (snake_case), where domain comes first for discoverability (examples: `analysis_setup.py`, `line_manage.py`, `report_generate.py`).
+- Preferred domains: `analysis`, `atlas`, `asset`, `geocode`, `line`, `map`, `processing`, `report`, `config`, `tiles`, `locale`, `app`.
+- Preferred actions: `create`, `edit`, `import`, `setup`, `run`, `view`, `manage`, `generate`, `internal`.
+- During migration, keep compatibility aliases so both old and new helper names can be launched.
+- Remove legacy names only in a dedicated cleanup phase after smoke tests and build validation pass.
+
 ## 6.1 Lazy imports for faster startup
 To minimize startup time, especially for compiled executables, follow these guidelines:
 - **UI launchers** (mesa.py, UI-focused helpers): Import heavy dependencies (geopandas, shapely, matplotlib) **inside functions** that actually use them, not at module top-level.
-- **Processing scripts** (data_process.py, geocodes_create.py, etc.): Top-level imports are fine since these tools are launched specifically to do heavy work.
+- **Processing scripts** (processing_pipeline_run.py, geocode_create.py, etc.): Top-level imports are fine since these tools are launched specifically to do heavy work.
 - **When lazy-importing GIS stack in helpers**: The helper .exe won't bundle GIS libs, but will load them from the system Python environment when needed. Verify helpers work both standalone and when launched from mesa.exe.
 - **Current lazy-import examples**:
   - `mesa.py`: geopandas lazy-loaded in `_total_area_km2_from_asset_objects()` and `_total_length_km_from_lines()`
-  - `geocodegroup_edit.py`: geopandas lazy-loaded in `load_spatial_data()` and `atomic_write_geoparquet()`
-- **build_all.py awareness**: The build script detects top-level imports to decide what to bundle. Helpers in the `never_gis` set (assetgroup_edit, geocodegroup_edit, edit_config, backup_restore) won't bundle GIS even if used internally.
+  - `geocode_group_edit.py`: geopandas lazy-loaded in `load_spatial_data()` and `atomic_write_geoparquet()`
+- **build_all.py awareness**: The build script detects top-level imports to decide what to bundle. Helpers in the `never_gis` set (`asset_group_edit`, `geocode_group_edit`, `config_edit`, `backup_restore`) won't bundle GIS even if used internally.
 
 ## 7. Testing expectations
 - After UI changes, run `python mesa.py` and manually verify: window sizing, tab ordering, button commands, Status counters.
@@ -104,4 +111,4 @@ To minimize startup time, especially for compiled executables, follow these guid
 **Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `code/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
 
 ---
-_Last updated: 2026-01-22 15:45_
+_Last updated: 2026-02-12 13:05_
