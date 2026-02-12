@@ -9,7 +9,6 @@ Goal
     - Analysis processing (study area analysis)
 
 Notes
-- This tool is intended to replace the separate processing helpers.
 - It tries to be safe for both dev (.py) runs and future frozen builds.
 
 UI behavior
@@ -113,50 +112,6 @@ def parquet_dir(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
     out = (base_dir / rel).resolve()
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def _parquet_num_rows(path: Path) -> int | None:
-    """Fast-ish row count for Parquet file or dataset folder.
-
-    Returns None when the path does not exist or row count can't be determined.
-    Uses pyarrow metadata to avoid loading full tables.
-    """
-
-    try:
-        if not path.exists():
-            return None
-        from pyarrow import parquet as pq  # type: ignore
-    except Exception:
-        return None
-
-    try:
-        if path.is_file():
-            return int(pq.ParquetFile(str(path)).metadata.num_rows)
-        if path.is_dir():
-            total = 0
-            any_files = False
-            for f in sorted(path.glob("*.parquet")):
-                any_files = True
-                try:
-                    total += int(pq.ParquetFile(str(f)).metadata.num_rows)
-                except Exception:
-                    # Skip unreadable part files rather than failing the UI.
-                    continue
-            return total if any_files else None
-    except Exception:
-        return None
-    return None
-
-
-def _format_stats(flat_rows: int | None, stacked_rows: int | None) -> str:
-    if flat_rows is None and stacked_rows is None:
-        return ""
-    parts: list[str] = []
-    if flat_rows is not None:
-        parts.append(f"flat={flat_rows:,}")
-    if stacked_rows is not None:
-        parts.append(f"stacked={stacked_rows:,}")
-    return ", ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -269,39 +224,6 @@ def _log_line(base_dir: Path, log_fn: Callable[[str], None], msg: str) -> None:
             fh.write(line + "\n")
     except Exception:
         pass
-
-
-def _run_subprocess(
-    base_dir: Path,
-    log_fn: Callable[[str], None],
-    argv: list[str],
-    *,
-    env: dict[str, str] | None = None,
-) -> int:
-    try:
-        _log_line(base_dir, log_fn, "Running: " + " ".join(argv))
-        p = subprocess.run(
-            argv,
-            cwd=str(base_dir),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        if p.stdout:
-            for line in p.stdout.splitlines():
-                _log_line(base_dir, log_fn, f"[child] {line}")
-        if p.returncode != 0:
-            _log_line(base_dir, log_fn, f"ERROR: process failed (exit={p.returncode})")
-        return int(p.returncode)
-    except FileNotFoundError as e:
-        _log_line(base_dir, log_fn, f"ERROR: failed to start process: {e}")
-        return 2
-    except Exception as e:
-        _log_line(base_dir, log_fn, f"ERROR: failed to run process: {e}")
-        return 2
 
 
 def _run_subprocess_streaming(
@@ -703,12 +625,12 @@ def run_lines_process(
                 desc = row.get("description", "")
 
                 _log_line(base_dir, log_fn, f"Buffering {name_gis}")
-                tmp = gpd.GeoDataFrame([{ "geometry": geom }], geometry="geometry", crs=workingprojection_epsg).to_crs(target_crs)
-                tmp["geometry"] = tmp.buffer(seg_w, cap_style=2)
-                back = tmp.to_crs(workingprojection_epsg)
-                gbuf = back.iloc[0].geometry
-                if not isinstance(gbuf, (Polygon, MultiPolygon)):
-                    _log_line(base_dir, log_fn, f"Unexpected buffered geom type: {type(gbuf)}")
+                projected_line = gpd.GeoDataFrame([{"geometry": geom}], geometry="geometry", crs=workingprojection_epsg).to_crs(target_crs)
+                projected_line["geometry"] = projected_line.buffer(seg_w, cap_style=2)
+                buffered_back = projected_line.to_crs(workingprojection_epsg)
+                buffered_geom = buffered_back.iloc[0].geometry
+                if not isinstance(buffered_geom, (Polygon, MultiPolygon)):
+                    _log_line(base_dir, log_fn, f"Unexpected buffered geom type: {type(buffered_geom)}")
                 buffered_records.append(
                     {
                         "fid": idx,
@@ -717,7 +639,7 @@ def run_lines_process(
                         "segment_length": seg_len,
                         "segment_width": seg_w,
                         "description": desc,
-                        "geometry": gbuf,
+                        "geometry": buffered_geom,
                     }
                 )
             except Exception as e:

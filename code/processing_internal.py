@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 06_process.py — memory-aware, CPU-optimized (Windows spawn-safe) intersections + robust flattening to GeoParquet
+# processing_internal.py — memory-aware, CPU-optimized (Windows spawn-safe) intersections + robust flattening to GeoParquet
 # UI: two panes (left: logs/progress/buttons; right: minimap launcher).
 # Minimap opens in a separate, low-priority helper process (pywebview + Leaflet + OSM).
 
@@ -2216,9 +2216,9 @@ def _flatten_worker(args):
     Process one tbl_stacked parquet file and return aggregated stats per code.
     args: (parquet_path, ranges_map, desc_map, index_weights)
     """
-    path, ranges_map, desc_map, index_weights = args
+    parquet_path, ranges_map, desc_map, index_weights = args
     try:
-        df = gpd.read_parquet(path)
+        df = gpd.read_parquet(parquet_path)
     except Exception:
         return None
     
@@ -2229,101 +2229,84 @@ def _flatten_worker(args):
     # (Current tbl_stacked partitions often only store ref_asset_group + attributes strings.)
     try:
         if "ref_asset_group" in df.columns:
-            ag = _get_asset_group_lookup()
-            if ag is not None and not ag.empty:
-                merged = df.merge(ag, on="ref_asset_group", how="left", suffixes=("", "_ag"))
-                for b in ("importance", "sensitivity", "susceptibility"):
-                    src = f"{b}_ag"
-                    if b not in merged.columns and src in merged.columns:
-                        merged[b] = merged[src]
-                    elif b in merged.columns and src in merged.columns:
-                        merged[b] = merged[b].where(~pd.isna(merged[b]), merged[src])
-                for c in ("name_gis_assetgroup", "sensitivity_code"):
-                    src = f"{c}_ag"
-                    if c not in merged.columns and src in merged.columns:
-                        merged[c] = merged[src]
-                    elif c in merged.columns and src in merged.columns:
-                        merged[c] = merged[c].where(~pd.isna(merged[c]), merged[src])
-                drop_cols = [c for c in merged.columns if c.endswith("_ag")]
+            asset_group_lookup = _get_asset_group_lookup()
+            if asset_group_lookup is not None and not asset_group_lookup.empty:
+                merged_df = df.merge(asset_group_lookup, on="ref_asset_group", how="left", suffixes=("", "_ag"))
+                for metric_name in ("importance", "sensitivity", "susceptibility"):
+                    source_col = f"{metric_name}_ag"
+                    if metric_name not in merged_df.columns and source_col in merged_df.columns:
+                        merged_df[metric_name] = merged_df[source_col]
+                    elif metric_name in merged_df.columns and source_col in merged_df.columns:
+                        merged_df[metric_name] = merged_df[metric_name].where(~pd.isna(merged_df[metric_name]), merged_df[source_col])
+                for field_name in ("name_gis_assetgroup", "sensitivity_code"):
+                    source_col = f"{field_name}_ag"
+                    if field_name not in merged_df.columns and source_col in merged_df.columns:
+                        merged_df[field_name] = merged_df[source_col]
+                    elif field_name in merged_df.columns and source_col in merged_df.columns:
+                        merged_df[field_name] = merged_df[field_name].where(~pd.isna(merged_df[field_name]), merged_df[source_col])
+                drop_cols = [column_name for column_name in merged_df.columns if column_name.endswith("_ag")]
                 if drop_cols:
-                    merged = merged.drop(columns=drop_cols)
-                df = merged
+                    merged_df = merged_df.drop(columns=drop_cols)
+                df = merged_df
     except Exception:
         pass
 
     # Ensure numeric bases
     bases = ["importance","sensitivity","susceptibility"]
-    for b in bases:
-        if b in df.columns:
-            df[b] = pd.to_numeric(df[b], errors="coerce")
+    for metric_name in bases:
+        if metric_name in df.columns:
+            df[metric_name] = pd.to_numeric(df[metric_name], errors="coerce")
         else:
-            df[b] = pd.Series(pd.NA, index=df.index, dtype="Float64")
+            df[metric_name] = pd.Series(pd.NA, index=df.index, dtype="Float64")
 
     if "name_gis_assetgroup" not in df.columns:
         df["name_gis_assetgroup"] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # Helpers (same as original)
-    def _pick_base_category(d, base):
-        if f"{base}_code" in d.columns:
-            return d[f"{base}_code"].astype("string").str.strip().str.upper()
-        elif "category" in d.columns:
-            return d["category"].astype("string").str.strip().str.upper()
+    def _pick_base_category(frame, base):
+        if f"{base}_code" in frame.columns:
+            return frame[f"{base}_code"].astype("string").str.strip().str.upper()
+        elif "category" in frame.columns:
+            return frame["category"].astype("string").str.strip().str.upper()
         else:
-            return d[base].apply(lambda v: map_num_to_code(v, ranges_map)).astype("string").str.upper()
+            return frame[base].apply(lambda value: map_num_to_code(value, ranges_map)).astype("string").str.upper()
 
-    def _pick_rank(d, base):
-        if f"{base}_category_rank" in d.columns:
-            return pd.to_numeric(d[f"{base}_category_rank"], errors="coerce").fillna(0.0)
-        elif "category_rank" in d.columns:
-            return pd.to_numeric(d["category_rank"], errors="coerce").fillna(0.0)
-        return pd.Series(0.0, index=d.index, dtype="float64")
+    def _pick_rank(frame, base):
+        if f"{base}_category_rank" in frame.columns:
+            return pd.to_numeric(frame[f"{base}_category_rank"], errors="coerce").fillna(0.0)
+        elif "category_rank" in frame.columns:
+            return pd.to_numeric(frame["category_rank"], errors="coerce").fillna(0.0)
+        return pd.Series(0.0, index=frame.index, dtype="float64")
 
-    def _select_extreme_local(d, base, pick):
-        val = pd.to_numeric(d[base], errors="coerce")
-        cat = _pick_base_category(d, base)
-        rnk = _pick_rank(d, base)
-        tmp = pd.DataFrame({"code": d["code"], "val": val, "cat": cat, "rnk": rnk})
+    def _select_extreme_local(frame, base, pick):
+        numeric_values = pd.to_numeric(frame[base], errors="coerce")
+        category_codes = _pick_base_category(frame, base)
+        category_ranks = _pick_rank(frame, base)
+        local_df = pd.DataFrame({"code": frame["code"], "val": numeric_values, "cat": category_codes, "rnk": category_ranks})
         if pick == "max":
-            tmp["sv"] = tmp["val"].fillna(-np.inf)
-            tmp = tmp.sort_values(["code","sv","rnk","cat"], ascending=[True, False, False, True], kind="mergesort")
+            local_df["sv"] = local_df["val"].fillna(-np.inf)
+            local_df = local_df.sort_values(["code","sv","rnk","cat"], ascending=[True, False, False, True], kind="mergesort")
         else:
-            tmp["sv"] = tmp["val"].fillna(np.inf)
-            tmp = tmp.sort_values(["code","sv","rnk","cat"], ascending=[True, True, False, True], kind="mergesort")
-        return tmp.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].rename(
+            local_df["sv"] = local_df["val"].fillna(np.inf)
+            local_df = local_df.sort_values(["code","sv","rnk","cat"], ascending=[True, True, False, True], kind="mergesort")
+        return local_df.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].rename(
             columns={"val": f"{base}_{pick}", "cat": f"{base}_code_{pick}"}
         )
 
-    # 1. Basic Meta (first)
-    # We'll take the first geometry/names found. Since code is unique per geocode, this is stable.
-    keys = ["code"]
-    # For asset groups, we need sets to merge later
-    # But passing sets is heavy. 
-    # Optimization: If we assume code is mostly in one file, we can just take the list.
-    # But to be safe, we'll aggregate sets.
-    
-    # Group by code within this file
+    # Basic per-code aggregation for this input partition.
     grouped = df.groupby("code", as_index=False)
     
     # Meta: first
     meta = grouped.first()[["code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"]]
     
     # Counts
-    sz = grouped.size()
-    if isinstance(sz, pd.Series):
-        counts = sz.to_frame("assets_overlap_total").reset_index()
+    group_sizes = grouped.size()
+    if isinstance(group_sizes, pd.Series):
+        counts = group_sizes.to_frame("assets_overlap_total").reset_index()
     else:
-        counts = sz.rename(columns={"size": "assets_overlap_total"})
+        counts = group_sizes.rename(columns={"size": "assets_overlap_total"})
     
-    # Asset Groups (unique IDs)
-    # We'll store them as a list/string to be merged? 
-    # Actually, let's just return the raw 'ref_asset_group' and 'name_gis_assetgroup' columns 
-    # associated with the code, but that's too much data.
-    # Let's do: set of ref_asset_group, set of name_gis_assetgroup
-    # This might be slow if many groups.
-    # Alternative: Just count unique here. If a code is split, the sum of unique counts is WRONG.
-    # Correct way: Union of sets.
-    # Let's try to be efficient.
-    
+    # Keep unique group IDs/names per geocode for downstream merge.
     asset_info = df.groupby("code")[["ref_asset_group", "name_gis_assetgroup"]].agg({
         "ref_asset_group": lambda x: list(set(x.dropna())),
         "name_gis_assetgroup": lambda x: list(set(x.dropna().astype(str)))
@@ -2331,9 +2314,9 @@ def _flatten_worker(args):
 
     # Min/Max
     extremes = []
-    for b in bases:
-        extremes.append(_select_extreme_local(df, b, "min"))
-        extremes.append(_select_extreme_local(df, b, "max"))
+    for metric_name in bases:
+        extremes.append(_select_extreme_local(df, metric_name, "min"))
+        extremes.append(_select_extreme_local(df, metric_name, "max"))
 
     # Raw Scores
     # Importance: 1..5 bucket weights.
@@ -2377,24 +2360,24 @@ def _flatten_worker(args):
     owa_counts = _compute_owa_counts_from_stacked(df, min_score=1, max_score=25)
 
     # Merge all partials
-    res = meta
-    res = res.merge(counts, on="code", how="left")
-    res = res.merge(asset_info, on="code", how="left")
-    for e in extremes:
-        res = res.merge(e, on="code", how="left")
-    for k, v in raw_scores.items():
-        res = res.merge(v, on="code", how="left")
+    result_df = meta
+    result_df = result_df.merge(counts, on="code", how="left")
+    result_df = result_df.merge(asset_info, on="code", how="left")
+    for extreme_df in extremes:
+        result_df = result_df.merge(extreme_df, on="code", how="left")
+    for score_name, score_df in raw_scores.items():
+        result_df = result_df.merge(score_df, on="code", how="left")
 
     if owa_counts is not None and not owa_counts.empty:
-        res = res.merge(owa_counts, on="code", how="left")
+        result_df = result_df.merge(owa_counts, on="code", how="left")
     else:
         # Ensure columns exist for downstream ranking
         for score in range(1, 26):
             col = f"owa_n{score}"
-            if col not in res.columns:
-                res[col] = 0
+            if col not in result_df.columns:
+                result_df[col] = 0
         
-    return res
+    return result_df
 
 def _backfill_worker(args):
     """
@@ -2541,53 +2524,24 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             full["code"] = full["code"].astype(str)
     except Exception:
         pass
-    # If a code was split across files, we need to aggregate again
-    # Group by code
-    # Aggregations:
-    # geometry: first
-    # ref_geocodegroup: first
-    # name_gis_geocodegroup: first
-    # assets_overlap_total: sum
-    # ref_asset_group (list): sum (concat lists) -> then set -> len
-    # name_gis_assetgroup (list): sum (concat lists) -> then set -> join
-    # min columns: min
-    # max columns: max
-    # raw_score columns: sum
-    
+    # If codes are split across files, aggregate again at code level.
     agg_rules = {
         "geometry": "first",
         "ref_geocodegroup": "first",
         "name_gis_geocodegroup": "first",
         "assets_overlap_total": "sum",
-        "ref_asset_group": "sum", # concats lists
-        "name_gis_assetgroup": "sum", # concats lists
+        "ref_asset_group": "sum",
+        "name_gis_assetgroup": "sum",
     }
     
     bases = ["importance","sensitivity","susceptibility"]
     for b in bases:
         agg_rules[f"{b}_min"] = "min"
         agg_rules[f"{b}_max"] = "max"
-        # For codes/cats, we need to re-evaluate if min/max changed?
-        # Actually, if we have local min/max, the global min is min(local_mins).
-        # The corresponding code/cat for the global min is the code/cat of the local min that won.
-        # This is tricky with standard groupby.agg.
-        # But we can just take the min/max of the values.
-        # What about the *codes* associated with them?
-        # We need to keep the (val, code) pair to pick the right code.
-        # _flatten_worker returned val and cat.
-        # If we just take min(val), we lose the cat.
-        # We can sort and take first.
     
-    # Custom reducer for min/max with associated category
-    # We'll do a custom apply or just iterate.
-    # Since most codes won't be split, maybe we can optimize.
-    # Check duplicates
     if "code" in full.columns and full["code"].duplicated().any():
         log_to_gui(log_widget, "Resolving split geocodes…")
-        # We need a more complex reduction for the winners
-        # Let's do it manually for the complex columns
-        
-        # 1. Simple sums/firsts
+
         simple_agg = {k:v for k,v in agg_rules.items() if k not in ["ref_asset_group", "name_gis_assetgroup"]}
         for k in ["importance_raw_score", "sensitivity_raw_score"]:
             if k in full.columns:
@@ -2597,62 +2551,28 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         
         grouped = full.groupby("code")
         res_simple = grouped.agg(simple_agg).reset_index()
-        
-        # 2. Lists (sets)
-        # This is slow if we do apply on all.
-        # Only do it for duplicated codes? No, easier to do all.
-        # Optimization: Vectorized list concat is hard.
-        # Let's use a custom apply for the lists
-        def merge_sets(series):
-            s = set()
-            for x in series:
-                s.update(x)
-            return s
-            
-        # Actually, we can just explode and nunique?
-        # ref_asset_group is list of IDs.
-        # We want count of unique.
-        # full.explode("ref_asset_group").groupby("code")["ref_asset_group"].nunique()
-        # This is memory intensive if lists are long.
-        # But it's robust.
-        
+
         asset_counts = full[["code", "ref_asset_group"]].explode("ref_asset_group").groupby("code")["ref_asset_group"].nunique().reset_index(name="asset_groups_total")
-        
-        # For names, we want joined string
+
         def join_names(x):
             return ", ".join(sorted(set(x.dropna())))
-        
+
         asset_names = full[["code", "name_gis_assetgroup"]].explode("name_gis_assetgroup").groupby("code")["name_gis_assetgroup"].apply(join_names).reset_index(name="asset_group_names")
-        
-        # 3. Min/Max with categories
-        # We need to pick the row with the global min/max val
-        # For each base, we have local min/max rows.
-        # We want to pick the best among them.
-        # We can use sort_values + drop_duplicates logic again!
-        
-        # For Min:
-        # We have columns: base_min, base_code_min
-        # We want row with min(base_min). Tie break?
-        # We don't have rank here. We assume local winner was best.
-        # If tie, pick any.
-        
+
         merged_extremes = []
         for b in bases:
-            # Min
             cols = ["code", f"{b}_min", f"{b}_code_min"]
             if all(c in full.columns for c in cols):
-                sub = full[cols].sort_values([f"{b}_min", f"{b}_code_min"]) # sort by val asc
+                sub = full[cols].sort_values([f"{b}_min", f"{b}_code_min"])
                 win = sub.drop_duplicates(subset=["code"], keep="first")
                 merged_extremes.append(win)
-            
-            # Max
+
             cols = ["code", f"{b}_max", f"{b}_code_max"]
             if all(c in full.columns for c in cols):
-                sub = full[cols].sort_values([f"{b}_max", f"{b}_code_max"], ascending=[False, True]) # sort by val desc
+                sub = full[cols].sort_values([f"{b}_max", f"{b}_code_max"], ascending=[False, True])
                 win = sub.drop_duplicates(subset=["code"], keep="first")
                 merged_extremes.append(win)
-                
-        # Merge everything back
+
         tbl_flat = res_simple
         tbl_flat = tbl_flat.merge(asset_counts, on="code", how="left")
         tbl_flat = tbl_flat.merge(asset_names, on="code", how="left")
@@ -3174,9 +3094,6 @@ def open_minimap_window():
         threading.Thread(target=_check_minimap_proc, daemon=True).start()
     except Exception:
         pass
-
-"""
-"""
 
 # ------------------------------------------------------------
 # Processing worker (separate process) + GUI progress polling
@@ -3849,135 +3766,4 @@ if __name__ == "__main__":
 
     log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
     root.mainloop()
-
-def _process_chunks(chunks, max_workers, asset_data, geom_types, tmp_parts,
-                    asset_soft_limit, geocode_soft_limit,
-                    chunk_cells, cells_meta, home_bounds, total_chunks,
-                    progress_state, files, written):
-    """
-    Run intersection either with a multiprocessing Pool (safe contexts)
-    or serially (when running from a background thread in frozen builds).
-    Returns (done_count, written, files, error_msg).
-    """
-    done_count = progress_state.get('done', 0)
-    error_msg = None
-    started_at = progress_state.get('started_at', 0.0)
-    last_ping = started_at if started_at else 0.0
-
-    iterable = ((i, ch) for i, ch in enumerate(chunks, start=1))
-
-    def _update_status():
-        try:
-            running_chunk_ids = list(range(done_count+1, min(done_count + max_workers, total_chunks) + 1))
-            running_cells = set().union(*(chunk_cells.get(i, set()) for i in running_chunk_ids)) if running_chunk_ids else set()
-            done_cells = set().union(*(chunk_cells.get(i, set()) for i in range(1, done_count+1))) if done_count else set()
-
-            id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
-            for cid in done_cells:
-                i = id_to_idx.get(int(cid))
-                if i is not None:
-                    cells_meta[i]["state"] = "done"
-            for cid in running_cells:
-                i = id_to_idx.get(int(cid))
-                if i is not None and cells_meta[i]["state"] != "done":
-                    cells_meta[i]["state"] = "running"
-
-            _write_status_atomic({
-                "phase": "intersect",
-                "updated_at": datetime.utcnow().isoformat() + "Z",
-                "chunks_total": total_chunks,
-                "done": done_count,
-                "running": running_chunk_ids,
-                "cells": cells_meta,
-                "home_bounds": home_bounds
-            })
-        except Exception:
-            pass
-
-    def _tick_progress():
-        nonlocal last_ping, written, done_count
-        now = time.time()
-        if (now - last_ping) >= HEARTBEAT_SECS or done_count == total_chunks:
-            elapsed = now - started_at if started_at else 0.0
-            pct = (done_count / total_chunks) * 100 if total_chunks else 100.0
-            eta = "?"
-            if done_count and started_at:
-                est_total = elapsed / max(done_count, 1) * total_chunks
-                eta_ts = datetime.now() + timedelta(seconds=max(0.0, est_total - elapsed))
-                eta = eta_ts.strftime("%H:%M:%S")
-                dd = (eta_ts.date() - datetime.now().date()).days
-                if dd > 0:
-                    eta += f" (+{dd}d)"
-            log_to_gui(log_widget, f"[intersect] {done_count}/{total_chunks} chunks (~{pct:.2f}%) • rows written: {written:,} • ETA {eta}")
-            update_progress(35.0 + (done_count / max(total_chunks, 1)) * 15.0)
-            last_ping = now
-
-    # Pool path (safe in dev or main-thread contexts)
-    if _mp_allowed() and max_workers > 1:
-        with multiprocessing.get_context("spawn").Pool(
-                processes=max_workers,
-                initializer=_intersect_pool_init,
-                initargs=(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
-
-            for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
-                done_count += 1
-                progress_state['done'] = done_count
-
-                if logs:
-                    for line in logs:
-                        log_to_gui(log_widget, line)
-
-                if err:
-                    log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
-                    error_msg = err
-                    pool.terminate()
-                    break
-
-                written += nrows
-                progress_state['rows'] = written
-                if paths:
-                    if isinstance(paths, list):
-                        files.extend(paths)
-                    else:
-                        files.append(paths)
-
-                _update_status()
-                _tick_progress()
-
-                if done_count % 8 == 0:
-                    gc.collect()
-    else:
-        # Serial fallback (initialize globals like pool initializer does)
-        _intersect_pool_init(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)
-        for args in iterable:
-            (idx, nrows, paths, err, logs) = _intersection_worker(args)
-
-            done_count += 1
-            progress_state['done'] = done_count
-
-            if logs:
-                for line in logs:
-                    log_to_gui(log_widget, line)
-
-            if err:
-                log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
-                error_msg = err
-                break
-
-            written += nrows
-            progress_state['rows'] = written
-            if paths:
-                if isinstance(paths, list):
-                    files.extend(paths)
-                else:
-                    files.append(paths)
-
-            _update_status()
-            _tick_progress()
-
-            if done_count % 8 == 0:
-                gc.collect()
-
-    return done_count, written, files, error_msg
-
 
