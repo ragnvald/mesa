@@ -2,7 +2,7 @@
 # MESA – Setup & Registration (2 tabs: Start and Vulnerability)
 # Persistence: GeoParquet + JSON only (GPKG removed)
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
@@ -980,9 +980,9 @@ if __name__ == "__main__":
     original_working_directory = str(resolved_base)
 
     # ---- tiny diagnostics (helps catch path mistakes fast)
-    log_to_file(f"[parametres_setup] start_cwd: {START_CWD}")
-    log_to_file(f"[parametres_setup] app_dir  : {APP_DIR}")
-    log_to_file(f"[parametres_setup] base_dir : {original_working_directory}")
+    log_to_file(f"[processing_setup] start_cwd: {START_CWD}")
+    log_to_file(f"[processing_setup] app_dir  : {APP_DIR}")
+    log_to_file(f"[processing_setup] base_dir : {original_working_directory}")
 
     # Config
     config_file = os.path.join(original_working_directory, "config.ini")
@@ -1015,7 +1015,7 @@ if __name__ == "__main__":
     )
     # Asset groups
     gdf_asset_group = load_asset_group(original_working_directory)
-    log_to_file(f"[parametres_setup] asset grp: {_parquet_asset_group_path(original_working_directory)}")
+    log_to_file(f"[processing_setup] asset grp: {_parquet_asset_group_path(original_working_directory)}")
     if gdf_asset_group is None:
         log_to_file("Failed to load tbl_asset_group (Parquet).")
         sys.exit(1)

@@ -159,11 +159,11 @@ def _empty_geodf() -> gpd.GeoDataFrame:
 def load_parquet(path: str) -> gpd.GeoDataFrame:
     try:
         if not os.path.exists(path):
-            print(f"[maps_overview] Missing dataset: {path}", file=sys.stderr)
+            print(f"[map_overview] Missing dataset: {path}", file=sys.stderr)
             return _empty_geodf()
         gdf = gpd.read_parquet(path)
         if "geometry" not in gdf.columns:
-            print(f"[maps_overview] Dataset lacks geometry column: {path}", file=sys.stderr)
+            print(f"[map_overview] Dataset lacks geometry column: {path}", file=sys.stderr)
             return _empty_geodf()
         return gdf
     except Exception as e:
@@ -2359,7 +2359,7 @@ HTML = HTML_TEMPLATE
 if __name__ == "__main__":
     if webview is None:
         sys.stderr.write(
-            "ERROR: 'pywebview' is not installed in the Python environment launching maps_overview.py.\n"
+            "ERROR: 'pywebview' is not installed in the Python environment launching map_overview.py.\n"
             "Install it in that environment, e.g.:  pip install pywebview\n"
         )
         raise SystemExit(1)

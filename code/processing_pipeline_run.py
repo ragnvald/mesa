@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""process_all.py — Unified processing runner (Data / Lines / Analysis).
+"""processing_pipeline_run.py — Unified processing runner (Data / Lines / Analysis).
 
 Goal
 - Provide a single UI for batch-processing:
@@ -246,7 +246,7 @@ def detect_analysis_processing(base_dir: Path, cfg: configparser.ConfigParser) -
 def detect_tiles_processing(base_dir: Path, cfg: configparser.ConfigParser) -> ProcessAvailability:
     runner_path, _is_exe = _find_tiles_runner(base_dir)
     if not runner_path:
-        return ProcessAvailability(False, ["Missing: create_raster_tiles helper"])
+        return ProcessAvailability(False, ["Missing: tiles_create_raster helper"])
 
     gpq = parquet_dir(base_dir, cfg)
     flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
@@ -345,7 +345,7 @@ def _run_subprocess_streaming(
 
 
 def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
-    """Find create_raster_tiles (returns path, is_executable)."""
+    """Find tiles_create_raster (returns path, is_executable)."""
     frozen = bool(getattr(sys, "frozen", False))
 
     def _dedup(paths: Iterable[Path | None]) -> list[Path]:
@@ -366,19 +366,19 @@ def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
 
     exe_candidates = _dedup(
         [
-            base_dir / "tools" / "create_raster_tiles.exe",
-            base_dir / "create_raster_tiles.exe",
-            base_dir / "code" / "create_raster_tiles.exe",
-            base_dir / "system" / "create_raster_tiles.exe",
-            Path(sys.executable).resolve().parent / "create_raster_tiles.exe" if frozen else None,
+            base_dir / "tools" / "tiles_create_raster.exe",
+            base_dir / "tiles_create_raster.exe",
+            base_dir / "code" / "tiles_create_raster.exe",
+            base_dir / "system" / "tiles_create_raster.exe",
+            Path(sys.executable).resolve().parent / "tiles_create_raster.exe" if frozen else None,
         ]
     )
     py_candidates = _dedup(
         [
-            base_dir / "create_raster_tiles.py",
-            base_dir / "system" / "create_raster_tiles.py",
-            base_dir / "code" / "create_raster_tiles.py",
-            (Path(__file__).resolve().parent / "create_raster_tiles.py") if "__file__" in globals() else None,
+            base_dir / "tiles_create_raster.py",
+            base_dir / "system" / "tiles_create_raster.py",
+            base_dir / "code" / "tiles_create_raster.py",
+            (Path(__file__).resolve().parent / "tiles_create_raster.py") if "__file__" in globals() else None,
         ]
     )
 
@@ -423,8 +423,8 @@ def run_tiles_process(
 
     runner_path, is_exe = _find_tiles_runner(base_dir)
     if not runner_path:
-        _log_line(base_dir, log_fn, "ERROR: create_raster_tiles helper not found")
-        raise RuntimeError("Missing create_raster_tiles helper")
+        _log_line(base_dir, log_fn, "ERROR: tiles_create_raster helper not found")
+        raise RuntimeError("Missing tiles_create_raster helper")
 
     args = [str(runner_path)] if is_exe else [sys.executable, str(runner_path)]
 
@@ -475,7 +475,7 @@ def run_data_process(
     try:
         # Import on-demand so the main UI stays light until the user actually
         # runs the Area step.
-        import _data_process_internal as dpi
+        import processing_internal as dpi
 
         dpi.run_headless(str(base_dir), explode_flat_multipolygons=bool(explode_flat_multipolygons))
     except Exception as exc:
@@ -997,12 +997,12 @@ def run_analysis_process(
     progress_fn: Callable[[float], None],
 ) -> None:
     # Embedded (minimal) analysis processor so we can remove analysis_process.py.
-    # This intentionally avoids importing heavy GIS modules at process_all import time.
+    # This intentionally avoids importing heavy GIS modules at processing_pipeline_run import time.
     import geopandas as gpd
     import numpy as np
     import pandas as pd
 
-    from data_analysis_setup import (
+    from analysis_setup import (
         DEFAULT_ANALYSIS_GEOCODE,
         AnalysisStorage,
         analysis_flat_path,
@@ -1694,7 +1694,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
 
     def open_progress_map() -> None:
         try:
-            import _data_process_internal as dpi
+            import processing_internal as dpi
             try:
                 import importlib.util as _importlib_util
                 if _importlib_util.find_spec("webview") is None:

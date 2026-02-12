@@ -18,9 +18,9 @@ Per group in name_gis_geocodegroup, produces seven MBTiles:
 - Dependencies: geopandas, shapely, pandas, numpy, pillow (lightweight), sqlite3 (stdlib).
 
 Usage examples:
-    python create_raster_tiles.py --minzoom 6 --maxzoom 12
-    python create_raster_tiles.py --only-groups "geocode_001,H3_R8"
-    python create_raster_tiles.py --procs 8 --stroke-alpha 0.6
+    python tiles_create_raster.py --minzoom 6 --maxzoom 12
+    python tiles_create_raster.py --only-groups "geocode_001,H3_R8"
+    python tiles_create_raster.py --procs 8 --stroke-alpha 0.6
 """
 
 INDEX_GRADIENT_STEPS = 100  # number of discrete colors for 1..100 index layers

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """GUI helper for editing config.ini with simple section/key management."""
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 

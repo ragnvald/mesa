@@ -568,7 +568,7 @@ def _find_tiles_runner() -> tuple[Path | None, bool]:
     Locate the raster-tiles helper.
 
     Returns (path, is_executable).
-    - When this process is frozen (data_process.exe), prefer create_raster_tiles.exe.
+    - When this process is frozen (data_process.exe), prefer tiles_create_raster.exe.
     - Otherwise prefer the .py script but fall back to the .exe if needed.
     """
 
@@ -592,17 +592,17 @@ def _find_tiles_runner() -> tuple[Path | None, bool]:
         return out
 
     exe_candidates = _dedup([
-        base / "tools" / "create_raster_tiles.exe",
-        base / "create_raster_tiles.exe",
-        base / "code" / "create_raster_tiles.exe",
-        base / "system" / "create_raster_tiles.exe",
-        Path(sys.executable).resolve().parent / "create_raster_tiles.exe" if frozen else None,
+        base / "tools" / "tiles_create_raster.exe",
+        base / "tiles_create_raster.exe",
+        base / "code" / "tiles_create_raster.exe",
+        base / "system" / "tiles_create_raster.exe",
+        Path(sys.executable).resolve().parent / "tiles_create_raster.exe" if frozen else None,
     ])
     py_candidates = _dedup([
-        base / "create_raster_tiles.py",
-        base / "system" / "create_raster_tiles.py",
-        base / "code" / "create_raster_tiles.py",
-        (Path(__file__).resolve().parent / "create_raster_tiles.py") if '__file__' in globals() else None,
+        base / "tiles_create_raster.py",
+        base / "system" / "tiles_create_raster.py",
+        base / "code" / "tiles_create_raster.py",
+        (Path(__file__).resolve().parent / "tiles_create_raster.py") if '__file__' in globals() else None,
     ])
 
     exe_candidates = [p for p in exe_candidates if p is not None]
@@ -637,7 +637,7 @@ def _find_tiles_runner() -> tuple[Path | None, bool]:
     return None, False
 
 def _tiles_procs_from_config() -> int | None:
-    """Choose a reasonable worker count for create_raster_tiles.
+    """Choose a reasonable worker count for tiles_create_raster.
 
     Notes:
     - The tiles helper has its own multiprocessing pool.
@@ -677,7 +677,7 @@ def _tiles_procs_from_config() -> int | None:
 def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None, procs: int | None = None):
     runner_path, is_exe = _find_tiles_runner()
     if not runner_path:
-        log_to_gui(log_widget, "[Tiles] Missing raster-tiles helper (looked for create_raster_tiles.py/.exe)")
+        log_to_gui(log_widget, "[Tiles] Missing raster-tiles helper (looked for tiles_create_raster.py/.exe)")
         return None
 
     if is_exe:
@@ -702,7 +702,7 @@ def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None, proc
         env.setdefault("MESA_BASE_DIR", os.getcwd())
 
     if not getattr(sys, "frozen", False) and is_exe:
-        log_to_gui(log_widget, "[Tiles] create_raster_tiles.py not found; using bundled executable instead.")
+        log_to_gui(log_widget, "[Tiles] tiles_create_raster.py not found; using bundled executable instead.")
 
     # Run from the project root to keep all relative paths consistent
     # (some frozen builds/tools may still fall back to CWD for locating output).
@@ -736,7 +736,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
         tile_floor = max(95.0, min(_progress_value, 100.0))
         tile_span = max(1.0, tile_ceiling - tile_floor)
         update_progress(tile_floor)
-        log_to_gui(log_widget, "[Tiles] Stage 4/4 - integrating MBTiles build (create_raster_tiles)...")
+        log_to_gui(log_widget, "[Tiles] Stage 4/4 - integrating MBTiles build (tiles_create_raster)...")
 
         tiles_procs = _tiles_procs_from_config()
         if isinstance(tiles_procs, int) and tiles_procs > 0:
@@ -744,7 +744,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
         proc = _spawn_tiles_subprocess(minzoom=minzoom, maxzoom=maxzoom, procs=tiles_procs)
 
         if proc is None:
-            log_to_gui(log_widget, "[Tiles] Unable to start create_raster_tiles subprocess.")
+            log_to_gui(log_widget, "[Tiles] Unable to start tiles_create_raster subprocess.")
             return
 
         re_groups = re.compile(r"^Groups:\s*\[(.*)\]\s*$")
@@ -805,7 +805,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
 
         ret = proc.wait()
         if ret != 0:
-            log_to_gui(log_widget, f"[Tiles] create_raster_tiles exited with code {ret}")
+            log_to_gui(log_widget, f"[Tiles] tiles_create_raster exited with code {ret}")
         else:
             log_to_gui(log_widget, "[Tiles] Completed.")
     except Exception as e:
@@ -1700,7 +1700,7 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
             )
 
     # Guardrail: importance/susceptibility are required to compute sensitivity.
-    # If these are not set (typically via parametres_setup), we must stop early
+    # If these are not set (typically via processing_setup), we must stop early
     # to avoid producing blank sensitivity outputs.
     try:
         missing_cols = [c for c in ("importance", "susceptibility") if (groups is None or groups.empty or c not in groups.columns)]
@@ -2868,7 +2868,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 # ----------------------------
 # Top-level process
 # ----------------------------
-def process_all(config_file: Path):
+def run_processing_pipeline(config_file: Path):
     try:
         cfg = read_config(config_file)
         set_global_cfg(cfg)  # <-- make parquet_folder available to gpq_dir()
@@ -3183,7 +3183,7 @@ def open_minimap_window():
 # ------------------------------------------------------------
 def _processing_worker_entry(cfg_path_str: str) -> None:
     """Entry point for heavy processing in a separate process.
-    Runs process_all without touching GUI state so child can safely create Pools.
+    Runs run_processing_pipeline without touching GUI state so child can safely create Pools.
     """
     try:
         # Ensure spawn-friendly bootstrap in child as well
@@ -3200,7 +3200,7 @@ def _processing_worker_entry(cfg_path_str: str) -> None:
         pass
 
     try:
-        process_all(Path(cfg_path_str))
+        run_processing_pipeline(Path(cfg_path_str))
     except Exception:
         # Ensure the worker exits non-zero so the GUI can skip downstream stages (e.g., tiles).
         try:
@@ -3651,7 +3651,7 @@ def run_headless(original_working_directory_arg: str | None = None, *, explode_f
     global _EXPLODE_TBL_FLAT_MULTIPOLYGONS
     _EXPLODE_TBL_FLAT_MULTIPOLYGONS = bool(explode_flat_multipolygons)
 
-    process_all(cfg_path)
+    run_processing_pipeline(cfg_path)
 
 
 if __name__ == "__main__":

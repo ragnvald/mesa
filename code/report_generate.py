@@ -5,7 +5,7 @@ except Exception:
     # Fall back silently if locale isn't available on this system
     pass
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
@@ -677,7 +677,7 @@ def _analysis_write_sankey_difference_png(
     right_label: str,
     ribbon_alpha: float = 0.45,
 ) -> bool:
-    """Sankey-style comparison: same-code ribbons between left/right blocks (like data_analysis_presentation.py)."""
+    """Sankey-style comparison: same-code ribbons between left/right blocks (like analysis_present.py)."""
     try:
         def _to_map(df: pd.DataFrame) -> dict[str, float]:
             if df is None or df.empty:
@@ -4233,7 +4233,7 @@ def generate_report(base_dir: str,
                 if mode == "all":
                     if not id_list:
                         order_list.append(('heading(2)', "Analysis"))
-                        order_list.append(('text', "(No analysis groups found. Run data_analysis_setup.py / analysis_process.py first.)"))
+                        order_list.append(('text', "(No analysis groups found. Run analysis_setup.py / processing_pipeline_run.py first.)"))
                         order_list.append(('new_page', None))
                     else:
                         for gid in id_list:
@@ -4335,7 +4335,7 @@ def generate_report(base_dir: str,
                     gid = (analysis_area_left or "").strip() or (id_list[0] if id_list else "")
                     if not gid:
                         order_list.append(('heading(2)', "Analysis"))
-                        order_list.append(('text', "(No analysis groups found. Run data_analysis_setup.py / analysis_process.py first.)"))
+                        order_list.append(('text', "(No analysis groups found. Run analysis_setup.py / processing_pipeline_run.py first.)"))
                         order_list.append(('new_page', None))
                     else:
                         _add_single(gid)

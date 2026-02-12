@@ -44,7 +44,7 @@ def _require_webview():
     return _wv
   except ModuleNotFoundError:
     sys.stderr.write(
-      "ERROR: 'pywebview' is not installed in the Python environment launching map_assets.py.\n"
+      "ERROR: 'pywebview' is not installed in the Python environment launching asset_map_view.py.\n"
       "Install it in that environment, e.g.:  pip install pywebview\n"
     )
     raise SystemExit(1)
@@ -337,7 +337,7 @@ def log_event(message: str) -> None:
         pass
 
 
-log_event(f"map_assets.py starting (APP_DIR={APP_DIR})")
+log_event(f"asset_map_view.py starting (APP_DIR={APP_DIR})")
 
 
 def read_config(path: Path) -> configparser.ConfigParser:

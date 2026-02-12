@@ -5,7 +5,7 @@
 # - Atomic writes; logs to <BASE_DIR>/log.txt
 # - ttkbootstrap optional (falls back to standard Tk)
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 

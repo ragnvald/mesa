@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-lines_admin.py — Leaflet line editor (selective edit & delete) with Save/Discard + dropdown picker
+line_manage.py — Leaflet line editor (selective edit & delete) with Save/Discard + dropdown picker
 
 Updates in this Parquet-only, flat-layout version:
 - No GeoPackage reads/writes or references.

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-data_analysis_presentation.py - Compare analysis groups side by side.
+analysis_present.py - Compare analysis groups side by side.
 
-This utility reads the GeoParquet outputs produced by data_analysis_setup.py /
-data_process.py and lets the user compare two analysis groups without opening
-the map interface.
+This utility reads the GeoParquet outputs produced by analysis_setup.py /
+processing_pipeline_run.py and lets the user compare two analysis groups
+without opening the map interface.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import tkinter as tk
 from tkinter import messagebox
 from openpyxl.drawing.image import Image as XLImage
 
-from mesa_locale import harden_locale_for_ttkbootstrap
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
@@ -100,7 +100,7 @@ def debug_log(base_dir: Path, message: str) -> None:
         path = target.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write(f"[{ts}] [data_analysis_presentation] {message}\n")
+            fh.write(f"[{ts}] [analysis_present] {message}\n")
     except Exception:
         pass
 
@@ -757,7 +757,7 @@ class AnalysisData:
 
         group_row = self.groups[self.groups["id"].astype(str) == str(group_id)]
         if group_row.empty:
-            summary["message"] = "Analysis group not found. Run data_analysis_setup.py first."
+            summary["message"] = "Analysis group not found. Run analysis_setup.py first."
             return summary
 
         summary["group_name"] = coalesce(group_row.iloc[0].get("name"), default=str(group_id))
@@ -1098,7 +1098,7 @@ class AnalysisData:
 
     def status_message(self) -> str:
         if self.groups.empty:
-            return "No analysis groups available. Run data_analysis_setup.py to create them."
+            return "No analysis groups available. Run analysis_setup.py to create them."
         if not self.has_analysis:
             return (
                 "No analysis results detected. Run analysis_process.py "

@@ -59,7 +59,7 @@ def _require_webview() -> Any:
     return webview
   except ModuleNotFoundError as exc:
     raise SystemExit(
-      "pywebview is required for data_analysis_setup.py (pip install pywebview)"
+      "pywebview is required for analysis_setup.py (pip install pywebview)"
     ) from exc
 
 # ---------------------------------------------------------------------------
