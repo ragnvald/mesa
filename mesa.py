@@ -72,25 +72,20 @@ except Exception:
         pass
 
 import tkinter as tk
-from tkinter import *
 from pathlib import Path
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
-from ttkbootstrap.constants import *
 import pandas as pd
 import configparser
 import platform
 import shutil
 import json
-import socket
-import datetime
 from datetime import datetime
 import threading
 import sys
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
-import math
 import time
 import struct
 import ctypes
@@ -220,17 +215,6 @@ def read_config(abs_or_rel_path: str):
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
     return cfg
-
-# ---------------------------------------------------------------------
-# Networking / utils
-# ---------------------------------------------------------------------
-def is_connected(hostname="8.8.8.8", port=53, timeout=3):
-    try:
-        socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((hostname, port))
-        return True
-    except socket.error:
-        return False
 
 def check_and_create_folders():
     folders = [
@@ -462,27 +446,12 @@ def get_status(geoparquet_dir):
                 return fp
         return None
 
-    def _parquet_has_rows(fp: str) -> bool:
-        if not os.path.exists(fp):
-            return False
-        try:
-            return (pq.ParquetFile(fp).metadata.num_rows or 0) > 0
-        except Exception:
-            try:
-                return len(pd.read_parquet(fp)) > 0
-            except Exception:
-                return False
-
     def ppath(layer_name: str) -> str:
         fp = _existing_table_path(layer_name)
         if fp:
             return fp
         candidates = _table_path_candidates(layer_name)
         return candidates[0] if candidates else os.path.join(geoparquet_dir, f"{layer_name}.parquet")
-
-    def table_exists_nonempty(layer_name: str) -> bool:
-        fp = ppath(layer_name)
-        return _parquet_has_rows(fp)
 
     def read_table_and_count(layer_name: str):
         fp = ppath(layer_name)
@@ -859,14 +828,6 @@ def open_present_files():
         _launch_gui_process([python_exe, python_script, *arg_tokens], "data_report script")
 
 
-def open_create_raster_tiles():
-    python_script, exe_file = get_script_paths("create_raster_tiles")
-    if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess_async([exe_file], [], gpkg_file)
-    else:
-        run_subprocess_async([sys.executable or "python", python_script], [exe_file], gpkg_file)
-
 def open_data_analysis_setup():
     python_script, exe_file = get_script_paths("data_analysis_setup")
     arg_tokens = ["--original_working_directory", original_working_directory]
@@ -946,53 +907,6 @@ def backup_restore_data():
     else:
         python_exe = sys.executable or "python"
         _launch_gui_process([python_exe, python_script, *arg_tokens], "backup_restore script")
-
-def exit_program():
-    root.destroy()
-
-# ---------------------------------------------------------------------
-# Config updaters (preserve layout, ensure [DEFAULT])
-# ---------------------------------------------------------------------
-def update_config_with_values(config_file, **kwargs):
-    if os.path.isabs(config_file):
-        cfg_path = config_file
-    else:
-        cfg_path = os.path.join(PROJECT_BASE, config_file)
-    _ensure_default_header_present(cfg_path)
-    if not os.path.isfile(cfg_path):
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            f.write("[DEFAULT]\n")
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    if not any(line.strip().startswith('[') for line in lines):
-        lines.insert(0, "[DEFAULT]\n")
-    for key, value in kwargs.items():
-        found = False
-        key_norm = key.strip().casefold()
-        for i, line in enumerate(lines):
-            if "=" not in line:
-                continue
-            left, sep, right = line.partition("=")
-            if sep == "":
-                continue
-            if left.strip().casefold() != key_norm:
-                continue
-            indent = left[: len(left) - len(left.lstrip())]
-            lines[i] = f"{indent}{key} = {value}\n"
-            found = True
-            break
-        if not found:
-            lines.append(f"{key} = {value}\n")
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-
-def add_text_to_labelframe(labelframe, text):
-    label = tk.Label(labelframe, text=text, justify='left')
-    label.pack(padx=10, pady=10, fill='both', expand=True)
-    def update_wrap(event):
-        label.config(wraplength=labelframe.winfo_width() - 20)
-    labelframe.bind('<Configure>', update_wrap)
-
 
 # ---------------------------------------------------------------------
 # Host capability snapshot (written once to output/geoparquet)
@@ -1408,7 +1322,6 @@ gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
 config                  = read_config(config_file)
 ttk_bootstrap_theme     = config['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 mesa_version            = config['DEFAULT'].get('mesa_version', 'MESA 5')
-workingprojection_epsg  = config['DEFAULT'].get('working_projection_epsg', '4326')
 
 
 def _format_display_version(version: str) -> str:
@@ -1569,7 +1482,7 @@ if __name__ == "__main__":
         width=20
     ).pack(side="right", padx=(24, 16), pady=(6, 0))
 
-    notebook = ttk.Notebook(root, bootstyle=SECONDARY)
+    notebook = ttk.Notebook(root, bootstyle="secondary")
     notebook.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
     # ------------------------------------------------------------------
