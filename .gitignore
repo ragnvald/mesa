@@ -36,3 +36,8 @@ win/
 mbtiles/
 output/tile_cache/
 output/reports
+log.txt
+code/log.txt
+mesa.code-workspace
+mesa.sln
+system_resources/mesa_illustration.xcf
