@@ -1010,7 +1010,7 @@ class Api:
             "home_bounds": HOME_BOUNDS,
             "colors": COLOR_MAP,
             "hierarchy": ASSET_HIERARCHY,
-        "style_query_file": str(STYLE_QUERY_FILE) if STYLE_QUERY_FILE else None,
+          "style_query_file": str(STYLE_QUERY_FILE) if STYLE_QUERY_FILE else None,
         }
 
     def get_asset_layer(self, group_id: str | int | None = None) -> Dict[str, Any]:
@@ -1025,7 +1025,7 @@ class Api:
         return {"ok": True, "geojson": data}
 
     def exit_app(self) -> None:
-      _cleanup_style_query_file()
+        _cleanup_style_query_file()
         try:
             webview.destroy_window()
         except Exception:
