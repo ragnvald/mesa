@@ -389,7 +389,6 @@ def helper_collects_for(basename: str) -> list[str]:
     src = _read_helper_source(basename)
 
     # Helpers that don't bundle GIS (either they don't use it, or they lazy-import it)
-    # - asset_group_edit: pure pandas table editor, no GIS
     # - geocode_group_edit: lazy-imports geopandas only when loading/saving data
     # - config_edit: config.ini editor only
     # - backup_restore: ZIP backup/restore, no data processing
@@ -397,7 +396,6 @@ def helper_collects_for(basename: str) -> list[str]:
     # Note: PyInstaller may still show warnings like "Datas for pyproj not found" for
     # lazy-import helpers because it scans source code, but no GIS code is actually bundled.
     never_gis = {
-        "asset_group_edit",
         "geocode_group_edit",
         "config_edit",
         "backup_restore",
@@ -617,11 +615,10 @@ def main() -> None:
     if BUILD_HELPERS:
         log("Building helper tools (onefile, per-tool dependency profiles)...")
         helpers = [
-            "asset_group_edit",
+            "asset_manage",
             "atlas_manage",
             "backup_restore",
             "tiles_create_raster",
-            "data_import",
             "report_generate",
             "analysis_setup",
             "analysis_present",

@@ -424,7 +424,7 @@ def update_stats(_unused_gpkg_path):
             status_label.grid(row=0, column=0, padx=5, pady=5)
             message_label = ttk.Label(info_labelframe,
                                       text="To initiate the system please import assets.\n"
-                                           "Press the Import button.",
+                                       "Press the Assets button.",
                                       wraplength=380, justify="left")
             message_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
             create_link_icon(info_labelframe, "https://github.com/ragnvald/mesa/wiki", 0, 2, 5, 5)
@@ -495,7 +495,7 @@ def get_status(geoparquet_dir):
         else:
             parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
         detail = "; ".join([p for p in parts if p]) or "Incomplete setup."
-        return "-", f"You need to set up the calculation. \nPress the 'Set up'-button to proceed. ({detail})"
+        return "-", f"You need to set up the calculation. \nPress the 'Assets'-button to proceed. ({detail})"
 
     def append_status(symbol, message, link):
         status_list.append({'Status': symbol, 'Message': message, 'Link': link})
@@ -505,13 +505,13 @@ def get_status(geoparquet_dir):
         has_asset_group_rows = asset_group_count is not None and asset_group_count > 0
         append_status("+" if has_asset_group_rows else "-",
                       f"Asset layers imported: {asset_group_count}" if has_asset_group_rows else
-                      "Assets are missing.\nUse 'Set up' to register asset groups.",
+                      "Assets are missing.\nUse 'Assets' to import and register asset groups.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
 
         geocode_group_count = read_table_and_count('tbl_geocode_group')
         append_status("+" if geocode_group_count is not None else "/",
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else
-                      "Geocodes are missing.\nImport assets by pressing the Import button.",
+                      "Geocodes are missing.\nImport assets by pressing the Assets button.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
 
         lines_original_count = read_table_and_count('tbl_lines_original')
@@ -743,8 +743,8 @@ def geocodes_grids():
     else:
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
-def import_assets(gpkg_file):
-    python_script, exe_file = get_script_paths("data_import")
+def open_assets(gpkg_file):
+    python_script, exe_file = get_script_paths("asset_manage")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
@@ -847,14 +847,6 @@ def open_data_analysis_presentation():
         python_exe = sys.executable or "python"
         arg_tokens = ["--original_working_directory", original_working_directory]
         _launch_gui_process([python_exe, python_script, *arg_tokens], "analysis_present script")
-
-def edit_assets():
-    python_script, exe_file = get_script_paths("asset_group_edit")
-    if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
-    else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_geocodes():
     python_script, exe_file = get_script_paths("geocode_group_edit")
@@ -1508,22 +1500,20 @@ if __name__ == "__main__":
 
     workflow_sections = [
         ("Prepare data (step 1)", "Import or create new data and generate supporting geometries.", [
-            ("Area assets", lambda: import_assets(gpkg_file),
-             "Start here to import area asset (wetlands, mangrove forests etc)."),
+            ("Assets", lambda: open_assets(gpkg_file),
+             "Import assets and edit asset groups in one tool."),
             ("Geocodes", geocodes_grids,
              "Create or refresh the hexagon/tile grids that support analysis."),
             ("Line assets", edit_lines,
              "Import and edit line assets (transport, rivers, utilities, etc)."),
-            ("Analysis design", open_data_analysis_setup,
-             "Define analysis groups and study area polygons."),
-        ]),
-        ("Configure processing (step 2)", "Tune processing parameters/study areas before running heavy jobs.", [
-            ("Area parameters", edit_processing_setup,
-             "Adjust weights, thresholds and other processing rules."),
             ("Atlas", make_atlas,
                "Create/import atlas polygons and edit atlas page metadata in one tool."),
-            ("Edit assets", edit_assets,
-             "Add titles to imported layers, plus a short descriptive text."),
+        ]),
+        ("Configure processing (step 2)", "Tune parameters/study areas before running heavy jobs.", [
+            ("Parameters", edit_processing_setup,
+             "Adjust weights, thresholds and other processing rules."),
+            ("Analysis", open_data_analysis_setup,
+             "Define analysis groups and study area polygons."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Process", open_process_all,
@@ -1895,7 +1885,7 @@ if __name__ == "__main__":
 
         seconds: dict[str, float | None] = {}
         times: dict[str, str] = {}
-        seconds["Import assets"] = _scan_last_duration_from_log(
+        seconds["Assets"] = _scan_last_duration_from_log(
             log_path,
             start_markers=["Step [Assets] STARTED"],
             end_markers_primary=["Step [Assets] COMPLETED", "Step [Assets] FAILED"],
@@ -2051,7 +2041,7 @@ if __name__ == "__main__":
         durations["Time to calculate stats on this page"] = _fmt_stats_runtime(_status_calc_runtime.get("seconds"))
         times = _log_duration_cache.get("times", {})
         events = [
-            ("Import assets", _last_asset_import_timestamp(), 'success'),
+            ("Assets", _last_asset_import_timestamp(), 'success'),
             ("Build basic_mosaic", times.get("Build basic_mosaic", "--"), 'info'),
             ("Processing", _last_flat_timestamp(), 'info'),
             ("Line processing", _last_line_processing_timestamp(), 'warning'),
