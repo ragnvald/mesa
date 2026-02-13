@@ -1543,17 +1543,17 @@ if __name__ == "__main__":
             ("Atlas", make_atlas,
                "Create/import atlas polygons and edit atlas page metadata in one tool."),
         ]),
-        ("Configure processing (step 2)", "Tune parameters/study areas before running heavy jobs.", [
+        ("Configure (step 2)", "Tune parameters/study areas before running heavy jobs.", [
             ("Parameters", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
             ("Analysis", open_data_analysis_setup,
              "Define analysis groups and study area polygons."),
         ]),
-        ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
+        ("Process (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Process", open_process_all,
              "Runs area, line, and analysis processing."),
         ]),
-        ("Review & publish (step 4)", "Open the interactive viewers and export the deliverables.", [
+        ("Results (step 4)", "Open the interactive viewers and export the deliverables.", [
             ("Asset map", open_asset_layers_viewer,
              "Inspect layers with AI-assisted styling controls."),
               ("Results map", open_maps_overview,
