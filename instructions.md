@@ -20,6 +20,12 @@ Use this document as the first stop before editing the `mesa` repository. Update
 ## 1.3 Time zone for logs
 - Any timestamps we add to logs, status messages, docs, or build output should be in **Norway local time** (`Europe/Oslo`, i.e. CET/CEST), since the lead programmer is in Norway. He likes things to be convenient for himself.
 
+## 1.4 Overordnet prioritering: kjørbarhet før pakke-sikkerhet
+- **Høyeste prioritet er at løsningen fortsatt kompilerer og kjører stabilt** både som Python (`mesa.py`) og som pakket `.exe`.
+- Ved konflikt mellom sikkerhetsoppdateringer og runtime/build-stabilitet skal vi **prioritere kompatibilitet og kjørbarhet**.
+- Oppgraderinger av avhengigheter skal være konservative: kun endringer som ikke bryter build-kjeden, helper-kall eller exe-runtime skal tas inn som standard.
+- Sårbarheter som krever større versjonshopp eller koordinert økosystemløft (f.eks. flere gjensidig avhengige pakker) håndteres som planlagt backlog, ikke tvangsinnføres i stabilitetsløp.
+
 ## 2. Repository layout (high level)
 | Path | Purpose |
 | --- | --- |
@@ -111,4 +117,4 @@ To minimize startup time, especially for compiled executables, follow these guid
 **Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `code/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
 
 ---
-_Last updated: 2026-02-12 13:05_
+_Last updated: 2026-02-12 19:46_

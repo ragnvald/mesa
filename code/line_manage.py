@@ -613,38 +613,49 @@ class Api:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
-        def import_lines_from_input(self):
-                with self._lock:
-                        try:
-                                lines_original, lines = import_lines_from_folder(
-                                        self._input_folder_lines,
-                                        self._default_epsg,
-                                        self._segment_width,
-                                        self._segment_length,
-                                )
-                                out_dir = gpq_dir(self._base_dir)
-                                os.makedirs(out_dir, exist_ok=True)
-                                try:
-                                        lines_original.to_parquet(os.path.join(out_dir, "tbl_lines_original.parquet"), index=False)
-                                except Exception:
-                                        pass
+    def get_defaults(self):
+        with self._lock:
+            try:
+                return {
+                    "ok": True,
+                    "segment_length": int(self._segment_length),
+                    "segment_width": int(self._segment_width),
+                }
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
-                                lines = _ensure_schema_types(lines)
-                                lines.to_parquet(os.path.join(out_dir, "tbl_lines.parquet"), index=False)
+    def import_lines_from_input(self):
+        with self._lock:
+            try:
+                lines_original, lines = import_lines_from_folder(
+                    self._input_folder_lines,
+                    self._default_epsg,
+                    self._segment_width,
+                    self._segment_length,
+                )
+                out_dir = gpq_dir(self._base_dir)
+                os.makedirs(out_dir, exist_ok=True)
+                try:
+                    lines_original.to_parquet(os.path.join(out_dir, "tbl_lines_original.parquet"), index=False)
+                except Exception:
+                    pass
 
-                                # Reload editor state from the freshly written table
-                                self._pq_path = os.path.join(out_dir, "tbl_lines.parquet")
-                                self._pq_orig_path = os.path.join(out_dir, "tbl_lines_original.parquet")
-                                self._gdf = load_lines_gdf_any(self._pq_path, self._default_epsg)
-                                self._asset_home_bounds = None
-                                return {
-                                        "ok": True,
-                                        "rows": int(len(self._gdf)),
-                                        "input": str(self._input_folder_lines),
-                                        "out": out_dir,
-                                }
-                        except Exception as e:
-                                return {"ok": False, "error": str(e)}
+                lines = _ensure_schema_types(lines)
+                lines.to_parquet(os.path.join(out_dir, "tbl_lines.parquet"), index=False)
+
+                # Reload editor state from the freshly written table
+                self._pq_path = os.path.join(out_dir, "tbl_lines.parquet")
+                self._pq_orig_path = os.path.join(out_dir, "tbl_lines_original.parquet")
+                self._gdf = load_lines_gdf_any(self._pq_path, self._default_epsg)
+                self._asset_home_bounds = None
+                return {
+                    "ok": True,
+                    "rows": int(len(self._gdf)),
+                    "input": str(self._input_folder_lines),
+                    "out": out_dir,
+                }
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
     def update_attribute(self, name_gis: str, field: str, value: Any):
         with self._lock:
@@ -810,7 +821,7 @@ HTML = r"""<!doctype html>
     <div class="row"><label>GIS name</label><input id="f_name_gis" type="text" readonly></div>
     <div class="row"><label>Title</label><input id="f_name_user" type="text" placeholder="Enter a user-friendly title"></div>
     <div class="row"><label>Length of segments (m)</label><input id="f_seg_len" type="number" inputmode="numeric" placeholder="e.g., 500"></div>
-    <div class="row"><label>Segments width (m)</label><input id="f_seg_wid" type="number" inputmode="numeric" placeholder="e.g., 20"></div>
+    <div class="row"><label>Segment width (m)</label><input id="f_seg_wid" type="number" inputmode="numeric" placeholder="e.g., 20"></div>
     <div class="row"><label>Description</label><textarea id="f_desc" placeholder="Short description"></textarea></div>
 
     <div class="form-actions">
@@ -840,11 +851,26 @@ let DRAW_HANDLER = null;
 let DIRTY = false;
 let HIDDEN_LAYERS = {};
 let SHOW_ONLY_CURRENT = false;
+let DEFAULT_SEGMENT_LENGTH = 1000;
+let DEFAULT_SEGMENT_WIDTH = 600;
 
 function showStatus(m, cls){ const el = document.getElementById('status'); el.textContent = m || ''; el.className = cls || ''; }
 function setFootLeft(m){ document.getElementById('foot-left').textContent = m || ''; }
+function setFootRight(m){ document.getElementById('foot-right').textContent = m || ''; }
 function dirtyBadge(show){ document.getElementById('dirtyBadge').style.display = show ? '' : 'none'; }
-function setDirty(v){ DIRTY = !!v; dirtyBadge(DIRTY); }
+function setSaveButtonsEnabled(enabled){
+    document.getElementById('saveBtn').disabled = !enabled;
+    document.getElementById('formSaveBtn').disabled = !enabled;
+    document.getElementById('discardBtn').disabled = !enabled;
+}
+function setDirty(v){ DIRTY = !!v; dirtyBadge(DIRTY); setSaveButtonsEnabled(DIRTY); }
+
+function setFormEnabled(enabled){
+    ['f_name_user','f_seg_len','f_seg_wid','f_desc'].forEach(function(id){
+        const el = document.getElementById(id);
+        if (el) el.disabled = !enabled;
+    });
+}
 
 function fillForm(p){
   document.getElementById('f_name_gis').value = p?.name_gis || '';
@@ -865,7 +891,10 @@ function setSelected(id, fly=false){
   const layer = id ? LAYER_BY_ID[id] : null;
   const props = (layer && layer.feature) ? layer.feature.properties : {};
   fillForm(props||{});
+    setFormEnabled(!!id);
   enableEditButtons(!!id);
+    const title = (props && props.name_user && String(props.name_user).trim().length) ? String(props.name_user).trim() : '';
+    setFootRight(id ? (title ? `${title} — ${id}` : id) : 'No line selected');
   const pickerSel = document.getElementById('pickerSel');
   if (pickerSel && pickerSel.value !== (id||"")) pickerSel.value = (id||"");
   enforceVisibility();
@@ -955,10 +984,10 @@ function initMapOnce(){
       picker.appendChild(opt);
       picker.value = res.record.name_gis;
 
-      document.getElementById('f_seg_len').value = 1000;
-      document.getElementById('f_seg_wid').value = 600;
-      window.pywebview.api.update_attribute(res.record.name_gis, 'segment_length', 1000);
-      window.pywebview.api.update_attribute(res.record.name_gis, 'segment_width', 600);
+    document.getElementById('f_seg_len').value = DEFAULT_SEGMENT_LENGTH;
+    document.getElementById('f_seg_wid').value = DEFAULT_SEGMENT_WIDTH;
+    window.pywebview.api.update_attribute(res.record.name_gis, 'segment_length', DEFAULT_SEGMENT_LENGTH);
+    window.pywebview.api.update_attribute(res.record.name_gis, 'segment_width', DEFAULT_SEGMENT_WIDTH);
       setDirty(true);
 
       enableEditButtons(true);
@@ -1133,6 +1162,14 @@ async function loadAll(){
     if (!st.ok){ showStatus(st.error || 'State failed', 'status-err'); return; }
     updatePicker(st.records || []);
 
+        try{
+            const defaults = await window.pywebview.api.get_defaults();
+            if (defaults && defaults.ok){
+                if (Number.isFinite(Number(defaults.segment_length))) DEFAULT_SEGMENT_LENGTH = Number(defaults.segment_length);
+                if (Number.isFinite(Number(defaults.segment_width))) DEFAULT_SEGMENT_WIDTH = Number(defaults.segment_width);
+            }
+        } catch(e){}
+
     const res = await window.pywebview.api.get_all_lines();
     if (!res.ok){ showStatus(res.error || 'Load failed', 'status-err'); return; }
     const feats = res.geojson && res.geojson.features ? res.geojson.features : [];
@@ -1153,7 +1190,10 @@ async function loadAll(){
 
 function boot(){
   document.getElementById('homeBtn').addEventListener('click', ()=> { if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); });
-  document.getElementById('reloadBtn').addEventListener('click', ()=> { loadAll(); });
+    document.getElementById('reloadBtn').addEventListener('click', ()=> {
+        if (DIRTY && !confirm('You have unsaved changes. Reload anyway and keep staged changes in memory?')) return;
+        loadAll();
+    });
   document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
   document.getElementById('newBtn').addEventListener('click', startNewLine);
   document.getElementById('editBtn').addEventListener('click', toggleSingleEdit);
@@ -1169,6 +1209,7 @@ function boot(){
   });
 
   async function doSave(){
+        if (!DIRTY){ showStatus('No unsaved changes.','status-warn'); return; }
     showStatus('Saving…','status-warn');
     try{
       const res = await window.pywebview.api.commit();
@@ -1197,6 +1238,7 @@ function boot(){
   });
 
   document.getElementById('importBtn').addEventListener('click', async ()=>{
+        if (DIRTY && !confirm('Import replaces current line set. Continue and lose unsaved staged changes?')) return;
     showStatus('Importing lines…','status-warn');
     try{
       const res = await window.pywebview.api.import_lines_from_input();
@@ -1213,6 +1255,9 @@ function boot(){
   bindAuto('f_seg_len','segment_length');
   bindAuto('f_seg_wid','segment_width');
   bindAuto('f_desc','description');
+    setFormEnabled(false);
+    setSaveButtonsEnabled(false);
+    setFootRight('No line selected');
 
     document.addEventListener('keydown', function(e){
         // Don’t trigger map/edit shortcuts while typing in form fields.
@@ -1221,7 +1266,12 @@ function boot(){
         const tag = (t && t.tagName) ? t.tagName.toLowerCase() : '';
         const inFormField = (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable));
 
-        if ((e.ctrlKey || e.metaKey || e.altKey)) return;
+        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')){
+            e.preventDefault();
+            doSave();
+            return;
+        }
+        if (e.altKey) return;
         if (inFormField && e.key !== 'Escape') return;
 
         if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
