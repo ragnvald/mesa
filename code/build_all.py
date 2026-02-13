@@ -504,7 +504,15 @@ def build_main() -> None:
 
     entry_point = resolve_main_script()
 
-    args = FLAGS_MAIN + [
+    # Embedded helper modules launched in-process from mesa when frozen.
+    # Bundle them into the main app so separate helper exes are not required.
+    hidden_imports = [
+        "--hidden-import", "backup_restore",
+        "--hidden-import", "config_edit",
+        "--hidden-import", "processing_setup",
+    ]
+
+    args = FLAGS_MAIN + hidden_imports + [
         "--name", APP_NAME,
         "--distpath", str(FINAL_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{APP_NAME}_build"),
@@ -617,18 +625,15 @@ def main() -> None:
         helpers = [
             "asset_manage",
             "atlas_manage",
-            "backup_restore",
             "tiles_create_raster",
             "report_generate",
             "analysis_setup",
             "analysis_present",
-            "config_edit",
             "geocode_group_edit",
             "geocode_create",
             "line_manage",
             "asset_map_view",
             "map_overview",
-            "processing_setup",
             "processing_pipeline_run",
         ]
 

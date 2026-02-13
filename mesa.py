@@ -1,6 +1,7 @@
 import os
 import locale
 import warnings
+import runpy
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -731,6 +732,16 @@ def get_script_paths(file_name: str):
     return python_script, exe_file
 
 
+def _run_bundled_module_as_main(module_name: str, arg_tokens: list[str]) -> None:
+    """Execute a bundled helper module as __main__ within the current process."""
+    argv_prev = list(sys.argv)
+    try:
+        sys.argv = [module_name, *arg_tokens]
+        runpy.run_module(module_name, run_name="__main__")
+    finally:
+        sys.argv = argv_prev
+
+
 # ---------------------------------------------------------------------
 # Button handlers (now pass args as separate tokens; always set cwd/env)
 # ---------------------------------------------------------------------
@@ -775,6 +786,12 @@ def edit_processing_setup():
     log_to_logfile(f"Processing setup executable path: {exe_file}")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
+        # Prefer in-process launch so processing_setup does not need a separate helper exe.
+        try:
+            _run_bundled_module_as_main("processing_setup", arg_tokens)
+            return
+        except Exception as exc:
+            log_to_logfile(f"In-process processing_setup launch failed: {exc}")
         run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess(
@@ -876,7 +893,13 @@ def edit_main_config():
     python_script, exe_file = get_script_paths("config_edit")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
+        # Prefer in-process launch so config_edit does not need a separate helper exe.
+        try:
+            _run_bundled_module_as_main("config_edit", arg_tokens)
+            return
+        except Exception as exc:
+            log_to_logfile(f"In-process config_edit launch failed: {exc}")
+        log_to_logfile(f"Falling back to bundled exe: {exe_file}")
         run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
         run_subprocess(
@@ -886,13 +909,24 @@ def edit_main_config():
         )
 
 def backup_restore_data():
-    python_script, exe_file = get_script_paths("backup_restore")
     arg_tokens = ["--original_working_directory", original_working_directory]
+
     if getattr(sys, "frozen", False):
+        # Prefer in-process launch so backup_restore does not need a separate helper exe.
+        try:
+            _run_bundled_module_as_main("backup_restore", arg_tokens)
+            return
+        except Exception as exc:
+            log_to_logfile(f"In-process backup_restore launch failed: {exc}")
+
+        # Backward-compatible fallback for older distributions that still carry helper exe.
+        _python_script, exe_file = get_script_paths("backup_restore")
         _launch_gui_process([exe_file, *arg_tokens], "backup_restore exe")
-    else:
-        python_exe = sys.executable or "python"
-        _launch_gui_process([python_exe, python_script, *arg_tokens], "backup_restore script")
+        return
+
+    python_script, exe_file = get_script_paths("backup_restore")
+    python_exe = sys.executable or "python"
+    _launch_gui_process([python_exe, python_script, *arg_tokens], "backup_restore script")
 
 # ---------------------------------------------------------------------
 # Host capability snapshot (written once to output/geoparquet)
