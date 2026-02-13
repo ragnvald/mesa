@@ -3242,21 +3242,15 @@ def _start_log_tailer(root_obj: tk.Misc,
     append new lines to the GUI log widget. This restores live log updates
     when the heavy processing runs in a separate process.
     """
-    # Candidate log files: root/log.txt (new) and code/log.txt (legacy)
+    # Candidate log file: root/log.txt
     try:
         root_log = (log_path if isinstance(log_path, Path) else None) or (base_dir() / "log.txt")
     except Exception:
         root_log = None
-    try:
-        code_log = base_dir() / "code" / "log.txt"
-    except Exception:
-        code_log = None
 
     candidates: list[Path] = []
     if root_log is not None:
         candidates.append(root_log)
-    if code_log is not None and code_log != root_log:
-        candidates.append(code_log)
 
     if not candidates:
         return

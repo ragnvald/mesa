@@ -1459,7 +1459,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
     _tail_state: dict[str, int] = {}
 
     def _start_log_tailer(interval_ms: int = 750) -> None:
-        candidates = [base_dir / "log.txt", base_dir / "code" / "log.txt"]
+        candidates = [base_dir / "log.txt"]
 
         def _tail_once() -> None:
             try:

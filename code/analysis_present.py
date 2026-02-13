@@ -92,12 +92,7 @@ def debug_log(base_dir: Path, message: str) -> None:
     """Append a timestamped message to log.txt for diagnostics."""
     try:
         ts = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        target = base_dir / "log.txt"
-        if not target.exists():
-            alt = base_dir / "code" / "log.txt"
-            if alt.exists():
-                target = alt
-        path = target.resolve()
+        path = (base_dir / "log.txt").resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"[{ts}] [analysis_present] {message}\n")

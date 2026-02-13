@@ -105,6 +105,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = base_dir()
 os.chdir(APP_DIR)
 
+PROJECT_ROOT = APP_DIR.parent if APP_DIR.name.lower() == "code" else APP_DIR
+
 CONFIG_FILE = APP_DIR / "config.ini"
 FALLBACK_CONFIG_FILE: Optional[Path] = None
 if APP_DIR.name.lower() == "code":
@@ -116,7 +118,7 @@ PARQUET_DIR = OUTPUT_DIR / "geoparquet"
 ASSET_OBJECT_FILE = PARQUET_DIR / "tbl_asset_object.parquet"
 ASSET_GROUP_FILE = PARQUET_DIR / "tbl_asset_group.parquet"
 ASSET_HIERARCHY_FILE = PARQUET_DIR / "tbl_asset_hierarchy.parquet"
-LOG_FILE = SCRIPT_DIR / "log.txt"
+LOG_FILE = PROJECT_ROOT / "log.txt"
 STYLE_QUERY_FILE = SCRIPT_DIR / "style_query.txt"
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
