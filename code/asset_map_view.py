@@ -14,6 +14,8 @@ import locale
 import os
 import random
 import sys
+import atexit
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -119,7 +121,8 @@ ASSET_OBJECT_FILE = PARQUET_DIR / "tbl_asset_object.parquet"
 ASSET_GROUP_FILE = PARQUET_DIR / "tbl_asset_group.parquet"
 ASSET_HIERARCHY_FILE = PARQUET_DIR / "tbl_asset_hierarchy.parquet"
 LOG_FILE = PROJECT_ROOT / "log.txt"
-STYLE_QUERY_FILE = SCRIPT_DIR / "style_query.txt"
+LEGACY_STYLE_QUERY_FILE = SCRIPT_DIR / "style_query.txt"
+STYLE_QUERY_FILE: Optional[Path] = None
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
@@ -342,6 +345,31 @@ def log_event(message: str) -> None:
 log_event(f"asset_map_view.py starting (APP_DIR={APP_DIR})")
 
 
+def _cleanup_style_query_file() -> None:
+  global STYLE_QUERY_FILE
+  path = STYLE_QUERY_FILE
+  STYLE_QUERY_FILE = None
+  if path is None:
+    return
+  try:
+    if path.exists():
+      path.unlink()
+  except Exception:
+    pass
+
+
+def _remove_legacy_style_query_file() -> None:
+  try:
+    if LEGACY_STYLE_QUERY_FILE.exists():
+      LEGACY_STYLE_QUERY_FILE.unlink()
+  except Exception:
+    pass
+
+
+_remove_legacy_style_query_file()
+atexit.register(_cleanup_style_query_file)
+
+
 def read_config(path: Path) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser(inline_comment_prefixes=(";",), strict=False)
     try:
@@ -561,9 +589,20 @@ def _build_style_prompt(layers: List[Dict[str, str]]) -> str:
 
 
 def _write_style_query(prompt: str) -> None:
+  global STYLE_QUERY_FILE
+  _cleanup_style_query_file()
   try:
-    STYLE_QUERY_FILE.write_text(prompt, encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+      mode="w",
+      encoding="utf-8",
+      suffix=".txt",
+      prefix="mesa_style_query_",
+      delete=False,
+    ) as handle:
+      handle.write(prompt)
+      STYLE_QUERY_FILE = Path(handle.name)
   except Exception as exc:
+    STYLE_QUERY_FILE = None
     log_event(f"Failed to write style query file: {exc}")
 
 
@@ -971,7 +1010,7 @@ class Api:
             "home_bounds": HOME_BOUNDS,
             "colors": COLOR_MAP,
             "hierarchy": ASSET_HIERARCHY,
-            "style_query_file": str(STYLE_QUERY_FILE),
+        "style_query_file": str(STYLE_QUERY_FILE) if STYLE_QUERY_FILE else None,
         }
 
     def get_asset_layer(self, group_id: str | int | None = None) -> Dict[str, Any]:
@@ -986,6 +1025,7 @@ class Api:
         return {"ok": True, "geojson": data}
 
     def exit_app(self) -> None:
+      _cleanup_style_query_file()
         try:
             webview.destroy_window()
         except Exception:
@@ -1080,7 +1120,7 @@ class Api:
       return {
         "ok": True,
         "styles": updates,
-        "prompt_file": str(STYLE_QUERY_FILE),
+        "prompt_file": str(STYLE_QUERY_FILE) if STYLE_QUERY_FILE else None,
         "raw": response_text,
         "fallback_groups": missing,
         "mode": "openai",
@@ -2179,12 +2219,14 @@ function handleCreateAiStyles(){
     const count = Object.keys(res.styles || {}).length;
     const fallback = Array.isArray(res.fallback_groups) ? res.fallback_groups.length : 0;
     const mode = (res && res.mode) ? String(res.mode) : 'openai';
-    const promptPath = STYLE_QUERY_PATH || 'style_query.txt';
+    const promptPath = STYLE_QUERY_PATH || '';
     let message = `Updated ${count} layer(s).`;
     if (mode === 'random'){
       message += ' Generated local random styles (no OpenAI key).';
     } else {
-      message += ` Prompt saved to ${promptPath}.`;
+      if (promptPath){
+        message += ` Prompt saved to temporary file ${promptPath}.`;
+      }
       if (fallback){
         message += ` (${fallback} layer(s) used default styling.)`;
       }
