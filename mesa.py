@@ -795,12 +795,13 @@ def open_process_all():
         _launch_gui_process([python_exe, python_script, *arg_tokens], "processing_pipeline_run script")
 
 def make_atlas():
-    python_script, exe_file = get_script_paths("atlas_create")
+    python_script, exe_file = get_script_paths("atlas_manage")
+    arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
+        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
     else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
+        run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def open_maps_overview():
     python_script, exe_file = get_script_paths("map_overview")
@@ -891,14 +892,6 @@ def edit_main_config():
             [exe_file, *arg_tokens],
             gpkg_file
         )
-
-def edit_atlas():
-    python_script, exe_file = get_script_paths("atlas_edit")
-    if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess_async([exe_file], [], gpkg_file)
-    else:
-        run_subprocess_async([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def backup_restore_data():
     python_script, exe_file = get_script_paths("backup_restore")
@@ -1514,7 +1507,7 @@ if __name__ == "__main__":
     ACTION_COLUMNS = 1
 
     workflow_sections = [
-        ("Prepare data (step 1)", "Import new data and generate supporting geometries.", [
+        ("Prepare data (step 1)", "Import or create new data and generate supporting geometries.", [
             ("Area assets", lambda: import_assets(gpkg_file),
              "Start here to import area asset (wetlands, mangrove forests etc)."),
             ("Geocodes", geocodes_grids,
@@ -1528,11 +1521,9 @@ if __name__ == "__main__":
             ("Area parameters", edit_processing_setup,
              "Adjust weights, thresholds and other processing rules."),
             ("Atlas", make_atlas,
-             "Generate atlas polygons used in the QGIS atlas and the report engine."),
+               "Create/import atlas polygons and edit atlas page metadata in one tool."),
             ("Edit assets", edit_assets,
              "Add titles to imported layers, plus a short descriptive text."),
-            ("Edit atlas", edit_atlas,
-             "Edit atlas tile titles/metadata after creating/importing atlas tiles."),
         ]),
         ("Run processing (step 3)", "Execute the automated steps that build fresh outputs.", [
             ("Process", open_process_all,

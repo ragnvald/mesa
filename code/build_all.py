@@ -618,8 +618,7 @@ def main() -> None:
         log("Building helper tools (onefile, per-tool dependency profiles)...")
         helpers = [
             "asset_group_edit",
-            "atlas_create",
-            "atlas_edit",
+            "atlas_manage",
             "backup_restore",
             "tiles_create_raster",
             "data_import",
