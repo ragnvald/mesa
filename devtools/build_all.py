@@ -20,8 +20,9 @@ def fail(msg: str, code: int = 1) -> None:
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-CODE_DIR = Path(__file__).resolve().parent           # ...\mesa\code
-PROJECT_ROOT = CODE_DIR.parent                       # ...\mesa
+DEVTOOLS_DIR = Path(__file__).resolve().parent       # ...\mesa\devtools
+PROJECT_ROOT = DEVTOOLS_DIR.parent                   # ...\mesa
+CODE_DIR = PROJECT_ROOT / "code"                     # ...\mesa\code
 PARENT_DIR = PROJECT_ROOT.parent                     # ...\wingide
 
 BUILD_FOLDER_ROOT = PARENT_DIR / "build"
@@ -389,14 +390,14 @@ def helper_collects_for(basename: str) -> list[str]:
     src = _read_helper_source(basename)
 
     # Helpers that don't bundle GIS (either they don't use it, or they lazy-import it)
-    # - geocode_group_edit: lazy-imports geopandas only when loading/saving data
+    # - geocode_manage: UI-focused helper with lightweight startup and selective GIS usage
     # - config_edit: config.ini editor only
     # - backup_restore: ZIP backup/restore, no data processing
     #
     # Note: PyInstaller may still show warnings like "Datas for pyproj not found" for
     # lazy-import helpers because it scans source code, but no GIS code is actually bundled.
     never_gis = {
-        "geocode_group_edit",
+        "geocode_manage",
         "config_edit",
         "backup_restore",
     }
@@ -604,7 +605,11 @@ def copy_resources() -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    if not CODE_DIR.is_dir():
+        fail(f"Expected code directory at: {CODE_DIR}")
+
     log("\n==============================\n  Building MESA\n==============================\n")
+    log(f"DEVTOOLS_DIR  = {DEVTOOLS_DIR}")
     log(f"CODE_DIR      = {CODE_DIR}")
     log(f"PROJECT_ROOT  = {PROJECT_ROOT}")
     log(f"PARENT_DIR    = {PARENT_DIR}")
@@ -629,8 +634,7 @@ def main() -> None:
             "report_generate",
             "analysis_setup",
             "analysis_present",
-            "geocode_group_edit",
-            "geocode_create",
+            "geocode_manage",
             "line_manage",
             "asset_map_view",
             "map_overview",

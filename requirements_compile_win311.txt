@@ -1,5 +1,5 @@
 # Minimal-ish MESA dev+compile environment for Windows + Python 3.11
-# Focus: run scripts + build executables via PyInstaller (build_all.py / compile_win_11.bat)
+# Focus: run scripts + build executables via PyInstaller (devtools/build_all.py / devtools/compile_win_11.bat)
 # If you need every optional tool/package, use requirements_all_win311.txt instead.
 
 # Build toolchain
