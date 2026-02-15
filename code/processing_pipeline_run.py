@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -266,6 +267,32 @@ def _run_subprocess_streaming(
         return 2
 
 
+def _start_progress_pulse(
+    progress_fn: Callable[[float], None],
+    *,
+    start: float,
+    cap: float,
+    step: float = 1.0,
+    interval_s: float = 0.8,
+) -> tuple[threading.Event, threading.Thread]:
+    """Emit small monotone progress jumps while a long step is running."""
+    stop_event = threading.Event()
+    state = {"value": max(0.0, float(start))}
+    progress_fn(state["value"])
+
+    def _worker() -> None:
+        while not stop_event.wait(max(0.2, float(interval_s))):
+            nxt = min(float(cap), state["value"] + max(0.2, float(step)))
+            if nxt <= state["value"]:
+                continue
+            state["value"] = nxt
+            progress_fn(state["value"])
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return stop_event, t
+
+
 def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
     """Find tiles_create_raster (returns path, is_executable)."""
     frozen = bool(getattr(sys, "frozen", False))
@@ -341,6 +368,7 @@ def run_tiles_process(
 ) -> None:
     """Run the raster tiles (MBTiles) helper."""
     progress_fn(0.0)
+    progress_fn(5.0)
     _log_line(base_dir, log_fn, "TILES PROCESS START")
 
     runner_path, is_exe = _find_tiles_runner(base_dir)
@@ -365,10 +393,25 @@ def run_tiles_process(
     env["PYTHONUTF8"] = "1"
     env["MESA_BASE_DIR"] = str(base_dir)
 
-    code = _run_subprocess_streaming(base_dir, log_fn, args, env=env, line_prefix="[tiles]")
-    if code != 0:
-        raise RuntimeError(f"Raster tiles failed (exit={code})")
+    stop_pulse, pulse_thread = _start_progress_pulse(
+        progress_fn,
+        start=10.0,
+        cap=92.0,
+        step=1.8,
+        interval_s=0.7,
+    )
+    try:
+        code = _run_subprocess_streaming(base_dir, log_fn, args, env=env, line_prefix="[tiles]")
+        if code != 0:
+            raise RuntimeError(f"Raster tiles failed (exit={code})")
+    finally:
+        stop_pulse.set()
+        try:
+            pulse_thread.join(timeout=0.2)
+        except Exception:
+            pass
 
+    progress_fn(97.0)
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "TILES PROCESS COMPLETED")
 
@@ -392,18 +435,34 @@ def run_data_process(
     """
 
     progress_fn(0.0)
+    progress_fn(5.0)
     _log_line(base_dir, log_fn, "DATA PROCESS START")
 
     try:
+        progress_fn(12.0)
         # Import on-demand so the main UI stays light until the user actually
         # runs the Area step.
         import processing_internal as dpi
+        progress_fn(18.0)
 
+        stop_pulse, pulse_thread = _start_progress_pulse(
+            progress_fn,
+            start=22.0,
+            cap=93.0,
+            step=1.2,
+            interval_s=0.8,
+        )
         dpi.run_headless(str(base_dir), explode_flat_multipolygons=bool(explode_flat_multipolygons))
+        stop_pulse.set()
+        try:
+            pulse_thread.join(timeout=0.2)
+        except Exception:
+            pass
     except Exception as exc:
         _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
         raise
 
+    progress_fn(97.0)
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "DATA PROCESS COMPLETED")
 
@@ -901,13 +960,21 @@ def run_lines_process(
 
     _log_line(base_dir, log_fn, "LINES PROCESS START (Parquet)")
     progress_fn(1.0)
+    progress_fn(8.0)
     process_and_buffer_lines()
+    progress_fn(22.0)
     progress_fn(35.0)
+    progress_fn(52.0)
     create_segments_from_buffered_lines()
+    progress_fn(64.0)
     progress_fn(70.0)
+    progress_fn(78.0)
     build_stacked_data()
+    progress_fn(82.0)
     progress_fn(85.0)
+    progress_fn(94.0)
     build_flat_data()
+    progress_fn(98.0)
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "LINES PROCESS COMPLETED")
 
@@ -1291,57 +1358,83 @@ def run_selected(
     had_errors = False
     _log_line(base_dir, log_fn, "[Process] STARTED")
 
-    # Allocate progress evenly across selected processes.
-    slice_size = 100.0 / float(len(active))
+    # Weighted progress allocation (normalized across selected processes).
+    # This provides more realistic overall movement than fixed 25% blocks.
+    weights: dict[str, float] = {
+        "data": 4.0,
+        "tiles": 1.0,
+        "lines": 2.5,
+        "analysis": 2.5,
+    }
 
-    def make_slice_progress(offset: float) -> Callable[[float], None]:
+    total_weight = sum(weights.get(name, 1.0) for name in active)
+    if total_weight <= 0:
+        total_weight = float(len(active))
+
+    ranges: dict[str, tuple[float, float]] = {}
+    cursor = 0.0
+    for name in ["data", "tiles", "lines", "analysis"]:
+        if name not in active:
+            continue
+        w = max(0.0, float(weights.get(name, 1.0)))
+        span = (w / total_weight) * 100.0
+        start = cursor
+        end = min(100.0, start + span)
+        ranges[name] = (start, end)
+        cursor = end
+
+    def make_slice_progress(start: float, end: float) -> Callable[[float], None]:
+        span = max(0.0, float(end) - float(start))
+
         def _slice(p: float) -> None:
             p = max(0.0, min(100.0, float(p)))
-            progress_fn(min(100.0, offset + (p / 100.0) * slice_size))
+            progress_fn(min(100.0, float(start) + (p / 100.0) * span))
 
         return _slice
 
-    current_offset = 0.0
-
     if plan.run_data:
         try:
+            s, e = ranges.get("data", (0.0, 100.0))
+            _log_line(base_dir, log_fn, f"[Process] Progress range data: {s:.1f}% -> {e:.1f}%")
             run_data_process(
                 base_dir,
                 log_fn,
-                make_slice_progress(current_offset),
+                make_slice_progress(s, e),
                 explode_flat_multipolygons=bool(plan.explode_flat_multipolygons),
             )
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
             had_errors = True
-        current_offset += slice_size
 
     if plan.run_tiles:
         try:
+            s, e = ranges.get("tiles", (0.0, 100.0))
+            _log_line(base_dir, log_fn, f"[Process] Progress range tiles: {s:.1f}% -> {e:.1f}%")
             gpq = parquet_dir(base_dir, cfg)
             if not _exists_any([gpq / "tbl_flat.parquet"]):
                 raise FileNotFoundError("tbl_flat.parquet is missing; run data processing first")
-            run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
+            run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: raster tiles failed: {exc}")
             had_errors = True
-        current_offset += slice_size
 
     if plan.run_lines:
         try:
-            run_lines_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
+            s, e = ranges.get("lines", (0.0, 100.0))
+            _log_line(base_dir, log_fn, f"[Process] Progress range lines: {s:.1f}% -> {e:.1f}%")
+            run_lines_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: lines processing failed: {exc}")
             had_errors = True
-        current_offset += slice_size
 
     if plan.run_analysis:
         try:
-            run_analysis_process(base_dir, cfg, log_fn, make_slice_progress(current_offset))
+            s, e = ranges.get("analysis", (0.0, 100.0))
+            _log_line(base_dir, log_fn, f"[Process] Progress range analysis: {s:.1f}% -> {e:.1f}%")
+            run_analysis_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: analysis processing failed: {exc}")
             had_errors = True
-        current_offset += slice_size
 
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "[Process] FAILED" if had_errors else "[Process] COMPLETED")
