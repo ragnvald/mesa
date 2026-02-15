@@ -29,7 +29,7 @@ Use this document as the first stop before editing the `mesa` repository. Update
 ## 2. Repository layout (high level)
 | Path | Purpose |
 | --- | --- |
-| `mesa.py` | Tk/ttkbootstrap desktop that orchestrates all helper scripts and exposes Workflows/Status/Settings/About tabs. |
+| `mesa.py` | Tk/ttkbootstrap desktop that orchestrates all helper scripts and exposes Workflows/Status/Config/Manage MESA data/About tabs. |
 | `code/` | Individual command-line utilities (imports, processing, atlas tools, etc.). Each should run standalone, via `mesa.py`, and when compiled. |
 | `input/` | Expected user-provided data (`asset`, `geocode`, `lines`, etc.). Never ship sample data here. |
 | `output/` | Runtime products (GeoParquet, MBTiles, PDF reports, logs). Preserve structure when adding new exporters. |
@@ -47,7 +47,7 @@ Use this document as the first stop before editing the `mesa` repository. Update
 - **Header band**: intro text plus Exit button lives at the top. Text should clearly direct users to start in Workflows and monitor Status.
 - **Aspect ratio**: the main window enforces 5:3 with sensible minimums; honor that logic when resizing or adding views.
 - **Responsive layout**: Workflows grid supports 1–2 columns; sections like “Prepare data” and “Review & publish” display their actions in two sub-columns. Do nott hardcode pixel-perfect positions that would break this responsiveness.
-- **Tab order**: Workflows (default) → Status → Settings → About. The Register tab is retired; keep UUID handling headless.
+- **Tab order**: Workflows (default) → Status → Config → Manage MESA data → About. The Register tab is retired; keep UUID handling headless.
 - **Buttons**: prefer verb-first labels (“Import data”, “Run area processing”). Pair each button with a concise helper line.
 - **Styling**: stay within the current ttkbootstrap theme; introduce new bootstyles only if they harmonize with the palette.
 
@@ -79,7 +79,7 @@ To minimize startup time, especially for compiled executables, follow these guid
 - **Current lazy-import examples**:
   - `mesa.py`: geopandas lazy-loaded in `_total_area_km2_from_asset_objects()` and `_total_length_km_from_lines()`
   - `geocode_group_edit.py`: geopandas lazy-loaded in `load_spatial_data()` and `atomic_write_geoparquet()`
-- **build_all.py awareness**: The build script detects top-level imports to decide what to bundle. Helpers in the `never_gis` set (`asset_group_edit`, `geocode_group_edit`, `config_edit`, `backup_restore`) won't bundle GIS even if used internally.
+- **build_all.py awareness**: The build script detects top-level imports to decide what to bundle. Helpers in the `never_gis` set (`asset_group_edit`, `geocode_group_edit`) won't bundle GIS even if used internally.
 
 ## 7. Testing expectations
 - After UI changes, run `python mesa.py` and manually verify: window sizing, tab ordering, button commands, Status counters.
@@ -120,4 +120,4 @@ To minimize startup time, especially for compiled executables, follow these guid
 Troughout the work you will learn new things. Make notes of this in learning.md
 When you meet a problem make sure you look for a solution in learning.md in case this is something you already have local knowledge about.
 ---
-_Last updated: 2026-02-15 18:03_
+_Last updated: 2026-02-15 18:12_

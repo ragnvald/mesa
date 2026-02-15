@@ -73,6 +73,7 @@ except Exception:
         pass
 
 import tkinter as tk
+from tkinter import filedialog, messagebox
 from pathlib import Path
 import subprocess
 import webbrowser
@@ -91,6 +92,7 @@ import time
 import struct
 import ctypes
 import re
+import zipfile
 
 try:
     from zoneinfo import ZoneInfo
@@ -881,44 +883,148 @@ def edit_lines():
         )
 
 
-def edit_main_config():
-    python_script, exe_file = get_script_paths("config_edit")
-    arg_tokens = ["--original_working_directory", original_working_directory]
-    if getattr(sys, "frozen", False):
-        # Prefer in-process launch so config_edit does not need a separate helper exe.
-        try:
-            _run_bundled_module_as_main("config_edit", arg_tokens)
-            return
-        except Exception as exc:
-            log_to_logfile(f"In-process config_edit launch failed: {exc}")
-        log_to_logfile(f"Falling back to bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
-    else:
-        run_subprocess(
-            [sys.executable or "python", python_script, *arg_tokens],
-            [exe_file, *arg_tokens],
-            gpkg_file
-        )
+def _iter_backup_files(root: Path):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for fn in filenames:
+            yield Path(dirpath) / fn
 
-def backup_restore_data():
-    arg_tokens = ["--original_working_directory", original_working_directory]
 
-    if getattr(sys, "frozen", False):
-        # Prefer in-process launch so backup_restore does not need a separate helper exe.
-        try:
-            _run_bundled_module_as_main("backup_restore", arg_tokens)
-            return
-        except Exception as exc:
-            log_to_logfile(f"In-process backup_restore launch failed: {exc}")
+def _safe_zip_member_names(names: list[str]) -> list[str]:
+    safe: list[str] = []
+    for member in names:
+        name = str(member or "").replace("\\", "/")
+        if not name or name.startswith("/"):
+            continue
+        parts = [p for p in name.split("/") if p]
+        if any(p == ".." for p in parts):
+            continue
+        safe.append("/".join(parts))
+    return safe
 
-        # Backward-compatible fallback for older distributions that still carry helper exe.
-        _python_script, exe_file = get_script_paths("backup_restore")
-        _launch_gui_process([exe_file, *arg_tokens], "backup_restore exe")
+
+def create_backup_archive(base_dir: str, destination_folder: str) -> str:
+    base = Path(base_dir)
+    dest = Path(destination_folder)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    zip_path = dest / f"mesa_backup_{ts}.zip"
+
+    config_path = base / "config.ini"
+    input_dir = base / "input"
+    output_dir = base / "output"
+
+    files_to_add: list[tuple[Path, str]] = []
+    if config_path.is_file():
+        files_to_add.append((config_path, "config.ini"))
+
+    for folder in (input_dir, output_dir):
+        if folder.is_dir():
+            for file_path in _iter_backup_files(folder):
+                if file_path.is_file():
+                    arc = file_path.relative_to(base).as_posix()
+                    files_to_add.append((file_path, arc))
+
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for file_path, arcname in files_to_add:
+            zf.write(file_path, arcname=arcname)
+
+    log_to_logfile(f"Created backup archive: {zip_path}")
+    return str(zip_path)
+
+
+def restore_backup_archive(base_dir: str, zip_path: str) -> None:
+    base = Path(base_dir)
+    zip_file = Path(zip_path)
+    if not zip_file.is_file():
+        raise FileNotFoundError(zip_path)
+
+    with zipfile.ZipFile(zip_file, mode="r") as zf:
+        safe_members = _safe_zip_member_names(zf.namelist())
+        to_extract = [
+            m for m in safe_members
+            if m == "config.ini" or m.startswith("input/") or m.startswith("output/")
+        ]
+
+        for folder_name in ("input", "output"):
+            folder = base / folder_name
+            if folder.exists() and folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+        cfg = base / "config.ini"
+        if cfg.exists() and cfg.is_file():
+            try:
+                cfg.unlink()
+            except Exception:
+                pass
+
+        for member in to_extract:
+            target = (base / Path(member)).resolve()
+            base_resolved = base.resolve()
+            if target != base_resolved and base_resolved not in target.parents:
+                raise ValueError(f"Unsafe ZIP member: {member}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member, "r") as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+    check_and_create_folders()
+    log_to_logfile(f"Restored backup archive: {zip_file}")
+
+
+def clear_output_data():
+    output_dir = os.path.join(original_working_directory, "output")
+
+    if not os.path.isdir(output_dir):
+        messagebox.showinfo("Clear output", f"Output folder does not exist:\n{output_dir}")
         return
 
-    python_script, exe_file = get_script_paths("backup_restore")
-    python_exe = sys.executable or "python"
-    _launch_gui_process([python_exe, python_script, *arg_tokens], "backup_restore script")
+    confirm = messagebox.askyesno(
+        "Confirm clear output",
+        "This will permanently delete imported and processed data from output/.\n\n"
+        "GitHub-related files (for example .gitignore/.gitkeep) are kept.\n\n"
+        "Do you want to continue?",
+        icon="warning",
+    )
+    if not confirm:
+        return
+
+    def _keep_github_related(name: str) -> bool:
+        lname = (name or "").strip().lower()
+        return lname.startswith(".git") or lname == ".github"
+
+    removed = 0
+    kept: list[str] = []
+    failed: list[str] = []
+
+    for name in os.listdir(output_dir):
+        path = os.path.join(output_dir, name)
+        if _keep_github_related(name):
+            kept.append(name)
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            removed += 1
+        except Exception as exc:
+            failed.append(f"{name}: {exc}")
+
+    log_to_logfile(f"Clear output executed. removed={removed}, kept={len(kept)}, failed={len(failed)}")
+    if failed:
+        details = "\n".join(failed[:6])
+        if len(failed) > 6:
+            details += f"\n... and {len(failed) - 6} more"
+        messagebox.showwarning(
+            "Clear output completed with issues",
+            f"Removed entries: {removed}\nKept GitHub-related entries: {len(kept)}\nFailed: {len(failed)}\n\n{details}",
+        )
+        return
+
+    messagebox.showinfo(
+        "Clear output completed",
+        f"Removed entries: {removed}\nKept GitHub-related entries: {len(kept)}",
+    )
 
 # ---------------------------------------------------------------------
 # Host capability snapshot (written once to output/geoparquet)
@@ -2346,49 +2452,189 @@ if __name__ == "__main__":
         pass
 
     # ------------------------------------------------------------------
-    # Settings tab
+    # Config tab
     # ------------------------------------------------------------------
-    settings_tab = ttk.Frame(notebook)
-    notebook.add(settings_tab, text="Settings")
+    config_tab = ttk.Frame(notebook)
+    notebook.add(config_tab, text="Config")
 
-    settings_container = ttk.Frame(settings_tab, padding=12)
-    settings_container.pack(fill="both", expand=True)
+    config_container = ttk.Frame(config_tab, padding=12)
+    config_container.pack(fill="both", expand=True)
 
-    mesa_text2 = (
-        "Some of the objects you already have imported or created might need some further adjustments.\n"
-        "You may do this by reading up on the below suggestions."
-    )
     ttk.Label(
-        settings_container,
-        text=mesa_text2,
-        wraplength=660,
-        justify="left"
+        config_container,
+        text="Edit config.ini directly. Save validates INI format before writing.",
+        wraplength=760,
+        justify="left",
+    ).pack(anchor="w", pady=(0, 8))
+
+    config_path = os.path.join(PROJECT_BASE, "config.ini")
+    config_status_var = tk.StringVar(value=f"Config file: {config_path}")
+    ttk.Label(config_container, textvariable=config_status_var, bootstyle="secondary").pack(anchor="w", pady=(0, 6))
+
+    config_editor_frame = ttk.Frame(config_container)
+    config_editor_frame.pack(fill="both", expand=True)
+    config_editor_frame.columnconfigure(0, weight=1)
+    config_editor_frame.rowconfigure(0, weight=1)
+
+    config_text = tk.Text(config_editor_frame, wrap="none", undo=True)
+    config_text.grid(row=0, column=0, sticky="nsew")
+    config_scroll_y = ttk.Scrollbar(config_editor_frame, orient="vertical", command=config_text.yview)
+    config_scroll_x = ttk.Scrollbar(config_editor_frame, orient="horizontal", command=config_text.xview)
+    config_text.configure(yscrollcommand=config_scroll_y.set, xscrollcommand=config_scroll_x.set)
+    config_scroll_y.grid(row=0, column=1, sticky="ns")
+    config_scroll_x.grid(row=1, column=0, sticky="ew")
+
+    def _load_config_editor_text():
+        if not os.path.exists(config_path):
+            config_text.delete("1.0", tk.END)
+            config_status_var.set(f"Config not found: {config_path}")
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            with open(config_path, "r", encoding="latin-1") as f:
+                content = f.read()
+        config_text.delete("1.0", tk.END)
+        config_text.insert(tk.END, content)
+        config_status_var.set(f"Loaded: {config_path}")
+
+    def _save_config_editor_text():
+        content = config_text.get("1.0", tk.END)
+        parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), strict=False)
+        try:
+            parser.read_string(content)
+        except Exception as exc:
+            messagebox.showerror("Invalid config", f"Config validation failed:\n{exc}")
+            return
+
+        tmp_path = config_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+                f.write(content)
+            os.replace(tmp_path, config_path)
+            config_status_var.set("Saved config.ini")
+            log_to_logfile("Config saved from Config tab")
+        except Exception as exc:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            messagebox.showerror("Save failed", f"Could not save config.ini:\n{exc}")
+
+    config_actions = ttk.Frame(config_container)
+    config_actions.pack(fill="x", pady=(8, 0))
+    ttk.Button(config_actions, text="Reload", command=_load_config_editor_text).pack(side="right", padx=(0, 6))
+    ttk.Button(config_actions, text="Save", command=_save_config_editor_text, bootstyle="success").pack(side="right")
+
+    _load_config_editor_text()
+
+    # ------------------------------------------------------------------
+    # Manage MESA data tab
+    # ------------------------------------------------------------------
+    manage_tab = ttk.Frame(notebook)
+    notebook.add(manage_tab, text="Manage MESA data")
+
+    manage_container = ttk.Frame(manage_tab, padding=12)
+    manage_container.pack(fill="both", expand=True)
+
+    ttk.Label(
+        manage_container,
+        text=(
+            "Create and restore project backups, and clear generated output data.\n"
+            "Restore replaces current input/, output/, and config.ini."
+        ),
+        wraplength=760,
+        justify="left",
     ).pack(anchor="w", pady=(0, 10))
 
-    settings_grid = ttk.Frame(settings_container, padding=(10, 10))
-    settings_grid.pack(fill="both", expand=True)
-    settings_grid.columnconfigure(1, weight=1)
+    manage_status_var = tk.StringVar(value="")
+    ttk.Label(manage_container, textvariable=manage_status_var, bootstyle="secondary").pack(anchor="w", pady=(0, 6))
 
-    settings_actions = [
-        ("Edit config", edit_main_config,
-         "Open the config.ini editor to review or adjust global settings."),
-           ("Backup / restore", backup_restore_data,
-            "Create a ZIP backup of input/, output/ and config.ini, or restore from a previous backup."),
+    def _create_backup_clicked():
+        dest = filedialog.askdirectory(
+            title="Choose backup destination folder",
+            initialdir=original_working_directory,
+        )
+        if not dest:
+            return
+        try:
+            zip_path = create_backup_archive(original_working_directory, dest)
+            manage_status_var.set(f"Backup created: {zip_path}")
+            messagebox.showinfo("Backup created", f"Backup ZIP created:\n{zip_path}")
+        except Exception as exc:
+            messagebox.showerror("Backup failed", f"Could not create backup:\n{exc}")
+
+    def _restore_backup_clicked():
+        zip_path = filedialog.askopenfilename(
+            title="Select backup ZIP",
+            initialdir=original_working_directory,
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+        )
+        if not zip_path:
+            return
+
+        ok = messagebox.askyesno(
+            "Confirm restore",
+            "Restoring backup will delete and replace current input/, output/, and config.ini.\n\n"
+            "Do you want to continue?",
+            icon="warning",
+        )
+        if not ok:
+            return
+
+        try:
+            restore_backup_archive(original_working_directory, zip_path)
+            manage_status_var.set(f"Backup restored: {zip_path}")
+            messagebox.showinfo("Restore completed", "Backup restore completed successfully.")
+            try:
+                update_stats(gpkg_file)
+                update_insight_boxes()
+                update_timeline()
+            except Exception:
+                pass
+        except Exception as exc:
+            messagebox.showerror("Restore failed", f"Could not restore backup:\n{exc}")
+
+    manage_grid = ttk.Frame(manage_container)
+    manage_grid.pack(fill="both", expand=True)
+    manage_grid.columnconfigure(1, weight=1)
+
+    manage_actions = [
+        (
+            "Create backup",
+            _create_backup_clicked,
+            "Create a ZIP backup containing config.ini, input/, and output/.",
+            "primary",
+        ),
+        (
+            "Restore backup",
+            _restore_backup_clicked,
+            "Restore from backup ZIP and replace current config.ini, input/, and output/.",
+            "warning",
+        ),
+        (
+            "Clear output",
+            clear_output_data,
+            "Delete imported/processed data in output/ while keeping GitHub-related files.",
+            "danger",
+        ),
     ]
 
-    for row, (label, command, description) in enumerate(settings_actions):
+    for row, (label, command, description, bootstyle) in enumerate(manage_actions):
         ttk.Button(
-            settings_grid,
+            manage_grid,
             text=label,
             command=command,
-            bootstyle="primary",
-            width=18
+            bootstyle=bootstyle,
+            width=18,
         ).grid(row=row, column=0, padx=5, pady=4, sticky="ew")
         ttk.Label(
-            settings_grid,
+            manage_grid,
             text=description,
-            wraplength=500,
-            justify="left"
+            wraplength=560,
+            justify="left",
         ).grid(row=row, column=1, padx=5, pady=4, sticky="w")
 
     # ------------------------------------------------------------------

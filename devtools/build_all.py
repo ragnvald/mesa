@@ -391,15 +391,11 @@ def helper_collects_for(basename: str) -> list[str]:
 
     # Helpers that don't bundle GIS (either they don't use it, or they lazy-import it)
     # - geocode_manage: UI-focused helper with lightweight startup and selective GIS usage
-    # - config_edit: config.ini editor only
-    # - backup_restore: ZIP backup/restore, no data processing
     #
     # Note: PyInstaller may still show warnings like "Datas for pyproj not found" for
     # lazy-import helpers because it scans source code, but no GIS code is actually bundled.
     never_gis = {
         "geocode_manage",
-        "config_edit",
-        "backup_restore",
     }
     uses_gis = (
         basename not in never_gis
@@ -508,8 +504,6 @@ def build_main() -> None:
     # Embedded helper modules launched in-process from mesa when frozen.
     # Bundle them into the main app so separate helper exes are not required.
     hidden_imports = [
-        "--hidden-import", "backup_restore",
-        "--hidden-import", "config_edit",
         "--hidden-import", "processing_setup",
     ]
 
