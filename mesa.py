@@ -746,7 +746,7 @@ def _run_bundled_module_as_main(module_name: str, arg_tokens: list[str]) -> None
 # Button handlers (now pass args as separate tokens; always set cwd/env)
 # ---------------------------------------------------------------------
 def geocodes_grids():
-    python_script, exe_file = get_script_paths("geocode_create")
+    python_script, exe_file = get_script_paths("geocode_manage")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
         log_to_logfile(f"Running bundled exe: {exe_file}")
@@ -864,14 +864,6 @@ def open_data_analysis_presentation():
         python_exe = sys.executable or "python"
         arg_tokens = ["--original_working_directory", original_working_directory]
         _launch_gui_process([python_exe, python_script, *arg_tokens], "analysis_present script")
-
-def edit_geocodes():
-    python_script, exe_file = get_script_paths("geocode_group_edit")
-    if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file], [], gpkg_file)
-    else:
-        run_subprocess([sys.executable or "python", python_script], [exe_file], gpkg_file)
 
 def edit_lines():
     python_script, exe_file = get_script_paths("line_manage")
@@ -2382,8 +2374,6 @@ if __name__ == "__main__":
          "Open the config.ini editor to review or adjust global settings."),
            ("Backup / restore", backup_restore_data,
             "Create a ZIP backup of input/, output/ and config.ini, or restore from a previous backup."),
-        ("Edit geocodes", edit_geocodes,
-         "Geocodes can be grid cells, hexagons or other polygons. Add titles to them here for easier reference later."),
     ]
 
     for row, (label, command, description) in enumerate(settings_actions):
