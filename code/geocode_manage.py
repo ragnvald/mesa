@@ -50,6 +50,7 @@ import datetime
 import locale
 import os
 import sys
+import threading
 import time
 import shutil
 import multiprocessing as mp
@@ -336,7 +337,11 @@ AVG_HEX_AREA_KM2 = {
 # GUI globals + heartbeat
 # -----------------------------------------------------------------------------
 root: Optional[tk.Tk] = None
-log_widget: Optional[scrolledtext.ScrolledText] = None
+log_widget: Optional[tk.Widget] = None
+log_widgets: list[tk.Widget] = []
+mosaic_log_widget: Optional[tk.Widget] = None
+mosaic_log_from_file_mode: bool = False
+log_main_thread_id: Optional[int] = None
 progress_var: Optional[tk.DoubleVar] = None
 progress_label: Optional[tk.Label] = None
 original_working_directory: Optional[str] = None
@@ -400,8 +405,8 @@ def _has_config_at(root: Path) -> bool:
 def find_base_dir(cli_workdir: str | None = None) -> Path:
     """Choose a canonical project base folder that contains config.ini.
     Priority order:
-      1) env MESA_BASE_DIR (honored immediately when valid)
-      2) --original_working_directory (CLI)
+            1) --original_working_directory (CLI)
+            2) env MESA_BASE_DIR (honored immediately when valid in frozen mode)
       3) running binary/interpreter folder (and parents)
       4) this script's folder and parents (covers PyInstaller _MEIPASS)
       5) CWD, CWD/code, and their parents
@@ -413,16 +418,16 @@ def find_base_dir(cli_workdir: str | None = None) -> Path:
             resolved = Path(path_like)
         return resolved if _has_config_at(resolved) else None
 
-    env_base = os.environ.get("MESA_BASE_DIR")
-    if env_base:
-        env_hit = _maybe_return(env_base)
-        if env_hit:
-            return env_hit
-
     if cli_workdir:
         cli_hit = _maybe_return(cli_workdir)
         if cli_hit:
             return cli_hit
+
+    env_base = os.environ.get("MESA_BASE_DIR")
+    if env_base and getattr(sys, "frozen", False):
+        env_hit = _maybe_return(env_base)
+        if env_hit:
+            return env_hit
 
     candidates: list[Path] = []
     if env_base:
@@ -606,15 +611,65 @@ def update_progress(new_value: float):
     except Exception:
         pass
 
-def log_to_gui(message: str, level: str = "INFO"):
-    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    formatted = f"{timestamp} [{level}] - {message}"
+
+def _append_formatted_to_log_targets(formatted: str) -> None:
+    targets: list[tk.Widget] = []
     if log_widget is not None:
+        targets = [log_widget]
+    elif mosaic_log_widget is not None and not mosaic_log_from_file_mode:
+        targets = [mosaic_log_widget]
+    elif log_widgets:
+        targets = [log_widgets[0]]
+    for target in targets:
         try:
-            log_widget.insert(tk.END, formatted + "\n")
-            log_widget.see(tk.END)
+            if isinstance(target, ttk.Treeview):
+                iid = target.insert("", tk.END, values=(formatted,))
+                target.see(iid)
+                children = target.get_children()
+                if len(children) > 2500:
+                    for old_iid in children[:500]:
+                        target.delete(old_iid)
+                continue
+            try:
+                target.configure(state="normal")
+            except Exception:
+                pass
+            target.insert(tk.END, formatted + "\n")
+            target.see(tk.END)
+            try:
+                target.update_idletasks()
+            except Exception:
+                pass
         except Exception:
             pass
+
+
+def _tail_text_file(path: Path, max_lines: int = 20) -> list[str]:
+    try:
+        if max_lines <= 0 or not path.exists() or not path.is_file():
+            return []
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        return [ln.rstrip("\r\n") for ln in lines[-max_lines:]]
+    except Exception:
+        return []
+
+def log_to_gui(message: str, level: str = "INFO"):
+    global log_widgets, log_main_thread_id
+    timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    formatted = f"{timestamp} [{level}] - {message}"
+
+    if root is not None and log_main_thread_id is not None:
+        if threading.get_ident() == log_main_thread_id:
+            _append_formatted_to_log_targets(formatted)
+        else:
+            try:
+                root.after(0, lambda f=formatted: _append_formatted_to_log_targets(f))
+            except Exception:
+                pass
+    else:
+        _append_formatted_to_log_targets(formatted)
+
     if original_working_directory:
         try:
             with open(Path(original_working_directory) / "log.txt", "a", encoding="utf-8") as f:
@@ -2229,24 +2284,32 @@ def _merge_and_write_geocodes(base_dir: Path,
     new_groups_gdf = new_groups_gdf.copy()
     new_groups_gdf["id"] = list(range(start_id, start_id + len(new_groups_gdf)))
 
+    def _series_or_default(df: pd.DataFrame, col: str, default: str = "") -> pd.Series:
+        if col in df.columns:
+            try:
+                return df[col]
+            except Exception:
+                pass
+        return pd.Series([default] * len(df), index=df.index, dtype="object")
+
     if "geocode_origin" not in existing_g.columns:
-        existing_g["geocode_origin"] = existing_g.get("name_gis_geocodegroup", "").apply(
+        existing_g["geocode_origin"] = _series_or_default(existing_g, "name_gis_geocodegroup", "").apply(
             lambda v: _normalize_geocode_origin("", v)
         )
     else:
         existing_g["geocode_origin"] = [
             _normalize_geocode_origin(o, n)
-            for o, n in zip(existing_g["geocode_origin"], existing_g.get("name_gis_geocodegroup", ""))
+            for o, n in zip(existing_g["geocode_origin"], _series_or_default(existing_g, "name_gis_geocodegroup", ""))
         ]
 
     if "geocode_origin" not in new_groups_gdf.columns:
-        new_groups_gdf["geocode_origin"] = new_groups_gdf.get("name_gis_geocodegroup", "").apply(
+        new_groups_gdf["geocode_origin"] = _series_or_default(new_groups_gdf, "name_gis_geocodegroup", "").apply(
             lambda v: _normalize_geocode_origin("", v)
         )
     else:
         new_groups_gdf["geocode_origin"] = [
             _normalize_geocode_origin(o, n)
-            for o, n in zip(new_groups_gdf["geocode_origin"], new_groups_gdf.get("name_gis_geocodegroup", ""))
+            for o, n in zip(new_groups_gdf["geocode_origin"], _series_or_default(new_groups_gdf, "name_gis_geocodegroup", ""))
         ]
 
     name_to_id = dict(zip(new_groups_gdf["name_gis_geocodegroup"], new_groups_gdf["id"]))
@@ -3000,7 +3063,7 @@ def format_level_size_list(levels: list[int]) -> str:
 # GUI
 # -----------------------------------------------------------------------------
 def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
-    global root, log_widget, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var
+    global root, log_widget, mosaic_log_widget, mosaic_log_from_file_mode, log_main_thread_id, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var
     original_working_directory = str(base)
 
     try:
@@ -3011,6 +3074,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
     theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if ttk else None
     root = ttk.Window(themename=theme) if ttk else tk.Tk()
+    log_main_thread_id = threading.get_ident()
     root.title("Geocode manage (Mosaic / H3 / Import / Edit)")
 
     notebook = ttk.Notebook(root) if ttk else None
@@ -3018,14 +3082,14 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
         messagebox.showerror("Missing UI dependency", "ttkbootstrap is required for geocode_manage GUI.")
         root.destroy()
         return
-    notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
     tab_mosaic = ttk.Frame(notebook)
     tab_h3 = ttk.Frame(notebook)
     tab_import = ttk.Frame(notebook)
     tab_edit = ttk.Frame(notebook)
     notebook.add(tab_mosaic, text="Basic mosaic")
-    notebook.add(tab_h3, text="H3 geocodes")
+    notebook.add(tab_h3, text="H3 codes")
     notebook.add(tab_import, text="Import geocodes")
     notebook.add(tab_edit, text="Edit geocodes")
 
@@ -3045,13 +3109,58 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     except Exception:
         pass
 
-    mosaic_log = scrolledtext.ScrolledText(tab_mosaic, height=12)
-    h3_log = scrolledtext.ScrolledText(tab_h3, height=12)
-    import_log = scrolledtext.ScrolledText(tab_import, height=10)
+    mosaic_log = None
+    h3_log = None
+    import_log = None
+    # Mosaic tab log uses a Treeview list for robust rendering across themes.
+
+    global log_widgets
+    log_widgets = []
+    mosaic_log_widget = mosaic_log
+    mosaic_log_from_file_mode = True
 
     def _set_log_target(widget):
         global log_widget
         log_widget = widget
+
+    def _bind_treeview_copy(tv) -> None:
+        def _copy_selected(_event=None):
+            try:
+                selected = tv.selection()
+                if not selected:
+                    return "break"
+                lines: list[str] = []
+                for iid in selected:
+                    vals = tv.item(iid, "values")
+                    if not vals:
+                        continue
+                    lines.append(" | ".join(str(v) for v in vals))
+                text = "\n".join(lines).strip()
+                if not text:
+                    return "break"
+                root.clipboard_clear()
+                root.clipboard_append(text)
+                return "break"
+            except Exception:
+                return "break"
+
+        try:
+            tv.bind("<Control-c>", _copy_selected)
+            tv.bind("<Control-C>", _copy_selected)
+        except Exception:
+            pass
+
+    def _sync_log_target_with_tab(_event=None):
+        try:
+            selected = notebook.select()
+        except Exception:
+            selected = ""
+        if selected == str(tab_h3):
+            _set_log_target(h3_log)
+        elif selected == str(tab_import):
+            _set_log_target(import_log)
+        else:
+            _set_log_target(None)
 
     # ---------------- Tab 1: Mosaic ----------------
     ttk.Label(tab_mosaic, text="Create/update the basic mosaic geocode group.").pack(anchor="w", padx=8, pady=(8, 4))
@@ -3073,7 +3182,23 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
             pass
 
     def _run_mosaic_inline():
-        _set_log_target(mosaic_log)
+        _set_log_target(None)
+        _clear_mosaic_log_view()
+        try:
+            _append_mosaic_line("--- Mosaic run started ---")
+        except Exception:
+            pass
+        try:
+            lp = Path(original_working_directory or str(base)) / "log.txt"
+            if lp.exists():
+                _mosaic_tail_state["offset"] = int(lp.stat().st_size)
+            else:
+                _mosaic_tail_state["offset"] = 0
+        except Exception:
+            _mosaic_tail_state["offset"] = 0
+        _mosaic_tail_state["carry"] = ""
+        _mosaic_tail_state["active"] = True
+        log_to_gui("[Mosaic] Build requested.", "INFO")
         try:
             buf = float(cfg["DEFAULT"].get("mosaic_buffer_m", "25"))
         except Exception:
@@ -3088,6 +3213,10 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
             def _ui():
                 _update_mosaic_status()
                 mosaic_status_var.set("Completed" if success else "No faces")
+                log_to_gui(
+                    f"[Mosaic] Build finished with status: {'Completed' if success else 'No faces'}.",
+                    "INFO",
+                )
             try:
                 root.after(100, _ui)
             except Exception:
@@ -3101,7 +3230,18 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
     lf_mosaic_log = ttk.LabelFrame(tab_mosaic, text="Log", bootstyle="info")
     lf_mosaic_log.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    mosaic_log.pack(in_=lf_mosaic_log, fill=tk.BOTH, expand=True)
+    mosaic_log_frame = ttk.Frame(lf_mosaic_log)
+    mosaic_log_frame.pack(fill=tk.BOTH, expand=True)
+    mosaic_log_frame.columnconfigure(0, weight=1)
+    mosaic_log_frame.rowconfigure(0, weight=1)
+    mosaic_log = ttk.Treeview(mosaic_log_frame, columns=("line",), show="headings", height=3)
+    mosaic_log.heading("line", text="Mosaic log")
+    mosaic_log.column("line", anchor="w", stretch=True, width=880)
+    mosaic_log.grid(in_=mosaic_log_frame, row=0, column=0, sticky="nsew")
+    mosaic_scroll = ttk.Scrollbar(mosaic_log_frame, orient="vertical", command=mosaic_log.yview)
+    mosaic_scroll.grid(row=0, column=1, sticky="ns")
+    mosaic_log.configure(yscrollcommand=mosaic_scroll.set)
+    _bind_treeview_copy(mosaic_log)
 
     # ---------------- Tab 2: H3 ----------------
     ttk.Label(tab_h3, text="Generate H3 geocodes from existing asset/geocode coverage.").pack(anchor="w", padx=8, pady=(8, 4))
@@ -3131,6 +3271,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
     def _suggest_levels():
         _set_log_target(h3_log)
+        log_to_gui("[H3] Suggest requested.", "INFO")
         try:
             min_m = float(min_var.get())
             max_m = float(max_var.get())
@@ -3149,6 +3290,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
             if not levels:
                 log_to_gui("No suggested levels to generate.", "WARN")
                 return
+            log_to_gui(f"[H3] Generate requested for levels: {levels}", "INFO")
             _run_in_thread(write_h3_levels, base, levels, clear_existing=bool(clear_h3_var.get()))
 
         gen_btn.configure(command=_generate_size_based, state=("normal" if levels else "disabled"))
@@ -3168,7 +3310,18 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
     lf_h3_log = ttk.LabelFrame(tab_h3, text="Log", bootstyle="info")
     lf_h3_log.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    h3_log.pack(in_=lf_h3_log, fill=tk.BOTH, expand=True)
+    h3_log_frame = ttk.Frame(lf_h3_log)
+    h3_log_frame.pack(fill=tk.BOTH, expand=True)
+    h3_log_frame.columnconfigure(0, weight=1)
+    h3_log_frame.rowconfigure(0, weight=1)
+    h3_log = ttk.Treeview(h3_log_frame, columns=("line",), show="headings", height=4)
+    h3_log.heading("line", text="H3 log")
+    h3_log.column("line", anchor="w", stretch=True, width=860)
+    h3_log.grid(in_=h3_log_frame, row=0, column=0, sticky="nsew")
+    h3_scroll = ttk.Scrollbar(h3_log_frame, orient="vertical", command=h3_log.yview)
+    h3_scroll.grid(row=0, column=1, sticky="ns")
+    h3_log.configure(yscrollcommand=h3_scroll.set)
+    _bind_treeview_copy(h3_log)
 
     # ---------------- Tab 3: Import geocodes ----------------
     ttk.Label(tab_import, text="Import geocode datasets and manage existing geocode groups.").pack(anchor="w", padx=8, pady=(8, 4))
@@ -3178,7 +3331,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     ttk.Label(import_actions, text="Import geocode datasets from input folder into GeoParquet tables.").pack(side=tk.LEFT, padx=8, pady=6)
 
     group_frame = ttk.LabelFrame(tab_import, text="Geocode groups", bootstyle="secondary")
-    group_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+    group_frame.pack(fill=tk.X, expand=False, padx=8, pady=(0, 6))
     group_frame.columnconfigure(0, weight=1)
     group_frame.rowconfigure(0, weight=1)
 
@@ -3187,7 +3340,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
         columns=("id", "gis", "name", "origin", "title", "objects"),
         show="headings",
         selectmode="extended",
-        height=10,
+        height=4,
     )
     group_tree.heading("id", text="ID")
     group_tree.heading("gis", text="GIS group")
@@ -3256,16 +3409,9 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     ttk.Label(tab_edit, textvariable=edit_info_var, bootstyle="secondary").pack(fill=tk.X, padx=8, pady=(0, 6))
 
     def _load_geocode_group_df():
-        import geopandas as gpd
-
         cols = ["id", "name", "name_gis_geocodegroup", "geocode_origin", "title_user", "description", "geometry"]
-        if not Path(read_path).exists():
-            log_to_gui(f"Geocode group file not found: {read_path}", "WARN")
-            return gpd.GeoDataFrame(columns=cols, geometry="geometry", crs="EPSG:4326")
         try:
-            gdf = gpd.read_parquet(read_path)
-            if gdf.crs is None:
-                gdf.set_crs("EPSG:4326", inplace=True)
+            gdf, _ = _load_existing_geocodes(base)
             for c in cols:
                 if c not in gdf.columns:
                     gdf[c] = ""
@@ -3324,6 +3470,8 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
         import_status_var.set(f"Groups: {len(existing_g)} | Total objects: {len(existing_o)}")
 
     def _delete_selected_groups():
+        _set_log_target(import_log)
+        log_to_gui("[Import] Delete selected requested.", "INFO")
         selected = group_tree.selection()
         if not selected:
             messagebox.showinfo("Delete geocodes", "Select one or more geocode groups to delete.")
@@ -3370,11 +3518,13 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
         _set_log_target(import_log)
         _clear_geocode_groups(base, names_imported)
+        log_to_gui(f"[Import] Deleted imported groups: {', '.join(names_imported)}", "INFO")
         _refresh_group_list()
         _refresh_edit_data()
 
     def _run_import_and_refresh():
         _set_log_target(import_log)
+        log_to_gui("[Import] Import requested.", "INFO")
 
         def _job():
             run_import_geocodes(base, cfg)
@@ -3466,7 +3616,8 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
         edit_idx = min(edit_idx, max((len(geocode_df) if geocode_df is not None else 0) - 1, 0))
         _load_record()
         total = len(geocode_df) if geocode_df is not None else 0
-        edit_info_var.set(f"Geocode group file: {read_path} | rows: {total}")
+        actual_path = _existing_parquet_path(base, "tbl_geocode_group") or write_path
+        edit_info_var.set(f"Geocode group file: {actual_path} | rows: {total}")
 
     def _delete_current_group():
         nonlocal geocode_df, edit_idx
@@ -3497,7 +3648,20 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
     import_log_frame = ttk.LabelFrame(tab_import, text="Log", bootstyle="info")
     import_log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    import_log.pack(in_=import_log_frame, fill=tk.BOTH, expand=True)
+    import_log_inner = ttk.Frame(import_log_frame)
+    import_log_inner.pack(fill=tk.BOTH, expand=True)
+    import_log_inner.columnconfigure(0, weight=1)
+    import_log_inner.rowconfigure(0, weight=1)
+    import_log = ttk.Treeview(import_log_inner, columns=("line",), show="headings", height=3)
+    import_log.heading("line", text="Import log")
+    import_log.column("line", anchor="w", stretch=True, width=860)
+    import_log.grid(in_=import_log_inner, row=0, column=0, sticky="nsew")
+    import_scroll = ttk.Scrollbar(import_log_inner, orient="vertical", command=import_log.yview)
+    import_scroll.grid(row=0, column=1, sticky="ns")
+    import_log.configure(yscrollcommand=import_scroll.set)
+    _bind_treeview_copy(import_log)
+
+    log_widgets = [h3_log, import_log]
 
     edit_actions = ttk.Frame(tab_edit)
     edit_actions.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -3514,15 +3678,120 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
 
     # ---------------- Shared footer ----------------
     footer = ttk.Frame(root)
-    footer.pack(fill=tk.X, padx=10, pady=(0, 8))
-    progress_var = tk.DoubleVar()
-    pbar = ttk.Progressbar(footer, orient="horizontal", length=260, mode="determinate", variable=progress_var, bootstyle="info")
-    pbar.pack(side=tk.LEFT, padx=(0, 8))
-    progress_label = ttk.Label(footer, text="0%")
-    progress_label.pack(side=tk.LEFT)
+    footer.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 8))
     ttk.Button(footer, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.RIGHT)
 
-    _set_log_target(mosaic_log)
+    progress_var = tk.DoubleVar()
+    pbar = ttk.Progressbar(footer, orient="horizontal", mode="determinate", variable=progress_var, bootstyle="info")
+    pbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+    progress_label = ttk.Label(footer, text="0%")
+    progress_label.place(in_=pbar, relx=0.5, rely=0.5, anchor="center")
+
+    try:
+        root.resizable(True, True)
+    except Exception:
+        pass
+
+    try:
+        notebook.bind("<<NotebookTabChanged>>", _sync_log_target_with_tab)
+    except Exception:
+        pass
+    _sync_log_target_with_tab()
+
+    startup_line = f"{datetime.datetime.now().strftime('%Y.%m.%d %H:%M:%S')} [INFO] - Log window initialized."
+    for _lw in (h3_log, import_log):
+        try:
+            if isinstance(_lw, ttk.Treeview):
+                iid = _lw.insert("", tk.END, values=(startup_line,))
+                _lw.see(iid)
+            else:
+                _lw.insert(tk.END, startup_line + "\n")
+                _lw.see(tk.END)
+        except Exception:
+            pass
+    try:
+        mosaic_log.insert("", tk.END, values=(startup_line,))
+    except Exception:
+        pass
+
+    _mosaic_tail_state: dict[str, object] = {
+        "offset": 0,
+        "carry": "",
+        "active": False,
+    }
+
+    def _clear_mosaic_log_view() -> None:
+        try:
+            for iid in mosaic_log.get_children():
+                mosaic_log.delete(iid)
+        except Exception:
+            pass
+
+    def _append_mosaic_line(line: str) -> None:
+        try:
+            iid = mosaic_log.insert("", tk.END, values=(line,))
+            mosaic_log.see(iid)
+            children = mosaic_log.get_children()
+            if len(children) > 2500:
+                for old_iid in children[:500]:
+                    mosaic_log.delete(old_iid)
+        except Exception:
+            pass
+
+    def _refresh_mosaic_log_from_file() -> None:
+        try:
+            if root is None or not root.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            if not bool(_mosaic_tail_state.get("active", False)):
+                try:
+                    lp = Path(original_working_directory or str(base)) / "log.txt"
+                    if lp.exists():
+                        _mosaic_tail_state["offset"] = int(lp.stat().st_size)
+                except Exception:
+                    pass
+            else:
+                lp = Path(original_working_directory or str(base)) / "log.txt"
+                if lp.exists() and lp.is_file():
+                    start_offset = int(_mosaic_tail_state.get("offset", 0) or 0)
+                    carry = str(_mosaic_tail_state.get("carry", "") or "")
+                    with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(max(0, start_offset))
+                        chunk = f.read()
+                        _mosaic_tail_state["offset"] = int(f.tell())
+
+                    if chunk:
+                        text = carry + chunk
+                        lines = text.splitlines()
+                        if text and not text.endswith(("\n", "\r")):
+                            _mosaic_tail_state["carry"] = lines.pop() if lines else text
+                        else:
+                            _mosaic_tail_state["carry"] = ""
+
+                        for ln in lines:
+                            _append_mosaic_line(ln)
+                            if "Step [Mosaic] COMPLETED" in ln or "Step [Mosaic] FAILED" in ln:
+                                _mosaic_tail_state["active"] = False
+        except Exception:
+            pass
+
+        try:
+            root.after(350, _refresh_mosaic_log_from_file)
+        except Exception:
+            pass
+
+    try:
+        root.after(350, _refresh_mosaic_log_from_file)
+    except Exception:
+        pass
+
+    # NOTE: Keep mosaic log as direct in-memory stream from log_to_gui.
+    # This mirrors previous working behavior and avoids file-tail overwrite races.
+
     log_to_gui(f"Base dir: {base}")
     log_to_gui(f"GeoParquet out: {gpq_dir(base)}")
     log_to_gui("Geocode manage ready (Basic mosaic / H3 geocodes / Import geocodes / Edit geocodes).")

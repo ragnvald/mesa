@@ -110,14 +110,17 @@ except Exception:
 # Project/base resolution (works in dev and when frozen)
 # ---------------------------------------------------------------------
 def _get_project_base() -> str:
-    # 1) External override
-    env_dir = os.environ.get("MESA_BASE_DIR")
-    if env_dir:
-        return os.path.abspath(env_dir)
+    # 1) In frozen builds, allow external override first.
+    #    In developer/source runs we intentionally ignore MESA_BASE_DIR so
+    #    outputs stay relative to this local repository.
+    if getattr(sys, "frozen", False):
+        env_dir = os.environ.get("MESA_BASE_DIR")
+        if env_dir:
+            return os.path.abspath(env_dir)
     # 2) Compiled exe folder
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
-    # 3) Folder containing this mesa.py
+    # 3) Folder containing this mesa.py (developer/source run)
     return os.path.dirname(os.path.abspath(__file__))
 
 PROJECT_BASE = _get_project_base()

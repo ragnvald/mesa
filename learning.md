@@ -117,3 +117,29 @@ When a problem is solved, add a short entry here with:
 - Root cause
 - Practical fix
 - Any changed canonical path/command
+
+## Mosaic log rendering lesson (2026-02-15)
+
+- What failed:
+  - Basic mosaic log pane in `geocode_manage.py` stayed visually empty even while `log.txt` showed correct live progress.
+- Root cause:
+  - GUI-side rendering/dispatch proved unreliable on some Windows/theme/thread combinations, while file logging stayed reliable.
+- Practical fix:
+  - Use a dedicated UI-thread tail loop that reads only new bytes from `log.txt` after pressing **Build mosaic**.
+  - Track file offset at run start and append only current-run lines until `Step [Mosaic] COMPLETED|FAILED`.
+- Why this helps:
+  - Decouples user-visible progress from worker-thread widget updates and avoids stale full-log noise.
+
+## Mosaic tab rendering result (final, 2026-02-15)
+
+- What was observed:
+  - `log.txt` and a popup log window both showed live Mosaic output, while the Mosaic tab log area stayed blank.
+- Confirmed diagnosis:
+  - Logging pipeline was healthy; issue was specific to tab-embedded text widget rendering in this layout/theme combination.
+- Final stable solution:
+  - Keep Mosaic log source as `log.txt` tail from run-start offset.
+  - Render Mosaic tab log lines in a `ttk.Treeview` list (not Text/ScrolledText/Listbox in this pane).
+  - Keep normal text log panes for `H3 codes` and `Import geocodes`.
+  - Remove log pane from `Edit geocodes` to reduce UI complexity/noise.
+- Practical rule for future UI work:
+  - If logs write correctly to file but tab text area appears empty, verify with a temporary popup; if popup works and tab fails, switch the tab log renderer to a simpler non-text widget (`Treeview`) rather than changing backend logging again.
