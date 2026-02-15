@@ -595,6 +595,14 @@ def copy_resources() -> None:
 
     # NOTE: Intentionally do NOT copy secrets/ into distributions.
 
+
+def ensure_devtools_not_in_dist() -> None:
+    """Safety guard: never ship devtools in distribution output."""
+    devtools_in_dist = FINAL_DIST / "devtools"
+    if devtools_in_dist.exists():
+        log(f"[WARN] Removing unexpected 'devtools/' from dist: {devtools_in_dist}")
+        shutil.rmtree(devtools_in_dist, ignore_errors=True)
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -668,6 +676,7 @@ def main() -> None:
 
     log("Copying runtime resources next to the app...")
     copy_resources()
+    ensure_devtools_not_in_dist()
 
     exe_path = FINAL_DIST / f"{APP_NAME}.exe"
     if BUILD_MAIN:
