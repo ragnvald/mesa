@@ -18,6 +18,10 @@ SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+KEYEVENTF_KEYUP = 0x0002
+VK_CONTROL = 0x11
+VK_TAB = 0x09
+VK_SHIFT = 0x10
 
 user32 = ctypes.windll.user32
 
@@ -34,8 +38,6 @@ TARGET_SCRIPT_NAMES = {
     "analysis_setup.py",
     "analysis_present.py",
     "line_manage.py",
-    "config_edit.py",
-    "backup_restore.py",
 }
 
 
@@ -216,6 +218,24 @@ def click_client(hwnd: int, x: int, y: int) -> None:
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
+def _press_vk(vk_code: int, key_up: bool = False) -> None:
+    flags = KEYEVENTF_KEYUP if key_up else 0
+    user32.keybd_event(vk_code, 0, flags, 0)
+
+
+def send_ctrl_tab(reverse: bool = False) -> None:
+    _press_vk(VK_CONTROL, key_up=False)
+    if reverse:
+        _press_vk(VK_SHIFT, key_up=False)
+    time.sleep(0.02)
+    _press_vk(VK_TAB, key_up=False)
+    time.sleep(0.02)
+    _press_vk(VK_TAB, key_up=True)
+    if reverse:
+        _press_vk(VK_SHIFT, key_up=True)
+    _press_vk(VK_CONTROL, key_up=True)
+
+
 def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
     proc = subprocess.Popen([str(py), "mesa.py"], cwd=repo)
     try:
@@ -231,32 +251,29 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         first_hash = capture_hwnd(hwnd, base_path)
         print(f"OK   mesa_desktop: {title} -> {base_path.name}")
 
-        tab_targets = [
-            ("ui_mesa_desktop_tab2.png", 115),
-            ("ui_mesa_desktop_tab3.png", 185),
-            ("ui_mesa_desktop_tab4.png", 255),
-        ]
-        y_candidates = [122, 130, 138, 146, 154, 162]
-        seen_hashes = {first_hash}
+        # Focus the notebook area once, then cycle tabs with Ctrl+Tab.
+        click_client(hwnd, 120, 135)
+        time.sleep(0.2)
 
-        for filename, x_center in tab_targets:
-            best_hash = None
-            best_path = wiki_images / filename
-            for y in y_candidates:
-                for dx in (-12, -6, 0, 6, 12):
-                    ensure_on_screen(hwnd)
-                    click_client(hwnd, x_center + dx, y)
-                    time.sleep(1.2)
-                    h = capture_hwnd(hwnd, best_path)
-                    if h not in seen_hashes:
-                        best_hash = h
-                        break
-                if best_hash is not None:
-                    break
-            if best_hash is None:
-                best_hash = capture_hwnd(hwnd, best_path)
-            seen_hashes.add(best_hash)
+        tab_files = [
+            "ui_mesa_desktop_tab2.png",  # Status
+            "ui_mesa_desktop_tab3.png",  # Config
+            "ui_mesa_desktop_tab4.png",  # Manage MESA data
+            "ui_mesa_desktop_tab5.png",  # About
+        ]
+
+        for filename in tab_files:
+            ensure_on_screen(hwnd)
+            send_ctrl_tab(reverse=False)
+            time.sleep(1.2)
+            out_path = wiki_images / filename
+            capture_hwnd(hwnd, out_path)
             print(f"OK   mesa_desktop tab -> {filename}")
+
+        # Return to first tab for predictable end-state before cleanup.
+        for _ in tab_files:
+            send_ctrl_tab(reverse=True)
+            time.sleep(0.08)
     finally:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
 
@@ -329,8 +346,6 @@ def main() -> None:
         HelperCapture("analysis_present", ["code/analysis_present.py", "--original_working_directory", str(repo)], "comparison", 40.0),
         HelperCapture("geocode_group_edit", ["code/geocode_manage.py", "--start-tab", "edit", "--original_working_directory", str(repo)], "geocode manage", 35.0),
         HelperCapture("line_manage", ["code/line_manage.py", "--original_working_directory", str(repo)], "edit line", 40.0),
-        HelperCapture("config_edit", ["code/config_edit.py", "--original_working_directory", str(repo)], "config editor", 35.0),
-        HelperCapture("backup_restore", ["code/backup_restore.py", "--original_working_directory", str(repo)], "backup / restore", 35.0),
     ]
 
     for helper in helpers:
