@@ -2,7 +2,7 @@
 
 Use this document as the first stop before editing the `mesa` repository. Update it whenever new conventions emerge so the next contributor can stay aligned without re-reading the full chat history.
 
-**AI (GPT-5.2 / Copilot) must-read:** Before making changes, running commands, or proposing decisions, always open and read this entire file (`instructions.md`). If you have not read it in the current session, do so first.
+**AI (GPT / Copilot) must-read:** Before making changes, running commands, or proposing decisions, always open and read this entire file (`instructions.md`). If you have not read it in the current session, do so first.
 
 ## 1. Scope & goals
 - Maintain the desktop launcher (`mesa.py`/`mesa.exe`) and helper tools that automate the MESA 5 workflow: import → configure → process → review/publish.
@@ -20,11 +20,11 @@ Use this document as the first stop before editing the `mesa` repository. Update
 ## 1.3 Time zone for logs
 - Any timestamps we add to logs, status messages, docs, or build output should be in **Norway local time** (`Europe/Oslo`, i.e. CET/CEST), since the lead programmer is in Norway. He likes things to be convenient for himself.
 
-## 1.4 Overordnet prioritering: kjørbarhet før pakke-sikkerhet
-- **Høyeste prioritet er at løsningen fortsatt kompilerer og kjører stabilt** både som Python (`mesa.py`) og som pakket `.exe`.
-- Ved konflikt mellom sikkerhetsoppdateringer og runtime/build-stabilitet skal vi **prioritere kompatibilitet og kjørbarhet**.
-- Oppgraderinger av avhengigheter skal være konservative: kun endringer som ikke bryter build-kjeden, helper-kall eller exe-runtime skal tas inn som standard.
-- Sårbarheter som krever større versjonshopp eller koordinert økosystemløft (f.eks. flere gjensidig avhengige pakker) håndteres som planlagt backlog, ikke tvangsinnføres i stabilitetsløp.
+## 1.4 Overall priority: runtime stability before package security
+- **Top priority is that the solution continues to compile and run stably** both as Python (`mesa.py`) and as a packaged `.exe`.
+- If there is a conflict between security updates and runtime/build stability, we should **prioritize compatibility and runnability**.
+- Dependency upgrades should be conservative: by default, only changes that do not break the build chain, helper invocations, or exe runtime should be accepted.
+- Vulnerabilities that require major version jumps or a coordinated ecosystem lift (for example, multiple interdependent packages) should be handled as planned backlog work, not forced into stability-focused iterations.
 
 ## 2. Repository layout (high level)
 | Path | Purpose |
@@ -114,7 +114,10 @@ To minimize startup time, especially for compiled executables, follow these guid
 - `UserWarning: The numpy.array_api submodule is still experimental`  
   **Harmless.** NumPy development warning that doesn't affect runtime.
 
-**Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `code/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
+**Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `devtools/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
 
+## Learning and storing experiences
+Troughout the work you will learn new things. Make notes of this in learning.md
+When you meet a problem make sure you look for a solution in learning.md in case this is something you already have local knowledge about.
 ---
-_Last updated: 2026-02-12 19:46_
+_Last updated: 2026-02-15 18:03_
