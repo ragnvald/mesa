@@ -2534,6 +2534,477 @@ if __name__ == "__main__":
     _load_config_editor_text()
 
     # ------------------------------------------------------------------
+    # Tune processing tab
+    # ------------------------------------------------------------------
+    tune_tab = ttk.Frame(notebook)
+    notebook.add(tune_tab, text="Tune processing")
+
+    tune_container = ttk.Frame(tune_tab, padding=12)
+    tune_container.pack(fill="both", expand=True)
+
+    tune_top = ttk.Frame(tune_container)
+    tune_top.pack(fill="x", pady=(0, 8))
+    tune_top.columnconfigure(0, weight=1)
+
+    tune_intro_col = ttk.Frame(tune_top)
+    tune_intro_col.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+
+    ttk.Label(
+        tune_intro_col,
+        text=(
+            "Automatically tune processing settings based on this computer's CPU and RAM.\n"
+            "This updates selected keys in [DEFAULT] in config.ini."
+        ),
+        wraplength=600,
+        justify="left",
+    ).pack(anchor="w", pady=(0, 6))
+
+    tune_status_var = tk.StringVar(value="Ready. Press Evaluate to compare current and advised settings.")
+    ttk.Label(tune_intro_col, textvariable=tune_status_var, bootstyle="secondary").pack(anchor="w")
+
+    tune_actions = ttk.Frame(tune_top)
+    tune_actions.grid(row=0, column=1, sticky="ne")
+
+    compare_frame = ttk.Labelframe(tune_container, text="Current vs advised settings", padding=8)
+    compare_frame.pack(fill="both", expand=True)
+    compare_frame.columnconfigure(0, weight=1)
+    compare_frame.rowconfigure(1, weight=1)
+
+    compare_header = ttk.Frame(compare_frame)
+    compare_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    compare_header.columnconfigure(0, weight=1)
+    compare_header.columnconfigure(1, weight=1)
+    ttk.Label(compare_header, text="Current settings", bootstyle="secondary").grid(row=0, column=0, sticky="w")
+    ttk.Label(compare_header, text="Advised settings", bootstyle="secondary").grid(row=0, column=1, sticky="w")
+
+    tune_tree_frame = ttk.Frame(compare_frame)
+    tune_tree_frame.grid(row=1, column=0, sticky="nsew")
+    tune_tree_frame.columnconfigure(0, weight=1)
+    tune_tree_frame.rowconfigure(0, weight=1)
+
+    style.configure("Tune.Treeview.Heading", font=("Segoe UI", 10, "bold"))
+
+    tune_tree = ttk.Treeview(
+        tune_tree_frame,
+        columns=("key", "current", "advised", "change"),
+        show="headings",
+        height=9,
+        style="Tune.Treeview",
+    )
+    tune_tree.heading("key", text="Key", anchor="w")
+    tune_tree.heading("current", text="Current", anchor="w")
+    tune_tree.heading("advised", text="Advised", anchor="w")
+    tune_tree.heading("change", text="Suggested", anchor="w")
+    tune_tree.column("key", width=240, anchor="w")
+    tune_tree.column("current", width=180, anchor="w")
+    tune_tree.column("advised", width=180, anchor="w")
+    tune_tree.column("change", width=120, anchor="center")
+    tune_tree.grid(row=0, column=0, sticky="nsew")
+
+    try:
+        tune_tree.tag_configure("changed", foreground=style.colors.warning)
+    except Exception:
+        pass
+
+    tune_tree_scroll = ttk.Scrollbar(tune_tree_frame, orient="vertical", command=tune_tree.yview)
+    tune_tree.configure(yscrollcommand=tune_tree_scroll.set)
+    tune_tree_scroll.grid(row=0, column=1, sticky="ns")
+
+    tune_text_frame = ttk.Frame(tune_container)
+    tune_text_frame.pack(fill="x", pady=(6, 0))
+    tune_text_frame.columnconfigure(0, weight=1)
+    tune_text_frame.rowconfigure(0, weight=0)
+
+    tune_text = tk.Text(tune_text_frame, wrap="word", height=5)
+    tune_text.grid(row=0, column=0, sticky="nsew")
+    tune_scroll = ttk.Scrollbar(tune_text_frame, orient="vertical", command=tune_text.yview)
+    tune_text.configure(yscrollcommand=tune_scroll.set)
+    tune_scroll.grid(row=0, column=1, sticky="ns")
+    tune_text.configure(state="disabled")
+
+    def _set_tune_text(text: str) -> None:
+        tune_text.configure(state="normal")
+        tune_text.delete("1.0", tk.END)
+        tune_text.insert("1.0", text)
+        tune_text.configure(state="disabled")
+
+    def _format_int_like(value):
+        try:
+            return f"{int(float(value)):,}"
+        except Exception:
+            return str(value)
+
+    tune_backup_path = os.path.join(PROJECT_BASE, "output", "processing_tuning_backup.json")
+    pending_tune_values: dict[str, str] = {}
+    pending_before_values: dict[str, str] = {}
+    pending_eval_state: dict[str, str] = {"rationale": ""}
+
+    def _clear_tune_comparison() -> None:
+        for item in tune_tree.get_children():
+            tune_tree.delete(item)
+
+    def _populate_tune_comparison(current_values: dict[str, str], advised_values: dict[str, str]) -> int:
+        _clear_tune_comparison()
+        suggested_count = 0
+        for key in sorted(advised_values.keys()):
+            old_val = str(current_values.get(key, "(missing)")).strip() or "(empty)"
+            new_val = str(advised_values.get(key, "")).strip() or "(empty)"
+            changed = old_val != new_val
+            if changed:
+                suggested_count += 1
+            change_label = "Yes" if changed else "No"
+            item_tags = ("changed",) if changed else ()
+            tune_tree.insert("", "end", values=(key, old_val, new_val, change_label), tags=item_tags)
+        return suggested_count
+
+    def _write_tune_backup(previous_values: dict[str, str], applied_values: dict[str, str]) -> None:
+        os.makedirs(os.path.dirname(tune_backup_path), exist_ok=True)
+        payload = {
+            "created_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "config_path": config_path,
+            "keys": sorted(list(applied_values.keys())),
+            "previous_values": previous_values,
+            "applied_values": applied_values,
+        }
+        tmp_path = tune_backup_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, tune_backup_path)
+
+    def _read_tune_backup() -> dict | None:
+        if not os.path.exists(tune_backup_path):
+            return None
+        try:
+            with open(tune_backup_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return None
+        return None
+
+    def _recommended_processing_tuning(cap_row: dict) -> tuple[dict[str, str], str]:
+        try:
+            logical = int(float(cap_row.get("cpu_count_logical") or 0))
+        except Exception:
+            logical = int(os.cpu_count() or 4)
+        logical = max(1, logical)
+
+        try:
+            ram_total = float(cap_row.get("ram_total_gb") or 0.0)
+        except Exception:
+            ram_total = 0.0
+        if ram_total <= 0:
+            ram_total = 16.0
+
+        if logical <= 4:
+            worker_cap = 2
+        elif logical <= 8:
+            worker_cap = 4
+        elif logical <= 12:
+            worker_cap = 6
+        elif logical <= 16:
+            worker_cap = 8
+        elif logical <= 24:
+            worker_cap = 10
+        else:
+            worker_cap = 12
+
+        if ram_total <= 12:
+            approx_gb_per_worker = 2.5
+            geocode_soft_limit = 180
+            asset_soft_limit = 30000
+            target_geocodes = 1800
+            chunk_size = 10000
+            cell_size = 7000
+        elif ram_total <= 24:
+            approx_gb_per_worker = 3.5
+            geocode_soft_limit = 260
+            asset_soft_limit = 45000
+            target_geocodes = 2600
+            chunk_size = 14000
+            cell_size = 8000
+        elif ram_total <= 48:
+            approx_gb_per_worker = 4.5
+            geocode_soft_limit = 340
+            asset_soft_limit = 70000
+            target_geocodes = 3400
+            chunk_size = 18000
+            cell_size = 9000
+        else:
+            approx_gb_per_worker = 6.0
+            geocode_soft_limit = 420
+            asset_soft_limit = 100000
+            target_geocodes = 4200
+            chunk_size = 22000
+            cell_size = 10000
+
+        recommendations = {
+            "max_workers": "0",
+            "auto_workers_min": "1",
+            "auto_workers_max": str(worker_cap),
+            "approx_gb_per_worker": f"{approx_gb_per_worker:.1f}",
+            "mem_target_frac": "0.85",
+            "target_geocodes_per_chunk": str(int(target_geocodes)),
+            "chunk_backlog_multiplier": "3.5",
+            "chunk_cells_min": "2",
+            "chunk_cells_max": "72",
+            "chunk_overshoot_factor": "1.15",
+            "geocode_soft_limit": str(int(geocode_soft_limit)),
+            "asset_soft_limit": str(int(asset_soft_limit)),
+            "chunk_size": str(int(chunk_size)),
+            "cell_size": str(int(cell_size)),
+        }
+
+        rationale = (
+            f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
+            f"Using auto worker mode with an upper cap of {worker_cap} and "
+            f"moderate memory headroom (mem_target_frac=0.85). "
+            "Chunking is tuned toward better load balancing to reduce slow end-of-run tails."
+        )
+        return recommendations, rationale
+
+    def _update_default_keys_preserve_comments(path: str, updates: dict[str, str]) -> None:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        lines = text.splitlines(keepends=True)
+        newline = "\n"
+        for line in lines:
+            if line.endswith("\r\n"):
+                newline = "\r\n"
+                break
+
+        default_start = None
+        default_end = None
+        for i, line in enumerate(lines):
+            if line.strip().lower() == "[default]":
+                default_start = i
+                break
+
+        if default_start is None:
+            lines = ["[DEFAULT]" + newline, newline] + lines
+            default_start = 0
+
+        for i in range(default_start + 1, len(lines)):
+            s = lines[i].strip()
+            if s.startswith("[") and s.endswith("]"):
+                default_end = i
+                break
+        if default_end is None:
+            default_end = len(lines)
+
+        found = set()
+        for idx in range(default_start + 1, default_end):
+            line = lines[idx]
+            for key, val in updates.items():
+                pat = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)(.*?)(\s*(?:[;#].*)?)$", re.IGNORECASE)
+                m = pat.match(line.rstrip("\r\n"))
+                if not m:
+                    continue
+                lines[idx] = f"{m.group(1)}{val}{m.group(3)}{newline}"
+                found.add(key)
+                break
+
+        missing = [k for k in updates.keys() if k not in found]
+        if missing:
+            insert_at = default_end
+            if insert_at > 0 and lines[insert_at - 1].strip() != "":
+                lines.insert(insert_at, newline)
+                insert_at += 1
+            for key in missing:
+                lines.insert(insert_at, f"{key:<30} = {updates[key]}{newline}")
+                insert_at += 1
+
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+            f.writelines(lines)
+        os.replace(tmp_path, path)
+
+    def _evaluate_processing_tuning():
+        try:
+            detected = _collect_system_capabilities() or {}
+            tuning, rationale = _recommended_processing_tuning(detected)
+
+            cfg_before = read_config(config_path)
+            before_default = cfg_before["DEFAULT"] if "DEFAULT" in cfg_before else {}
+
+            current_values = {key: str(before_default.get(key, "(missing)")).strip() for key in tuning.keys()}
+            pending_tune_values.clear()
+            pending_tune_values.update({k: str(v) for k, v in tuning.items()})
+            pending_before_values.clear()
+            pending_before_values.update({k: str(before_default.get(k, "")).strip() for k in tuning.keys()})
+            pending_eval_state["rationale"] = rationale
+
+            suggested_count = _populate_tune_comparison(current_values, tuning)
+            commit_tune_btn.configure(state="normal" if suggested_count > 0 else "disabled")
+
+            summary_lines = [
+                "Evaluation completed.",
+                rationale,
+                f"Suggested changes: {suggested_count}",
+                "Press Commit changes to apply the advised values to config.ini.",
+                f"Config file: {config_path}",
+            ]
+            if suggested_count == 0:
+                summary_lines[5] = "No changes suggested; config.ini already matches advised values."
+
+            summary = "\n".join(summary_lines)
+            _set_tune_text(summary)
+            if suggested_count > 0:
+                tune_status_var.set("Evaluation complete. Review highlighted rows, then Commit changes.")
+            else:
+                tune_status_var.set("Evaluation complete. No changes needed.")
+            log_to_logfile("Processing tuning evaluated from Tune processing tab")
+        except Exception as exc:
+            commit_tune_btn.configure(state="disabled")
+            tune_status_var.set("Processing tuning evaluation failed")
+            messagebox.showerror("Evaluate failed", f"Could not evaluate tuning:\n{exc}")
+
+    def _commit_processing_tuning():
+        if not pending_tune_values:
+            messagebox.showinfo("Commit changes", "Run Evaluate first to generate advised settings.")
+            return
+
+        confirmed = messagebox.askyesno(
+            "Commit processing tuning",
+            "Apply the advised processing settings to config.ini?",
+            icon="question",
+        )
+        if not confirmed:
+            return
+
+        try:
+            _update_default_keys_preserve_comments(config_path, pending_tune_values)
+            _write_tune_backup(dict(pending_before_values), dict(pending_tune_values))
+
+            global config
+            config = read_config(config_path)
+
+            try:
+                _load_config_editor_text()
+            except Exception:
+                pass
+
+            changed_lines = []
+            for key, new_val in pending_tune_values.items():
+                old_val = str(pending_before_values.get(key, "(missing)")).strip() or "(empty)"
+                if old_val != str(new_val):
+                    if key in ("chunk_size", "cell_size", "target_geocodes_per_chunk", "geocode_soft_limit", "asset_soft_limit", "auto_workers_max"):
+                        old_disp = _format_int_like(old_val) if old_val != "(missing)" else old_val
+                        new_disp = _format_int_like(new_val)
+                    else:
+                        old_disp = old_val
+                        new_disp = str(new_val)
+                    changed_lines.append(f"- {key}: {old_disp} -> {new_disp}")
+
+            if not changed_lines:
+                changed_lines.append("- No effective changes (values were already tuned).")
+
+            summary_lines = [
+                "Tune processing committed.",
+                pending_eval_state.get("rationale", ""),
+                "Applied keys:",
+                *changed_lines,
+                f"Backup saved: {tune_backup_path}",
+                f"Config file: {config_path}",
+            ]
+            _set_tune_text("\n".join(summary_lines))
+            commit_tune_btn.configure(state="disabled")
+            tune_status_var.set("Processing tuning committed and saved to config.ini")
+            log_to_logfile("Processing tuning committed from Tune processing tab")
+        except Exception as exc:
+            tune_status_var.set("Commit processing tuning failed")
+            messagebox.showerror("Commit failed", f"Could not apply advised tuning:\n{exc}")
+
+    def _restore_previous_tuning():
+        backup = _read_tune_backup()
+        if not backup:
+            messagebox.showinfo("Restore tuning", "No previous tuning backup was found.")
+            return
+
+        prev = backup.get("previous_values") if isinstance(backup, dict) else None
+        if not isinstance(prev, dict) or not prev:
+            messagebox.showinfo("Restore tuning", "Backup exists but does not contain restore values.")
+            return
+
+        confirmed = messagebox.askyesno(
+            "Restore previous tuning",
+            "Restore the previously saved values for tuned processing keys in config.ini?",
+            icon="question",
+        )
+        if not confirmed:
+            return
+
+        try:
+            cfg_before = read_config(config_path)
+            before_default = cfg_before["DEFAULT"] if "DEFAULT" in cfg_before else {}
+
+            restore_updates = {str(k): str(v) for k, v in prev.items()}
+            _update_default_keys_preserve_comments(config_path, restore_updates)
+
+            global config
+            config = read_config(config_path)
+            try:
+                _load_config_editor_text()
+            except Exception:
+                pass
+
+            changed_lines = []
+            for key, restored_val in restore_updates.items():
+                old_val = str(before_default.get(key, "(missing)")).strip()
+                if old_val != str(restored_val):
+                    if key in ("chunk_size", "cell_size", "target_geocodes_per_chunk", "geocode_soft_limit", "asset_soft_limit", "auto_workers_max"):
+                        old_disp = _format_int_like(old_val) if old_val != "(missing)" else old_val
+                        new_disp = _format_int_like(restored_val) if str(restored_val).strip() else "(empty)"
+                    else:
+                        old_disp = old_val
+                        new_disp = str(restored_val).strip() if str(restored_val).strip() else "(empty)"
+                    changed_lines.append(f"- {key}: {old_disp} -> {new_disp}")
+
+            if not changed_lines:
+                changed_lines.append("- No effective changes (config already matched backup values).")
+
+            created_at = str(backup.get("created_at", "--"))
+            summary = "\n".join([
+                "Restore previous tuning completed.",
+                f"Backup timestamp: {created_at}",
+                "Restored keys:",
+                *changed_lines,
+                f"Config file: {config_path}",
+            ])
+            _set_tune_text(summary)
+            tune_status_var.set("Previous tuning values restored")
+            log_to_logfile("Processing tuning restored from Tune processing tab")
+        except Exception as exc:
+            tune_status_var.set("Restore previous tuning failed")
+            messagebox.showerror("Restore tuning failed", f"Could not restore tuned values:\n{exc}")
+
+    ttk.Button(
+        tune_actions,
+        text="Evaluate",
+        command=_evaluate_processing_tuning,
+        bootstyle="primary",
+        width=22,
+    ).pack(fill="x")
+    commit_tune_btn = ttk.Button(
+        tune_actions,
+        text="Commit changes",
+        command=_commit_processing_tuning,
+        bootstyle="success",
+        state="disabled",
+        width=22,
+    )
+    commit_tune_btn.pack(fill="x", pady=(6, 0))
+    ttk.Button(
+        tune_actions,
+        text="Restore previous tuning",
+        command=_restore_previous_tuning,
+        bootstyle="secondary",
+        width=22,
+    ).pack(fill="x", pady=(6, 0))
+
+    # ------------------------------------------------------------------
     # Manage MESA data tab
     # ------------------------------------------------------------------
     manage_tab = ttk.Frame(notebook)

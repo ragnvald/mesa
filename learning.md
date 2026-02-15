@@ -143,3 +143,29 @@ When a problem is solved, add a short entry here with:
   - Remove log pane from `Edit geocodes` to reduce UI complexity/noise.
 - Practical rule for future UI work:
   - If logs write correctly to file but tab text area appears empty, verify with a temporary popup; if popup works and tab fails, switch the tab log renderer to a simpler non-text widget (`Treeview`) rather than changing backend logging again.
+
+## Processing auto-tune tab lesson (2026-02-15)
+
+- What was added:
+  - New `Tune processing` tab in `mesa.py` with a one-click button that tunes selected processing keys in `config.ini` based on detected CPU and RAM.
+- Implementation choice:
+  - Keep user comments/order in `config.ini` by updating only key lines under `[DEFAULT]` (line-level replacement), instead of rewriting the full INI with `ConfigParser.write()`.
+- User-facing behavior:
+  - After tuning, show a plain-text explanation listing detected hardware, rationale, and old→new values for each updated key.
+
+- Rollback extension:
+  - Save a lightweight backup JSON at `output/processing_tuning_backup.json` containing only tuned keys and their pre-tune values.
+  - `Restore previous tuning` applies those values back to `config.ini` using the same comment-preserving key update logic.
+
+## Processing tune UX lesson (2026-02-15)
+
+- What changed:
+  - The `Tune processing` tab now uses a two-step flow: `Evaluate` first, then `Commit changes`.
+- Why:
+  - Users can review current vs advised values before writing anything to `config.ini`.
+- Practical UI pattern:
+  - Show side-by-side comparison columns (`Current` on the left, `Advised` on the right).
+  - Highlight rows where values differ and mark them as suggested changes.
+  - Keep `Commit changes` disabled until an evaluation has completed and at least one change is suggested.
+- Safety behavior:
+  - Only `Commit changes` writes to `config.ini` and updates backup JSON, preserving config comments/order via line-level updates.
