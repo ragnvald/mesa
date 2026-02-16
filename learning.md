@@ -169,3 +169,16 @@ When a problem is solved, add a short entry here with:
   - Keep `Commit changes` disabled until an evaluation has completed and at least one change is suggested.
 - Safety behavior:
   - Only `Commit changes` writes to `config.ini` and updates backup JSON, preserving config comments/order via line-level updates.
+
+## Desktop capture mapping update (2026-02-15)
+
+- What changed:
+  - `devtools/capture_ui_active_batch.py` desktop tab cycle now captures six desktop files:
+    - `ui_mesa_desktop.png` (Workflows)
+    - `ui_mesa_desktop_tab2.png` (Status)
+    - `ui_mesa_desktop_tab3.png` (Config)
+    - `ui_mesa_desktop_tab4.png` (Tune processing)
+    - `ui_mesa_desktop_tab5.png` (Manage MESA data)
+    - `ui_mesa_desktop_tab6.png` (About)
+- Why:
+  - Prevents tab-name drift in docs after the Tune processing and Manage tab additions.

@@ -258,8 +258,9 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         tab_files = [
             "ui_mesa_desktop_tab2.png",  # Status
             "ui_mesa_desktop_tab3.png",  # Config
-            "ui_mesa_desktop_tab4.png",  # Manage MESA data
-            "ui_mesa_desktop_tab5.png",  # About
+            "ui_mesa_desktop_tab4.png",  # Tune processing
+            "ui_mesa_desktop_tab5.png",  # Manage MESA data
+            "ui_mesa_desktop_tab6.png",  # About
         ]
 
         for filename in tab_files:
