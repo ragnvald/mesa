@@ -117,7 +117,17 @@ To minimize startup time, especially for compiled executables, follow these guid
 **Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `devtools/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
 
 ## Learning and storing experiences
-Troughout the work you will learn new things. Make notes of this in learning.md
-When you meet a problem make sure you look for a solution in learning.md in case this is something you already have local knowledge about.
+Throughout the work you will learn new things. Make notes of this in `learning.md`.
+When you meet a problem make sure you look for a solution in `learning.md` in case this is something you already have local knowledge about.
+
+### Automatic learning log rule (AI/Copilot)
+- **Default behavior:** after any non-trivial fix, refactor, build/debug incident, or workflow improvement, add a short entry to `learning.md` in the same work session.
+- Keep each entry concise and practical, covering:
+  - What failed or changed
+  - Root cause or key insight
+  - Practical fix / final decision
+  - Any command/path convention updates
+- If no new insight was produced, no entry is required.
+- Before starting investigation on a recurring issue, quickly scan `learning.md` for relevant prior solutions.
 ---
-_Last updated: 2026-02-15 18:12_
+_Last updated: 2026-02-16 00:18_
