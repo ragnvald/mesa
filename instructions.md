@@ -13,6 +13,7 @@ Use this document as the first stop before editing the `mesa` repository. Update
 - **Never execute `git add`, `git commit`, `git push`, or otherwise publish changes unless the user explicitly asks for it** after reviewing the proposed diffs/text.
 - Default workflow: make changes locally → report what changed → wait for approval → then (and only then) stage/commit/push.
 - **Important**: Phrases like "create commit messages" or "set up commits" mean **prepare the text only**, not execute the commits. Only commit when told "commit this" or "run the commits" or similar explicit instructions.
+- **Never, never delete files outside this repository.**
 
 ## 1.2 Keep this document current
 - Whenever you edit this file, update the **Last updated** line at the bottom with the current date **and time** in the format `YYYY-MM-DD HH:MM`.
@@ -38,10 +39,13 @@ Use this document as the first stop before editing the `mesa` repository. Update
 
 ## 3. Environment & tooling
 1. Use Python 3.11+ (matches the packaged interpreter bundled in releases).
-2. Create a venv inside the repo: `python -m venv .venv`.
-3. Activate and install deps: `pip install -r requirements_all.txt` (or `requirements.txt` inside `code/` for lighter work).
-4. Launch the UI with `python mesa.py` to test changes before compiling.
-5. Keep ttkbootstrap as the primary UI framework; discuss before adding new GUI toolkits.
+2. Use dedicated Windows venvs:
+   - Development: `.venv` with `requirements_all_win311.txt`
+   - Compilation: `.venv_compile` with `requirements_compile_win311.txt`
+3. To bootstrap both on Windows, run: `devtools\setup_venvs_win311.bat`
+4. `requirements_all.txt` is a broader/legacy superset; prefer `requirements_all_win311.txt` for day-to-day Windows development.
+5. Launch the UI with development venv Python: `python mesa.py`.
+6. Keep ttkbootstrap as the primary UI framework; discuss before adding new GUI toolkits.
 
 ## 4. UI conventions (current as of MESA 5)
 - **Header band**: intro text plus Exit button lives at the top. Text should clearly direct users to start in Workflows and monitor Status.
@@ -114,7 +118,7 @@ To minimize startup time, especially for compiled executables, follow these guid
 - `UserWarning: The numpy.array_api submodule is still experimental`  
   **Harmless.** NumPy development warning that doesn't affect runtime.
 
-**Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `devtools/compile_win_11.bat` as the entrypoint; do not rely on partial-build environment toggles in normal work.
+**Local developer workflow:** we treat builds as **full builds** (main + all helper tools). Use `devtools/compile_win_11.bat` as the entrypoint; it now prefers `.venv_compile` first (then `.venv`, then PATH Python). Do not rely on partial-build environment toggles in normal work.
 
 ## Learning and storing experiences
 Throughout the work you will learn new things. Make notes of this in `learning.md`.
@@ -130,4 +134,4 @@ When you meet a problem make sure you look for a solution in `learning.md` in ca
 - If no new insight was produced, no entry is required.
 - Before starting investigation on a recurring issue, quickly scan `learning.md` for relevant prior solutions.
 ---
-_Last updated: 2026-02-16 00:18_
+_Last updated: 2026-03-08 22:55_

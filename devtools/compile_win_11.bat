@@ -23,14 +23,36 @@ REM Run the build via Python to avoid CMD parsing issues
 set "SCRIPT_PATH=%~dp0"
 set "SCRIPT_PATH=%SCRIPT_PATH:~0,-1%"
 
-REM Prefer venv Python if it exists (..\.venv\Scripts\python.exe under mesa\)
-set "VENV_PY=%SCRIPT_PATH%\..\.venv\Scripts\python.exe"
+REM Hide pygame startup banner if pygame is present in fallback environments.
+set "PYGAME_HIDE_SUPPORT_PROMPT=1"
 
-if exist "%VENV_PY%" (
-  "%VENV_PY%" "%SCRIPT_PATH%\build_all.py"
+REM Python selection for compile builds (in priority order):
+REM  1) MESA_COMPILE_PYTHON (explicit override)
+REM  2) ..\.venv_compile\Scripts\python.exe  (recommended)
+REM  3) ..\.venv\Scripts\python.exe          (development fallback)
+REM  4) python from PATH
+set "VENV_COMPILE_PY=%SCRIPT_PATH%\..\.venv_compile\Scripts\python.exe"
+set "VENV_DEV_PY=%SCRIPT_PATH%\..\.venv\Scripts\python.exe"
+set "BUILD_PYTHON="
+
+if defined MESA_COMPILE_PYTHON (
+  set "BUILD_PYTHON=%MESA_COMPILE_PYTHON%"
+) else if exist "%VENV_COMPILE_PY%" (
+  set "BUILD_PYTHON=%VENV_COMPILE_PY%"
+) else if exist "%VENV_DEV_PY%" (
+  set "BUILD_PYTHON=%VENV_DEV_PY%"
 ) else (
-  python "%SCRIPT_PATH%\build_all.py"
+  set "BUILD_PYTHON=python"
 )
+
+echo [MESA] Compile Python: %BUILD_PYTHON%
+"%BUILD_PYTHON%" -c "import sys; print('[MESA] Python version:', sys.version.split()[0])"
+if errorlevel 1 (
+  echo [MESA] Failed to start selected Python: %BUILD_PYTHON%
+  endlocal & exit /b 1
+)
+
+"%BUILD_PYTHON%" "%SCRIPT_PATH%\build_all.py"
 
 set "BUILD_EXITCODE=%ERRORLEVEL%"
 

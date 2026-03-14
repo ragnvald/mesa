@@ -182,3 +182,14 @@ When a problem is solved, add a short entry here with:
     - `ui_mesa_desktop_tab6.png` (About)
 - Why:
   - Prevents tab-name drift in docs after the Tune processing and Manage tab additions.
+
+## Venv association for Windows dev vs compile (2026-03-08)
+
+- What changed:
+  - Build entrypoint `devtools/compile_win_11.bat` now prefers `.venv_compile` first, then `.venv`, then `python` from PATH.
+  - Added `devtools/setup_venvs_win311.bat` to create/update both venvs with the intended requirements files.
+  - Added purpose headers in `requirements_all_win311.txt` and `requirements_compile_win311.txt`.
+- Root cause:
+  - Multiple requirements files caused ambiguity about which venv should be used for daily work vs packaging.
+- Practical fix / decision:
+  - Standardize `.venv` for development (`requirements_all_win311.txt`) and `.venv_compile` for packaging (`requirements_compile_win311.txt`).

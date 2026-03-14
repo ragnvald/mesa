@@ -51,6 +51,12 @@ HELPERS_FULL_DEPS = os.environ.get("MESA_HELPERS_FULL_DEPS", "0").strip().lower(
 # - Uncompressed: larger .exe, faster startup (no decompression, less AV scanning)
 # Set MESA_NO_COMPRESS=1 to build uncompressed helpers for faster startup.
 NO_COMPRESS = os.environ.get("MESA_NO_COMPRESS", "0").strip().lower() in {"1", "true", "yes"}
+AUTO_CLEAN_LOCAL_TMP_DIRS = os.environ.get("MESA_CLEAN_LOCAL_TMP_DIRS", "1").strip().lower() not in {"0", "false", "no"}
+
+LOCAL_TMP_DIR_PATTERNS = (
+    ".tmpbuild*",
+    ".tmpdist*",
+)
 
 def resolve_main_script() -> Path:
     """
@@ -71,8 +77,36 @@ def resolve_main_script() -> Path:
 # ---------------------------------------------------------------------------
 # Setup / Cleanup
 # ---------------------------------------------------------------------------
+def cleanup_local_tmp_dirs() -> None:
+    """Remove leftover root-level tmp folders from ad-hoc PyInstaller runs.
+
+    The official build uses D:/code/build and D:/code/dist. This cleanup targets
+    only repo-root directories named like `.tmpbuild*` and `.tmpdist*`.
+    """
+
+    if not AUTO_CLEAN_LOCAL_TMP_DIRS:
+        log("[NOTE] Skipping local tmp dir cleanup (MESA_CLEAN_LOCAL_TMP_DIRS=0).")
+        return
+
+    removed = 0
+    for pattern in LOCAL_TMP_DIR_PATTERNS:
+        for candidate in PROJECT_ROOT.glob(pattern):
+            if not candidate.is_dir():
+                continue
+            try:
+                shutil.rmtree(candidate, ignore_errors=False)
+                log(f"Removed leftover local tmp dir: {candidate}")
+                removed += 1
+            except Exception as exc:
+                log(f"[WARN] Could not remove local tmp dir '{candidate}': {exc}")
+
+    if removed == 0:
+        log("No leftover local tmp dirs found in project root.")
+
+
 def clean_and_prepare() -> None:
     log("Preparing build folders...")
+    cleanup_local_tmp_dirs()
 
     # IMPORTANT:
     # - When building the main app (mesa.exe), we want a clean dist to avoid stale DLLs/files.
