@@ -74,6 +74,32 @@ REQUIRED_COLUMNS = [
 	"total_asset_objects",
 ]
 
+ASSET_OBJECT_COLUMNS = [
+	"id",
+	"asset_group_name",
+	"attributes",
+	"process",
+	"ref_asset_group",
+	"geometry",
+]
+
+ASSET_GROUP_COLUMNS = [
+	"id",
+	"name_original",
+	"name_gis_assetgroup",
+	"title_fromuser",
+	"date_import",
+	"geometry",
+	"total_asset_objects",
+	"importance",
+	"susceptibility",
+	"sensitivity",
+	"sensitivity_code",
+	"sensitivity_description",
+	PURPOSE_COLUMN,
+	STYLING_COLUMN,
+]
+
 
 def _force_2d_geom(geom):
 	if geom is None:
@@ -361,6 +387,7 @@ class AssetManagerApp:
 	def __init__(self, root: tk.Tk, base_dir: Path):
 		self.root = root
 		self.base_dir = base_dir
+		self._import_running = False
 
 		self.settings = load_settings()
 		self.input_folder_asset = _abs_path_like(self.settings["input_folder_asset"])
@@ -388,6 +415,10 @@ class AssetManagerApp:
 		self._build_ui()
 		self._log_import_diagnostics()
 		self._refresh_edit_data()
+		try:
+			self.root.protocol("WM_DELETE_WINDOW", self._request_close)
+		except Exception:
+			pass
 
 	def _ts(self) -> str:
 		return datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
@@ -441,11 +472,17 @@ class AssetManagerApp:
 		self.summary_label = tb.Label(bottom, text="") if tb is not None else ttk.Label(bottom, text="")
 		self.summary_label.pack(side="left")
 		exit_btn = (
-			tb.Button(bottom, text="Exit", bootstyle=WARNING, command=self.root.destroy)
+			tb.Button(bottom, text="Exit", bootstyle=WARNING, command=self._request_close)
 			if tb is not None
-			else ttk.Button(bottom, text="Exit", command=self.root.destroy)
+			else ttk.Button(bottom, text="Exit", command=self._request_close)
 		)
 		exit_btn.pack(side="right")
+
+	def _request_close(self):
+		if self._import_running:
+			messagebox.showwarning("Import running", "Import is still running. Please wait for completion before exiting.")
+			return
+		self.root.destroy()
 
 	def _log_import_diagnostics(self):
 		cfg_display = _CFG_PATH if _CFG_PATH is not None else (self.base_dir / "config.ini")
@@ -592,7 +629,9 @@ class AssetManagerApp:
 				self._log(f"{label}: simplify failed: {exc}", "WARN")
 		return out
 
-	def _ensure_geo_gdf(self, records_or_gdf, crs_str: str) -> gpd.GeoDataFrame:
+	def _ensure_geo_gdf(self, records_or_gdf, crs_str: str, expected_columns: list[str] | None = None) -> gpd.GeoDataFrame:
+		expected = list(expected_columns or [])
+
 		if isinstance(records_or_gdf, gpd.GeoDataFrame):
 			gdf = records_or_gdf.copy()
 			if gdf.geometry.name != "geometry":
@@ -601,21 +640,32 @@ class AssetManagerApp:
 				gdf.set_crs(crs_str, inplace=True)
 			elif str(gdf.crs) != crs_str and crs_str:
 				gdf = gdf.to_crs(crs_str)
-			return gdf
-		df = pd.DataFrame(records_or_gdf)
-		if "geometry" not in df.columns:
-			df["geometry"] = gpd.GeoSeries([], dtype="geometry")
-		return gpd.GeoDataFrame(df, geometry="geometry", crs=crs_str)
+		else:
+			df = records_or_gdf.copy() if isinstance(records_or_gdf, pd.DataFrame) else pd.DataFrame(records_or_gdf)
+			if "geometry" not in df.columns:
+				df["geometry"] = None
+			gdf = gpd.GeoDataFrame(df, geometry="geometry", crs=crs_str)
+
+		for col in expected:
+			if col not in gdf.columns:
+				gdf[col] = pd.NA
+		if expected:
+			ordered = [col for col in expected if col in gdf.columns]
+			remaining = [col for col in gdf.columns if col not in ordered]
+			gdf = gdf[ordered + remaining]
+		return gdf
 
 	def _save_parquet(self, name: str, gdf: gpd.GeoDataFrame):
 		path = _parquet_path(f"{name}.parquet", for_write=True)
-		gdf.to_parquet(path, index=False)
+		_atomic_write_parquet(gdf, path)
 		self._log(f"Saved {name} -> {path} (rows={len(gdf)})")
 
 	def _import_spatial_data_asset(self):
 		asset_objects, asset_groups = [], []
 		group_id, object_id = 1, 1
 		files = self._scan_for_files("Assets", self.input_folder_asset, ("*.shp", "*.gpkg", "*.parquet"))
+		if not files:
+			self._log("No supported asset files found (*.shp, *.gpkg, *.parquet).", "WARN")
 		self._update_progress(2)
 
 		for i, fp in enumerate(files, start=1):
@@ -645,6 +695,8 @@ class AssetManagerApp:
 						"sensitivity": 0,
 						"sensitivity_code": "",
 						"sensitivity_description": "",
+						PURPOSE_COLUMN: "",
+						STYLING_COLUMN: "",
 					})
 					for _, row in gdf.iterrows():
 						attrs = "; ".join([f"{c}: {row[c]}" for c in gdf.columns if c != gdf.geometry.name])
@@ -679,6 +731,8 @@ class AssetManagerApp:
 					"sensitivity": 0,
 					"sensitivity_code": "",
 					"sensitivity_description": "",
+					PURPOSE_COLUMN: "",
+					STYLING_COLUMN: "",
 				})
 				for _, row in gdf.iterrows():
 					attrs = "; ".join([f"{c}: {row[c]}" for c in gdf.columns if c != gdf.geometry.name])
@@ -694,7 +748,10 @@ class AssetManagerApp:
 				group_id += 1
 
 		crs = f"EPSG:{self.working_epsg}"
-		return self._ensure_geo_gdf(asset_objects, crs), self._ensure_geo_gdf(asset_groups, crs)
+		return (
+			self._ensure_geo_gdf(asset_objects, crs, expected_columns=ASSET_OBJECT_COLUMNS),
+			self._ensure_geo_gdf(asset_groups, crs, expected_columns=ASSET_GROUP_COLUMNS),
+		)
 
 	def _run_import_asset(self):
 		self._update_progress(0)
@@ -710,12 +767,20 @@ class AssetManagerApp:
 			self._update_progress(100)
 
 	def _start_import(self):
-		def _job():
-			self._sync_import_options_to_config()
-			self._run_import_asset()
-			self.root.after(0, self._refresh_edit_data)
+		if self._import_running:
+			self._log("Import already running.", "WARN")
+			return
 
-		threading.Thread(target=_job, daemon=True).start()
+		def _job():
+			self._import_running = True
+			self._sync_import_options_to_config()
+			try:
+				self._run_import_asset()
+				self.root.after(0, self._refresh_edit_data)
+			finally:
+				self._import_running = False
+
+		threading.Thread(target=_job, daemon=False).start()
 
 	def _build_edit_tab(self, parent):
 		self.edit_state_label = tb.Label(parent, text="") if tb is not None else ttk.Label(parent, text="")

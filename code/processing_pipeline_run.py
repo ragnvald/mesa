@@ -624,11 +624,60 @@ def run_lines_process(
         gdf[new_desc_col] = list(descs)
         return gdf, new_code_col, new_desc_col
 
-    workingprojection_epsg = f"EPSG:{cfg['DEFAULT'].get('workingprojection_epsg', '4326')}" if "DEFAULT" in cfg else "EPSG:4326"
+    def _cfg_int(*keys: str, default: int) -> int:
+        if "DEFAULT" not in cfg:
+            return int(default)
+        for key in keys:
+            try:
+                raw = str(cfg["DEFAULT"].get(key, "")).strip()
+                if raw:
+                    return int(round(float(raw)))
+            except Exception:
+                continue
+        return int(default)
+
+    workingprojection_epsg = f"EPSG:{_cfg_int('working_projection_epsg', 'workingprojection_epsg', default=4326)}"
+    default_segment_width = max(1, _cfg_int("segment_width", default=600))
+    default_segment_length = max(1, _cfg_int("segment_length", default=1000))
+
+    def _looks_like_legacy_auto_lines(gdf: gpd.GeoDataFrame) -> bool:
+        required = {"name_gis", "description", "segment_width", "segment_length"}
+        if gdf is None or getattr(gdf, "empty", True):
+            return False
+        if len(gdf) != 3 or not required.issubset(set(gdf.columns)):
+            return False
+        try:
+            names = sorted(str(v).strip() for v in gdf["name_gis"].tolist())
+            desc = {str(v).strip().lower() for v in gdf["description"].tolist()}
+            widths = sorted(pd.to_numeric(gdf["segment_width"], errors="coerce").dropna().astype(int).tolist())
+            lengths = sorted(pd.to_numeric(gdf["segment_length"], errors="coerce").dropna().astype(int).tolist())
+            return (
+                names == ["line_001", "line_002", "line_003"]
+                and desc.issubset({"auto line", ""})
+                and widths == [1000, 5000, 20000]
+                and lengths == [10, 15, 30]
+            )
+        except Exception:
+            return False
 
     def load_lines_table():
         gdf = read_parquet_or_none("tbl_lines")
         if gdf is not None and not getattr(gdf, "empty", True):
+            if _looks_like_legacy_auto_lines(gdf):
+                gdf = gdf.copy()
+                gdf["segment_width"] = int(default_segment_width)
+                gdf["segment_length"] = int(default_segment_length)
+                _log_line(
+                    base_dir,
+                    log_fn,
+                    (
+                        "Detected legacy auto-line defaults "
+                        f"(1000/5000/20000 m). Normalizing to config defaults: "
+                        f"segment_width={default_segment_width} m, "
+                        f"segment_length={default_segment_length} m."
+                    ),
+                )
+                write_parquet("tbl_lines", gdf)
             return gdf
         return None
 
@@ -650,15 +699,25 @@ def run_lines_process(
             {
                 "name_gis": [f"line_{i:03d}" for i in range(1, 4)],
                 "name_user": [f"line_{i:03d}" for i in range(1, 4)],
-                "segment_length": [15, 30, 10],
-                "segment_width": [1000, 20000, 5000],
+                "segment_length": [int(default_segment_length)] * 3,
+                "segment_width": [int(default_segment_width)] * 3,
                 "description": ["auto line", "auto line", "auto line"],
                 "geometry": lines,
             },
             geometry="geometry",
             crs=geocode_group.crs or workingprojection_epsg,
         )
-        gdf_lines = gdf_lines.set_crs(workingprojection_epsg, allow_override=True)
+        _log_line(
+            base_dir,
+            log_fn,
+            (
+                "Template lines use config defaults: "
+                f"segment_width={default_segment_width} m, "
+                f"segment_length={default_segment_length} m."
+            ),
+        )
+        if str(gdf_lines.crs).upper() != str(workingprojection_epsg).upper():
+            gdf_lines = gdf_lines.to_crs(workingprojection_epsg)
         write_parquet("tbl_lines", gdf_lines)
 
     def process_and_buffer_lines():
