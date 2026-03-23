@@ -222,3 +222,12 @@ When a problem is solved, add a short entry here with:
   - `processing_setup.py` is a heavy Tk/GeoPandas helper and starts its own `tb.Window(...).mainloop()`. Running that inside the already-running launcher process made the compiled app look hung and risked nested-Tk issues.
 - Practical fix / decision:
   - Keep Tk helpers in separate processes. The main launcher should orchestrate them, not embed them.
+
+## Root README scope split (2026-03-23)
+
+- What changed:
+  - Added a root `README.md` that explains the system for developers: workflow, architecture, helper responsibilities, shared data model, and build model.
+- Root cause:
+  - The repo had packaging-oriented documentation, but not a single developer-facing entry document explaining what MESA actually is as a system.
+- Practical fix / decision:
+  - Keep the root `README.md` developer-facing and keep `code/README.md` focused on the packaged distribution.
