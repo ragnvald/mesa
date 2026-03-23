@@ -1,7 +1,6 @@
 import os
 import locale
 import warnings
-import runpy
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -737,16 +736,6 @@ def get_script_paths(file_name: str):
     return python_script, exe_file
 
 
-def _run_bundled_module_as_main(module_name: str, arg_tokens: list[str]) -> None:
-    """Execute a bundled helper module as __main__ within the current process."""
-    argv_prev = list(sys.argv)
-    try:
-        sys.argv = [module_name, *arg_tokens]
-        runpy.run_module(module_name, run_name="__main__")
-    finally:
-        sys.argv = argv_prev
-
-
 # ---------------------------------------------------------------------
 # Button handlers (now pass args as separate tokens; always set cwd/env)
 # ---------------------------------------------------------------------
@@ -791,19 +780,10 @@ def edit_processing_setup():
     log_to_logfile(f"Processing setup executable path: {exe_file}")
     arg_tokens = ["--original_working_directory", original_working_directory]
     if getattr(sys, "frozen", False):
-        # Prefer in-process launch so processing_setup does not need a separate helper exe.
-        try:
-            _run_bundled_module_as_main("processing_setup", arg_tokens)
-            return
-        except Exception as exc:
-            log_to_logfile(f"In-process processing_setup launch failed: {exc}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
+        _launch_gui_process([exe_file, *arg_tokens], "processing_setup exe")
     else:
-        run_subprocess(
-            [sys.executable or "python", python_script, *arg_tokens],
-            [exe_file, *arg_tokens],
-            gpkg_file
-        )
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "processing_setup script")
 
 def open_process_all():
     # Explicit marker so Status->Recent activity can time the full run.
@@ -1469,7 +1449,23 @@ def _format_display_version(version: str) -> str:
     return v
 
 
+def _read_packaged_build_info() -> dict:
+    if not getattr(sys, "frozen", False):
+        return {}
+    try:
+        info_path = resolve_path("build_info.json")
+        if not os.path.exists(info_path):
+            return {}
+        with open(info_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 mesa_version_display = _format_display_version(mesa_version)
+packaged_build_info = _read_packaged_build_info()
+packaged_build_timestamp = str(packaged_build_info.get("build_timestamp", "") or "").strip()
 
 check_and_create_folders()
 
@@ -1575,16 +1571,31 @@ if __name__ == "__main__":
         )
 
         # Version right
+        version_text = "Version " + (mesa_version_display or "unknown")
+        version_y = max(12, img_h // 2 + 14 + text_y_nudge)
+        if packaged_build_timestamp:
+            version_y = max(12, img_h // 2 + 9 + text_y_nudge)
         banner_canvas.create_text(
             max(120, img_w - 100),
-            max(12, img_h // 2 + 14 + text_y_nudge),
+            version_y,
             anchor="e",
-            text="Version " + (mesa_version_display or "unknown"),
+            text=version_text,
             fill="#0f172a",
             font=("Segoe UI", 9, "italic")
         )
+        if packaged_build_timestamp:
+            banner_canvas.create_text(
+                max(120, img_w - 100),
+                max(12, version_y + 13),
+                anchor="e",
+                text="Build " + packaged_build_timestamp,
+                fill="#475569",
+                font=("Segoe UI", 8)
+            )
     else:
-        intro_text = "MESA tool  ·  " + (mesa_version_display or "unknown")
+        intro_text = "MESA tool  |  Version " + (mesa_version_display or "unknown")
+        if packaged_build_timestamp:
+            intro_text += "  |  Build " + packaged_build_timestamp
         intro_label = ttk.Label(
             banner_host,
             text=intro_text,

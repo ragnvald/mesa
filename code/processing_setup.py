@@ -778,7 +778,7 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
             else:
                 if strict:
                     lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
-                    messagebox.showerror("Indexes", f"Weight for value {lab} in {key} must be a positive integer.")
+                    messagebox.showerror("Indices", f"Weight for value {lab} in {key} must be a positive integer.")
                     return None
                 try:
                     val = int(float(txt))
@@ -788,7 +788,7 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
             if val < 1:
                 if strict:
                     lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
-                    messagebox.showerror("Indexes", f"Weight for value {lab} in {key} must be at least 1.")
+                    messagebox.showerror("Indices", f"Weight for value {lab} in {key} must be at least 1.")
                     return None
                 val = 1
             values.append(val)

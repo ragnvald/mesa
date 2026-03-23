@@ -193,3 +193,32 @@ When a problem is solved, add a short entry here with:
   - Multiple requirements files caused ambiguity about which venv should be used for daily work vs packaging.
 - Practical fix / decision:
   - Standardize `.venv` for development (`requirements_all_win311.txt`) and `.venv_compile` for packaging (`requirements_compile_win311.txt`).
+
+## Webview helper packaging lesson (2026-03-23)
+
+- What changed:
+  - `devtools/build_all.py` now force-includes the webview collection step for known pywebview-based helpers such as `line_manage`, `analysis_setup`, `asset_map_view`, and `map_overview`.
+- Root cause:
+  - Generic import-pattern detection usually works, but packaging a UI helper should not depend only on source scanning for `import webview`.
+- Practical fix / decision:
+  - Keep `pywebview` in compile requirements and also maintain an explicit helper allowlist for webview collection in the build script.
+
+## Launcher build stamp visibility (2026-03-23)
+
+- What changed:
+  - `mesa.py` now reads packaged `build_info.json` in frozen builds and shows the build timestamp in the header banner.
+  - `devtools/build_all.py` now writes that metadata file into `dist\mesa` using `Europe/Oslo` local time.
+- Root cause:
+  - The visible launcher version string comes from `config.ini` as a manual release label, so a fresh build can still look stale if that label is not bumped.
+- Practical fix / decision:
+  - Keep `config.ini` as the release/version label, but also stamp each packaged build with an explicit build timestamp to reduce confusion.
+
+## Processing setup must stay out-of-process (2026-03-23)
+
+- What changed:
+  - `devtools/build_all.py` now builds `processing_setup.exe` as a normal helper.
+  - `mesa.py` now launches Processing setup as an external GUI process instead of running the module inside `mesa.exe`.
+- Root cause:
+  - `processing_setup.py` is a heavy Tk/GeoPandas helper and starts its own `tb.Window(...).mainloop()`. Running that inside the already-running launcher process made the compiled app look hung and risked nested-Tk issues.
+- Practical fix / decision:
+  - Keep Tk helpers in separate processes. The main launcher should orchestrate them, not embed them.

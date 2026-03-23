@@ -3,9 +3,16 @@
 
 import sys
 import os
+import json
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -16,6 +23,15 @@ def log(msg: str) -> None:
 def fail(msg: str, code: int = 1) -> None:
     print(f"[ERROR] {msg}", flush=True)
     sys.exit(code)
+
+
+def oslo_now() -> datetime:
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo("Europe/Oslo"))
+        except Exception:
+            pass
+    return datetime.now()
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -436,7 +452,15 @@ def helper_collects_for(basename: str) -> list[str]:
         and _imports_any_module(src, {"geopandas", "shapely", "fiona", "pyproj"})
     )
 
-    uses_webview = _imports_any_module(src, {"webview"})
+    # Some helpers depend on pywebview for their main UI. Keep these explicit so
+    # packaging does not rely only on import-pattern detection.
+    force_webview = {
+        "analysis_setup",
+        "asset_map_view",
+        "line_manage",
+        "map_overview",
+    }
+    uses_webview = basename in force_webview or _imports_any_module(src, {"webview"})
     uses_h3 = _imports_any_module(src, {"h3"})
     uses_docx = _imports_any_module(src, {"docx"})
 
@@ -535,13 +559,7 @@ def build_main() -> None:
 
     entry_point = resolve_main_script()
 
-    # Embedded helper modules launched in-process from mesa when frozen.
-    # Bundle them into the main app so separate helper exes are not required.
-    hidden_imports = [
-        "--hidden-import", "processing_setup",
-    ]
-
-    args = FLAGS_MAIN + hidden_imports + [
+    args = FLAGS_MAIN + [
         "--name", APP_NAME,
         "--distpath", str(FINAL_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{APP_NAME}_build"),
@@ -630,6 +648,20 @@ def copy_resources() -> None:
     # NOTE: Intentionally do NOT copy secrets/ into distributions.
 
 
+def write_build_metadata() -> None:
+    stamp = oslo_now().replace(second=0, microsecond=0)
+    payload = {
+        "build_timestamp": stamp.strftime("%Y-%m-%d %H:%M"),
+        "build_date": stamp.strftime("%Y-%m-%d"),
+        "timezone": "Europe/Oslo",
+        "build_main": BUILD_MAIN,
+        "build_helpers": BUILD_HELPERS,
+    }
+    target = FINAL_DIST / "build_info.json"
+    target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    log(f"Wrote build metadata: {target}")
+
+
 def ensure_devtools_not_in_dist() -> None:
     """Safety guard: never ship devtools in distribution output."""
     devtools_in_dist = FINAL_DIST / "devtools"
@@ -668,6 +700,7 @@ def main() -> None:
             "atlas_manage",
             "tiles_create_raster",
             "report_generate",
+            "processing_setup",
             "analysis_setup",
             "analysis_present",
             "geocode_manage",
@@ -710,6 +743,7 @@ def main() -> None:
 
     log("Copying runtime resources next to the app...")
     copy_resources()
+    write_build_metadata()
     ensure_devtools_not_in_dist()
 
     exe_path = FINAL_DIST / f"{APP_NAME}.exe"
