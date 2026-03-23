@@ -462,7 +462,7 @@ class AssetManagerApp:
 		import_tab = tb.Frame(notebook, padding=10) if tb is not None else ttk.Frame(notebook, padding=10)
 		edit_tab = tb.Frame(notebook, padding=10) if tb is not None else ttk.Frame(notebook, padding=10)
 		notebook.add(import_tab, text="Import assets")
-		notebook.add(edit_tab, text="Edit asset groups")
+		notebook.add(edit_tab, text="Edit assets")
 
 		self._build_import_tab(import_tab)
 		self._build_edit_tab(edit_tab)

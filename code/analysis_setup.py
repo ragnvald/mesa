@@ -608,7 +608,7 @@ class AnalysisStorage:
                 [
                     {
                         "id": "group_default",
-                        "name": "Analyseområder",
+                        "name": "Area 1",
                         "notes": "",
                         "created_at": now,
                         "updated_at": now,
@@ -794,7 +794,7 @@ class AnalysisStorage:
         gid = self._resolve_group_id(identifier)
         with self._lock:
             if len(self._groups_df) <= 1:
-                raise ValueError("Det må finnes minst én analysegruppe.")
+                raise ValueError("More than one group is required; cannot delete the last remaining group.")
             self._groups_df = self._groups_df[self._groups_df["id"] != gid].reset_index(drop=True)
             self._polygons_gdf = self._polygons_gdf[self._polygons_gdf["group_id"] != gid].reset_index(drop=True)
             remaining = self._groups_df["id"].astype(str)

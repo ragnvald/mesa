@@ -3090,7 +3090,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     tab_edit = ttk.Frame(notebook)
     notebook.add(tab_mosaic, text="Basic mosaic")
     notebook.add(tab_h3, text="H3 codes")
-    notebook.add(tab_import, text="Import geocodes")
+    notebook.add(tab_import, text="Import and manage geocodes")
     notebook.add(tab_edit, text="Edit geocodes")
 
     tab_lookup = {
