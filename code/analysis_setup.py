@@ -26,12 +26,6 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote
 import sys
 
-import pandas as pd
-import geopandas as gpd
-import numpy as np
-from shapely.geometry import shape as shp_from_geojson, mapping as shp_to_geojson
-from shapely.geometry.base import BaseGeometry
-
 import tkinter as tk
 from tkinter import filedialog
 
@@ -46,6 +40,32 @@ except Exception:
 os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
 os.environ.setdefault("PYWEBVIEW_LOG", "error")
 os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-logging --log-level=3")
+
+np = None
+pd = None
+gpd = None
+shp_from_geojson = None
+shp_to_geojson = None
+
+
+def _load_runtime_data_stack() -> None:
+  global np, pd, gpd, shp_from_geojson, shp_to_geojson
+  if all(module is not None for module in (np, pd, gpd, shp_from_geojson, shp_to_geojson)):
+    return
+  try:
+    import numpy as _np
+    import pandas as _pd
+    import geopandas as _gpd
+    from shapely.geometry import shape as _shape, mapping as _mapping
+  except ModuleNotFoundError as exc:
+    raise SystemExit(
+      "analysis_setup.py requires numpy, pandas, geopandas, and shapely in the runtime environment."
+    ) from exc
+  np = _np
+  pd = _pd
+  gpd = _gpd
+  shp_from_geojson = _shape
+  shp_to_geojson = _mapping
 
 
 def _require_webview() -> Any:
@@ -1120,21 +1140,44 @@ class AnalysisPreviewProvider:
 class WebApi:
     """Expose storage and analysis primitives to the embedded Leaflet app."""
 
-    def __init__(self, storage: AnalysisStorage, analyzer: AnalysisPreviewProvider, base_dir: Path) -> None:
-        self._storage = storage
-        self._analyzer = analyzer
+    def __init__(self, base_dir: Path, cfg: configparser.ConfigParser) -> None:
         self._base_dir = base_dir
+        self._cfg = cfg
+        self._storage: Optional[AnalysisStorage] = None
+        self._analyzer: Optional[AnalysisPreviewProvider] = None
         self._dirty = False
         self._lock = threading.Lock()
-        self._active_group_id = self._storage.active_group_id()
-        try:
-            group = self._storage.get_group(self._active_group_id)
-            self._active_geocode = group.default_geocode or self._analyzer.default_geocode
-        except Exception:
-            self._active_geocode = self._analyzer.default_geocode
-        debug_log(self._base_dir, "WebApi initialised")
+        self._active_group_id = ""
+        self._active_geocode = DEFAULT_ANALYSIS_GEOCODE
+        debug_log(self._base_dir, "WebApi initialised (lazy backend)")
 
     # --------------------- helpers ---------------------
+    def _ensure_ready(self) -> None:
+        if self._storage is not None and self._analyzer is not None:
+            return
+        _load_runtime_data_stack()
+        storage = AnalysisStorage(self._base_dir, self._cfg)
+        analyzer = AnalysisPreviewProvider(self._base_dir, self._cfg, storage.storage_epsg)
+        self._storage = storage
+        self._analyzer = analyzer
+        self._active_group_id = storage.active_group_id()
+        try:
+            group = storage.get_group(self._active_group_id)
+            self._active_geocode = group.default_geocode or analyzer.default_geocode
+        except Exception:
+            self._active_geocode = analyzer.default_geocode
+        debug_log(self._base_dir, "WebApi backend ready")
+
+    def _storage_obj(self) -> AnalysisStorage:
+        self._ensure_ready()
+        assert self._storage is not None
+        return self._storage
+
+    def _analyzer_obj(self) -> AnalysisPreviewProvider:
+        self._ensure_ready()
+        assert self._analyzer is not None
+        return self._analyzer
+
     def _set_dirty(self, value: bool) -> None:
         with self._lock:
             self._dirty = value
@@ -1144,30 +1187,33 @@ class WebApi:
             return self._dirty
 
     def _group_payload(self, group: AnalysisGroup) -> Dict[str, Any]:
+        analyzer = self._analyzer_obj()
         return {
             "id": group.identifier,
             "name": group.name,
             "notes": group.notes,
-            "default_geocode": group.default_geocode or self._analyzer.default_geocode,
+            "default_geocode": group.default_geocode or analyzer.default_geocode,
             "created_at": group.created_at.isoformat(),
             "updated_at": group.updated_at.isoformat(),
         }
 
     def _current_group(self) -> AnalysisGroup:
-        return self._storage.get_group(self._active_group_id)
+        return self._storage_obj().get_group(self._active_group_id)
 
     # --------------------- exposed API -----------------
     def bootstrap(self, _payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         features = {"features": []}
         try:
             debug_log(self._base_dir, "bootstrap: start")
+            storage = self._storage_obj()
+            analyzer = self._analyzer_obj()
             group = self._current_group()
             self._active_group_id = group.identifier
-            self._active_geocode = group.default_geocode or self._analyzer.default_geocode
+            self._active_geocode = group.default_geocode or analyzer.default_geocode
 
-            groups_payload = [self._group_payload(g) for g in self._storage.list_groups()]
-            features = self._storage.to_feature_collection(group.identifier)
-            preview = self._analyzer.analysis_preview_geojson(group.identifier)
+            groups_payload = [self._group_payload(g) for g in storage.list_groups()]
+            features = storage.to_feature_collection(group.identifier)
+            preview = analyzer.analysis_preview_geojson(group.identifier)
 
             bounds = None
             if features["features"]:
@@ -1177,7 +1223,7 @@ class WebApi:
                 except Exception:
                     bounds = None
 
-            layer = self._analyzer.canvas_geojson(self._active_geocode)
+            layer = analyzer.canvas_geojson(self._active_geocode)
             if layer:
                 geocode_layer = layer
                 layer_bounds = layer.get("bounds")
@@ -1190,10 +1236,10 @@ class WebApi:
                     "bounds": None,
                     "category": self._active_geocode,
                 }
-                if bounds is None and self._analyzer.canvas_bounds:
-                    bounds = self._analyzer.canvas_bounds
-                if bounds is None and self._analyzer.asset_bounds:
-                    bounds = list(self._analyzer.asset_bounds)
+                if bounds is None and analyzer.canvas_bounds:
+                    bounds = analyzer.canvas_bounds
+                if bounds is None and analyzer.asset_bounds:
+                    bounds = list(analyzer.asset_bounds)
 
             debug_log(
                 self._base_dir,
@@ -1208,8 +1254,8 @@ class WebApi:
                 "geocode_layer": geocode_layer,
                 "analysis_preview": preview,
                 "mbtiles": geocode_layer.get("mbtiles") if isinstance(geocode_layer, dict) else None,
-                "geocode_categories": self._analyzer.available_geocode_categories(),
-                "asset_bounds": list(self._analyzer.asset_bounds) if self._analyzer.asset_bounds else None,
+                "geocode_categories": analyzer.available_geocode_categories(),
+                "asset_bounds": list(analyzer.asset_bounds) if analyzer.asset_bounds else None,
                 "bounds": bounds,
                 "dirty": self._is_dirty(),
             }
@@ -1229,15 +1275,16 @@ class WebApi:
 
     def add_polygon(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
             feature = payload.get("feature")
             if not feature:
                 raise ValueError("feature payload missing")
             group_id = payload.get("group_id") or self._active_group_id
             debug_log(self._base_dir, f"add_polygon: group={group_id}")
-            record = self._storage.add_polygon(feature, group_id)
+            record = storage.add_polygon(feature, group_id)
             self._active_group_id = record.group_id
 
-            gdf = gpd.GeoDataFrame([{"geometry": record.geometry}], geometry="geometry", crs=self._storage.storage_epsg).to_crs(4326)
+            gdf = gpd.GeoDataFrame([{"geometry": record.geometry}], geometry="geometry", crs=storage.storage_epsg).to_crs(4326)
             feature_out = {
                 "type": "Feature",
                 "geometry": shp_to_geojson(gdf.geometry.iloc[0]),
@@ -1259,13 +1306,14 @@ class WebApi:
 
     def update_geometry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
             identifier = payload.get("identifier")
             geometry = payload.get("geometry")
             if not identifier or geometry is None:
                 raise ValueError("identifier/geometry missing")
             group_id = payload.get("group_id") or self._active_group_id
             debug_log(self._base_dir, f"update_geometry: id={identifier}, group={group_id}")
-            record = self._storage.update_geometry(identifier, group_id, geometry)
+            record = storage.update_geometry(identifier, group_id, geometry)
             self._active_group_id = record.group_id
             self._set_dirty(True)
             debug_log(self._base_dir, f"update_geometry: updated id={identifier}")
@@ -1276,6 +1324,7 @@ class WebApi:
 
     def update_properties(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
             identifier = payload.get("identifier")
             if not identifier:
                 raise ValueError("identifier missing")
@@ -1283,7 +1332,7 @@ class WebApi:
             notes = payload.get("notes", "")
             group_id = payload.get("group_id") or self._active_group_id
             debug_log(self._base_dir, f"update_properties: id={identifier}, group={group_id}")
-            record = self._storage.update_properties(identifier, group_id, title, notes)
+            record = storage.update_properties(identifier, group_id, title, notes)
             self._active_group_id = record.group_id
             self._set_dirty(True)
             debug_log(self._base_dir, f"update_properties: updated id={identifier}")
@@ -1302,12 +1351,13 @@ class WebApi:
 
     def delete_polygon(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
             identifier = payload.get("identifier")
             if not identifier:
                 raise ValueError("identifier missing")
             group_id = payload.get("group_id") or self._active_group_id
             debug_log(self._base_dir, f"delete_polygon: id={identifier}, group={group_id}")
-            self._storage.delete(identifier, group_id)
+            storage.delete(identifier, group_id)
             self._set_dirty(True)
             debug_log(self._base_dir, f"delete_polygon: removed id={identifier}")
             return {"ok": True, "dirty": True}
@@ -1317,7 +1367,7 @@ class WebApi:
 
     def save(self) -> Dict[str, Any]:
         try:
-            self._storage.save()
+            self._storage_obj().save()
             self._set_dirty(False)
             debug_log(self._base_dir, "save: wrote storage to parquet")
             return {"ok": True, "dirty": False}
@@ -1327,6 +1377,7 @@ class WebApi:
 
     def import_file(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
             root = tk.Tk()
             root.withdraw()
             root.attributes("-topmost", True)
@@ -1346,10 +1397,10 @@ class WebApi:
 
             group_id = (payload or {}).get("group_id") or self._active_group_id
             debug_log(self._base_dir, f"import_file: path={path}, group={group_id}")
-            imported = self._storage.import_file(Path(path), group_id)
+            imported = storage.import_file(Path(path), group_id)
             features = []
             for record in imported:
-                gdf = gpd.GeoDataFrame([{"geometry": record.geometry}], geometry="geometry", crs=self._storage.storage_epsg).to_crs(4326)
+                gdf = gpd.GeoDataFrame([{"geometry": record.geometry}], geometry="geometry", crs=storage.storage_epsg).to_crs(4326)
                 features.append(
                     {
                         "type": "Feature",
@@ -1373,9 +1424,10 @@ class WebApi:
 
     def load_canvas(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
+            analyzer = self._analyzer_obj()
             category = DEFAULT_ANALYSIS_GEOCODE
             debug_log(self._base_dir, f"load_canvas: requested category={category}")
-            layer = self._analyzer.canvas_geojson(category)
+            layer = analyzer.canvas_geojson(category)
             if not layer:
                 debug_log(self._base_dir, f"load_canvas: no layer for {category}")
                 return {"ok": False, "error": "Canvas layer unavailable."}
@@ -1388,20 +1440,22 @@ class WebApi:
 
     def list_geocodes(self) -> Dict[str, Any]:
         try:
-            return {"ok": True, "geocode_categories": self._analyzer.available_geocode_categories()}
+            return {"ok": True, "geocode_categories": self._analyzer_obj().available_geocode_categories()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     def select_group(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
+            analyzer = self._analyzer_obj()
             group_id = payload.get("group_id")
             debug_log(self._base_dir, f"select_group: group={group_id}")
-            group = self._storage.set_active_group(group_id)
+            group = storage.set_active_group(group_id)
             self._active_group_id = group.identifier
             if payload.get("geocode"):
                 self._active_geocode = payload["geocode"]
             else:
-                self._active_geocode = group.default_geocode or self._analyzer.default_geocode
+                self._active_geocode = group.default_geocode or analyzer.default_geocode
             return self.bootstrap()
         except Exception as exc:
             debug_log(self._base_dir, f"select_group: error {exc}")
@@ -1409,13 +1463,15 @@ class WebApi:
 
     def create_group(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
+            analyzer = self._analyzer_obj()
             name = payload.get("name", "Ny analysegruppe")
             notes = payload.get("notes", "")
             geocode = payload.get("default_geocode")
             debug_log(self._base_dir, f"create_group: name={name}, geocode={geocode}")
-            group = self._storage.add_group(name, notes, geocode)
+            group = storage.add_group(name, notes, geocode)
             self._active_group_id = group.identifier
-            self._active_geocode = group.default_geocode or self._analyzer.default_geocode
+            self._active_geocode = group.default_geocode or analyzer.default_geocode
             self._set_dirty(True)
             return self.bootstrap()
         except Exception as exc:
@@ -1424,17 +1480,19 @@ class WebApi:
 
     def update_group(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
+            analyzer = self._analyzer_obj()
             group_id = payload.get("group_id") or self._active_group_id
             name = payload.get("name")
             notes = payload.get("notes")
             geocode = payload.get("default_geocode")
             debug_log(self._base_dir, f"update_group: group={group_id}, name={name}, geocode={geocode}")
-            group = self._storage.update_group(group_id, name=name, notes=notes, default_geocode=geocode)
+            group = storage.update_group(group_id, name=name, notes=notes, default_geocode=geocode)
             self._active_group_id = group.identifier
             if geocode:
                 self._active_geocode = geocode
             else:
-                self._active_geocode = group.default_geocode or self._analyzer.default_geocode
+                self._active_geocode = group.default_geocode or analyzer.default_geocode
             self._set_dirty(True)
             return self.bootstrap()
         except Exception as exc:
@@ -1443,11 +1501,13 @@ class WebApi:
 
     def delete_group(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            storage = self._storage_obj()
+            analyzer = self._analyzer_obj()
             group_id = payload.get("group_id")
             debug_log(self._base_dir, f"delete_group: group={group_id}")
-            self._storage.delete_group(group_id)
-            self._active_group_id = self._storage.active_group_id()
-            self._active_geocode = self._storage.get_group(self._active_group_id).default_geocode or self._analyzer.default_geocode
+            storage.delete_group(group_id)
+            self._active_group_id = storage.active_group_id()
+            self._active_geocode = storage.get_group(self._active_group_id).default_geocode or analyzer.default_geocode
             self._set_dirty(True)
             return self.bootstrap()
         except Exception as exc:
@@ -2640,9 +2700,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     base_dir = resolve_base_dir(args.owd)
     cfg = read_config(base_dir)
 
-    storage = AnalysisStorage(base_dir, cfg)
-    analyzer = AnalysisPreviewProvider(base_dir, cfg, storage.storage_epsg)
-    api = WebApi(storage, analyzer, base_dir)
+    api = WebApi(base_dir, cfg)
 
     webview = _require_webview()
 

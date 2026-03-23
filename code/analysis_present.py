@@ -22,12 +22,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import geopandas as gpd
-import numpy as np
-import pandas as pd
 import tkinter as tk
 from tkinter import messagebox
-from openpyxl.drawing.image import Image as XLImage
 
 from locale_bootstrap import harden_locale_for_ttkbootstrap
 
@@ -40,16 +36,58 @@ try:
 except ModuleNotFoundError as exc:  # pragma: no cover - ttkbootstrap required at runtime
     raise SystemExit("ttkbootstrap is required (pip install ttkbootstrap).") from exc
 
-try:
-    import matplotlib
+gpd = None
+np = None
+pd = None
+FigureCanvasTkAgg = None
+Figure = None
+PathPatch = None
+MplPath = None
+XLImage = None
 
-    matplotlib.use("TkAgg")
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-    from matplotlib.patches import PathPatch
-    from matplotlib.path import Path as MplPath
-except Exception as exc:  # pragma: no cover - matplotlib is required at runtime
-    raise SystemExit("matplotlib with TkAgg support is required for this tool.") from exc
+
+def _load_runtime_deps() -> None:
+    global gpd, np, pd, FigureCanvasTkAgg, Figure, PathPatch, MplPath
+    if all(dep is not None for dep in (gpd, np, pd, FigureCanvasTkAgg, Figure, PathPatch, MplPath)):
+        return
+    try:
+        import geopandas as _gpd
+        import numpy as _np
+        import pandas as _pd
+        import matplotlib
+
+        matplotlib.use("TkAgg")
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
+        from matplotlib.figure import Figure as _Figure
+        from matplotlib.patches import PathPatch as _PathPatch
+        from matplotlib.path import Path as _MplPath
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "analysis_present.py requires numpy, pandas, geopandas, and matplotlib with TkAgg support."
+        ) from exc
+    except Exception as exc:
+        raise SystemExit("matplotlib with TkAgg support is required for this tool.") from exc
+
+    gpd = _gpd
+    np = _np
+    pd = _pd
+    FigureCanvasTkAgg = _FigureCanvasTkAgg
+    Figure = _Figure
+    PathPatch = _PathPatch
+    MplPath = _MplPath
+
+
+def _load_excel_export_deps() -> None:
+    global XLImage
+    if XLImage is not None:
+        return
+    try:
+        from openpyxl.drawing.image import Image as _XLImage
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "analysis_present.py requires openpyxl and pillow for Excel chart export."
+        ) from exc
+    XLImage = _XLImage
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -1709,10 +1747,16 @@ class ComparisonTable:
 
 
 class ComparisonApp:
-    def __init__(self, data: AnalysisData, theme: str) -> None:
+    def __init__(self, data: AnalysisData, theme: str, root: Optional[tk.Tk] = None) -> None:
         self.data = data
         self.palette_map = data.palette_map
-        self.root = tb.Window(themename=theme)
+        self.root = root if root is not None else tb.Window(themename=theme)
+        if root is not None:
+            for child in list(self.root.winfo_children()):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
         self.root.title("MESA Area Analysis - Comparison")
         self.root.geometry("1280x780")
         self.root.minsize(1100, 720)
@@ -1946,6 +1990,7 @@ class ComparisonApp:
         report_dir = self._ensure_report_dir()
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = report_dir / f"{prefix}_{timestamp}.xlsx"
+        _load_excel_export_deps()
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             for sheet_name, frame in sheets.items():
                 safe_name = sheet_name[:31] or "Sheet"
@@ -2062,18 +2107,46 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
     base_dir = resolve_base_dir(args.owd)
     cfg = read_config(base_dir)
+    theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "litera").strip() or "litera"
+    root = tb.Window(themename=theme)
+    root.title("MESA Area Analysis - Comparison")
+    root.geometry("1280x780")
+    root.minsize(1100, 720)
+
+    loading = ttk.Frame(root, padding=(20, 20))
+    loading.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(loading, text="Loading comparison viewer...", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+    loading_var = tk.StringVar(value="Preparing runtime dependencies...")
+    ttk.Label(loading, textvariable=loading_var, justify="left", wraplength=720).pack(anchor="w")
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+
+    loading_var.set("Loading GIS/data and chart libraries...")
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+    _load_runtime_deps()
 
     palette_map = read_sensitivity_palette(cfg)
     for code_key, entry in palette_map.items():
         debug_log(base_dir, f"presentation palette {code_key}: {entry.get('color', '')}")
-
-    theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "litera").strip() or "litera"
     debug_log(base_dir, f"presentation theme: {theme}")
 
+    loading_var.set("Loading comparison datasets...")
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
     data = AnalysisData(base_dir, cfg, palette_map)
     debug_log(base_dir, "Comparison viewer initialised")
 
-    app = ComparisonApp(data, theme)
+    app = ComparisonApp(data, theme, root=root)
     app.run()
 
 

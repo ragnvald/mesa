@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 # MESA – Setup & Registration (2 tabs: Start and Vulnerability)
 # Persistence: GeoParquet + JSON only (GPKG removed)
 
@@ -11,14 +12,9 @@ import sys
 import argparse
 import configparser
 import datetime
+import statistics
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
-import geopandas as gpd
 from typing import Optional
-from shapely import wkb as _shapely_wkb
-from shapely import wkt as _shapely_wkt
 
 import tkinter as tk
 from tkinter import messagebox, filedialog
@@ -26,6 +22,33 @@ from tkinter import messagebox, filedialog
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from ttkbootstrap import ttk as ttkb  # themed ttk widgets
+
+np = None
+pd = None
+gpd = None
+_shapely_wkb = None
+_shapely_wkt = None
+
+
+def _load_runtime_data_stack() -> None:
+    global np, pd, gpd, _shapely_wkb, _shapely_wkt
+    if all(module is not None for module in (np, pd, gpd, _shapely_wkb, _shapely_wkt)):
+        return
+    try:
+        import numpy as _np
+        import pandas as _pd
+        import geopandas as _gpd
+        from shapely import wkb as _wkb
+        from shapely import wkt as _wkt
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "processing_setup.py requires numpy, pandas, geopandas, and shapely in the runtime environment."
+        ) from exc
+    np = _np
+    pd = _pd
+    gpd = _gpd
+    _shapely_wkb = _wkb
+    _shapely_wkt = _wkt
 
 # Capture start-CWD before anything changes
 START_CWD = Path.cwd()
@@ -200,7 +223,7 @@ def get_fallback_value(cfg, valid_vals: list[int]) -> int:
         if v in valid_vals: return v
     except Exception:
         pass
-    return int(np.median(valid_vals))
+    return int(statistics.median(valid_vals))
 
 # -------------------------------
 # Logging
@@ -1013,14 +1036,6 @@ if __name__ == "__main__":
         or _cfg_get_any(config, 'workingprojection_epsg', fallback='4326')
         or '4326'
     )
-    # Asset groups
-    gdf_asset_group = load_asset_group(original_working_directory)
-    log_to_file(f"[processing_setup] asset grp: {_parquet_asset_group_path(original_working_directory)}")
-    if gdf_asset_group is None:
-        log_to_file("Failed to load tbl_asset_group (Parquet).")
-        sys.exit(1)
-
-    # UI
     root = tb.Window(themename=ttk_bootstrap_theme)
     root.title("MESA – Setup & Registration (GeoParquet)")
     try:
@@ -1030,6 +1045,52 @@ if __name__ == "__main__":
     except Exception:
         pass
     root.geometry("1100x860")
+
+    loading_frame = ttkb.Frame(root, padding=(18, 18))
+    loading_frame.pack(fill="both", expand=True)
+    ttkb.Label(
+        loading_frame,
+        text="Loading processing setup...",
+        font=("Segoe UI", 12, "bold"),
+    ).pack(anchor="w", pady=(0, 8))
+    startup_status_var = tk.StringVar(value="Preparing data libraries...")
+    ttkb.Label(
+        loading_frame,
+        textvariable=startup_status_var,
+        justify="left",
+        wraplength=700,
+    ).pack(anchor="w")
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+
+    startup_status_var.set("Loading GIS/data libraries...")
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+    _load_runtime_data_stack()
+
+    startup_status_var.set("Loading asset-group data...")
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+    gdf_asset_group = load_asset_group(original_working_directory)
+    log_to_file(f"[processing_setup] asset grp: {_parquet_asset_group_path(original_working_directory)}")
+    if gdf_asset_group is None:
+        log_to_file("Failed to load tbl_asset_group (Parquet).")
+        root.destroy()
+        sys.exit(1)
+
+    try:
+        loading_frame.destroy()
+    except Exception:
+        pass
 
     # -------------------------------
     # Layout: left navigation controls right content

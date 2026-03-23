@@ -231,3 +231,14 @@ When a problem is solved, add a short entry here with:
   - The repo had packaging-oriented documentation, but not a single developer-facing entry document explaining what MESA actually is as a system.
 - Practical fix / decision:
   - Keep the root `README.md` developer-facing and keep `code/README.md` focused on the packaged distribution.
+
+## UI helpers should lazy-load heavy GIS/chart stacks (2026-03-23)
+
+- What changed:
+  - `processing_setup.py`, `analysis_setup.py`, and `analysis_present.py` now defer `numpy`/`pandas`/`geopandas`/`shapely` or `matplotlib` imports until after a lightweight UI shell or API bridge is already up.
+- Root cause:
+  - Importing the full GIS/data stack at module import time made frozen helpers look hung before any visible window or status message appeared.
+- Practical fix / decision:
+  - For desktop helpers, show a small loading window first and then import heavy runtime dependencies.
+  - For pywebview helpers, keep the bridge object cheap and initialise GIS/storage backends on first API use.
+  - Keep export-only dependencies such as `openpyxl` image helpers out of module scope so report features do not slow initial startup.
