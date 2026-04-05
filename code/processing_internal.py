@@ -4,58 +4,10 @@
 # Minimap opens in a separate, low-priority helper process (pywebview + Leaflet + OSM).
 
 import locale
-
-def _patch_locale_setlocale_for_windows() -> None:
-    """Make locale.setlocale resilient on Windows.
-
-    ttkbootstrap calls locale.setlocale during import (DatePickerDialog). On some
-    Windows machines, setlocale(LC_TIME, "") can raise locale.Error.
-    """
-    try:
-        if os.name != "nt":
-            return
-        _orig = locale.setlocale
-
-        def _safe_setlocale(category, value=None):
-            try:
-                if value is None:
-                    return _orig(category)
-                return _orig(category, value)
-            except locale.Error:
-                for fallback in ("", "C"):
-                    try:
-                        return _orig(category, fallback)
-                    except Exception:
-                        continue
-                try:
-                    return _orig(category)
-                except Exception:
-                    return "C"
-
-        locale.setlocale = _safe_setlocale  # type: ignore[assignment]
-    except Exception:
-        pass
+from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 
-_patch_locale_setlocale_for_windows()
-
-try:
-    if os.name == "nt":
-        for _k in ("LC_ALL", "LC_CTYPE", "LANG"):
-            _v = os.environ.get(_k)
-            if _v and ("utf-8" in _v.lower()) and ("_" in _v) and ("." in _v):
-                os.environ.pop(_k, None)
-except Exception:
-    pass
-
-try:
-    # Use OS default locale when available; fall back to the C locale.
-    locale.setlocale(locale.LC_ALL, "")
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, "C")
-    except Exception:
-        pass
+harden_locale_for_ttkbootstrap()
 
 import os, sys, math, re, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
 import configparser
@@ -334,8 +286,8 @@ def _ensure_cfg() -> configparser.ConfigParser:
         _CFG = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
         try:
             _CFG.read(base_dir() / "config.ini", encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[mesa] warn: config.ini could not be read: {e}", flush=True)
         if "DEFAULT" not in _CFG:
             _CFG["DEFAULT"] = {}
     if "parquet_folder" not in _CFG["DEFAULT"]:
@@ -480,7 +432,7 @@ def log_to_gui(widget, message: str):
         with open(base_dir() / "log.txt", "a", encoding="utf-8") as f:
             f.write(formatted + "\n")
     except Exception:
-        pass
+        print(formatted, flush=True)
     if widget is None:
         print(formatted, flush=True)
 
@@ -849,8 +801,8 @@ def read_class_ranges(cfg_path: Path):
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     try:
         cfg.read(cfg_path, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[mesa] warn: class ranges could not be read from {cfg_path}: {e}", flush=True)
     ranges, desc = {}, {}
     for code in ["A","B","C","D","E"]:
         if code not in cfg:

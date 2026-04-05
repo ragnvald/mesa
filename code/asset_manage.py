@@ -5,6 +5,8 @@ from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
+from mesa_shared import find_base_dir
+
 import argparse
 import configparser
 import datetime
@@ -127,74 +129,6 @@ def _exists(path: Path) -> bool:
 		return False
 
 
-def _has_config_at(root: Path) -> bool:
-	return _exists(root / "config.ini") or _exists(root / "system" / "config.ini")
-
-
-def find_base_dir(cli_workdir: str | None = None) -> Path:
-	candidates: list[Path] = []
-
-	def _add(path_like):
-		if not path_like:
-			return
-		try:
-			candidates.append(Path(path_like))
-		except Exception:
-			pass
-
-	env_base = os.environ.get("MESA_BASE_DIR")
-	if env_base:
-		_add(env_base)
-	if cli_workdir:
-		_add(cli_workdir)
-
-	exe_path: Path | None = None
-	try:
-		exe_path = Path(os.path.abspath(os.path.realpath(os.sys.executable))).resolve()
-	except Exception:
-		exe_path = None
-	if exe_path:
-		_add(exe_path.parent)
-		_add(exe_path.parent.parent)
-		_add(exe_path.parent.parent.parent)
-
-	meipass = getattr(os.sys, "_MEIPASS", None)
-	if meipass:
-		_add(meipass)
-
-	here = Path(__file__).resolve()
-	_add(here.parent)
-	_add(here.parent.parent)
-	_add(here.parent.parent.parent)
-
-	cwd = Path.cwd()
-	_add(cwd)
-	_add(cwd / "code")
-	_add(cwd.parent)
-	_add(cwd.parent / "code")
-
-	seen = set()
-	uniq = []
-	for candidate in candidates:
-		try:
-			resolved = candidate.resolve()
-		except Exception:
-			resolved = candidate
-		if resolved not in seen:
-			seen.add(resolved)
-			uniq.append(resolved)
-
-	for candidate in uniq:
-		if _has_config_at(candidate):
-			return candidate
-
-	if here.parent.name.lower() == "system":
-		return here.parent.parent
-	if exe_path:
-		return exe_path.parent
-	if env_base:
-		return Path(env_base)
-	return here.parent
 
 
 def _ensure_cfg() -> configparser.ConfigParser:

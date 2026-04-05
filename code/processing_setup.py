@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import messagebox, filedialog
 
 import ttkbootstrap as tb
-from ttkbootstrap.constants import *
+from ttkbootstrap.constants import INFO, PRIMARY, SUCCESS
 from ttkbootstrap import ttk as ttkb  # themed ttk widgets
 
 np = None

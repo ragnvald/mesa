@@ -25,6 +25,12 @@ CLI behavior
 
 from __future__ import annotations
 
+from mesa_shared import find_base_dir as resolve_base_dir, read_config, parquet_dir
+
+from locale_bootstrap import harden_locale_for_ttkbootstrap
+
+harden_locale_for_ttkbootstrap()
+
 import argparse
 import configparser
 import datetime
@@ -63,56 +69,6 @@ def _ts() -> str:
 # Paths / config
 # ---------------------------------------------------------------------------
 
-def resolve_base_dir(original_working_directory: str | None) -> Path:
-    """Resolve the mesa root folder in all modes (.py, frozen, tools/ launch)."""
-    candidates: list[Path] = []
-
-    if original_working_directory:
-        candidates.append(Path(original_working_directory))
-
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent)
-    else:
-        if "__file__" in globals():
-            candidates.append(Path(__file__).resolve().parent)
-
-    candidates.append(Path(os.getcwd()).resolve())
-
-    def normalize(p: Path) -> Path:
-        p = p.resolve()
-        if p.name.lower() in ("tools", "system", "code"):
-            p = p.parent
-        q = p
-        for _ in range(5):
-            if (q / "config.ini").exists() and (q / "output").exists() and (q / "input").exists():
-                return q
-            q = q.parent
-        return p
-
-    for c in candidates:
-        root = normalize(c)
-        if (root / "config.ini").exists():
-            return root
-
-    return normalize(candidates[0])
-
-
-def read_config(base_dir: Path) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
-    cfg.read(base_dir / "config.ini", encoding="utf-8")
-    return cfg
-
-
-def parquet_dir(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
-    rel = "output/geoparquet"
-    try:
-        if "DEFAULT" in cfg:
-            rel = str(cfg["DEFAULT"].get("parquet_folder", rel)).strip() or rel
-    except Exception:
-        pass
-    out = (base_dir / rel).resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    return out
 
 
 # ---------------------------------------------------------------------------

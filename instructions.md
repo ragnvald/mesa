@@ -68,6 +68,15 @@ Use this document as the first stop before editing the `mesa` repository. Update
 - Maintain backwards compatibility with both the .py and compiled .exe launch paths (check `get_script_paths` usage before moving code).
 - Log meaningful events via `log_to_logfile` instead of printing directly to stdout from GUI callbacks.
 
+### 6.3 Exception handling rule
+- `except Exception: pass` (silent swallow) is acceptable **only** for cosmetic/GUI operations (e.g. updating a progress label, setting plot aspect).
+- Config reads, file writes, and any data-processing path must produce at least a `log_to_logfile` entry when they fail. Use `except Exception as e: log_to_logfile(base_dir, f"[warn] <context>: {e}")` as the minimum.
+- If `log.txt` cannot be written, fall back to `print()` so the failure is visible on stdout.
+
+### 6.4 Shared utility modules
+- Path resolution: import `find_base_dir`, `read_config`, and `parquet_dir` from `code/mesa_shared.py`. Do **not** add new local implementations of these functions in individual helpers.
+- Table-name and path constants: import from `code/mesa_constants.py` (e.g. `TABLE_ASSET_GROUP`, `PARQUET_SUBDIR`). Do **not** hard-code GeoParquet file names as string literals.
+
 ## 6.2 Helper file naming convention
 - Use `domain_action.py` (snake_case), where domain comes first for discoverability (examples: `analysis_setup.py`, `line_manage.py`, `report_generate.py`).
 - Preferred domains: `analysis`, `atlas`, `asset`, `geocode`, `line`, `map`, `processing`, `report`, `config`, `tiles`, `locale`, `app`.
@@ -134,4 +143,4 @@ When you meet a problem make sure you look for a solution in `learning.md` in ca
 - If no new insight was produced, no entry is required.
 - Before starting investigation on a recurring issue, quickly scan `learning.md` for relevant prior solutions.
 ---
-_Last updated: 2026-03-08 22:55_
+_Last updated: 2026-04-04 12:00_

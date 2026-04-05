@@ -29,6 +29,15 @@ from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
+from mesa_shared import find_base_dir as resolve_base_dir
+from mesa_constants import (
+    TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
+    TABLE_ANALYSIS_GROUP as ANALYSIS_GROUP_TABLE,
+    TABLE_ANALYSIS_FLAT as ANALYSIS_FLAT_TABLE,
+    TABLE_ANALYSIS_STACKED as ANALYSIS_STACKED_TABLE,
+    PARQUET_SUBDIR,
+)
+
 try:
     import ttkbootstrap as tb
     from ttkbootstrap import ttk
@@ -93,11 +102,7 @@ def _load_excel_export_deps() -> None:
 # Constants
 # --------------------------------------------------------------------------- #
 
-ANALYSIS_POLYGON_TABLE = "tbl_analysis_polygons.parquet"
-ANALYSIS_GROUP_TABLE = "tbl_analysis_group.parquet"
-ANALYSIS_FLAT_TABLE = "tbl_analysis_flat.parquet"
-ANALYSIS_STACKED_TABLE = "tbl_analysis_stacked.parquet"
-DEFAULT_PARQUET_SUBDIR = "output/geoparquet"
+DEFAULT_PARQUET_SUBDIR = PARQUET_SUBDIR
 DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
 KM2_DENOMINATOR = 1_000_000.0
 
@@ -138,45 +143,6 @@ def debug_log(base_dir: Path, message: str) -> None:
         pass
 
 
-def resolve_base_dir(cli_path: Optional[str] = None) -> Path:
-    """Mirror the directory probing logic used in the setup tool."""
-    candidates: List[Path] = []
-    env_base = os.environ.get("MESA_BASE_DIR")
-    if env_base:
-        candidates.append(Path(env_base))
-    if cli_path:
-        candidates.append(Path(cli_path))
-
-    # Frozen exe check
-    if getattr(sys, "frozen", False):
-        exe_path = Path(sys.executable).resolve()
-        candidates.extend([exe_path.parent, exe_path.parent.parent])
-
-    here = Path(__file__).resolve()
-    candidates.extend([here.parent, here.parent.parent, here.parent.parent.parent])
-    cwd = Path(os.getcwd())
-    candidates.extend([cwd, cwd / "code"])
-
-    ordered: List[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        if resolved not in seen:
-            seen.add(resolved)
-            ordered.append(resolved)
-
-    for candidate in ordered:
-        if (candidate / "config.ini").exists():
-            return candidate
-        if (candidate / "system" / "config.ini").exists():
-            return candidate
-
-    if here.parent.name.lower() == "system":
-        return here.parent.parent
-    return here.parent
 
 
 def read_config(base_dir: Path) -> configparser.ConfigParser:

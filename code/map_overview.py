@@ -14,6 +14,9 @@ except Exception:
     STRtree = None
 from pyproj import Geod
 from pathlib import Path
+from mesa_constants import (
+    TABLE_FLAT, TABLE_SEGMENT_FLAT, TABLE_SEGMENTS, TABLE_LINES, DEFAULT_CRS,
+)
 
 TEST_MODE = (os.environ.get("MESA_TEST_MODE", "").strip().lower() in ("1", "true", "yes"))
 
@@ -103,12 +106,12 @@ MBTILES_DIR   = OUTPUT_DIR / "mbtiles"
 MBTILES_DEBUG_GUARD = (os.environ.get("MESA_DEBUG_MB_GUARD", "").strip().lower() in ("1", "true", "yes", "debug"))
 AREA_JSON     = OUTPUT_DIR / "area_stats.json"
 
-PARQUET_FILE          = PARQUET_DIR / "tbl_flat.parquet"
-SEGMENT_FILE          = PARQUET_DIR / "tbl_segment_flat.parquet"
-SEGMENT_OUTLINE_FILE  = PARQUET_DIR / "tbl_segments.parquet"
-LINES_FILE            = PARQUET_DIR / "tbl_lines.parquet"
+PARQUET_FILE          = PARQUET_DIR / TABLE_FLAT
+SEGMENT_FILE          = PARQUET_DIR / TABLE_SEGMENT_FLAT
+SEGMENT_OUTLINE_FILE  = PARQUET_DIR / TABLE_SEGMENTS
+LINES_FILE            = PARQUET_DIR / TABLE_LINES
 
-PLOT_CRS         = "EPSG:4326"
+PLOT_CRS         = DEFAULT_CRS
 BASIC_GROUP_NAME = "basic_mosaic"
 ZOOM_THRESHOLD   = 10
 STEEL_BLUE       = "#4682B4"

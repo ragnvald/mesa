@@ -5,6 +5,9 @@ from locale_bootstrap import harden_locale_for_ttkbootstrap
 
 harden_locale_for_ttkbootstrap()
 
+from mesa_shared import find_base_dir
+from mesa_constants import TABLE_ATLAS, TABLE_ASSET_GROUP, TABLE_FLAT
+
 import argparse
 import configparser
 import datetime
@@ -60,74 +63,6 @@ def _exists(path: Path) -> bool:
         return False
 
 
-def _has_config_at(root: Path) -> bool:
-    return _exists(root / "config.ini") or _exists(root / "system" / "config.ini")
-
-
-def find_base_dir(cli_workdir: str | None = None) -> Path:
-    candidates: list[Path] = []
-
-    def _add(path_like):
-        if not path_like:
-            return
-        try:
-            candidates.append(Path(path_like))
-        except Exception:
-            pass
-
-    env_base = os.environ.get("MESA_BASE_DIR")
-    if env_base:
-        _add(env_base)
-    if cli_workdir:
-        _add(cli_workdir)
-
-    exe_path: Path | None = None
-    try:
-        exe_path = Path(os.path.abspath(os.path.realpath(os.sys.executable))).resolve()
-    except Exception:
-        exe_path = None
-    if exe_path:
-        _add(exe_path.parent)
-        _add(exe_path.parent.parent)
-        _add(exe_path.parent.parent.parent)
-
-    meipass = getattr(os.sys, "_MEIPASS", None)
-    if meipass:
-        _add(meipass)
-
-    here = Path(__file__).resolve()
-    _add(here.parent)
-    _add(here.parent.parent)
-    _add(here.parent.parent.parent)
-
-    cwd = Path.cwd()
-    _add(cwd)
-    _add(cwd / "code")
-    _add(cwd.parent)
-    _add(cwd.parent / "code")
-
-    seen = set()
-    uniq = []
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        if resolved not in seen:
-            seen.add(resolved)
-            uniq.append(resolved)
-
-    for candidate in uniq:
-        if _has_config_at(candidate):
-            return candidate
-
-    if here.parent.name.lower() == "system":
-        return here.parent.parent
-    if exe_path:
-        return exe_path.parent
-    if env_base:
-        return Path(env_base)
-    return here.parent
 
 
 def _ensure_cfg() -> configparser.ConfigParser:
@@ -163,7 +98,7 @@ def _ensure_cfg() -> configparser.ConfigParser:
     d.setdefault("ttk_bootstrap_theme", "flatly")
     d.setdefault("workingprojection_epsg", "4326")
     d.setdefault("input_folder_atlas", "input/atlas")
-    d.setdefault("atlas_parquet_file", "tbl_atlas.parquet")
+    d.setdefault("atlas_parquet_file", TABLE_ATLAS)
     d.setdefault("atlas_lon_size_km", "10")
     d.setdefault("atlas_lat_size_km", "10")
     d.setdefault("atlas_overlap_percent", "10")
@@ -526,9 +461,9 @@ class AtlasManagerApp:
             widget.configure(state=count_state)
 
     def _read_asset_group_parquet(self) -> gpd.GeoDataFrame:
-        p = _parquet_path("tbl_asset_group.parquet")
+        p = _parquet_path(TABLE_ASSET_GROUP)
         if not p.exists():
-            self._log_to_gui(f"Missing tbl_asset_group.parquet at {p}")
+            self._log_to_gui(f"Missing {TABLE_ASSET_GROUP} at {p}")
             return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
         try:
             gdf = gpd.read_parquet(p)
@@ -540,9 +475,9 @@ class AtlasManagerApp:
             return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
     def _read_flat_parquet(self) -> gpd.GeoDataFrame:
-        p = _parquet_path("tbl_flat.parquet")
+        p = _parquet_path(TABLE_FLAT)
         if not p.exists():
-            self._log_to_gui(f"Missing tbl_flat.parquet at {p}")
+            self._log_to_gui(f"Missing {TABLE_FLAT} at {p}")
             return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
         try:
             gdf = gpd.read_parquet(p)

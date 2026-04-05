@@ -241,4 +241,14 @@ When a problem is solved, add a short entry here with:
 - Practical fix / decision:
   - For desktop helpers, show a small loading window first and then import heavy runtime dependencies.
   - For pywebview helpers, keep the bridge object cheap and initialise GIS/storage backends on first API use.
-  - Keep export-only dependencies such as `openpyxl` image helpers out of module scope so report features do not slow initial startup.
+
+## Launcher source runs should self-correct to `.venv` (2026-03-24)
+
+- What changed:
+  - `mesa.py` now checks its interpreter at process start during source runs on Windows and relaunches itself with `.\.venv\Scripts\python.exe` (or `pythonw.exe` when appropriate) if it was started from the wrong Python.
+- Root cause:
+  - The repo already standardized `.venv` for daily development, but launching `mesa.py` from an IDE, shell, or file association could still pick a different interpreter and then fail on imports or mismatch helper behavior.
+- Practical fix / decision:
+  - Keep packaged `.exe` runs untouched.
+  - Correct the interpreter before importing heavy GUI/runtime dependencies.
+  - When relaunching, also set `VIRTUAL_ENV` and prepend the venv `Scripts` folder to `PATH` so descendant processes inherit the expected development environment.

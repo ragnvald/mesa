@@ -44,6 +44,10 @@ Config (<base>/config.ini → [DEFAULT]) knobs (defaults shown):
 
 from __future__ import annotations
 
+from mesa_shared import find_base_dir
+from mesa_constants import TABLE_GEOCODE_GROUP, TABLE_GEOCODE_OBJECT
+from locale_bootstrap import harden_locale_for_ttkbootstrap
+
 import argparse
 import configparser
 import datetime
@@ -121,59 +125,7 @@ except Exception:
     ShapelySTRtree = None
 
 # -----------------------------------------------------------------------------
-# Locale
-# -----------------------------------------------------------------------------
-# Avoid forcing "en_US.UTF-8" on Windows: many machines don't have that locale.
-
-def _patch_locale_setlocale_for_windows() -> None:
-    """Make locale.setlocale resilient on Windows.
-
-    ttkbootstrap calls locale.setlocale during import (DatePickerDialog). On some
-    Windows machines, setlocale(LC_TIME, "") can raise locale.Error.
-    """
-    try:
-        if os.name != "nt":
-            return
-        _orig = locale.setlocale
-
-        def _safe_setlocale(category, value=None):
-            try:
-                if value is None:
-                    return _orig(category)
-                return _orig(category, value)
-            except locale.Error:
-                for fallback in ("", "C"):
-                    try:
-                        return _orig(category, fallback)
-                    except Exception:
-                        continue
-                try:
-                    return _orig(category)
-                except Exception:
-                    return "C"
-
-        locale.setlocale = _safe_setlocale  # type: ignore[assignment]
-    except Exception:
-        pass
-
-
-_patch_locale_setlocale_for_windows()
-
-try:
-    if os.name == "nt":
-        for _k in ("LC_ALL", "LC_CTYPE", "LANG"):
-            _v = os.environ.get(_k)
-            if _v and ("utf-8" in _v.lower()) and ("_" in _v) and ("." in _v):
-                os.environ.pop(_k, None)
-except Exception:
-    pass
-try:
-    locale.setlocale(locale.LC_ALL, "")
-except Exception:
-    try:
-        locale.setlocale(locale.LC_ALL, "C")
-    except Exception:
-        pass
+harden_locale_for_ttkbootstrap()
 
 try:
     import fiona
@@ -398,94 +350,6 @@ def _exists(p: Path) -> bool:
     except Exception:
         return False
 
-def _has_config_at(root: Path) -> bool:
-    # Flat layout: config.ini lives at project root
-    return _exists(root / "config.ini")
-
-def find_base_dir(cli_workdir: str | None = None) -> Path:
-    """Choose a canonical project base folder that contains config.ini.
-    Priority order:
-            1) --original_working_directory (CLI)
-            2) env MESA_BASE_DIR (honored immediately when valid in frozen mode)
-      3) running binary/interpreter folder (and parents)
-      4) this script's folder and parents (covers PyInstaller _MEIPASS)
-      5) CWD, CWD/code, and their parents
-    """
-    def _maybe_return(path_like: Path) -> Path | None:
-        try:
-            resolved = Path(path_like).resolve()
-        except Exception:
-            resolved = Path(path_like)
-        return resolved if _has_config_at(resolved) else None
-
-    if cli_workdir:
-        cli_hit = _maybe_return(cli_workdir)
-        if cli_hit:
-            return cli_hit
-
-    env_base = os.environ.get("MESA_BASE_DIR")
-    if env_base and getattr(sys, "frozen", False):
-        env_hit = _maybe_return(env_base)
-        if env_hit:
-            return env_hit
-
-    candidates: list[Path] = []
-    if env_base:
-        candidates.append(Path(env_base))
-    if cli_workdir:
-        candidates.append(Path(cli_workdir))
-
-    exe_path: Path | None = None
-    try:
-        exe_path = Path(sys.executable).resolve()
-    except Exception:
-        exe_path = None
-    if exe_path:
-        candidates += [exe_path.parent, exe_path.parent.parent, exe_path.parent.parent.parent]
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(Path(meipass))
-
-    here = Path(__file__).resolve()
-    candidates += [here.parent, here.parent.parent, here.parent.parent.parent]
-
-    cwd = Path.cwd()
-    candidates += [cwd, cwd / "code", cwd.parent, cwd.parent / "code"]
-
-    seen = set()
-    uniq = []
-    for c in candidates:
-        try:
-            r = c.resolve()
-        except Exception:
-            r = c
-        if r not in seen:
-            seen.add(r)
-            uniq.append(r)
-
-    preferred = None
-    fallback = None
-    for c in uniq:
-        if _has_config_at(c):
-            if fallback is None:
-                fallback = c
-            if c.name.lower() not in {"code", "system"}:
-                preferred = c
-                break
-
-    if preferred:
-        return preferred
-    if fallback:
-        return fallback
-
-    if here.parent.name.lower() == "system":
-        return here.parent.parent
-    if exe_path:
-        return exe_path.parent
-    if env_base:
-        return Path(env_base)
-    return here.parent
 
 def read_config(file_name: Path) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -502,8 +366,6 @@ def _safe_rmtree(p: Path):
     except Exception:
         pass
 
-def resolve_base_dir(cli_root: str | None) -> Path:
-    return find_base_dir(cli_root)
 
 def config_path(base_dir: Path) -> Path:
     # FLAT: <base>/config.ini
@@ -976,8 +838,8 @@ def run_import_geocodes(base_dir: Path, cfg: configparser.ConfigParser):
         log_to_gui(f"Importing geocodes from: {input_folder}")
         g_grp, g_obj = import_geocodes_from_folder(input_folder, working_epsg)
         out_dir = gpq_dir(base_dir)
-        ensure_wgs84(g_grp).to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
-        ensure_wgs84(g_obj).to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+        ensure_wgs84(g_grp).to_parquet(out_dir / TABLE_GEOCODE_GROUP, index=False)
+        ensure_wgs84(g_obj).to_parquet(out_dir / TABLE_GEOCODE_OBJECT, index=False)
         log_to_gui(f"Saved tbl_geocode_* → {out_dir}")
         log_to_gui("Step [Import geocodes] COMPLETED")
     except Exception as e:
@@ -2146,10 +2008,10 @@ def _load_existing_geocodes(base_dir: Path) -> tuple[gpd.GeoDataFrame, gpd.GeoDa
     geodir = gpq_dir(base_dir)
     pg = _existing_parquet_path(base_dir, "tbl_geocode_group")
     if pg is None:
-        pg = geodir / "tbl_geocode_group.parquet"
+        pg = geodir / TABLE_GEOCODE_GROUP
     po = _existing_parquet_path(base_dir, "tbl_geocode_object")
     if po is None:
-        po = geodir / "tbl_geocode_object.parquet"
+        po = geodir / TABLE_GEOCODE_OBJECT
     if pg.exists():
         try:
             g = gpd.read_parquet(pg)
@@ -2212,8 +2074,8 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
             ].copy()
 
     out_dir = gpq_dir(base_dir)
-    ensure_wgs84(remaining_groups).to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
-    ensure_wgs84(remaining_objects).to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+    ensure_wgs84(remaining_groups).to_parquet(out_dir / TABLE_GEOCODE_GROUP, index=False)
+    ensure_wgs84(remaining_objects).to_parquet(out_dir / TABLE_GEOCODE_OBJECT, index=False)
 
     log_to_gui(
         f"Cleared existing geocode groups: {', '.join(names)} (removed {len(removed_groups)} group record(s)).",
@@ -2236,7 +2098,7 @@ def _list_existing_h3_group_names(base_dir: Path) -> list[str]:
     return sorted({n for n in names if n and n.startswith("H3_R")})
 
 def load_geocode_groups(base_dir: Path) -> gpd.GeoDataFrame:
-    pg = gpq_dir(base_dir) / "tbl_geocode_group.parquet"
+    pg = gpq_dir(base_dir) / TABLE_GEOCODE_GROUP
     if pg.exists():
         try:
             g = gpd.read_parquet(pg)
@@ -2333,8 +2195,8 @@ def _merge_and_write_geocodes(base_dir: Path,
         if delay_s:
             time.sleep(delay_s)
         try:
-            _atomic_to_parquet(groups_out, out_dir / "tbl_geocode_group.parquet")
-            _atomic_to_parquet(objects_out, out_dir / "tbl_geocode_object.parquet")
+            _atomic_to_parquet(groups_out, out_dir / TABLE_GEOCODE_GROUP)
+            _atomic_to_parquet(objects_out, out_dir / TABLE_GEOCODE_OBJECT)
             last_err = None
             break
         except Exception as e:
@@ -2928,10 +2790,10 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
             status_detail = "No H3 output generated (all levels skipped/empty)."
             log_to_gui(status_detail, "WARN")
             out_dir = gpq_dir(base_dir)
-            if not (out_dir / "tbl_geocode_group.parquet").exists():
-                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / "tbl_geocode_group.parquet", index=False)
-            if not (out_dir / "tbl_geocode_object.parquet").exists():
-                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / "tbl_geocode_object.parquet", index=False)
+            if not (out_dir / TABLE_GEOCODE_GROUP).exists():
+                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / TABLE_GEOCODE_GROUP, index=False)
+            if not (out_dir / TABLE_GEOCODE_OBJECT).exists():
+                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / TABLE_GEOCODE_OBJECT, index=False)
             return 0
 
         new_groups = gpd.GeoDataFrame(groups_rows, geometry="geometry", crs="EPSG:4326")
@@ -3370,7 +3232,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     ttk.Label(tab_edit, text="Edit geocode names, user titles and descriptions.").pack(anchor="w", padx=8, pady=(8, 4))
 
     read_path = geoparquet_path(base, "tbl_geocode_group")
-    write_path = gpq_dir(base) / "tbl_geocode_group.parquet"
+    write_path = gpq_dir(base) / TABLE_GEOCODE_GROUP
 
     edit_state_var = tk.StringVar(value="")
     edit_counter_var = tk.StringVar(value="0 / 0")
@@ -3818,7 +3680,7 @@ def main():
     parser.add_argument("--start-tab", default="", help="GUI startup tab: mosaic|h3|import|edit")
 
     args = parser.parse_args()
-    base = resolve_base_dir(args.original_working_directory)
+    base = find_base_dir(args.original_working_directory)
     cfg = read_config(config_path(base))
 
     # Respect custom parquet folder if provided

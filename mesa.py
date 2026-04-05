@@ -1,7 +1,68 @@
 import os
 import locale
+import sys
 import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+_MESA_SKIP_VENV_RELAUNCH = "MESA_SKIP_VENV_RELAUNCH"
+
+
+def _preferred_repo_dev_python() -> Path | None:
+    if os.name != "nt":
+        return None
+    try:
+        scripts_dir = Path(__file__).resolve().parent / ".venv" / "Scripts"
+    except Exception:
+        return None
+    current_name = Path(sys.executable or "").name.lower()
+    preferred_names = ["pythonw.exe", "python.exe"] if current_name == "pythonw.exe" else ["python.exe", "pythonw.exe"]
+    for exe_name in preferred_names:
+        candidate = scripts_dir / exe_name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _venv_env_overrides(python_exe: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    scripts_dir = python_exe.parent
+    venv_dir = scripts_dir.parent
+    env["VIRTUAL_ENV"] = str(venv_dir)
+    scripts_dir_str = str(scripts_dir)
+    path_value = env.get("PATH", "")
+    path_entries = [p for p in path_value.split(os.pathsep) if p]
+    scripts_norm = os.path.normcase(os.path.abspath(scripts_dir_str))
+    if not any(os.path.normcase(os.path.abspath(p)) == scripts_norm for p in path_entries):
+        env["PATH"] = os.pathsep.join([scripts_dir_str, *path_entries]) if path_entries else scripts_dir_str
+    return env
+
+
+def _ensure_repo_dev_venv() -> None:
+    if __name__ != "__main__":
+        return
+    if os.name != "nt" or getattr(sys, "frozen", False):
+        return
+    if os.environ.get(_MESA_SKIP_VENV_RELAUNCH) == "1":
+        return
+    preferred_python = _preferred_repo_dev_python()
+    if preferred_python is None:
+        return
+    try:
+        current_python = Path(sys.executable).resolve()
+        preferred_python = preferred_python.resolve()
+    except Exception:
+        return
+    if current_python == preferred_python:
+        return
+
+    env = _venv_env_overrides(preferred_python)
+    env[_MESA_SKIP_VENV_RELAUNCH] = "1"
+    argv = [str(preferred_python), str(Path(__file__).resolve()), *sys.argv[1:]]
+    os.execve(str(preferred_python), argv, env)
+
+
+_ensure_repo_dev_venv()
 
 if TYPE_CHECKING:
     import geopandas as gpd
@@ -73,7 +134,6 @@ except Exception:
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from pathlib import Path
 import subprocess
 import webbrowser
 import ttkbootstrap as ttk
@@ -84,7 +144,6 @@ import shutil
 import json
 from datetime import datetime
 import threading
-import sys
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
 import time

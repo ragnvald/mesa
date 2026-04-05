@@ -10,6 +10,17 @@ shared independently of the main UI.
 
 from __future__ import annotations
 
+from mesa_shared import find_base_dir as resolve_base_dir
+from mesa_constants import (
+    TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
+    TABLE_ANALYSIS_GROUP as ANALYSIS_GROUP_TABLE,
+    TABLE_ANALYSIS_FLAT as ANALYSIS_FLAT_TABLE,
+    TABLE_ANALYSIS_STACKED as ANALYSIS_STACKED_TABLE,
+    TABLE_ASSET_OBJECT as ASSET_OBJECT_TABLE,
+    TABLE_ASSET_GROUP as ASSET_GROUP_TABLE,
+    PARQUET_SUBDIR,
+)
+
 import argparse
 import configparser
 import datetime as dt
@@ -86,13 +97,7 @@ def _require_webview() -> Any:
 # Constants / configuration helpers
 # ---------------------------------------------------------------------------
 
-ANALYSIS_POLYGON_TABLE = "tbl_analysis_polygons.parquet"
-ANALYSIS_GROUP_TABLE = "tbl_analysis_group.parquet"
-ANALYSIS_STACKED_TABLE = "tbl_analysis_stacked.parquet"
-ANALYSIS_FLAT_TABLE = "tbl_analysis_flat.parquet"
-ASSET_OBJECT_TABLE = "tbl_asset_object.parquet"
-ASSET_GROUP_TABLE = "tbl_asset_group.parquet"
-DEFAULT_PARQUET_SUBDIR = "output/geoparquet"
+DEFAULT_PARQUET_SUBDIR = PARQUET_SUBDIR
 DEFAULT_MBTILES_SUBDIR = "output/mbtiles"
 REPORT_FILENAME_TEMPLATE = "MESA_area_analysis_report_{ts}.pdf"
 DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
@@ -114,45 +119,6 @@ def debug_log(base_dir: Path, message: str) -> None:
     pass
 
 
-def resolve_base_dir(cli_path: Optional[str] = None) -> Path:
-    """Mirror the directory probing logic used across other helpers."""
-    candidates: List[Path] = []
-    env_base = os.environ.get("MESA_BASE_DIR")
-    if env_base:
-        candidates.append(Path(env_base))
-    if cli_path:
-        candidates.append(Path(cli_path))
-
-    # Frozen exe check
-    if getattr(sys, "frozen", False):
-        exe_path = Path(sys.executable).resolve()
-        candidates.extend([exe_path.parent, exe_path.parent.parent])
-
-    here = Path(__file__).resolve()
-    candidates.extend([here.parent, here.parent.parent, here.parent.parent.parent])
-    cwd = Path(os.getcwd())
-    candidates.extend([cwd, cwd / "code"])
-
-    seen: set[Path] = set()
-    ordered: List[Path] = []
-    for cand in candidates:
-        try:
-            resolved = cand.resolve()
-        except Exception:
-            resolved = cand
-        if resolved not in seen:
-            seen.add(resolved)
-            ordered.append(resolved)
-
-    for cand in ordered:
-        if (cand / "config.ini").exists():
-            return cand
-        if (cand / "system" / "config.ini").exists():
-            return cand
-
-    if here.parent.name.lower() == "system":
-        return here.parent.parent
-    return here.parent
 
 
 def read_config(base_dir: Path) -> configparser.ConfigParser:

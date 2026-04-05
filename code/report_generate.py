@@ -1385,8 +1385,8 @@ def read_config(file_name: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     try:
         cfg.read(file_name, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[mesa] warn: config could not be read from {file_name}: {e}", flush=True)
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
     return cfg
@@ -1477,7 +1477,7 @@ def write_to_log(message: str, base_dir: str | None = None):
             with open(os.path.join(base_dir, "log.txt"), "a", encoding="utf-8") as f:
                 f.write(formatted + "\n")
     except Exception:
-        pass
+        print(formatted, flush=True)
     # GUI log update (thread-safe)
     def _append_gui():
         try:
@@ -1613,8 +1613,8 @@ def read_sensitivity_palette_and_desc(file_name: str):
     cfg = configparser.ConfigParser()
     try:
         cfg.read(file_name, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[mesa] warn: sensitivity palette config could not be read from {file_name}: {e}", flush=True)
 
     unknown_col = '#BDBDBD'
     if cfg.has_section('VALID_VALUES'):

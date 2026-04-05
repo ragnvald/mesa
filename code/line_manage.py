@@ -13,6 +13,7 @@ Updates in this Parquet-only, flat-layout version:
 import os, sys, uuid, threading, locale, configparser, argparse, warnings, time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP
 
 # --- pywebview config (quiet, Edge runtime preferred) ---
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
@@ -59,7 +60,7 @@ except Exception:
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ---------------- Path & config helpers ----------------
-def resolve_base_dir(passed: Optional[str]) -> str:
+def resolve_base_dir(passed: Optional[str]) -> Path:
     """
     Resolve the canonical Mesa base folder in dev and packaged modes.
     Priority:
@@ -99,9 +100,9 @@ def resolve_base_dir(passed: Optional[str]) -> str:
         cfg = os.path.join(candidate, "config.ini")
         legacy_cfg = os.path.join(candidate, "system", "config.ini")
         if os.path.isfile(cfg) or os.path.isfile(legacy_cfg):
-            return os.path.abspath(candidate)
+            return Path(os.path.abspath(candidate))
 
-    return os.path.abspath(os.path.join(here, ".."))
+    return Path(os.path.abspath(os.path.join(here, "..")))
 
 def read_config(path: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -150,26 +151,26 @@ def gpq_dir(base_dir: str) -> str:
 
 def lines_parquet_path(base_dir: str) -> str:
     for cand in _parquet_dir_candidates(base_dir):
-        path = os.path.join(cand, "tbl_lines.parquet")
+        path = os.path.join(cand, TABLE_LINES)
         if os.path.exists(path):
             return path
-    primary = os.path.join(gpq_dir(base_dir), "tbl_lines.parquet")
+    primary = os.path.join(gpq_dir(base_dir), TABLE_LINES)
     return primary
 
 def lines_original_parquet_path(base_dir: str) -> str:
     for cand in _parquet_dir_candidates(base_dir):
-        path = os.path.join(cand, "tbl_lines_original.parquet")
+        path = os.path.join(cand, TABLE_LINES_ORIGINAL)
         if os.path.exists(path):
             return path
-    primary = os.path.join(gpq_dir(base_dir), "tbl_lines_original.parquet")
+    primary = os.path.join(gpq_dir(base_dir), TABLE_LINES_ORIGINAL)
     return primary
 
 def asset_group_parquet_path(base_dir: str) -> str:
     for cand in _parquet_dir_candidates(base_dir):
-        path = os.path.join(cand, "tbl_asset_group.parquet")
+        path = os.path.join(cand, TABLE_ASSET_GROUP)
         if os.path.exists(path):
             return path
-    primary = os.path.join(gpq_dir(base_dir), "tbl_asset_group.parquet")
+    primary = os.path.join(gpq_dir(base_dir), TABLE_ASSET_GROUP)
     return primary
 
 def config_path(base_dir: str) -> str:
