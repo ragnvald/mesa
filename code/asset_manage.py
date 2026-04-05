@@ -435,10 +435,10 @@ class AssetManagerApp:
 
 		progress_frame = tb.Frame(parent) if tb is not None else ttk.Frame(parent)
 		progress_frame.pack(fill="x", pady=(8, 0))
-		progress = ttk.Progressbar(progress_frame, orient="horizontal", length=260, mode="determinate", variable=self.progress_var)
-		progress.pack(side="left")
-		self.progress_label = ttk.Label(progress_frame, text="0%")
-		self.progress_label.pack(side="left", padx=8)
+		progress = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate", variable=self.progress_var)
+		progress.pack(side="left", fill="x", expand=True)
+		self.progress_label = ttk.Label(progress_frame, text="0%", width=5, anchor="e")
+		self.progress_label.pack(side="right", padx=(8, 0))
 
 		opt = tb.Frame(parent) if tb is not None else ttk.Frame(parent)
 		opt.pack(fill="x", pady=(8, 0))

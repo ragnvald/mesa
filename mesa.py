@@ -2917,7 +2917,7 @@ if __name__ == "__main__":
                 f"Config file: {config_path}",
             ]
             if suggested_count == 0:
-                summary_lines[5] = "No changes suggested; config.ini already matches advised values."
+                summary_lines.append("No changes suggested; config.ini already matches advised values.")
 
             summary = "\n".join(summary_lines)
             _set_tune_text(summary)
