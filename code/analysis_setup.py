@@ -22,6 +22,7 @@ from mesa_constants import (
 )
 
 import argparse
+import atexit
 import configparser
 import datetime as dt
 import locale
@@ -36,6 +37,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote
 import sys
+from mesa_osm_tiles import (
+    OsmTileProxy,
+    build_osm_user_agent,
+    choose_cache_dir,
+    start_osm_tile_proxy as start_shared_osm_tile_proxy,
+    stop_osm_tile_proxy as stop_shared_osm_tile_proxy,
+)
 
 import tkinter as tk
 from tkinter import filedialog
@@ -101,6 +109,7 @@ DEFAULT_PARQUET_SUBDIR = PARQUET_SUBDIR
 DEFAULT_MBTILES_SUBDIR = "output/mbtiles"
 REPORT_FILENAME_TEMPLATE = "MESA_area_analysis_report_{ts}.pdf"
 DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
+OSM_TILE_PROXY: Optional[OsmTileProxy] = None
 
 
 def debug_log(base_dir: Path, message: str) -> None:
@@ -117,6 +126,63 @@ def debug_log(base_dir: Path, message: str) -> None:
       fh.write(f"[{ts}] [data_analysis] {message}\n")
   except Exception:
     pass
+
+
+def _mesa_version_label(cfg: configparser.ConfigParser) -> str:
+  try:
+    default = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
+    for option in ("mesa_version", "version"):
+      value = default.get(option)  # type: ignore[union-attr]
+      if value:
+        cleaned = str(value).strip().replace(" ", "_")
+        if cleaned:
+          return cleaned
+  except Exception:
+    pass
+  return "dev"
+
+
+def _osm_tile_cache_dir(base_dir: Path) -> Path:
+  return choose_cache_dir(
+    [
+      base_dir / "output" / "cache" / "osm_tiles",
+      base_dir / "logs" / "osm_tiles",
+    ],
+    fallback_name="mesa_osm_tiles",
+  )
+
+
+def _start_osm_tile_proxy(base_dir: Path, cfg: configparser.ConfigParser) -> OsmTileProxy:
+  global OSM_TILE_PROXY
+  if OSM_TILE_PROXY is not None:
+    return OSM_TILE_PROXY
+
+  OSM_TILE_PROXY = start_shared_osm_tile_proxy(
+    cache_dir=_osm_tile_cache_dir(base_dir),
+    user_agent=build_osm_user_agent("MESA-AnalysisSetup", _mesa_version_label(cfg)),
+    log=lambda msg: debug_log(base_dir, msg),
+    thread_name="mesa-analysis-osm-tile-proxy",
+  )
+  return OSM_TILE_PROXY
+
+
+def _stop_osm_tile_proxy(base_dir: Optional[Path] = None) -> None:
+  global OSM_TILE_PROXY
+  proxy = OSM_TILE_PROXY
+  OSM_TILE_PROXY = None
+  stop_shared_osm_tile_proxy(
+    proxy,
+    log=(lambda msg: debug_log(base_dir, msg)) if base_dir is not None else None,
+  )
+
+
+def _osm_tile_layer_url(base_dir: Path, cfg: configparser.ConfigParser) -> str:
+  try:
+    proxy = _start_osm_tile_proxy(base_dir, cfg)
+    return f"{proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
+  except Exception as exc:
+    debug_log(base_dir, f"Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
+    return "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 
 
@@ -1481,6 +1547,7 @@ class WebApi:
             return {"ok": False, "error": str(exc)}
 
     def exit_app(self) -> None:
+      _stop_osm_tile_proxy(self._base_dir)
       threading.Timer(0.05, _require_webview().destroy_window).start()
 
 
@@ -1614,7 +1681,7 @@ let CURRENT_CANVAS_LAYER = null;
 let ANALYSIS_PREVIEW = { type:'FeatureCollection', features:[] };
 const BASEMAPS = {
   osm: {
-    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    url: '__MESA_OSM_TILE_URL__',
     options: { attribution: '&copy; OpenStreetMap contributors' }
   },
   topo: {
@@ -2665,14 +2732,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
     base_dir = resolve_base_dir(args.owd)
     cfg = read_config(base_dir)
+    atexit.register(_stop_osm_tile_proxy, base_dir)
 
     api = WebApi(base_dir, cfg)
 
     webview = _require_webview()
+    html_payload = HTML_TEMPLATE.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
 
     window = webview.create_window(
         title="MESA Area Analysis",
-        html=HTML_TEMPLATE,
+        html=html_payload,
         js_api=api,
         width=1200,
         height=760,
