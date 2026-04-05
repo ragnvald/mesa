@@ -35,6 +35,7 @@ win/
 .claude/
 .geoparquet/
 mbtiles/
+.tmp*
 output/cache/
 output/tile_cache/
 output/reports
