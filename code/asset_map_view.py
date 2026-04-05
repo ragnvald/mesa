@@ -16,11 +16,7 @@ import random
 import sys
 import atexit
 import tempfile
-import threading
-import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +26,13 @@ from urllib import request as urlrequest
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import mapping
+from mesa_osm_tiles import (
+    OsmTileProxy,
+    build_osm_user_agent,
+    choose_cache_dir,
+    start_osm_tile_proxy as start_shared_osm_tile_proxy,
+    stop_osm_tile_proxy as stop_shared_osm_tile_proxy,
+)
 from mesa_constants import (
     TABLE_ASSET_OBJECT, TABLE_ASSET_GROUP, TABLE_ASSET_HIERARCHY,
 )
@@ -92,14 +95,6 @@ def _require_webview():
       ])
     sys.stderr.write("\n".join(lines) + "\n")
     raise SystemExit(1)
-
-
-class _OsmTileProxy:
-  def __init__(self, server: ThreadingHTTPServer, thread: threading.Thread, base_url: str, cache_dir: Path) -> None:
-    self.server = server
-    self.thread = thread
-    self.base_url = base_url.rstrip("/")
-    self.cache_dir = cache_dir
 
 try:
     locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
@@ -411,172 +406,30 @@ def _mesa_version_label() -> str:
 
 
 def _osm_tile_user_agent() -> str:
-  version = _mesa_version_label()
-  return f"MESA-AssetLayers/{version} (+https://github.com/ragnvald/mesa)"
+  return build_osm_user_agent("MESA-AssetLayers", _mesa_version_label())
 
 
 def _osm_tile_cache_dir() -> Path:
-  candidates = [
-    OUTPUT_DIR / "cache" / "osm_tiles",
-    PROJECT_ROOT / "logs" / "osm_tiles",
-    Path(tempfile.gettempdir()) / "mesa_osm_tiles",
-  ]
-  for candidate in candidates:
-    try:
-      candidate.mkdir(parents=True, exist_ok=True)
-      return candidate
-    except Exception:
-      continue
-  fallback = Path(tempfile.gettempdir())
-  fallback.mkdir(parents=True, exist_ok=True)
-  return fallback
+  return choose_cache_dir(
+    [
+      OUTPUT_DIR / "cache" / "osm_tiles",
+      PROJECT_ROOT / "logs" / "osm_tiles",
+      Path(tempfile.gettempdir()) / "mesa_osm_tiles",
+    ]
+  )
 
 
-def _osm_tile_cache_paths(cache_dir: Path, z: str, x: str, y: str) -> tuple[Path, Path]:
-  tile_path = cache_dir / z / x / f"{y}.png"
-  meta_path = cache_dir / z / x / f"{y}.json"
-  return tile_path, meta_path
-
-
-def _load_cached_tile(tile_path: Path, meta_path: Path) -> tuple[Optional[bytes], float]:
-  data: Optional[bytes] = None
-  expires_at = 0.0
-  try:
-    if tile_path.exists():
-      data = tile_path.read_bytes()
-  except Exception:
-    data = None
-  try:
-    if meta_path.exists():
-      meta = json.loads(meta_path.read_text(encoding="utf-8"))
-      expires_at = float(meta.get("expires_at") or 0.0)
-  except Exception:
-    expires_at = 0.0
-  return data, expires_at
-
-
-def _save_cached_tile(tile_path: Path, meta_path: Path, data: bytes, expires_at: float) -> None:
-  tile_path.parent.mkdir(parents=True, exist_ok=True)
-  tile_path.write_bytes(data)
-  meta = {
-    "expires_at": expires_at,
-    "saved_at": time.time(),
-  }
-  meta_path.write_text(json.dumps(meta), encoding="utf-8")
-
-
-def _cache_expiry_from_headers(headers) -> float:
-  now = time.time()
-  cache_control = headers.get("Cache-Control", "")
-  for token in cache_control.split(","):
-    part = token.strip().lower()
-    if not part.startswith("max-age="):
-      continue
-    try:
-      return now + max(0, int(part.split("=", 1)[1]))
-    except Exception:
-      break
-  expires = headers.get("Expires")
-  if expires:
-    try:
-      parsed = parsedate_to_datetime(expires)
-      if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-      return parsed.timestamp()
-    except Exception:
-      pass
-  return now + (7 * 24 * 60 * 60)
-
-
-def _build_osm_proxy_handler(cache_dir: Path):
-  class _OsmTileProxyHandler(BaseHTTPRequestHandler):
-    server_version = "MesaOsmProxy/1.0"
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, format: str, *args: Any) -> None:
-      return
-
-    def do_GET(self) -> None:
-      raw_path = self.path.split("?", 1)[0]
-      if raw_path == "/health":
-        self.send_response(204)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-        return
-
-      parts = raw_path.strip("/").split("/")
-      if len(parts) != 4 or parts[0] != "osm" or not parts[1].isdigit() or not parts[2].isdigit() or not parts[3].endswith(".png"):
-        self.send_error(404)
-        return
-
-      z = parts[1]
-      x = parts[2]
-      y = parts[3][:-4]
-      if not y.isdigit():
-        self.send_error(404)
-        return
-
-      tile_path, meta_path = _osm_tile_cache_paths(cache_dir, z, x, y)
-      cached_data, expires_at = _load_cached_tile(tile_path, meta_path)
-      now = time.time()
-      if cached_data is not None and expires_at > now:
-        self._send_png(cached_data, expires_at - now)
-        return
-
-      upstream = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-      request = urlrequest.Request(
-        upstream,
-        headers={
-          "User-Agent": _osm_tile_user_agent(),
-          "Accept": "image/png,image/*;q=0.9,*/*;q=0.8",
-        },
-      )
-      try:
-        with urlrequest.urlopen(request, timeout=20) as response:
-          payload = response.read()
-          expiry = _cache_expiry_from_headers(response.headers)
-        _save_cached_tile(tile_path, meta_path, payload, expiry)
-        self._send_png(payload, max(60.0, expiry - time.time()))
-      except urlerror.HTTPError as exc:
-        if cached_data is not None:
-          log_event(f"OSM tile proxy using stale cache for {raw_path} after HTTP {exc.code}")
-          self._send_png(cached_data, 60.0)
-          return
-        self.send_error(exc.code)
-      except Exception as exc:
-        if cached_data is not None:
-          log_event(f"OSM tile proxy using stale cache for {raw_path} after error: {exc}")
-          self._send_png(cached_data, 60.0)
-          return
-        log_event(f"OSM tile proxy failed for {raw_path}: {exc}")
-        self.send_error(502, f"Tile fetch failed: {exc}")
-
-    def _send_png(self, payload: bytes, ttl_seconds: float) -> None:
-      ttl = max(60, int(ttl_seconds))
-      self.send_response(200)
-      self.send_header("Content-Type", "image/png")
-      self.send_header("Content-Length", str(len(payload)))
-      self.send_header("Cache-Control", f"public, max-age={ttl}")
-      self.send_header("Access-Control-Allow-Origin", "*")
-      self.send_header("X-Content-Type-Options", "nosniff")
-      self.end_headers()
-      self.wfile.write(payload)
-
-  return _OsmTileProxyHandler
-
-
-def _start_osm_tile_proxy() -> _OsmTileProxy:
+def _start_osm_tile_proxy() -> OsmTileProxy:
   global OSM_TILE_PROXY
   if OSM_TILE_PROXY is not None:
     return OSM_TILE_PROXY
 
-  cache_dir = _osm_tile_cache_dir()
-  server = ThreadingHTTPServer(("127.0.0.1", 0), _build_osm_proxy_handler(cache_dir))
-  base_url = f"http://127.0.0.1:{server.server_address[1]}"
-  thread = threading.Thread(target=server.serve_forever, name="mesa-osm-tile-proxy", daemon=True)
-  thread.start()
-  OSM_TILE_PROXY = _OsmTileProxy(server, thread, base_url, cache_dir)
-  log_event(f"OSM tile proxy started at {base_url} (cache={cache_dir})")
+  OSM_TILE_PROXY = start_shared_osm_tile_proxy(
+    cache_dir=_osm_tile_cache_dir(),
+    user_agent=_osm_tile_user_agent(),
+    log=log_event,
+    thread_name="mesa-osm-tile-proxy",
+  )
   return OSM_TILE_PROXY
 
 
@@ -584,21 +437,7 @@ def _stop_osm_tile_proxy() -> None:
   global OSM_TILE_PROXY
   proxy = OSM_TILE_PROXY
   OSM_TILE_PROXY = None
-  if proxy is None:
-    return
-  try:
-    proxy.server.shutdown()
-  except Exception:
-    pass
-  try:
-    proxy.server.server_close()
-  except Exception:
-    pass
-  try:
-    proxy.thread.join(timeout=2.0)
-  except Exception:
-    pass
-  log_event("OSM tile proxy stopped")
+  stop_shared_osm_tile_proxy(proxy, log=log_event)
 
 
 def _osm_tile_layer_url() -> str:

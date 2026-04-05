@@ -915,14 +915,10 @@ def edit_lines():
     arg_tokens = ["--original_working_directory", chosen_base]
     log_to_logfile(f"Launching line_manage with base_dir={chosen_base}")
     if getattr(sys, "frozen", False):
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
+        _launch_gui_process([exe_file, *arg_tokens], "line_manage exe")
     else:
-        run_subprocess(
-            [sys.executable or "python", python_script, *arg_tokens],
-            [exe_file, *arg_tokens],
-            gpkg_file
-        )
+        python_exe = sys.executable or "python"
+        _launch_gui_process([python_exe, python_script, *arg_tokens], "line_manage script")
 
 
 def _iter_backup_files(root: Path):

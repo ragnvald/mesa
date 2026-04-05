@@ -10,10 +10,17 @@ Updates in this Parquet-only, flat-layout version:
 - Keeps the UI/behavior: Save all, Save changes, Apply/Cancel geometry, Delete selected line.
 """
 
-import os, sys, uuid, threading, locale, configparser, argparse, warnings, time
+import os, sys, uuid, threading, locale, configparser, argparse, warnings, time, atexit
 from pathlib import Path
 from typing import Any, Dict, Optional
 from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP
+from mesa_osm_tiles import (
+    OsmTileProxy,
+    build_osm_user_agent,
+    choose_cache_dir,
+    start_osm_tile_proxy as start_shared_osm_tile_proxy,
+    stop_osm_tile_proxy as stop_shared_osm_tile_proxy,
+)
 
 # --- pywebview config (quiet, Edge runtime preferred) ---
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
@@ -26,6 +33,8 @@ except Exception:
     pass
 
 webview = None
+OSM_TILE_PROXY: Optional[OsmTileProxy] = None
+_LOG_BASE_DIR: Optional[Path] = None
 
 
 def _require_webview():
@@ -44,6 +53,75 @@ def _require_webview():
     except ModuleNotFoundError as exc:
         sys.stderr.write("ERROR: 'pywebview' not installed. pip install pywebview\n")
         raise SystemExit(1) from exc
+
+
+def _log_event(message: str) -> None:
+    base_dir = _LOG_BASE_DIR
+    if base_dir is None:
+        return
+    try:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        with (base_dir / "log.txt").open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] [line_manage] {message}\n")
+    except Exception:
+        pass
+
+
+def _mesa_version_label(cfg: configparser.ConfigParser) -> str:
+    try:
+        default = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
+        for option in ("mesa_version", "version"):
+            value = default.get(option)  # type: ignore[union-attr]
+            if value:
+                cleaned = str(value).strip().replace(" ", "_")
+                if cleaned:
+                    return cleaned
+    except Exception:
+        pass
+    return "dev"
+
+
+def _osm_tile_cache_dir(base_dir: Path) -> Path:
+    return choose_cache_dir(
+        [
+            base_dir / "output" / "cache" / "osm_tiles",
+            base_dir / "logs" / "osm_tiles",
+        ],
+        fallback_name="mesa_osm_tiles",
+    )
+
+
+def _start_osm_tile_proxy(base_dir: Path, cfg: configparser.ConfigParser) -> OsmTileProxy:
+    global OSM_TILE_PROXY
+    if OSM_TILE_PROXY is not None:
+        return OSM_TILE_PROXY
+
+    OSM_TILE_PROXY = start_shared_osm_tile_proxy(
+        cache_dir=_osm_tile_cache_dir(base_dir),
+        user_agent=build_osm_user_agent("MESA-LineManage", _mesa_version_label(cfg)),
+        log=_log_event,
+        thread_name="mesa-line-osm-tile-proxy",
+    )
+    return OSM_TILE_PROXY
+
+
+def _stop_osm_tile_proxy() -> None:
+    global OSM_TILE_PROXY
+    proxy = OSM_TILE_PROXY
+    OSM_TILE_PROXY = None
+    stop_shared_osm_tile_proxy(proxy, log=_log_event)
+
+
+def _osm_tile_layer_url(base_dir: Path, cfg: configparser.ConfigParser) -> str:
+    try:
+        proxy = _start_osm_tile_proxy(base_dir, cfg)
+        return f"{proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
+    except Exception as exc:
+        _log_event(f"Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
+        return "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+
+atexit.register(_stop_osm_tile_proxy)
 
 import pandas as pd
 import geopandas as gpd
@@ -735,6 +813,7 @@ class Api:
 
     def exit_app(self):
         try:
+            _stop_osm_tile_proxy()
             threading.Timer(0.05, _require_webview().destroy_window).start()
         except Exception:
             os._exit(0)
@@ -951,7 +1030,7 @@ function bindAuto(fieldId, fieldName){
 function initMapOnce(){
   if (MAP) return;
   MAP = L.map('map');
-  BASE_OSM = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, crossOrigin:true, attribution:'© OpenStreetMap'}).addTo(MAP);
+  BASE_OSM = L.tileLayer('__MESA_OSM_TILE_URL__', {maxZoom:19, crossOrigin:true, attribution:'© OpenStreetMap contributors'}).addTo(MAP);
   BASE_SAT = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19, crossOrigin:true, attribution:'Esri, Maxar'});
   const bases = {'OpenStreetMap': BASE_OSM, 'Satellite (Esri)': BASE_SAT};
   L.control.layers(bases, {}, {collapsed:false, position:'topright'}).addTo(MAP);
@@ -1314,6 +1393,8 @@ def main():
     base_dir = resolve_base_dir(args.original_working_directory)
     cfg_path = config_path(base_dir)
     cfg = read_config(cfg_path)
+    global _LOG_BASE_DIR
+    _LOG_BASE_DIR = base_dir
 
     # Respect custom parquet folder if provided
     global _PARQUET_SUBDIR
@@ -1322,7 +1403,8 @@ def main():
     api = Api(base_dir, cfg)
     global webview
     webview = _require_webview()
-    window = webview.create_window(title="Edit line (GeoParquet)", html=HTML, js_api=api, width=1280, height=860)
+    html_payload = HTML.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
 
     try:
         webview.start(gui='edgechromium', debug=False)
