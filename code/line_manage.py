@@ -1384,6 +1384,33 @@ document.addEventListener('DOMContentLoaded', boot);
 </html>
 """
 
+# ---------------- In-process entry point (called by mesa.py via lazy import) ----------------
+def run(base_dir: str) -> None:
+    """Launch the line editor GUI in-process.
+
+    mesa.py calls this instead of spawning a subprocess.
+    """
+    global _LOG_BASE_DIR, _PARQUET_SUBDIR, webview
+    resolved = resolve_base_dir(base_dir)
+    cfg_path = config_path(resolved)
+    cfg = read_config(cfg_path)
+    _LOG_BASE_DIR = resolved
+    _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
+    api = Api(resolved, cfg)
+    webview = _require_webview()
+    html_payload = HTML.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(resolved, cfg))
+    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
+    try:
+        webview.start(gui='edgechromium', debug=False)
+    except Exception as e:
+        sys.stderr.write(
+            "This app prefers Microsoft Edge WebView2 runtime to avoid console spam.\n"
+            "Install 'Evergreen WebView2 Runtime' from Microsoft and retry if needed.\n"
+            f"Underlying error: {e}\n"
+        )
+        sys.exit(1)
+
+
 # ---------------- Main ----------------
 def main():
     parser = argparse.ArgumentParser()

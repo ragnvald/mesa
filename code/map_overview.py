@@ -2359,6 +2359,26 @@ document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview &
 
 HTML = HTML_TEMPLATE
 
+def run(base_dir: str) -> None:
+    """In-process entry point called by mesa.py via lazy import."""
+    if webview is None:
+        raise RuntimeError(
+            "'pywebview' is not installed in the Python environment.\n"
+            "Install it with:  pip install pywebview\n"
+        )
+    # Load the UI from the same local origin as the tile endpoints.
+    # This avoids WebView2 opaque-origin (about:blank) restrictions that can block loopback requests.
+    _refresh_mbtiles_index()
+    mbtiles_base_url = start_mbtiles_server()
+    window = webview.create_window(
+        title="Maps overview",
+        url=mbtiles_base_url,
+        js_api=api,
+        width=1300, height=800, resizable=True,
+    )
+    webview.start(gui="edgechromium", debug=False)
+
+
 if __name__ == "__main__":
     if webview is None:
         sys.stderr.write(

@@ -2924,7 +2924,7 @@ def format_level_size_list(levels: list[int]) -> str:
 # -----------------------------------------------------------------------------
 # GUI
 # -----------------------------------------------------------------------------
-def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
+def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", master=None):
     global root, log_widget, mosaic_log_widget, mosaic_log_from_file_mode, log_main_thread_id, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var
     original_working_directory = str(base)
 
@@ -2934,8 +2934,11 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     except Exception:
         pass
 
-    theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if ttk else None
-    root = ttk.Window(themename=theme) if ttk else tk.Tk()
+    if master is not None:
+        root = tk.Toplevel(master)
+    else:
+        theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if ttk else None
+        root = ttk.Window(themename=theme) if ttk else tk.Tk()
     log_main_thread_id = threading.get_ident()
     root.title("Geocode manage (Mosaic / H3 / Import / Edit)")
 
@@ -3658,7 +3661,31 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
     log_to_gui(f"GeoParquet out: {gpq_dir(base)}")
     log_to_gui("Geocode manage ready (Basic mosaic / H3 geocodes / Import geocodes / Edit geocodes).")
     _update_mosaic_status()
-    root.mainloop()
+    if master is None:
+        root.mainloop()
+    return root
+
+# -----------------------------------------------------------------------------
+# In-process entry point (called by mesa.py via lazy import)
+# -----------------------------------------------------------------------------
+def run(base_dir: str, master=None):
+    """Launch the geocode management GUI in-process.
+
+    mesa.py calls this instead of spawning a subprocess.  The helper is imported
+    once and reused for the session lifetime, so heavy libraries (geopandas, h3,
+    etc.) are loaded only on the first call.
+    """
+    global _PARQUET_SUBDIR, original_working_directory, HEARTBEAT_SECS
+    base = find_base_dir(base_dir)
+    cfg = read_config(config_path(base))
+    _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
+    original_working_directory = str(base)
+    try:
+        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
+    except Exception:
+        pass
+    return build_gui(base, cfg, start_tab="", master=master)
+
 
 # -----------------------------------------------------------------------------
 # Entrypoint

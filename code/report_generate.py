@@ -4481,9 +4481,12 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
         daemon=True
     ).start()
 
-def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str):
+def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str, master=None):
     global log_widget, progress_var, progress_label, link_var, _UI_ROOT
-    root = tb.Window(themename=theme)
+    if master is not None:
+        root = tk.Toplevel(master)
+    else:
+        root = tb.Window(themename=theme)
     _UI_ROOT = root
     root.title("MESA – Report generator")
     try:
@@ -4680,7 +4683,34 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
 
     write_to_log(f"Working directory: {base_dir}", base_dir)
     write_to_log("Ready. Select report contents, then press 'Create report'.", base_dir)
-    root.mainloop()
+    if master is None:
+        root.mainloop()
+    return root
+
+# ---------------- In-process entry point (called by mesa.py via lazy import) ----------------
+def run(base_dir: str, master=None) -> None:
+    """Launch the report generator GUI in-process.
+
+    mesa.py calls this instead of spawning a subprocess.
+    """
+    global PRIMARY_HEX, LIGHT_PRIMARY_HEX
+    resolved = normalize_base_dir(base_dir)
+    cfg_path = config_path(resolved)
+    cfg = read_config(cfg_path)
+    theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
+    palette_A2E, desc_A2E = read_sensitivity_palette_and_desc(cfg_path)
+    PRIMARY_HEX = cfg['DEFAULT'].get('ui_primary_color', PRIMARY_HEX).strip() or PRIMARY_HEX
+    try:
+        def _lighten(hexcol, amt=0.30):
+            hexcol = hexcol.lstrip('#')
+            r = int(hexcol[0:2],16); g = int(hexcol[2:4],16); b = int(hexcol[4:6],16)
+            r = int(r + (255 - r)*amt); g = int(g + (255 - g)*amt); b = int(b + (255 - b)*amt)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        LIGHT_PRIMARY_HEX = _lighten(PRIMARY_HEX, 0.30)
+    except Exception:
+        pass
+    return launch_gui(resolved, cfg_path, palette_A2E, desc_A2E, theme, master=master)
+
 
 # ---------------- CLI ----------------
 if __name__ == "__main__":

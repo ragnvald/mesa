@@ -252,3 +252,14 @@ When a problem is solved, add a short entry here with:
   - Keep packaged `.exe` runs untouched.
   - Correct the interpreter before importing heavy GUI/runtime dependencies.
   - When relaunching, also set `VIRTUAL_ENV` and prepend the venv `Scripts` folder to `PATH` so descendant processes inherit the expected development environment.
+
+## Source launcher can embed selected helpers via `run(...)` hooks (2026-04-07)
+
+- What changed:
+  - `mesa.py` now lazy-imports several helper modules during source runs and launches them in-process on the Tk main thread.
+  - Helpers that are safe to embed expose `run(base_dir, master=...)` and create `tk.Toplevel(...)` windows instead of always owning their own root/mainloop.
+- Root cause:
+  - Spawning every helper as a separate Python process in development added startup cost and duplicated heavy imports, but creating extra Tk roots from worker threads caused unstable window behavior.
+- Practical fix / decision:
+  - Keep frozen `.exe` behavior out-of-process.
+  - For source runs, schedule helper startup with `root.after(...)`, cache imported modules, and restore `cwd` after importing helpers with module-level side effects.

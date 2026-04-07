@@ -831,6 +831,31 @@ class AssetManagerApp:
 		self.summary_label.config(text=f"Asset group file: {parquet_path} | rows: {len(self.df)}")
 
 
+def run(base_dir: str, master=None):
+	"""In-process entry point called by mesa.py via lazy import."""
+	global BASE_DIR, _CFG, _CFG_PATH, _PARQUET_OVERRIDE
+	BASE_DIR = find_base_dir(base_dir)
+	_CFG = None
+	_CFG_PATH = None
+	_PARQUET_OVERRIDE = None
+	cfg = _ensure_cfg()
+	if master is not None:
+		root = tk.Toplevel(master)
+	else:
+		theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly")
+		if tb is not None:
+			try:
+				root = tb.Window(themename=theme)
+			except Exception:
+				root = tb.Window(themename="flatly")
+		else:
+			root = tk.Tk()
+	AssetManagerApp(root, BASE_DIR)
+	if master is None:
+		root.mainloop()
+	return root
+
+
 def main():
 	global BASE_DIR, _CFG, _CFG_PATH, _PARQUET_OVERRIDE
 

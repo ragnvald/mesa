@@ -2722,6 +2722,11 @@ startBootstrap();
 </html>"""
 
 
+def run(base_dir: str) -> None:
+    """In-process entry point called by mesa.py via lazy import."""
+    main(argv=["--original_working_directory", str(base_dir)])
+
+
 def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MESA area analysis tool")
     parser.add_argument("--original_working_directory", dest="owd", help="Path to the running folder (mesa desktop passes this)")

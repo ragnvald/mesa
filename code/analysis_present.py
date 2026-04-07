@@ -64,16 +64,23 @@ def _load_runtime_deps() -> None:
         import numpy as _np
         import pandas as _pd
         import matplotlib
-
-        matplotlib.use("TkAgg")
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
-        from matplotlib.figure import Figure as _Figure
-        from matplotlib.patches import PathPatch as _PathPatch
-        from matplotlib.path import Path as _MplPath
     except ModuleNotFoundError as exc:
         raise SystemExit(
             "analysis_present.py requires numpy, pandas, geopandas, and matplotlib with TkAgg support."
         ) from exc
+
+    try:
+        # When running in-process the backend may already be set; skip if so.
+        if matplotlib.get_backend().lower() != "tkagg":
+            matplotlib.use("TkAgg")
+    except Exception:
+        pass  # best-effort; the direct import below will still succeed if TkAgg is available
+
+    try:
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
+        from matplotlib.figure import Figure as _Figure
+        from matplotlib.patches import PathPatch as _PathPatch
+        from matplotlib.path import Path as _MplPath
     except Exception as exc:
         raise SystemExit("matplotlib with TkAgg support is required for this tool.") from exc
 
@@ -2059,6 +2066,11 @@ class ComparisonApp:
 # --------------------------------------------------------------------------- #
 
 
+def run(base_dir: str, master=None) -> None:
+    """In-process entry point called by mesa.py via lazy import."""
+    return main(argv=["--original_working_directory", str(base_dir)], master=master)
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare analysis groups side by side.")
     parser.add_argument(
@@ -2069,12 +2081,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: Optional[List[str]] = None, master=None) -> None:
     args = parse_args(argv)
     base_dir = resolve_base_dir(args.owd)
     cfg = read_config(base_dir)
     theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "litera").strip() or "litera"
-    root = tb.Window(themename=theme)
+    if master is not None:
+        root = tk.Toplevel(master)
+    else:
+        root = tb.Window(themename=theme)
     root.title("MESA Area Analysis - Comparison")
     root.geometry("1280x780")
     root.minsize(1100, 720)
@@ -2113,7 +2128,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     debug_log(base_dir, "Comparison viewer initialised")
 
     app = ComparisonApp(data, theme, root=root)
-    app.run()
+    if master is None:
+        app.run()
+    return root
 
 
 if __name__ == "__main__":

@@ -67,6 +67,8 @@ valid_input_values: list[int] = []
 classification: dict = {}
 entries_vuln = []
 FALLBACK_VULN = 3
+gdf_asset_group = None  # set by run(); referenced by module-level functions
+root = None             # set by run(); referenced by close_application()
 INDEX_WEIGHT_DEFAULTS = {
     "importance": [1, 2, 5, 5, 10],
     # Sensitivity is derived as importance * susceptibility (both 1..5).
@@ -991,15 +993,18 @@ def close_application():
         root.destroy()
 
 # -------------------------------
-# Entrypoint (single, Parquet+JSON)
+# In-process entry point (called by mesa.py via lazy import)
 # -------------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='MESA – Setup & Registration (GeoParquet)')
-    parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
-    args = parser.parse_args()
+def run(base_dir: str, master=None) -> None:
+    """Launch the processing setup GUI in-process.
+
+    mesa.py calls this instead of spawning a subprocess.
+    """
+    global original_working_directory, status_message_var
+    global valid_input_values, FALLBACK_VULN, gdf_asset_group, entries_vuln, root
 
     # Resolve base dir robustly
-    resolved_base = find_base_dir(args.original_working_directory)
+    resolved_base = find_base_dir(base_dir)
     original_working_directory = str(resolved_base)
 
     # ---- tiny diagnostics (helps catch path mistakes fast)
@@ -1036,7 +1041,10 @@ if __name__ == "__main__":
         or _cfg_get_any(config, 'workingprojection_epsg', fallback='4326')
         or '4326'
     )
-    root = tb.Window(themename=ttk_bootstrap_theme)
+    if master is not None:
+        root = tk.Toplevel(master)
+    else:
+        root = tb.Window(themename=ttk_bootstrap_theme)
     root.title("MESA – Setup & Registration (GeoParquet)")
     try:
         icon_path = resource_path(Path("system_resources") / "mesa.ico")
@@ -1085,6 +1093,8 @@ if __name__ == "__main__":
     if gdf_asset_group is None:
         log_to_file("Failed to load tbl_asset_group (Parquet).")
         root.destroy()
+        if master is not None:
+            return None
         sys.exit(1)
 
     try:
@@ -1204,4 +1214,16 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    root.mainloop()
+    if master is None:
+        root.mainloop()
+    return root
+
+
+# -------------------------------
+# Entrypoint (single, Parquet+JSON)
+# -------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='MESA – Setup & Registration (GeoParquet)')
+    parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+    args = parser.parse_args()
+    run(args.original_working_directory)

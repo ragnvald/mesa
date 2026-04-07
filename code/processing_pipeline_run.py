@@ -1013,7 +1013,11 @@ def run_analysis_process(
         analysis_stacked_path,
         find_dataset_dir,
         find_parquet_file,
+        _load_runtime_data_stack as _analysis_load_deps,
     )
+    # analysis_setup keeps pd/gpd/np as lazy module-level globals (None until loaded).
+    # Populate them now so AnalysisStorage and friends can call pd.DataFrame etc.
+    _analysis_load_deps()
 
     class AssetAnalyzer:
         """Run the actual analysis processing (clipping tbl_flat/tbl_stacked to polygons)."""
@@ -1460,7 +1464,7 @@ def run_selected(
 # ---------------------------------------------------------------------------
 
 
-def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
+def run_ui(base_dir: Path, cfg: configparser.ConfigParser, master=None) -> None:
     import tkinter as tk
     import tkinter.scrolledtext as scrolledtext
 
@@ -1476,7 +1480,10 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
     except Exception:
         pass
 
-    root = tb.Window(themename=theme) if tb is not None else tk.Tk()
+    if master is not None:
+        root = tk.Toplevel(master)
+    else:
+        root = tb.Window(themename=theme) if tb is not None else tk.Tk()
     root.title("MESA – Process all")
     try:
         ico = base_dir / "system_resources" / "mesa.ico"
@@ -1789,7 +1796,9 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser) -> None:
 
     _start_log_tailer()
 
-    root.mainloop()
+    if master is None:
+        root.mainloop()
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -1815,6 +1824,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-analysis", action="store_true", help="Do not run analysis processing")
 
     return p.parse_args()
+
+
+def run(base_dir: str, master=None) -> None:
+    """In-process entry point called by mesa.py via lazy import. Launches the GUI."""
+    resolved = resolve_base_dir(base_dir)
+    cfg = read_config(resolved)
+    return run_ui(resolved, cfg, master=master)
 
 
 def main() -> None:

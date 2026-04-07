@@ -2638,6 +2638,11 @@ if (document.readyState === 'loading'){
 """
 
 
+def run(base_dir: str) -> None:
+    """In-process entry point called by mesa.py via lazy import."""
+    main()
+
+
 def main() -> None:
     global webview
     webview = _require_webview()

@@ -1232,6 +1232,28 @@ class AtlasManagerApp:
         self._load_record()
 
 
+def run(base_dir: str, master=None):
+    """In-process entry point called by mesa.py via lazy import."""
+    global BASE_DIR
+    BASE_DIR = find_base_dir(base_dir)
+    cfg = _ensure_cfg()
+    if master is not None:
+        root = tk.Toplevel(master)
+    else:
+        if tb is not None:
+            try:
+                theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly")
+                root = tb.Window(themename=theme)
+            except Exception:
+                root = tb.Window(themename="flatly")
+        else:
+            root = tk.Tk()
+    AtlasManagerApp(root)
+    if master is None:
+        root.mainloop()
+    return root
+
+
 def main():
     global BASE_DIR
 
