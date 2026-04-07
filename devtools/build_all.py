@@ -327,15 +327,23 @@ HELPER_EXCLUDES = [
 ]
 
 MAIN_COLLECTS = [
-    # Mesa.py is a UI launcher that reads parquet files and spawns helper processes.
-    # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported only when Status
-    # metrics need geometry calculations, so we exclude it from the main bundle for
-    # faster startup. Helpers that need GIS will bundle it themselves (onefile).
+    # Core data stack
     "--collect-data", "pandas",
     "--collect-data", "pyarrow",
     # ttkbootstrap ships theme assets (tcl/images). Use collect-all to reliably
     # bundle both code + assets into frozen builds.
     "--collect-all", "ttkbootstrap",
+    # Full GIS stack - required by the 7 helpers that now run in-process inside mesa.exe
+    "--collect-all", "shapely",
+    "--collect-all", "pyproj",
+    "--collect-all", "fiona",
+    "--collect-submodules", "geopandas",
+    # Chart rendering (atlas_manage, analysis_present, report_generate)
+    "--collect-all", "matplotlib",
+    # Word-document generation (report_generate)
+    "--collect-all", "docx",
+    # H3 geospatial indexing (geocode_manage)
+    "--collect-all", "h3",
 ]
 MAIN_EXCLUDES = [
     "--exclude-module", "cupy",
@@ -343,7 +351,6 @@ MAIN_EXCLUDES = [
     "--exclude-module", "numba",
     "--exclude-module", "pandas.tests",
     "--exclude-module", "pyarrow.tests",
-    "--exclude-module", "matplotlib",
     "--exclude-module", "matplotlib.tests",
     "--exclude-module", "pytest",
     "--exclude-module", "scipy",
@@ -352,12 +359,6 @@ MAIN_EXCLUDES = [
     "--exclude-module", "pysqlite2",
     "--exclude-module", "MySQLdb",
     "--exclude-module", "psycopg2",
-    # GIS stack excluded from main (helpers bundle it when needed)
-    "--exclude-module", "geopandas",
-    "--exclude-module", "shapely",
-    "--exclude-module", "pyproj",
-    "--exclude-module", "fiona",
-    "--exclude-module", "pyogrio",
     "--exclude-module", "tkinterweb",
     "--exclude-module", "influxdb_client",
 ]
@@ -498,6 +499,28 @@ def helper_collects_for(basename: str) -> list[str]:
 
     return collects
 
+# Hidden imports for the 7 helpers that run in-process inside mesa.exe.
+# PyInstaller cannot detect these via static analysis (they are loaded with
+# importlib.import_module at runtime), so we declare them explicitly.
+# Also includes shared local modules they depend on.
+MESA_INPROCESS_HIDDEN_IMPORTS: list[str] = [
+    "--hidden-import", "geocode_manage",
+    "--hidden-import", "asset_manage",
+    "--hidden-import", "atlas_manage",
+    "--hidden-import", "processing_setup",
+    "--hidden-import", "processing_pipeline_run",
+    "--hidden-import", "report_generate",
+    "--hidden-import", "analysis_present",
+    # Shared local modules imported by the helpers above
+    "--hidden-import", "mesa_shared",
+    "--hidden-import", "mesa_constants",
+    "--hidden-import", "analysis_setup",   # imported by processing_pipeline_run
+    "--hidden-import", "mesa_osm_tiles",   # optional shared helper
+    # matplotlib TkAgg backend (needed by atlas_manage + analysis_present)
+    "--hidden-import", "matplotlib.backends.backend_tkagg",
+    "--hidden-import", "matplotlib.backends.backend_agg",
+]
+
 FLAGS_MAIN = [
     "--windowed",
     "--noconfirm",
@@ -564,7 +587,9 @@ def build_main() -> None:
         "--distpath", str(FINAL_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{APP_NAME}_build"),
         "--specpath", str(BUILD_FOLDER_ROOT),
-    ] + data_args + [str(entry_point)]
+        # Allow PyInstaller to find local helper modules (geocode_manage, etc.)
+        "--paths", str(CODE_DIR),
+    ] + PKG_RESOURCES_HIDDEN_IMPORTS + MESA_INPROCESS_HIDDEN_IMPORTS + data_args + [str(entry_point)]
 
     run_pyinstaller(args)
     elapsed = time.perf_counter() - start
@@ -696,18 +721,22 @@ def main() -> None:
     if BUILD_HELPERS:
         log("Building helper tools (onefile, per-tool dependency profiles)...")
         helpers = [
-            "asset_manage",
-            "atlas_manage",
+            # These 5 remain as standalone subprocess exes:
+            # - tiles_create_raster : spawned internally by processing_pipeline_run
+            # - analysis_setup      : webview-based UI, cannot run in-process
+            # - line_manage         : webview-based UI, cannot run in-process
+            # - asset_map_view      : webview-based UI, cannot run in-process
+            # - map_overview        : webview-based UI, cannot run in-process
+            #
+            # The 7 former helpers (geocode_manage, asset_manage, atlas_manage,
+            # processing_setup, processing_pipeline_run, report_generate,
+            # analysis_present) are now bundled inside mesa.exe as hidden imports
+            # and run in-process - no separate exe needed.
             "tiles_create_raster",
-            "report_generate",
-            "processing_setup",
             "analysis_setup",
-            "analysis_present",
-            "geocode_manage",
             "line_manage",
             "asset_map_view",
             "map_overview",
-            "processing_pipeline_run",
         ]
 
         # Optional helper selection:

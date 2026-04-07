@@ -796,12 +796,15 @@ def get_script_paths(file_name: str):
 
 
 # ---------------------------------------------------------------------
-# Lazy in-process tool loader (dev path only; frozen path uses subprocess)
+# Lazy in-process tool loader - used in both dev and frozen builds.
+# In frozen builds the 7 core helpers are bundled as hidden imports inside
+# mesa.exe; the remaining subprocess-only tools (map_overview, asset_map_view,
+# analysis_setup, line_manage, tiles_create_raster) still launch as separate exes.
 # ---------------------------------------------------------------------
 _tool_cache: dict = {}
 
 def _get_tool(name: str):
-    """Lazy import of a code/ helper module — only runs on first call per session.
+    """Lazy import of a code/helper module - only runs on first call per session.
 
     Guards against two module-level side-effects that would corrupt the host process:
     - os.chdir() calls in asset_map_view / map_overview (saved and restored).
@@ -831,7 +834,7 @@ def _run_tool_in_thread(name: str, base_dir: str, gpkg_file_for_refresh=None):
     """Schedule tool.run(base_dir, master=root) on the main thread via root.after().
 
     Uses root.after() so the helper Toplevel is created on the same thread as
-    mesa's mainloop — avoids phantom Tk windows caused by creating new Tk()
+    mesa's mainloop - avoids phantom Tk windows caused by creating new Tk()
     roots from daemon threads.  The helper's run() uses tk.Toplevel(master)
     instead of tb.Window(), so no ttkbootstrap Style singleton manipulation
     is needed.
@@ -851,67 +854,26 @@ def _run_tool_in_thread(name: str, base_dir: str, gpkg_file_for_refresh=None):
 # Button handlers (now pass args as separate tokens; always set cwd/env)
 # ---------------------------------------------------------------------
 def geocodes_grids():
-    if getattr(sys, "frozen", False):
-        python_script, exe_file = get_script_paths("geocode_manage")
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
-    else:
-        log_to_logfile("Launching geocode_manage in-process")
-        _run_tool_in_thread("geocode_manage", original_working_directory, gpkg_file)
+    log_to_logfile("Launching geocode_manage in-process")
+    _run_tool_in_thread("geocode_manage", original_working_directory, gpkg_file)
 
 def open_assets(gpkg_file):
-    if getattr(sys, "frozen", False):
-        python_script, exe_file = get_script_paths("asset_manage")
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
-    else:
-        log_to_logfile("Launching asset_manage in-process")
-        _run_tool_in_thread("asset_manage", original_working_directory, gpkg_file)
+    log_to_logfile("Launching asset_manage in-process")
+    _run_tool_in_thread("asset_manage", original_working_directory, gpkg_file)
 
 def edit_processing_setup():
-    if getattr(sys, "frozen", False):
-        script_candidates = [
-            os.path.join("system", "processing_setup.py"),
-            "processing_setup.py",
-            os.path.join("system", "params_edit.py"),
-            "params_edit.py",
-        ]
-        exe_candidates = [
-            os.path.join("system", "processing_setup.exe"),
-            "processing_setup.exe",
-            os.path.join("system", "params_edit.exe"),
-            "params_edit.exe",
-        ]
-        exe_file = _resolve_tool_path(*exe_candidates)
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        log_to_logfile(f"Processing setup executable path: {exe_file}")
-        _launch_gui_process([exe_file, *arg_tokens], "processing_setup exe")
-    else:
-        log_to_logfile("Launching processing_setup in-process")
-        _run_tool_in_thread("processing_setup", original_working_directory)
+    log_to_logfile("Launching processing_setup in-process")
+    _run_tool_in_thread("processing_setup", original_working_directory)
 
 def open_process_all():
     # Explicit marker so Status->Recent activity can time the full run.
     log_to_logfile("[Process] STARTED")
-    if getattr(sys, "frozen", False):
-        python_script, exe_file = get_script_paths("processing_pipeline_run")
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        _launch_gui_process([exe_file, *arg_tokens], "processing_pipeline_run exe")
-    else:
-        log_to_logfile("Launching processing_pipeline_run in-process")
-        _run_tool_in_thread("processing_pipeline_run", original_working_directory)
+    log_to_logfile("Launching processing_pipeline_run in-process")
+    _run_tool_in_thread("processing_pipeline_run", original_working_directory)
 
 def make_atlas():
-    if getattr(sys, "frozen", False):
-        python_script, exe_file = get_script_paths("atlas_manage")
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        log_to_logfile(f"Running bundled exe: {exe_file}")
-        run_subprocess([exe_file, *arg_tokens], [], gpkg_file)
-    else:
-        log_to_logfile("Launching atlas_manage in-process")
-        _run_tool_in_thread("atlas_manage", original_working_directory, gpkg_file)
+    log_to_logfile("Launching atlas_manage in-process")
+    _run_tool_in_thread("atlas_manage", original_working_directory, gpkg_file)
 
 def open_maps_overview():
     python_script, exe_file = get_script_paths("map_overview")
@@ -931,13 +893,8 @@ def open_asset_layers_viewer():
         _launch_gui_process([python_exe, python_script], "asset_map_view script")
 
 def open_present_files():
-    if getattr(sys, "frozen", False):
-        python_script, exe_file = get_script_paths("report_generate")
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        _launch_gui_process([exe_file, *arg_tokens], "report_generate exe")
-    else:
-        log_to_logfile("Launching report_generate in-process")
-        _run_tool_in_thread("report_generate", original_working_directory)
+    log_to_logfile("Launching report_generate in-process")
+    _run_tool_in_thread("report_generate", original_working_directory)
 
 
 def open_data_analysis_setup():
@@ -950,13 +907,8 @@ def open_data_analysis_setup():
         run_subprocess([sys.executable or "python", python_script, *arg_tokens], [exe_file, *arg_tokens], gpkg_file)
 
 def open_data_analysis_presentation():
-    if getattr(sys, "frozen", False):
-        python_script, exe_file = get_script_paths("analysis_present")
-        arg_tokens = ["--original_working_directory", original_working_directory]
-        _launch_gui_process([exe_file, *arg_tokens], "analysis_present exe")
-    else:
-        log_to_logfile("Launching analysis_present in-process")
-        _run_tool_in_thread("analysis_present", original_working_directory)
+    log_to_logfile("Launching analysis_present in-process")
+    _run_tool_in_thread("analysis_present", original_working_directory)
 
 def edit_lines():
     python_script, exe_file = get_script_paths("line_manage")
@@ -1578,6 +1530,15 @@ check_and_create_folders()
 # ---------------------------------------------------------------------
 root = None  # set in __main__; referenced by _run_tool_in_thread
 if __name__ == "__main__":
+    # freeze_support() MUST be the very first call in __main__.
+    # geocode_manage and processing_pipeline_run use multiprocessing, and when
+    # they're bundled inside mesa.exe (in-process mode) their worker processes
+    # re-execute mesa.exe.  Without freeze_support(), each worker process hits
+    # this __main__ block and opens a new MESA window - causing the recursive
+    # window explosion seen on frozen builds.
+    import multiprocessing as _mp
+    _mp.freeze_support()
+
     root = ttk.Window(themename=ttk_bootstrap_theme)
     root.title(mesa_version_display or "MESA")
     try:
