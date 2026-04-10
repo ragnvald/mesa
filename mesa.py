@@ -59,7 +59,18 @@ def _ensure_repo_dev_venv() -> None:
     env = _venv_env_overrides(preferred_python)
     env[_MESA_SKIP_VENV_RELAUNCH] = "1"
     argv = [str(preferred_python), str(Path(__file__).resolve()), *sys.argv[1:]]
-    os.execve(str(preferred_python), argv, env)
+    # Windows `os.execve()` is not a true exec and has proven unreliable here:
+    # launching `python mesa.py` could immediately return to the prompt without
+    # surfacing any traceback even though the venv interpreter works when invoked
+    # directly. Use a normal child-process handoff instead.
+    import subprocess
+
+    completed = subprocess.run(
+        argv,
+        cwd=str(Path(__file__).resolve().parent),
+        env=env,
+    )
+    raise SystemExit(int(completed.returncode or 0))
 
 
 _ensure_repo_dev_venv()
