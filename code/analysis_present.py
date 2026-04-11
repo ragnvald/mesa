@@ -22,13 +22,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import tkinter as tk
-from tkinter import messagebox
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QGroupBox, QLabel, QPushButton, QComboBox, QFrame,
+    QSizePolicy, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
+    QMessageBox,
+)
+from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import Qt, Signal, QObject
 
-from locale_bootstrap import harden_locale_for_ttkbootstrap
-
-harden_locale_for_ttkbootstrap()
-
+from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
 from mesa_shared import find_base_dir as resolve_base_dir
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
@@ -38,17 +41,10 @@ from mesa_constants import (
     PARQUET_SUBDIR,
 )
 
-try:
-    import ttkbootstrap as tb
-    from ttkbootstrap import ttk
-    from ttkbootstrap.constants import INFO, PRIMARY, SECONDARY, SUCCESS, WARNING
-except ModuleNotFoundError as exc:  # pragma: no cover - ttkbootstrap required at runtime
-    raise SystemExit("ttkbootstrap is required (pip install ttkbootstrap).") from exc
-
 gpd = None
 np = None
 pd = None
-FigureCanvasTkAgg = None
+FigureCanvasQTAgg = None
 Figure = None
 PathPatch = None
 MplPath = None
@@ -56,8 +52,8 @@ XLImage = None
 
 
 def _load_runtime_deps() -> None:
-    global gpd, np, pd, FigureCanvasTkAgg, Figure, PathPatch, MplPath
-    if all(dep is not None for dep in (gpd, np, pd, FigureCanvasTkAgg, Figure, PathPatch, MplPath)):
+    global gpd, np, pd, FigureCanvasQTAgg, Figure, PathPatch, MplPath
+    if all(dep is not None for dep in (gpd, np, pd, FigureCanvasQTAgg, Figure, PathPatch, MplPath)):
         return
     try:
         import geopandas as _gpd
@@ -66,28 +62,27 @@ def _load_runtime_deps() -> None:
         import matplotlib
     except ModuleNotFoundError as exc:
         raise SystemExit(
-            "analysis_present.py requires numpy, pandas, geopandas, and matplotlib with TkAgg support."
+            "analysis_present.py requires numpy, pandas, geopandas, and matplotlib."
         ) from exc
 
     try:
-        # When running in-process the backend may already be set; skip if so.
-        if matplotlib.get_backend().lower() != "tkagg":
-            matplotlib.use("TkAgg")
+        if matplotlib.get_backend().lower() != "agg":
+            matplotlib.use("Agg")
     except Exception:
-        pass  # best-effort; the direct import below will still succeed if TkAgg is available
+        pass
 
     try:
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as _FigureCanvasQTAgg
         from matplotlib.figure import Figure as _Figure
         from matplotlib.patches import PathPatch as _PathPatch
         from matplotlib.path import Path as _MplPath
     except Exception as exc:
-        raise SystemExit("matplotlib with TkAgg support is required for this tool.") from exc
+        raise SystemExit("matplotlib with Qt support is required for this tool.") from exc
 
     gpd = _gpd
     np = _np
     pd = _pd
-    FigureCanvasTkAgg = _FigureCanvasTkAgg
+    FigureCanvasQTAgg = _FigureCanvasQTAgg
     Figure = _Figure
     PathPatch = _PathPatch
     MplPath = _MplPath
@@ -129,14 +124,6 @@ DEFAULT_COLOR_FALLBACK: Dict[str, str] = {
 # --------------------------------------------------------------------------- #
 # Helpers shared with the setup tool
 # --------------------------------------------------------------------------- #
-
-def apply_bootstyle(widget: Any, style: str) -> None:
-    if not style:
-        return
-    try:
-        widget.configure(bootstyle=style)
-    except Exception:
-        pass
 
 def debug_log(base_dir: Path, message: str) -> None:
     """Append a timestamped message to log.txt for diagnostics."""
@@ -380,7 +367,7 @@ class AssetGroupSummary:
         return code_display
 
 
-def _polygons_dataframe(polygons: Optional[Iterable[Any]]) -> pd.DataFrame:
+def _polygons_dataframe(polygons: Optional[Iterable[Any]]) -> "pd.DataFrame":
     rows: List[Dict[str, Any]] = []
     for polygon in polygons or []:
         if isinstance(polygon, PolygonSummary):
@@ -408,7 +395,7 @@ def _polygons_dataframe(polygons: Optional[Iterable[Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def _sensitivity_dataframe(entries: Optional[Iterable[Any]]) -> pd.DataFrame:
+def _sensitivity_dataframe(entries: Optional[Iterable[Any]]) -> "pd.DataFrame":
     rows: List[Dict[str, Any]] = []
     for entry in entries or []:
         if isinstance(entry, SensitivitySummary):
@@ -430,7 +417,7 @@ def _sensitivity_dataframe(entries: Optional[Iterable[Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def _asset_groups_dataframe(entries: Optional[Iterable[Any]]) -> pd.DataFrame:
+def _asset_groups_dataframe(entries: Optional[Iterable[Any]]) -> "pd.DataFrame":
     rows: List[Dict[str, Any]] = []
     for entry in entries or []:
         if isinstance(entry, AssetGroupSummary):
@@ -477,7 +464,7 @@ class AnalysisData:
         self.has_stacked = not self.stacked.empty
 
     # ----------------------- loading helpers ----------------------- #
-    def _load_groups(self) -> pd.DataFrame:
+    def _load_groups(self) -> "pd.DataFrame":
         columns = ["id", "name", "notes", "created_at", "updated_at", "default_geocode"]
         path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_GROUP_TABLE)
         if not path:
@@ -501,7 +488,7 @@ class AnalysisData:
         df.sort_values(["name", "id"], inplace=True, ignore_index=True)
         return df
 
-    def _load_polygons(self) -> pd.DataFrame:
+    def _load_polygons(self) -> "pd.DataFrame":
         columns = ["id", "group_id", "title", "notes", "created_at", "updated_at"]
         path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_POLYGON_TABLE)
         if not path:
@@ -526,7 +513,7 @@ class AnalysisData:
             df[col] = pd.to_datetime(df[col], errors="coerce")
         return pd.DataFrame(df)
 
-    def _load_flat_results(self) -> pd.DataFrame:
+    def _load_flat_results(self) -> "pd.DataFrame":
         path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_FLAT_TABLE)
         if not path:
             debug_log(self.base_dir, "analysis flat table not found; comparison will show zero results")
@@ -604,7 +591,7 @@ class AnalysisData:
         df["analysis_polygon_notes"] = df.get("analysis_polygon_notes", pd.Series(dtype="object")).fillna("").astype(str)
         return df
 
-    def _load_stacked_results(self) -> pd.DataFrame:
+    def _load_stacked_results(self) -> "pd.DataFrame":
         path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_STACKED_TABLE)
         if not path:
             debug_log(self.base_dir, "analysis stacked table not found; comprehensive view will start empty")
@@ -1118,44 +1105,49 @@ class AnalysisData:
 # --------------------------------------------------------------------------- #
 
 
-class GroupHeader:
+class GroupHeader(QFrame):
     """Selector and headline statistics for a comparison column."""
 
-    def __init__(self, master: tk.Widget, title: str, on_selection: callable) -> None:
+    selectionChanged = Signal(str)
+
+    def __init__(self, title: str, on_selection: callable, parent: QWidget = None) -> None:
+        super().__init__(parent)
         self._on_selection = on_selection
-        self.frame = ttk.Frame(master, padding=(6, 6))
-        self.frame.columnconfigure(0, weight=1)
 
-        self.header_label = ttk.Label(self.frame, text=title, font=("Segoe UI", 12, "bold"))
-        apply_bootstyle(self.header_label, PRIMARY)
-        self.header_label.grid(row=0, column=0, sticky="w")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
 
-        self.combo_var = tk.StringVar()
-        self.combobox = ttk.Combobox(self.frame, textvariable=self.combo_var, state="readonly", width=40)
-        self.combobox.grid(row=1, column=0, sticky="ew", pady=(2, 4))
-        self.combobox.bind("<<ComboboxSelected>>", self._handle_selection)
-        apply_bootstyle(self.combobox, SECONDARY)
+        self.header_label = QLabel(title)
+        self.header_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        layout.addWidget(self.header_label)
 
-        summary_frame = ttk.Frame(self.frame)
-        summary_frame.grid(row=2, column=0, sticky="ew")
-        summary_frame.columnconfigure(0, weight=1)
-        self.summary_var = tk.StringVar(value="Total: 0.00 km^2 | Polygons: 0/0 | Last run: --")
-        ttk.Label(summary_frame, textvariable=self.summary_var, style="Value.TLabel").grid(row=0, column=0, sticky="w")
+        self.combobox = QComboBox()
+        self.combobox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combobox.currentTextChanged.connect(self._handle_selection)
+        layout.addWidget(self.combobox)
 
-    def _handle_selection(self, _event: object = None) -> None:
+        self.summary_label = QLabel("Total: 0.00 km^2 | Polygons: 0/0 | Last run: --")
+        self.summary_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        layout.addWidget(self.summary_label)
+
+    def _handle_selection(self, text: str) -> None:
         if self._on_selection:
-            self._on_selection(self.combo_var.get())
+            self._on_selection(text)
 
     def set_options(self, options: List[str]) -> None:
-        self.combobox["values"] = options
-        if not options:
-            self.combo_var.set("")
+        self.combobox.blockSignals(True)
+        self.combobox.clear()
+        self.combobox.addItems(options)
+        self.combobox.blockSignals(False)
 
     def set_selection(self, display: Optional[str]) -> None:
-        self.combo_var.set(display or "")
+        if display:
+            idx = self.combobox.findText(display)
+            if idx >= 0:
+                self.combobox.setCurrentIndex(idx)
 
     def current_selection(self) -> str:
-        return self.combo_var.get()
+        return self.combobox.currentText()
 
     def update_summary(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
@@ -1163,17 +1155,19 @@ class GroupHeader:
         processed = summary.get("processed_count", 0)
         configured = summary.get("configured_count", 0)
         last_run = summary.get("last_run_label", "--")
-        self.summary_var.set(f"Total: {total_label} | Polygons: {processed}/{configured} | Last run: {last_run}")
+        self.summary_label.setText(f"Total: {total_label} | Polygons: {processed}/{configured} | Last run: {last_run}")
 
 
-class SensitivityChart:
+class SensitivityChart(QFrame):
     """Reusable horizontal bar chart for sensitivity data."""
 
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
+    def __init__(self, palette_map: Dict[str, Dict[str, str]], parent: QWidget = None) -> None:
+        super().__init__(parent)
         self.palette_map = palette_map or {}
-        master.columnconfigure(0, weight=1)
-        master.rowconfigure(0, weight=1)
-        # Fixed footprint ~340x260 px to balance size and readability
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
         self.figure = Figure(figsize=(3.4, 2.6), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.ax.set_xlabel("Area (km^2)", fontsize=9)
@@ -1181,14 +1175,8 @@ class SensitivityChart:
         self.ax.tick_params(axis="both", labelsize=9)
         self.ax.grid(True, axis="x", linestyle=":", linewidth=0.5, alpha=0.6)
 
-        holder = ttk.Frame(master)
-        holder.grid(row=0, column=0, sticky="n")
-        holder.columnconfigure(0, weight=1)
-        holder.columnconfigure(1, weight=0)
-        holder.columnconfigure(2, weight=1)
-
-        self.canvas = FigureCanvasTkAgg(self.figure, master=holder)
-        self.canvas.get_tk_widget().grid(row=0, column=1, sticky="n")
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        layout.addWidget(self.canvas)
 
     def _palette_entry(self, code: str) -> Dict[str, str]:
         code_upper = str(code).strip().upper() if code is not None else ""
@@ -1250,192 +1238,155 @@ class SensitivityChart:
         self.canvas.draw_idle()
 
 
-class PolygonTotalsPanel:
+class PolygonTotalsPanel(QFrame):
     """Displays polygon totals from stacked analysis."""
 
-    def __init__(self, master: tk.Widget) -> None:
-        self.frame = ttk.Frame(master, padding=(6, 6))
-        self.frame.columnconfigure(0, weight=1)
-        # Avoid stretching the chart; keep minimal height
-        self.frame.rowconfigure(1, weight=0)
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
 
-        self.message_var = tk.StringVar(value="")
-        self.message_label = ttk.Label(self.frame, textvariable=self.message_var, wraplength=360, justify="left")
-        apply_bootstyle(self.message_label, WARNING)
-        self.message_label.grid(row=0, column=0, sticky="w")
-        self.message_label.grid_remove()
+        self.message_label = QLabel("")
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("color: #856404;")
+        self.message_label.hide()
+        layout.addWidget(self.message_label)
 
-        polygon_frame = ttk.LabelFrame(self.frame, text="Polygon totals (stacked)")
-        polygon_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-        polygon_frame.columnconfigure(0, weight=1)
-        polygon_frame.rowconfigure(0, weight=1)
-        apply_bootstyle(polygon_frame, SECONDARY)
+        group_box = QGroupBox("Polygon totals (stacked)")
+        group_layout = QVBoxLayout(group_box)
 
-        self.tree = ttk.Treeview(
-            polygon_frame,
-            columns=("title", "area"),
-            show="headings",
-            height=8,
-        )
-        self.tree.heading("title", text="Title")
-        self.tree.heading("area", text="Area (km^2)")
-        self.tree.column("title", width=240, anchor="w")
-        self.tree.column("area", width=120, anchor="e")
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Title", "Area (km^2)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        group_layout.addWidget(self.table)
 
-        scrollbar = ttk.Scrollbar(polygon_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        layout.addWidget(group_box)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
         message = summary.get("message", "")
-        self.message_var.set(message)
         if message:
-            self.message_label.grid()
+            self.message_label.setText(message)
+            self.message_label.show()
         else:
-            self.message_label.grid_remove()
+            self.message_label.hide()
 
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for polygon in summary.get("polygons", []):
-            self.tree.insert(
-                "",
-                "end",
-                values=(polygon.title, polygon.area_label),
-            )
+        polygons = summary.get("polygons", [])
+        self.table.setRowCount(len(polygons))
+        for row_idx, polygon in enumerate(polygons):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(polygon.title))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(polygon.area_label))
 
 
-class AssetOverlapPanel:
+class AssetOverlapPanel(QFrame):
     """Displays asset group overlap from stacked analysis."""
 
-    def __init__(self, master: tk.Widget) -> None:
-        self.frame = ttk.Frame(master, padding=(6, 6))
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(1, weight=1)
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
 
-        self.message_var = tk.StringVar(value="")
-        self.message_label = ttk.Label(self.frame, textvariable=self.message_var, wraplength=360, justify="left")
-        apply_bootstyle(self.message_label, WARNING)
-        self.message_label.grid(row=0, column=0, sticky="w")
-        self.message_label.grid_remove()
+        self.message_label = QLabel("")
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("color: #856404;")
+        self.message_label.hide()
+        layout.addWidget(self.message_label)
 
-        asset_frame = ttk.LabelFrame(self.frame, text="Asset group overlap")
-        asset_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-        asset_frame.columnconfigure(0, weight=1)
-        asset_frame.rowconfigure(0, weight=1)
-        apply_bootstyle(asset_frame, SUCCESS)
+        group_box = QGroupBox("Asset group overlap")
+        group_layout = QVBoxLayout(group_box)
 
-        self.tree = ttk.Treeview(
-            asset_frame,
-            columns=("asset", "sensitivity", "area"),
-            show="headings",
-            height=10,
-        )
-        self.tree.heading("asset", text="Asset group")
-        self.tree.heading("sensitivity", text="Dominant sensitivity")
-        self.tree.heading("area", text="Area (km^2)")
-        self.tree.column("asset", width=240, anchor="w")
-        self.tree.column("sensitivity", width=200, anchor="w")
-        self.tree.column("area", width=120, anchor="e")
-        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Asset group", "Dominant sensitivity", "Area (km^2)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        group_layout.addWidget(self.table)
 
-        scrollbar = ttk.Scrollbar(asset_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        layout.addWidget(group_box)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
         message = summary.get("message", "")
-        self.message_var.set(message)
         if message:
-            self.message_label.grid()
+            self.message_label.setText(message)
+            self.message_label.show()
         else:
-            self.message_label.grid_remove()
+            self.message_label.hide()
 
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for asset in summary.get("asset_groups", []):
-            self.tree.insert(
-                "",
-                "end",
-                values=(asset.asset_group, asset.dominant_label, asset.area_label),
-            )
+        assets = summary.get("asset_groups", [])
+        self.table.setRowCount(len(assets))
+        for row_idx, asset in enumerate(assets):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(asset.asset_group))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(asset.dominant_label))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(asset.area_label))
 
 
-class SensitivityTotalsPanel:
+class SensitivityTotalsPanel(QFrame):
     """Displays sensitivity totals chart from stacked analysis."""
 
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
-        self.frame = ttk.Frame(master, padding=(6, 6))
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(1, weight=1)
+    def __init__(self, palette_map: Dict[str, Dict[str, str]], parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
 
-        self.message_var = tk.StringVar(value="")
-        self.message_label = ttk.Label(self.frame, textvariable=self.message_var, wraplength=360, justify="left")
-        apply_bootstyle(self.message_label, WARNING)
-        self.message_label.grid(row=0, column=0, sticky="w")
-        self.message_label.grid_remove()
+        self.message_label = QLabel("")
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("color: #856404;")
+        self.message_label.hide()
+        layout.addWidget(self.message_label)
 
-        chart_frame = ttk.LabelFrame(self.frame, text="Sensitivity totals")
-        chart_frame.grid(row=1, column=0, sticky="nw", pady=(4, 0))
-        apply_bootstyle(chart_frame, INFO)
-        chart_frame.columnconfigure(0, weight=0)
-        chart_frame.rowconfigure(0, weight=0)
-        self.chart = SensitivityChart(chart_frame, palette_map)
+        group_box = QGroupBox("Sensitivity totals")
+        group_layout = QVBoxLayout(group_box)
+        self.chart = SensitivityChart(palette_map)
+        group_layout.addWidget(self.chart)
+        layout.addWidget(group_box)
 
     def update(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
         message = summary.get("message", "")
-        self.message_var.set(message)
         if message:
-            self.message_label.grid()
+            self.message_label.setText(message)
+            self.message_label.show()
         else:
-            self.message_label.grid_remove()
+            self.message_label.hide()
         self.chart.update(summary.get("sensitivity", []))
 
     def chart_figure(self):
         return self.chart.figure
 
 
-class TwoColumnView:
+class TwoColumnView(QWidget):
     """Generic left/right wrapper to keep side-by-side layout."""
 
-    def __init__(self, master: tk.Widget, left_factory, right_factory) -> None:
-        self.frame = ttk.Frame(master)
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.columnconfigure(1, weight=1)
-        self.frame.rowconfigure(0, weight=1)
+    def __init__(self, left_factory, right_factory, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        left_holder = ttk.Frame(self.frame)
-        left_holder.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        left_holder.columnconfigure(0, weight=1)
-        left_holder.rowconfigure(0, weight=1)
-
-        right_holder = ttk.Frame(self.frame)
-        right_holder.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        right_holder.columnconfigure(0, weight=1)
-        right_holder.rowconfigure(0, weight=1)
-
-        self.left = left_factory(left_holder)
-        self.right = right_factory(right_holder)
-        # Ensure child frames are placed inside their holders
-        if hasattr(self.left, "frame"):
-            self.left.frame.grid(row=0, column=0, sticky="nsew")
-        if hasattr(self.right, "frame"):
-            self.right.frame.grid(row=0, column=0, sticky="nsew")
+        self.left = left_factory()
+        self.right = right_factory()
+        layout.addWidget(self.left if isinstance(self.left, QWidget) else self.left.frame, 1)
+        layout.addWidget(self.right if isinstance(self.right, QWidget) else self.right.frame, 1)
 
 
-class PolygonTotalsView:
-    def __init__(self, master: tk.Widget) -> None:
-        columns = TwoColumnView(
-            master,
-            lambda parent: PolygonTotalsPanel(parent),
-            lambda parent: PolygonTotalsPanel(parent),
-        )
-        self.frame = columns.frame
-        self.left = columns.left
-        self.right = columns.right
+class PolygonTotalsView(QWidget):
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.left = PolygonTotalsPanel()
+        self.right = PolygonTotalsPanel()
+        layout.addWidget(self.left, 1)
+        layout.addWidget(self.right, 1)
 
     def update_left(self, summary: Dict[str, Any]) -> None:
         self.left.update(summary)
@@ -1444,16 +1395,15 @@ class PolygonTotalsView:
         self.right.update(summary)
 
 
-class AssetOverlapView:
-    def __init__(self, master: tk.Widget) -> None:
-        columns = TwoColumnView(
-            master,
-            lambda parent: AssetOverlapPanel(parent),
-            lambda parent: AssetOverlapPanel(parent),
-        )
-        self.frame = columns.frame
-        self.left = columns.left
-        self.right = columns.right
+class AssetOverlapView(QWidget):
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.left = AssetOverlapPanel()
+        self.right = AssetOverlapPanel()
+        layout.addWidget(self.left, 1)
+        layout.addWidget(self.right, 1)
 
     def update_left(self, summary: Dict[str, Any]) -> None:
         self.left.update(summary)
@@ -1462,16 +1412,15 @@ class AssetOverlapView:
         self.right.update(summary)
 
 
-class SensitivityTotalsView:
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]]) -> None:
-        columns = TwoColumnView(
-            master,
-            lambda parent: SensitivityTotalsPanel(parent, palette_map),
-            lambda parent: SensitivityTotalsPanel(parent, palette_map),
-        )
-        self.frame = columns.frame
-        self.left = columns.left
-        self.right = columns.right
+class SensitivityTotalsView(QWidget):
+    def __init__(self, palette_map: Dict[str, Dict[str, str]], parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.left = SensitivityTotalsPanel(palette_map)
+        self.right = SensitivityTotalsPanel(palette_map)
+        layout.addWidget(self.left, 1)
+        layout.addWidget(self.right, 1)
 
     def update_left(self, summary: Dict[str, Any]) -> None:
         self.left.update(summary)
@@ -1486,25 +1435,24 @@ class SensitivityTotalsView:
         ]
 
 
-class SankeyDifferenceView:
-    def __init__(self, master: tk.Widget, palette_map: Dict[str, Dict[str, str]], sensitivity_order: List[str]) -> None:
+class SankeyDifferenceView(QFrame):
+    def __init__(self, palette_map: Dict[str, Dict[str, str]], sensitivity_order: List[str], parent: QWidget = None) -> None:
+        super().__init__(parent)
         self.palette_map = palette_map or {}
         self.sensitivity_order = sensitivity_order or []
-        self.frame = ttk.Frame(master, padding=(6, 6))
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(0, weight=1)
 
-        holder = ttk.LabelFrame(self.frame, text="Area difference Sankey")
-        holder.grid(row=0, column=0, sticky="nsew")
-        holder.columnconfigure(0, weight=1)
-        holder.rowconfigure(0, weight=1)
-        apply_bootstyle(holder, INFO)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
 
-        # Allow a smaller minimum height (~1.4 in at 100 dpi) while stretching when space allows
+        group_box = QGroupBox("Area difference Sankey")
+        group_layout = QVBoxLayout(group_box)
+
         self.figure = Figure(figsize=(7.2, 1.4), dpi=100)
         self.ax = self.figure.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=holder)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        group_layout.addWidget(self.canvas)
+
+        layout.addWidget(group_box)
 
     def _color_for(self, code: str) -> str:
         entry = self.palette_map.get(str(code).upper()) or {}
@@ -1546,7 +1494,6 @@ class SankeyDifferenceView:
         available = max(0.05, y_top - y_bottom)
         scale = 1.0 if span <= available else available / span
         blocks: Dict[str, Dict[str, float]] = {}
-        # Stack top-down so A appears at the top.
         cursor_top = y_top
         for code, height, value in zip(codes, heights, values):
             if height <= 0:
@@ -1579,7 +1526,7 @@ class SankeyDifferenceView:
         self.ax.add_patch(patch)
         mid_x = (x_left + x_right) / 2
         mid_y = (left_block["start"] + left_block["end"] + right_block["start"] + right_block["end"]) / 4
-        self.ax.text(mid_x, mid_y, f"{delta_km2:+.2f} km²", fontsize=8, ha="center", va="center")
+        self.ax.text(mid_x, mid_y, f"{delta_km2:+.2f} km\u00b2", fontsize=8, ha="center", va="center")
 
     def _draw_blocks(self, blocks: Dict[str, Dict[str, float]], x: float, color_map: Dict[str, str], align: str) -> None:
         bar_w = 0.12
@@ -1607,7 +1554,7 @@ class SankeyDifferenceView:
             self.ax.text(
                 x + offset,
                 label_y,
-                f"{code}: {info['value']:.2f} km²",
+                f"{code}: {info['value']:.2f} km\u00b2",
                 fontsize=9,
                 ha=ha,
                 va="center",
@@ -1662,142 +1609,113 @@ class SankeyDifferenceView:
         return self.figure
 
 
-class ComparisonTotalsView:
-    def __init__(self, master: tk.Widget) -> None:
-        self.frame = ttk.Frame(master, padding=(6, 6))
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(0, weight=1)
-        self.table = ComparisonTable(self.frame)
-        self.table.frame.grid(row=0, column=0, sticky="nsew")
+class ComparisonTable(QFrame):
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        group_box = QGroupBox("Comparison totals")
+        group_layout = QVBoxLayout(group_box)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Category", "Left (km^2)", "Right (km^2)", "Difference (L - R)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        group_layout.addWidget(self.table)
+
+        layout.addWidget(group_box)
+
+    def update_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
+        row_list = list(rows)
+        self.table.setRowCount(len(row_list))
+        for row_idx, row in enumerate(row_list):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(row.get("label", "")))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(format_km2(row.get("left_km2", 0.0))))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(format_km2(row.get("right_km2", 0.0))))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(format_delta(row.get("delta_km2", 0.0))))
+
+
+class ComparisonTotalsView(QFrame):
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.table = ComparisonTable()
+        layout.addWidget(self.table)
 
     def update_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         self.table.update_rows(rows)
 
 
-class ComparisonTable:
-    def __init__(self, master: tk.Widget) -> None:
-        self.frame = ttk.LabelFrame(master, text="Comparison totals")
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(0, weight=1)
-        apply_bootstyle(self.frame, INFO)
-
-        self.tree = ttk.Treeview(
-            self.frame,
-            columns=("left", "right", "delta"),
-            show="tree headings",
-            height=6,
-        )
-        self.tree.heading("#0", text="Category")
-        self.tree.heading("left", text="Left (km^2)")
-        self.tree.heading("right", text="Right (km^2)")
-        self.tree.heading("delta", text="Difference (L - R)")
-        self.tree.column("#0", width=300, anchor="w")
-        self.tree.column("left", width=120, anchor="e")
-        self.tree.column("right", width=120, anchor="e")
-        self.tree.column("delta", width=140, anchor="e")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-
-        scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-    def update_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        row_list = list(rows)
-        self.tree.config(height=max(6, len(row_list) or 1))
-        for row in row_list:
-            self.tree.insert(
-                "",
-                "end",
-                text=row.get("label", ""),
-                values=(
-                    format_km2(row.get("left_km2", 0.0)),
-                    format_km2(row.get("right_km2", 0.0)),
-                    format_delta(row.get("delta_km2", 0.0)),
-                ),
-            )
-
-
-class ComparisonApp:
-    def __init__(self, data: AnalysisData, theme: str, root: Optional[tk.Tk] = None) -> None:
+class ComparisonWindow(QMainWindow):
+    def __init__(self, data: AnalysisData, parent: QWidget = None) -> None:
+        super().__init__(parent)
         self.data = data
         self.palette_map = data.palette_map
-        self.root = root if root is not None else tb.Window(themename=theme)
-        if root is not None:
-            for child in list(self.root.winfo_children()):
-                try:
-                    child.destroy()
-                except Exception:
-                    pass
-        self.root.title("MESA Area Analysis - Comparison")
-        self.root.geometry("1280x780")
-        self.root.minsize(1100, 720)
 
-        self._configure_style()
+        self.setWindowTitle("MESA Area Analysis - Comparison")
+        self.resize(1280, 780)
+        self.setMinimumSize(1100, 720)
 
-        container = ttk.Frame(self.root, padding=(12, 12))
-        container.pack(fill=tk.BOTH, expand=True)
-        container.columnconfigure(0, weight=1)
-        container.rowconfigure(1, weight=1)
-        apply_bootstyle(container, SECONDARY)
+        central = QWidget()
+        central.setObjectName("CentralHost")
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(12, 12, 12, 12)
 
-        header_frame = ttk.Frame(container)
-        header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        header_frame.columnconfigure(0, weight=1)
-        header_frame.columnconfigure(1, weight=1)
-        apply_bootstyle(header_frame, SECONDARY)
+        # Header with two group selectors side by side
+        header_layout = QHBoxLayout()
+        self.left_header = GroupHeader("Left group", self._on_left_selection)
+        self.right_header = GroupHeader("Right group", self._on_right_selection)
+        header_layout.addWidget(self.left_header, 1)
+        header_layout.addWidget(self.right_header, 1)
+        main_layout.addLayout(header_layout)
 
-        self.left_header = GroupHeader(header_frame, "Left group", self._on_left_selection)
-        self.left_header.frame.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        # Tab widget
+        self.notebook = QTabWidget()
+        self.polygon_view = PolygonTotalsView()
+        self.notebook.addTab(self.polygon_view, "Polygon totals (stacked)")
+        self.asset_view = AssetOverlapView()
+        self.notebook.addTab(self.asset_view, "Asset group overlap")
+        self.sensitivity_view = SensitivityTotalsView(self.palette_map)
+        self.notebook.addTab(self.sensitivity_view, "Sensitivity totals")
+        self.sankey_view = SankeyDifferenceView(self.palette_map, self.data.sensitivity_order)
+        self.notebook.addTab(self.sankey_view, "Area difference (Sankey)")
+        self.comparison_view = ComparisonTotalsView()
+        self.notebook.addTab(self.comparison_view, "Comparison totals")
+        main_layout.addWidget(self.notebook, 1)
 
-        self.right_header = GroupHeader(header_frame, "Right group", self._on_right_selection)
-        self.right_header.frame.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-
-        self.notebook = ttk.Notebook(container)
-        apply_bootstyle(self.notebook, SECONDARY)
-        self.polygon_view = PolygonTotalsView(self.notebook)
-        self.notebook.add(self.polygon_view.frame, text="Polygon totals (stacked)")
-        self.asset_view = AssetOverlapView(self.notebook)
-        self.notebook.add(self.asset_view.frame, text="Asset group overlap")
-        self.sensitivity_view = SensitivityTotalsView(self.notebook, self.palette_map)
-        self.notebook.add(self.sensitivity_view.frame, text="Sensitivity totals")
-        self.sankey_view = SankeyDifferenceView(self.notebook, self.palette_map, self.data.sensitivity_order)
-        self.notebook.add(self.sankey_view.frame, text="Area difference (Sankey)")
-        self.comparison_view = ComparisonTotalsView(self.notebook)
-        self.notebook.add(self.comparison_view.frame, text="Comparison totals")
-        self.notebook.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-
-        self.status_var = tk.StringVar(value=self.data.status_message())
-
+        # Report feedback
         self.report_dir = (self.data.base_dir / "output" / "reports").resolve()
-        self.report_note_var = tk.StringVar(value="")
-        self.report_link_var = tk.StringVar(value="")
-        self.report_note_label = ttk.Label(container, textvariable=self.report_note_var, anchor="w")
-        apply_bootstyle(self.report_note_label, SECONDARY)
-        self.report_link = tk.Label(
-            container,
-            textvariable=self.report_link_var,
-            fg="#0d6efd",
-            cursor="hand2",
-            anchor="w",
-        )
-        self.report_link.bind("<Button-1>", self._open_report_folder)
+        self.report_note_label = QLabel("")
+        self.report_note_label.hide()
+        main_layout.addWidget(self.report_note_label)
 
-        self.report_note_label.grid_remove()
-        self.report_link.grid_remove()
+        self.report_link = QLabel("")
+        self.report_link.setStyleSheet("color: #0d6efd; text-decoration: underline;")
+        self.report_link.setCursor(Qt.PointingHandCursor)
+        self.report_link.mousePressEvent = lambda _ev: self._open_report_folder()
+        self.report_link.hide()
+        main_layout.addWidget(self.report_link)
 
-        footer = ttk.Frame(container)
-        footer.grid(row=4, column=0, sticky="ew", pady=(12, 0))
-        footer.columnconfigure(0, weight=1)
-        footer.columnconfigure(1, weight=1)
-        tb.Button(footer, text="Print report", bootstyle=SUCCESS, command=self._export_comprehensive_report).grid(
-            row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 6)
-        )
-        tb.Button(footer, text="Exit", bootstyle=PRIMARY, command=self.root.destroy).grid(
-            row=0, column=1, sticky="ew", padx=(6, 0), pady=(0, 6)
-        )
+        # Footer buttons
+        footer_layout = QHBoxLayout()
+        btn_report = QPushButton("Print report")
+        btn_report.clicked.connect(self._export_comprehensive_report)
+        footer_layout.addWidget(btn_report, 1)
+        btn_exit = QPushButton("Exit")
+        btn_exit.clicked.connect(self.close)
+        footer_layout.addWidget(btn_exit, 1)
+        main_layout.addLayout(footer_layout)
 
+        # State
         self.display_to_id: Dict[str, str] = {}
         self.left_summary: Dict[str, Any] = {}
         self.right_summary: Dict[str, Any] = {}
@@ -1805,11 +1723,6 @@ class ComparisonApp:
         self.right_stacked_summary: Dict[str, Any] = {}
 
         self._populate_options()
-
-    def _configure_style(self) -> None:
-        style = ttk.Style(self.root)
-        style.configure("Caption.TLabel", font=("Segoe UI", 9))
-        style.configure("Value.TLabel", font=("Segoe UI", 10, "bold"))
 
     def _populate_options(self) -> None:
         choices = self.data.group_choices
@@ -1833,7 +1746,6 @@ class ComparisonApp:
             self.sensitivity_view.update_right(empty_comp)
             self.sankey_view.update(empty_comp, empty_comp)
             self.comparison_view.update_rows([])
-            self.status_var.set(self.data.status_message())
             self.left_summary = empty_basic
             self.right_summary = empty_basic
             self.left_stacked_summary = empty_comp
@@ -1847,11 +1759,6 @@ class ComparisonApp:
         right_display = option_labels[1] if len(option_labels) > 1 else option_labels[0]
         self.right_header.set_selection(right_display)
         self._on_right_selection(right_display)
-
-        if self.data.has_analysis:
-            self.status_var.set("Ready. Adjust the selections to compare different groups.")
-        else:
-            self.status_var.set(self.data.status_message())
 
     def _on_left_selection(self, display: str) -> None:
         group_id = self.display_to_id.get(display)
@@ -1879,22 +1786,6 @@ class ComparisonApp:
         rows = self.data.comparison_rows(self.left_summary, self.right_summary)
         self.comparison_view.update_rows(rows)
 
-        messages: List[str] = []
-        for summary in (
-            self.left_summary,
-            self.right_summary,
-            self.left_stacked_summary,
-            self.right_stacked_summary,
-        ):
-            if isinstance(summary, dict):
-                msg = summary.get("message")
-                if msg:
-                    messages.append(str(msg))
-        if messages:
-            self.status_var.set(messages[0])
-        else:
-            self.status_var.set(self.data.status_message())
-
     def _refresh_sankey(self) -> None:
         self.sankey_view.update(self.left_stacked_summary or {}, self.right_stacked_summary or {})
 
@@ -1902,7 +1793,7 @@ class ComparisonApp:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         return self.report_dir
 
-    def _basic_overview_df(self) -> pd.DataFrame:
+    def _basic_overview_df(self) -> "pd.DataFrame":
         left = self.left_summary or {}
         right = self.right_summary or {}
         rows = [
@@ -1910,12 +1801,12 @@ class ComparisonApp:
             {"Metric": "Notes", "Left": left.get("group_notes", ""), "Right": right.get("group_notes", "")},
             {"Metric": "Configured polygons", "Left": left.get("configured_count", 0), "Right": right.get("configured_count", 0)},
             {"Metric": "Processed polygons", "Left": left.get("processed_count", 0), "Right": right.get("processed_count", 0)},
-            {"Metric": "Total analysed area (km²)", "Left": area_to_km2(left.get("total_area_m2", 0.0)), "Right": area_to_km2(right.get("total_area_m2", 0.0))},
+            {"Metric": "Total analysed area (km\u00b2)", "Left": area_to_km2(left.get("total_area_m2", 0.0)), "Right": area_to_km2(right.get("total_area_m2", 0.0))},
             {"Metric": "Last run", "Left": left.get("last_run_label", "--"), "Right": right.get("last_run_label", "--")},
         ]
         return pd.DataFrame(rows, columns=["Metric", "Left", "Right"])
 
-    def _comprehensive_overview_df(self) -> pd.DataFrame:
+    def _comprehensive_overview_df(self) -> "pd.DataFrame":
         def _sum_polygons(summary: Dict[str, Any]) -> float:
             total = 0.0
             for polygon in summary.get("polygons", []) or []:
@@ -1934,29 +1825,29 @@ class ComparisonApp:
         rows = [
             {"Metric": "Group name", "Left": left.get("group_id", self.left_summary.get("group_name", "")), "Right": right.get("group_id", self.right_summary.get("group_name", ""))},
             {"Metric": "Polygons with overlaps", "Left": len(left.get("polygons", []) or []), "Right": len(right.get("polygons", []) or [])},
-            {"Metric": "Total overlap area (km²)", "Left": _sum_polygons(left), "Right": _sum_polygons(right)},
+            {"Metric": "Total overlap area (km\u00b2)", "Left": _sum_polygons(left), "Right": _sum_polygons(right)},
             {"Metric": "Asset groups reported", "Left": _asset_count(left), "Right": _asset_count(right)},
         ]
         return pd.DataFrame(rows, columns=["Metric", "Left", "Right"])
 
-    def _comparison_dataframe(self) -> pd.DataFrame:
+    def _comparison_dataframe(self) -> "pd.DataFrame":
         rows = self.data.comparison_rows(self.left_summary, self.right_summary)
         data_rows: List[Dict[str, Any]] = []
         for row in rows:
             data_rows.append(
                 {
                     "Category": row.get("label", ""),
-                    "Left (km²)": row.get("left_km2", 0.0),
-                    "Right (km²)": row.get("right_km2", 0.0),
-                    "Difference (km²)": row.get("delta_km2", 0.0),
+                    "Left (km\u00b2)": row.get("left_km2", 0.0),
+                    "Right (km\u00b2)": row.get("right_km2", 0.0),
+                    "Difference (km\u00b2)": row.get("delta_km2", 0.0),
                 }
             )
-        columns = ["Category", "Left (km²)", "Right (km²)", "Difference (km²)"]
+        columns = ["Category", "Left (km\u00b2)", "Right (km\u00b2)", "Difference (km\u00b2)"]
         return pd.DataFrame(data_rows, columns=columns)
 
     def _write_excel_report(
         self,
-        sheets: Dict[str, pd.DataFrame],
+        sheets: Dict[str, "pd.DataFrame"],
         prefix: str,
         chart_figures: Optional[List[Tuple[str, Any]]] = None,
     ) -> Path:
@@ -1990,15 +1881,13 @@ class ComparisonApp:
 
     def _after_report_export(self, path: Path) -> None:
         msg = f"Report exported: {path.name}"
-        self.report_note_var.set(msg)
-        self.report_link_var.set(f"Open reports folder ({self.report_dir})")
-        if not self.report_note_label.winfo_ismapped():
-            self.report_note_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
-        if not self.report_link.winfo_ismapped():
-            self.report_link.grid(row=3, column=0, sticky="w", pady=(0, 8))
+        self.report_note_label.setText(msg)
+        self.report_link.setText(f"Open reports folder ({self.report_dir})")
+        self.report_note_label.show()
+        self.report_link.show()
         debug_log(self.data.base_dir, msg)
 
-    def _open_report_folder(self, _event=None) -> None:
+    def _open_report_folder(self) -> None:
         try:
             self._ensure_report_dir()
             folder = str(self.report_dir)
@@ -2009,14 +1898,14 @@ class ComparisonApp:
             else:
                 subprocess.Popen(["xdg-open", folder])
         except Exception as exc:
-            messagebox.showerror("Open folder failed", str(exc))
+            QMessageBox.critical(self, "Open folder failed", str(exc))
 
     def _ensure_selection(self, summary: Dict[str, Any]) -> bool:
         return bool(summary and summary.get("group_id"))
 
     def _export_basic_report(self) -> None:
         if not (self._ensure_selection(self.left_summary) and self._ensure_selection(self.right_summary)):
-            messagebox.showwarning("Export basic report", "Select two analysis groups first.")
+            QMessageBox.warning(self, "Export basic report", "Select two analysis groups first.")
             return
         try:
             sheets = {
@@ -2032,12 +1921,12 @@ class ComparisonApp:
             path = self._write_excel_report(sheets, "basic_analysis", chart_figures=charts)
             self._after_report_export(path)
         except Exception as exc:
-            messagebox.showerror("Export failed", str(exc))
+            QMessageBox.critical(self, "Export failed", str(exc))
             debug_log(self.data.base_dir, f"basic report export failed: {exc}")
 
     def _export_comprehensive_report(self) -> None:
         if not (self._ensure_selection(self.left_stacked_summary) and self._ensure_selection(self.right_stacked_summary)):
-            messagebox.showwarning("Export comprehensive report", "Select groups that have comprehensive analysis results first.")
+            QMessageBox.warning(self, "Export comprehensive report", "Select groups that have comprehensive analysis results first.")
             return
         try:
             sheets = {
@@ -2054,11 +1943,8 @@ class ComparisonApp:
             path = self._write_excel_report(sheets, "comprehensive_analysis", chart_figures=charts)
             self._after_report_export(path)
         except Exception as exc:
-            messagebox.showerror("Export failed", str(exc))
+            QMessageBox.critical(self, "Export failed", str(exc))
             debug_log(self.data.base_dir, f"comprehensive report export failed: {exc}")
-
-    def run(self) -> None:
-        self.root.mainloop()
 
 
 # --------------------------------------------------------------------------- #
@@ -2085,52 +1971,57 @@ def main(argv: Optional[List[str]] = None, master=None) -> None:
     args = parse_args(argv)
     base_dir = resolve_base_dir(args.owd)
     cfg = read_config(base_dir)
-    theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "litera").strip() or "litera"
-    if master is not None:
-        root = tk.Toplevel(master)
+
+    # Ensure QApplication exists
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+        app.setStyleSheet(_SHARED_STYLESHEET)
+        own_app = True
     else:
-        root = tb.Window(themename=theme)
-    root.title("MESA Area Analysis - Comparison")
-    root.geometry("1280x780")
-    root.minsize(1100, 720)
+        own_app = False
 
-    loading = ttk.Frame(root, padding=(20, 20))
-    loading.pack(fill=tk.BOTH, expand=True)
-    ttk.Label(loading, text="Loading comparison viewer...", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
-    loading_var = tk.StringVar(value="Preparing runtime dependencies...")
-    ttk.Label(loading, textvariable=loading_var, justify="left", wraplength=720).pack(anchor="w")
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
+    # Show loading window
+    loading_window = QMainWindow()
+    loading_window.setWindowTitle("MESA Area Analysis - Comparison")
+    loading_window.resize(1280, 780)
+    loading_window.setMinimumSize(1100, 720)
+    loading_widget = QWidget()
+    loading_layout = QVBoxLayout(loading_widget)
+    loading_layout.setContentsMargins(20, 20, 20, 20)
+    loading_title = QLabel("Loading comparison viewer...")
+    loading_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
+    loading_layout.addWidget(loading_title)
+    loading_status = QLabel("Preparing runtime dependencies...")
+    loading_status.setWordWrap(True)
+    loading_layout.addWidget(loading_status)
+    loading_layout.addStretch()
+    loading_window.setCentralWidget(loading_widget)
+    loading_window.show()
+    QApplication.processEvents()
 
-    loading_var.set("Loading GIS/data and chart libraries...")
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
+    loading_status.setText("Loading GIS/data and chart libraries...")
+    QApplication.processEvents()
     _load_runtime_deps()
 
     palette_map = read_sensitivity_palette(cfg)
     for code_key, entry in palette_map.items():
         debug_log(base_dir, f"presentation palette {code_key}: {entry.get('color', '')}")
-    debug_log(base_dir, f"presentation theme: {theme}")
+    debug_log(base_dir, "presentation using PySide6")
 
-    loading_var.set("Loading comparison datasets...")
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
+    loading_status.setText("Loading comparison datasets...")
+    QApplication.processEvents()
     data = AnalysisData(base_dir, cfg, palette_map)
     debug_log(base_dir, "Comparison viewer initialised")
 
-    app = ComparisonApp(data, theme, root=root)
-    if master is None:
-        app.run()
-    return root
+    # Close loading window and show main window
+    loading_window.close()
+
+    window = ComparisonWindow(data)
+    window.show()
+
+    if own_app:
+        sys.exit(app.exec())
 
 
 if __name__ == "__main__":

@@ -3,12 +3,6 @@
 # UI: two panes (left: logs/progress/buttons; right: minimap launcher).
 # Minimap opens in a separate, low-priority helper process (pywebview + Leaflet + OSM).
 
-import locale
-from locale_bootstrap import harden_locale_for_ttkbootstrap
-
-
-harden_locale_for_ttkbootstrap()
-
 import os, sys, math, re, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
 import configparser
 from datetime import datetime, timedelta
@@ -31,113 +25,46 @@ try:
 except Exception:
     psutil = None
 
-# GUI
-import tkinter as tk
-from tkinter import scrolledtext
-from tkinter import ttk
-from tkinter import messagebox
+# GUI — PySide6
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QPlainTextEdit, QProgressBar, QFrame,
+    QSplitter, QSizePolicy, QMessageBox,
+)
+from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-# Try ttkbootstrap; fall back to standard ttk if missing/broken.
+from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+
 import traceback as _traceback
 
-
-def _import_ttkbootstrap():
-    """Import ttkbootstrap with a locale-safe fallback (Windows-friendly)."""
-    try:
-        import ttkbootstrap as _tb
-        from ttkbootstrap.constants import PRIMARY as _PRIMARY, WARNING as _WARNING, INFO as _INFO
-        return _tb, _PRIMARY, _WARNING, _INFO, None, None
-    except Exception as e:
-        err1 = repr(e)
-        tb1 = _traceback.format_exc()
-
-        try:
-            is_locale_problem = isinstance(e, locale.Error) or ("unsupported locale" in str(e).lower())
-        except Exception:
-            is_locale_problem = False
-
-        if is_locale_problem:
-            try:
-                for loc in ("", "C"):
-                    try:
-                        locale.setlocale(locale.LC_ALL, loc)
-                        break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-            try:
-                for name in list(sys.modules.keys()):
-                    if name == "ttkbootstrap" or name.startswith("ttkbootstrap."):
-                        sys.modules.pop(name, None)
-            except Exception:
-                pass
-
-            try:
-                import ttkbootstrap as _tb
-                from ttkbootstrap.constants import PRIMARY as _PRIMARY, WARNING as _WARNING, INFO as _INFO
-                return _tb, _PRIMARY, _WARNING, _INFO, None, None
-            except Exception as e2:
-                err2 = f"{err1} | retry: {repr(e2)}"
-                tb2 = tb1 + "\n--- retry ---\n" + _traceback.format_exc()
-                return None, None, None, None, err2, tb2
-
-        return None, None, None, None, err1, tb1
-
-
-tb, PRIMARY, WARNING, INFO, _TTKBOOTSTRAP_IMPORT_ERROR, _TTKBOOTSTRAP_IMPORT_TRACE = _import_ttkbootstrap()
-
-
-def _ttkbootstrap_diagnostics() -> dict:
-    """Best-effort diagnostics for ttkbootstrap import failures in frozen builds."""
-    d: dict = {}
-    try:
-        d["frozen"] = bool(getattr(sys, "frozen", False))
-    except Exception:
-        d["frozen"] = False
-    try:
-        d["executable"] = sys.executable
-    except Exception:
-        pass
-    try:
-        d["cwd"] = os.getcwd()
-    except Exception:
-        pass
-    try:
-        meipass = getattr(sys, "_MEIPASS", None)
-        d["_MEIPASS"] = meipass
-        if meipass:
-            root = Path(meipass)
-            d["meipass_exists"] = root.exists()
-            d["meipass_ttkbootstrap_dir_exists"] = (root / "ttkbootstrap").exists()
-    except Exception:
-        pass
-    try:
-        d["ttkbootstrap_import_error"] = _TTKBOOTSTRAP_IMPORT_ERROR
-    except Exception:
-        pass
-    try:
-        if _TTKBOOTSTRAP_IMPORT_TRACE:
-            d["ttkbootstrap_import_trace_tail"] = _TTKBOOTSTRAP_IMPORT_TRACE[-1200:]
-    except Exception:
-        pass
-    return d
 
 # ----------------------------
 # Globals
 # ----------------------------
 original_working_directory = None
 log_widget = None
-progress_var = None
+progress_bar = None
 progress_label = None
 progress_stage_text = "Preparations"
 _progress_value = 0.0
 HEARTBEAT_SECS = 60
 
+# Reference to the GUI window (None when headless)
+_gui_window = None
+
 # When true, GUI log updates are driven by the log tailer (tailing log.txt).
 # Avoid also inserting via log_to_gui() to prevent duplicate lines.
 _GUI_LOG_TAILER_ACTIVE = False
+
+
+class _ProcessingSignals(QObject):
+    """Thread-safe signals for updating the GUI from worker threads."""
+    log_message = Signal(str)
+    progress_update = Signal(float)
+
+
+_signals = None  # type: _ProcessingSignals | None
 
 def _mp_allowed() -> bool:
     """Multiprocessing Pool is unsafe from a non-main thread in frozen builds (PyInstaller/Windows).
@@ -373,8 +300,7 @@ def _current_progress_display() -> str:
 def _refresh_progress_label():
     try:
         if progress_label is not None:
-            progress_label.config(text=_current_progress_display())
-            progress_label.update_idletasks()
+            progress_label.setText(_current_progress_display())
     except Exception:
         pass
 
@@ -413,9 +339,11 @@ def update_progress(new_value: float):
     try:
         v = max(0.0, min(100.0, float(new_value)))
         _progress_value = v
-        if progress_var is not None:
-            progress_var.set(v)
+        if progress_bar is not None:
+            progress_bar.setValue(int(v))
         _refresh_progress_label()
+        if _signals is not None:
+            _signals.progress_update.emit(v)
     except Exception:
         pass
 
@@ -423,17 +351,16 @@ def log_to_gui(widget, message: str):
     timestamp = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted = f"{timestamp} - {message}"
     try:
-        if widget and widget.winfo_exists() and not _GUI_LOG_TAILER_ACTIVE:
-            widget.insert(tk.END, formatted + "\n")
-            widget.see(tk.END)
-    except tk.TclError:
+        if _signals is not None and _gui_window is not None and not _GUI_LOG_TAILER_ACTIVE:
+            _signals.log_message.emit(formatted)
+    except Exception:
         pass
     try:
         with open(base_dir() / "log.txt", "a", encoding="utf-8") as f:
             f.write(formatted + "\n")
     except Exception:
         print(formatted, flush=True)
-    if widget is None:
+    if _gui_window is None:
         print(formatted, flush=True)
 
 
@@ -3191,7 +3118,7 @@ def _start_processing_worker(cfg_path: Path) -> None:
     except Exception:
         pass
 
-def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> None:
+def _poll_progress_periodically(interval_ms: int = 1000) -> QTimer | None:
     """Periodically read the status JSON (same as minimap) and reflect progress in the GUI bar."""
     last_log = {
         "ts": 0.0,
@@ -3267,26 +3194,16 @@ def _poll_progress_periodically(root_obj: tk.Misc, interval_ms: int = 1000) -> N
                         pass
         except Exception:
             pass
-        finally:
-            try:
-                # keep polling while worker is alive; run a few extra ticks after
-                if _PROC is not None and _PROC.is_alive():
-                    root_obj.after(interval_ms, _poll)
-                else:
-                    # one last delayed refresh
-                    root_obj.after(2 * interval_ms, _poll)
-            except Exception:
-                pass
 
-    try:
-        root_obj.after(interval_ms, _poll)
-    except Exception:
-        pass
+    timer = QTimer()
+    timer.setInterval(interval_ms)
+    timer.timeout.connect(_poll)
+    timer.start()
+    return timer
 
 
-def _start_log_tailer(root_obj: tk.Misc,
-                      log_path: Path | None = None,
-                      interval_ms: int = 750) -> None:
+def _start_log_tailer(log_path: Path | None = None,
+                      interval_ms: int = 750) -> QTimer | None:
     """
     Periodically tail base_dir()/log.txt (written by the worker process) and
     append new lines to the GUI log widget. This restores live log updates
@@ -3303,7 +3220,7 @@ def _start_log_tailer(root_obj: tk.Misc,
         candidates.append(root_log)
 
     if not candidates:
-        return
+        return None
 
     global _GUI_LOG_TAILER_ACTIVE
     _GUI_LOG_TAILER_ACTIVE = True
@@ -3318,9 +3235,8 @@ def _start_log_tailer(root_obj: tk.Misc,
 
     def _gui_append(line: str) -> None:
         try:
-            if log_widget and log_widget.winfo_exists():
-                log_widget.insert(tk.END, line + "\n")
-                log_widget.see(tk.END)
+            if log_widget is not None:
+                log_widget.appendPlainText(line)
         except Exception:
             try:
                 print(line, flush=True)
@@ -3352,15 +3268,6 @@ def _start_log_tailer(root_obj: tk.Misc,
                     pass
         except Exception:
             pass
-        finally:
-            # Keep tailing while worker is alive; a few extra ticks after
-            try:
-                if _PROC is not None and _PROC.is_alive():
-                    root_obj.after(interval_ms, _tail_once)
-                else:
-                    root_obj.after(2 * interval_ms, _tail_once)
-            except Exception:
-                pass
 
     # Announce attachment once
     try:
@@ -3372,6 +3279,12 @@ def _start_log_tailer(root_obj: tk.Misc,
         _tail_once()
     except Exception:
         pass
+
+    timer = QTimer()
+    timer.setInterval(interval_ms)
+    timer.timeout.connect(_tail_once)
+    timer.start()
+    return timer
 
 def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                               geocode_data: gpd.GeoDataFrame,
@@ -3672,94 +3585,174 @@ if __name__ == "__main__":
             sys.exit(1)
         sys.exit(0)
 
-    ttk_theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
+    # --- PySide6 GUI mode ---
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyleSheet(_SHARED_STYLESHEET)
 
-    # GUI root: use the same method as Atlas tools.
-    if tb is not None:
-        try:
-            root = tb.Window(themename=ttk_theme)
-        except Exception:
-            root = tb.Window(themename="flatly")
-    else:
-        root = tk.Tk()
+    _signals = _ProcessingSignals()
 
-    frozen = bool(getattr(sys, 'frozen', False))
-    if frozen and tb is None:
+    window = ProcessingInternalWindow(cfg_path, tiles_minzoom, tiles_maxzoom)
+    window.show()
+    sys.exit(app.exec())
+
+
+class ProcessingInternalWindow(QMainWindow):
+    """Main GUI window for processing_internal (PySide6)."""
+
+    def __init__(self, cfg_path: "Path", tiles_minzoom: int, tiles_maxzoom: int):
+        super().__init__()
+        self._cfg_path = cfg_path
+        self._tiles_minzoom = tiles_minzoom
+        self._tiles_maxzoom = tiles_maxzoom
+        self._poll_timer: QTimer | None = None
+        self._tail_timer: QTimer | None = None
+
+        self.setWindowTitle("Process analysis & presentation (GeoParquet)")
+        self.resize(1100, 700)
+        self.setMinimumSize(800, 500)
+
+        # Icon
         try:
-            diag = _ttkbootstrap_diagnostics()
-            log_to_gui(None, f"[UI] ttkbootstrap unavailable. Diagnostics: {diag}")
-        except Exception:
-            pass
-        try:
-            messagebox.showwarning(
-                "MESA UI theme unavailable",
-                "ttkbootstrap could not be loaded, so a fallback UI is used.\n\n"
-                "Details:\n"
-                f"{_TTKBOOTSTRAP_IMPORT_ERROR}\n\n"
-                "If the error mentions 'DLL load failed', install the Microsoft Visual C++ 2015–2022 x64 Redistributable on the target machine.\n"
-                "If it mentions 'No module named ttkbootstrap', the packaged tool is incomplete/outdated.",
-            )
-        except Exception:
-            pass
-    root.title("Process analysis & presentation (GeoParquet)")
-    try:
-        # Keep backward-compat path for the icon
-        ico = (base_dir() / "system_resources" / "mesa.ico")
-        # Tail the shared worker log file into the GUI while the worker runs
-        try:
-            _start_log_tailer(root)
+            ico = base_dir() / "system_resources" / "mesa.ico"
+            if ico.exists():
+                self.setWindowIcon(QIcon(str(ico)))
         except Exception:
             pass
 
-        if ico.exists():
-            root.iconbitmap(str(ico))
-    except Exception:
-        pass
+        # Register as global window
+        global _gui_window
+        _gui_window = self
 
-    # panes (prefer themed ttk widgets so the bootstrap theme is visible)
-    paned = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
-    paned.pack(fill=tk.BOTH, expand=True)
-    left = ttk.Frame(paned)
-    right = ttk.Frame(paned, width=660)
-    paned.add(left); paned.add(right)
+        self._build_ui()
+        self._connect_signals()
 
-    # left
-    log_widget = scrolledtext.ScrolledText(left, height=14)
-    log_widget.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        # Start log tailer
+        try:
+            self._tail_timer = _start_log_tailer()
+        except Exception:
+            pass
 
-    progress_frame = ttk.Frame(left)
-    progress_frame.pack(pady=5)
-    progress_var = tk.DoubleVar(value=0.0)
-    if tb is not None:
-        progress_bar = tb.Progressbar(
-            progress_frame,
-            orient="horizontal",
-            length=260,
-            mode="determinate",
-            variable=progress_var,
-            bootstyle="info",
+        log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
+
+    def _build_ui(self):
+        global log_widget, progress_bar, progress_label
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(splitter)
+
+        # --- Left pane ---
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Log
+        self._log_widget = QPlainTextEdit()
+        self._log_widget.setReadOnly(True)
+        self._log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_layout.addWidget(self._log_widget)
+        log_widget = self._log_widget
+
+        # Progress row
+        progress_frame = QHBoxLayout()
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedWidth(260)
+        progress_frame.addWidget(self._progress_bar)
+        progress_bar = self._progress_bar
+
+        self._progress_label = QLabel(_current_progress_display())
+        progress_frame.addWidget(self._progress_label)
+        progress_frame.addStretch()
+        progress_label = self._progress_label
+        left_layout.addLayout(progress_frame)
+
+        # Info text
+        info = (f"This is where all calculations are made. Information is provided every {HEARTBEAT_SECS} seconds.\n"
+                "To start the processing press 'Process'. Then 'Progress map' to keep an eye on\n"
+                "the progress of your calculations. Many assets and/or detailed geocodes will\n"
+                "increase the processing time. All resulting data is saved in the GeoParquet\n"
+                "vector data format. Raster MBTiles are generated automatically at the end for\n"
+                "faster viewing of your data in the map viewer.")
+        info_label = QLabel(info)
+        info_label.setWordWrap(True)
+        left_layout.addWidget(info_label)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_process = QPushButton("Process")
+        btn_process.clicked.connect(self._run)
+        btn_layout.addWidget(btn_process)
+
+        btn_exit = QPushButton("Exit")
+        btn_exit.setProperty("class", "warning")
+        btn_exit.clicked.connect(self.close)
+        btn_layout.addWidget(btn_exit)
+        btn_layout.addStretch()
+        left_layout.addLayout(btn_layout)
+
+        splitter.addWidget(left)
+
+        # --- Right pane ---
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(10, 16, 10, 10)
+
+        title_label = QLabel("Processing progress map")
+        title_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        right_layout.addWidget(title_label)
+
+        desc_label = QLabel(
+            "For more complex calculations this will give the user a better\n"
+            "understanding of the progress of when the calculation"
         )
-    else:
-        progress_bar = ttk.Progressbar(
-            progress_frame,
-            orient="horizontal",
-            length=260,
-            mode="determinate",
-            variable=progress_var,
-        )
-    progress_bar.pack(side=tk.LEFT)
-    progress_label = ttk.Label(progress_frame, text=_current_progress_display())
-    progress_label.pack(side=tk.LEFT, padx=8)
+        right_layout.addWidget(desc_label)
 
-    info = (f"This is where all calculations are made. Information is provided every {HEARTBEAT_SECS} seconds.\n"
-            "To start the processing press 'Process'. Then 'Progress map' to keep an eye on\n"
-            "the progress of your calculations. Many assets and/or detailed geocodes will\n"
-            "increase the processing time. All resulting data is saved in the GeoParquet\n"
-            "vector data format. Raster MBTiles are generated automatically at the end for\n"
-            "faster viewing of your data in the map viewer.")
-    ttk.Label(left, text=info, wraplength=680, justify="left").pack(padx=10, pady=10)
+        btn_map = QPushButton("Progress map")
+        btn_map.clicked.connect(open_minimap_window)
+        right_layout.addWidget(btn_map)
+        right_layout.addStretch()
 
-    def _await_processing_then_tiles(proc_handle):
+        splitter.addWidget(right)
+        splitter.setSizes([700, 400])
+
+    def _connect_signals(self):
+        if _signals is not None:
+            _signals.log_message.connect(self._on_log_message)
+            _signals.progress_update.connect(self._on_progress_update)
+
+    def _on_log_message(self, text: str):
+        try:
+            self._log_widget.appendPlainText(text)
+        except Exception:
+            pass
+
+    def _on_progress_update(self, value: float):
+        try:
+            self._progress_bar.setValue(int(value))
+            self._progress_label.setText(_current_progress_display())
+        except Exception:
+            pass
+
+    def _run(self):
+        set_progress_stage("Preparations")
+        update_progress(0.0)
+        _start_processing_worker(self._cfg_path)
+        # Kick off periodic GUI polling of the shared status file for progress updates
+        try:
+            self._poll_timer = _poll_progress_periodically()
+        except Exception:
+            pass
+        proc_snapshot = _PROC
+        if proc_snapshot is not None:
+            threading.Thread(target=lambda: self._await_processing_then_tiles(proc_snapshot), daemon=True).start()
+
+    def _await_processing_then_tiles(self, proc_handle):
         try:
             proc_handle.join()
         except Exception:
@@ -3769,45 +3762,5 @@ if __name__ == "__main__":
             log_to_gui(log_widget, f"[Tiles] Skipping MBTiles stage because processing exited with code {exit_code}.")
             update_progress(100.0)
             return
-        _auto_run_tiles_stage(tiles_minzoom, tiles_maxzoom)
-
-    def _run():
-        set_progress_stage("Preparations")
-        update_progress(0.0)
-        _start_processing_worker(cfg_path)
-        # Kick off periodic GUI polling of the shared status file for progress updates
-        try:
-            _poll_progress_periodically(root)
-        except Exception:
-            pass
-        proc_snapshot = _PROC
-        if proc_snapshot is not None:
-            threading.Thread(target=lambda: _await_processing_then_tiles(proc_snapshot), daemon=True).start()
-
-    btn_frame = ttk.Frame(left)
-    btn_frame.pack(pady=6)
-    if tb is not None:
-        tb.Button(btn_frame, text="Process", bootstyle=PRIMARY, command=_run).pack(side=tk.LEFT, padx=5)
-        tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.LEFT, padx=5)
-    else:
-        ttk.Button(btn_frame, text="Process", command=_run).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Exit", command=root.destroy).pack(side=tk.LEFT, padx=5)
-
-    # right
-    ttk.Label(right, text="Processing progress map", font=("Segoe UI", 11, "bold")).pack(padx=10, pady=(16,6), anchor="w")
-    ttk.Label(
-        right,
-        text=(
-            "For more complex calculations this will give the user a better \n"
-            "understanding of the progress of when the calculation\n"
-        ),
-        justify="left",
-    ).pack(padx=10, anchor="w")
-    if tb is not None:
-        tb.Button(right, text="Progress map", command=open_minimap_window, bootstyle=INFO).pack(padx=10, pady=10, anchor="w")
-    else:
-        ttk.Button(right, text="Progress map", command=open_minimap_window).pack(padx=10, pady=10, anchor="w")
-
-    log_to_gui(log_widget, "Opened processing UI (GeoParquet only).")
-    root.mainloop()
+        _auto_run_tiles_stage(self._tiles_minzoom, self._tiles_maxzoom)
 

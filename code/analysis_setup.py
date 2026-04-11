@@ -45,8 +45,7 @@ from mesa_osm_tiles import (
     stop_osm_tile_proxy as stop_shared_osm_tile_proxy,
 )
 
-import tkinter as tk
-from tkinter import filedialog
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 try:
     locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
@@ -1410,20 +1409,13 @@ class WebApi:
     def import_file(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             storage = self._storage_obj()
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            path = filedialog.askopenfilename(
-                title="Import polygon dataset",
-                filetypes=[
-                    ("GeoJSON", "*.geojson;*.json"),
-                    ("Shapefile", "*.shp"),
-                    ("GeoPackage", "*.gpkg"),
-                    ("Parquet", "*.parquet;*.pq"),
-                    ("All files", "*.*"),
-                ],
+            _app = QApplication.instance() or QApplication([])
+            path, _ = QFileDialog.getOpenFileName(
+                None,
+                "Import polygon dataset",
+                "",
+                "GeoJSON (*.geojson *.json);;Shapefile (*.shp);;GeoPackage (*.gpkg);;Parquet (*.parquet *.pq);;All files (*.*)",
             )
-            root.destroy()
             if not path:
                 return {"ok": False, "error": "Import cancelled."}
 

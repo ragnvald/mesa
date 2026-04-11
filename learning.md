@@ -263,3 +263,17 @@ When a problem is solved, add a short entry here with:
 - Practical fix / decision:
   - Keep frozen `.exe` behavior out-of-process.
   - For source runs, schedule helper startup with `root.after(...)`, cache imported modules, and restore `cwd` after importing helpers with module-level side effects.
+
+## PySide6 migration from PyQt5 (2026-04-11)
+
+- What changed:
+  - `mesa_qt.py` switched from PyQt5 to PySide6 (6.11.0), the official Qt for Python binding.
+  - Color palette reworked from cool blue/slate to warm green/oker earth-tone palette, inspired by GRASP Desktop.
+- Key API differences:
+  - `app.exec_()` → `app.exec()` (PySide6 uses the non-underscore form).
+  - Enum paths like `QFont.Bold` still work in PySide6 6.x as compat aliases (resolves to `QFont.Weight.Bold`).
+  - Import paths change from `PyQt5.QtWidgets` to `PySide6.QtWidgets` etc., but class/function names are identical.
+- Practical fix / decision:
+  - PySide6 chosen over PyQt5 for: LGPL licensing, active maintenance by Qt Company, better long-term support.
+  - Keep PyQt5 in `requirements_all_win311.txt` temporarily (GRASP project still uses it); add PySide6 alongside.
+  - Color palette uses GRASP-inspired earth tones: background `#f3ecdf`, text `#3f3528`, accents `#715a36`/`#9b7c3d`, success `#4d7c0f`, warning `#b45309`, danger `#b02a37`.

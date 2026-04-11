@@ -5,9 +5,14 @@ except Exception:
     # Fall back silently if locale isn't available on this system
     pass
 
-from locale_bootstrap import harden_locale_for_ttkbootstrap
-
-harden_locale_for_ttkbootstrap()
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QRadioButton,
+    QComboBox, QProgressBar, QFrame, QSizePolicy, QButtonGroup, QMessageBox,
+)
+from PySide6.QtGui import QIcon, QFont, QDesktopServices
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl
+from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
 
 import geopandas as gpd
 import pandas as pd
@@ -35,10 +40,6 @@ from matplotlib.ticker import MaxNLocator
 
 from PIL import Image as PILImage
 import re
-import tkinter as tk
-from tkinter import scrolledtext
-import ttkbootstrap as tb
-from ttkbootstrap.constants import WARNING
 import threading
 from pathlib import Path
 import subprocess
@@ -59,13 +60,11 @@ except ModuleNotFoundError as exc:
         "  requirements_compile_win311.txt (or requirements_all_win311.txt)\n\n"
         f"Original error: {exc}"
     )
+    import sys as _sys
+    print(msg, file=_sys.stderr, flush=True)
     try:
-        from tkinter import messagebox
-
-        _root = tk.Tk()
-        _root.withdraw()
-        messagebox.showerror("MESA report engine", msg)
-        _root.destroy()
+        _app = QApplication.instance() or QApplication([])
+        QMessageBox.critical(None, "MESA report engine", msg)
     except Exception:
         pass
     raise
@@ -96,16 +95,23 @@ _REPORT_INSET_SHADOW_DX = 0.006
 _REPORT_INSET_SHADOW_DY = 0.008
 
 # ---------------- GUI / globals ----------------
-log_widget = None
-progress_var = None
-progress_label = None
+log_widget = None        # QPlainTextEdit (set when GUI is up)
+progress_var = None      # QProgressBar (set when GUI is up)
+progress_label = None    # QLabel showing percentage
 last_report_path = None
-link_var = None  # hyperlink label StringVar
+link_var = None          # QLabel used as hyperlink
 
-# Tk widgets must only be updated from the thread that owns the Tk event loop.
-# The report generation runs in a background thread, so we schedule UI updates
-# via root.after(0, ...) to avoid hangs/deadlocks.
-_UI_ROOT = None
+_gui_window = None       # ReportGeneratorWindow instance (global ref for thread-safe access)
+
+
+class _ReportSignals(QObject):
+    """Thread-safe signals for updating the GUI from background threads."""
+    log_message = Signal(str)
+    progress_update = Signal(float)
+    link_update = Signal(str)
+
+
+_signals: _ReportSignals | None = None
 
 # When running long jobs in a background thread, set_progress() messages were
 # only written to the GUI widget (not to log.txt). Keep a best-effort base_dir
@@ -1478,20 +1484,10 @@ def write_to_log(message: str, base_dir: str | None = None):
                 f.write(formatted + "\n")
     except Exception:
         print(formatted, flush=True)
-    # GUI log update (thread-safe)
-    def _append_gui():
-        try:
-            if log_widget and log_widget.winfo_exists():
-                log_widget.insert(tk.END, formatted + "\n")
-                log_widget.see(tk.END)
-        except Exception:
-            pass
-
+    # GUI log update (thread-safe via signal)
     try:
-        if _UI_ROOT is not None and getattr(_UI_ROOT, "winfo_exists", lambda: False)():
-            _UI_ROOT.after(0, _append_gui)
-        else:
-            _append_gui()
+        if _signals is not None:
+            _signals.log_message.emit(formatted)
     except Exception:
         # Never let logging break report generation.
         pass
@@ -3831,21 +3827,10 @@ def set_progress(pct: float, message: str | None = None):
         pct = max(0.0, min(100.0, float(pct)))
         if message:
             write_to_log(message, _LOG_BASE_DIR)
-
-        def _update_gui():
-            try:
-                if progress_var is not None:
-                    progress_var.set(pct)
-                if progress_label is not None:
-                    progress_label.config(text=f"{int(pct)}%")
-            except Exception:
-                pass
-
+        # Thread-safe progress update via signal
         try:
-            if _UI_ROOT is not None and getattr(_UI_ROOT, "winfo_exists", lambda: False)():
-                _UI_ROOT.after(0, _update_gui)
-            else:
-                _update_gui()
+            if _signals is not None:
+                _signals.progress_update.emit(pct)
         except Exception:
             pass
     except Exception:
@@ -4413,8 +4398,8 @@ def generate_report(base_dir: str,
         write_to_log(f"Word report created: {output_docx}", base_dir)
 
         try:
-            if link_var:
-                link_var.set("Open report folder")
+            if _signals is not None:
+                _signals.link_update.emit("Open report folder")
         except Exception:
             pass
 
@@ -4481,186 +4466,265 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
         daemon=True
     ).start()
 
-def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str, master=None):
-    global log_widget, progress_var, progress_label, link_var, _UI_ROOT
-    if master is not None:
-        root = tk.Toplevel(master)
-    else:
-        root = tb.Window(themename=theme)
-    _UI_ROOT = root
-    root.title("MESA – Report generator")
-    try:
-        ico = Path(base_dir) / "system_resources" / "mesa.ico"
-        if ico.exists():
-            root.iconbitmap(str(ico))
-    except Exception:
-        pass
+class ReportGeneratorWindow(QMainWindow):
+    """PySide6 main window for the MESA report generator."""
 
-    frame = tb.LabelFrame(root, text="Log", bootstyle="info")
-    frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-    log_widget = scrolledtext.ScrolledText(frame, height=8)
-    log_widget.pack(fill=tk.BOTH, expand=True)
+    def __init__(self, base_dir: str, config_file: str, palette: dict, desc: dict, parent=None):
+        super().__init__(parent)
+        global log_widget, progress_var, progress_label, link_var, _gui_window, _signals
 
-    pframe = tk.Frame(root); pframe.pack(pady=6)
-    progress_var = tk.DoubleVar(value=0.0)
-    pbar = tb.Progressbar(pframe, orient="horizontal", length=300, mode="determinate",
-                          variable=progress_var, bootstyle="info")
-    pbar.pack(side=tk.LEFT, padx=6)
-    progress_label = tk.Label(pframe, text="0%", width=5, anchor="w")
-    progress_label.pack(side=tk.LEFT)
+        _gui_window = self
+        _signals = _ReportSignals()
 
-    action_frame = tb.LabelFrame(root, text="Report", bootstyle="primary")
-    action_frame.pack(padx=10, pady=(0, 10), fill=tk.X)
-    action_frame.columnconfigure(1, weight=1)
+        self.setWindowTitle("MESA \u2013 Report generator")
+        self.resize(900, 640)
+        self.setMinimumSize(700, 500)
 
-    include_frame = tb.LabelFrame(action_frame, text="Include in report", bootstyle="secondary")
-    include_frame.grid(row=0, column=0, columnspan=2, padx=6, pady=(6, 2), sticky="ew")
-    include_frame.columnconfigure(0, weight=1)
-    include_frame.columnconfigure(1, weight=1)
+        try:
+            ico = Path(base_dir) / "system_resources" / "mesa.ico"
+            if ico.exists():
+                self.setWindowIcon(QIcon(str(ico)))
+        except Exception:
+            pass
 
-    include_assets_var = tk.BooleanVar(value=True)
-    include_analysis_var = tk.BooleanVar(value=False)
-    include_other_maps_var = tk.BooleanVar(value=True)
-    include_index_statistics_var = tk.BooleanVar(value=True)
-    include_lines_and_segments_var = tk.BooleanVar(value=True)
-    include_atlas_maps_var = tk.BooleanVar(value=False)
+        central = QWidget(self)
+        central.setObjectName("CentralHost")
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(10, 10, 10, 10)
 
-    _include_options = [
-        ("Assets overview & statistics", include_assets_var),
-        ("Analysis presentation (graphs)", include_analysis_var),
-        ("Other maps (basic_mosaic)", include_other_maps_var),
-        ("Index statistics", include_index_statistics_var),
-        ("Lines & segments", include_lines_and_segments_var),
-        ("Atlas maps (detailed)", include_atlas_maps_var),
-    ]
-    for idx, (label, var) in enumerate(_include_options):
-        row = idx // 2
-        col = idx % 2
-        tb.Checkbutton(
-            include_frame,
-            text=label,
-            variable=var,
-            bootstyle="round-toggle",
-        ).grid(row=row, column=col, sticky="w", pady=2, padx=(0, 16) if col == 0 else (0, 0))
+        # --- Log area ---
+        log_group = QGroupBox("Log")
+        log_lay = QVBoxLayout(log_group)
+        log_widget = QPlainTextEdit()
+        log_widget.setReadOnly(True)
+        log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        log_lay.addWidget(log_widget)
+        main_layout.addWidget(log_group)
 
-    analysis_frame = tb.LabelFrame(action_frame, text="Analysis presentation options", bootstyle="secondary")
-    analysis_frame.grid(row=1, column=0, columnspan=2, padx=6, pady=(4, 2), sticky="ew")
-    analysis_frame.columnconfigure(1, weight=1)
+        # --- Progress row ---
+        pframe = QHBoxLayout()
+        progress_var = QProgressBar()
+        progress_var.setRange(0, 100)
+        progress_var.setValue(0)
+        progress_var.setFixedWidth(300)
+        pframe.addWidget(progress_var)
+        progress_label = QLabel("0%")
+        progress_label.setFixedWidth(40)
+        pframe.addWidget(progress_label)
+        pframe.addStretch()
+        main_layout.addLayout(pframe)
 
-    analysis_mode_var = tk.StringVar(value="single")
-    analysis_left_var = tk.StringVar(value="")
-    analysis_right_var = tk.StringVar(value="")
+        # --- Report options group ---
+        action_group = QGroupBox("Report")
+        action_layout = QVBoxLayout(action_group)
 
-    tk.Label(analysis_frame, text="Mode:").grid(row=0, column=0, padx=(6, 2), pady=4, sticky="w")
-    mode_holder = tk.Frame(analysis_frame)
-    mode_holder.grid(row=0, column=1, padx=2, pady=4, sticky="w")
-    tb.Radiobutton(mode_holder, text="Single area", value="single", variable=analysis_mode_var,
-                   bootstyle="secondary-toolbutton").pack(side=tk.LEFT, padx=(0, 6))
-    tb.Radiobutton(mode_holder, text="Compare two areas", value="compare", variable=analysis_mode_var,
-                   bootstyle="secondary-toolbutton").pack(side=tk.LEFT, padx=(0, 6))
-    tb.Radiobutton(mode_holder, text="All areas", value="all", variable=analysis_mode_var,
-                   bootstyle="secondary-toolbutton").pack(side=tk.LEFT)
+        # Include in report
+        include_group = QGroupBox("Include in report")
+        include_grid = QGridLayout(include_group)
 
-    try:
-        _cfg_tmp = read_config(config_file)
-        _gpq_tmp = parquet_dir_from_cfg(base_dir, _cfg_tmp)
-    except Exception:
-        _gpq_tmp = parquet_dir_from_cfg(base_dir, read_config(config_file))
-    group_choices = _analysis_group_choices(_gpq_tmp)
-    group_labels = [disp for _gid, disp in group_choices]
-    label_to_id = {disp: gid for gid, disp in group_choices}
+        self._chk_assets = QCheckBox("Assets overview && statistics")
+        self._chk_assets.setChecked(True)
+        self._chk_analysis = QCheckBox("Analysis presentation (graphs)")
+        self._chk_analysis.setChecked(False)
+        self._chk_other_maps = QCheckBox("Other maps (basic_mosaic)")
+        self._chk_other_maps.setChecked(True)
+        self._chk_index_stats = QCheckBox("Index statistics")
+        self._chk_index_stats.setChecked(True)
+        self._chk_lines_segments = QCheckBox("Lines && segments")
+        self._chk_lines_segments.setChecked(True)
+        self._chk_atlas = QCheckBox("Atlas maps (detailed)")
+        self._chk_atlas.setChecked(False)
 
-    tk.Label(analysis_frame, text="Area A:").grid(row=1, column=0, padx=(6, 2), pady=4, sticky="w")
-    analysis_left_combo = tb.Combobox(analysis_frame, textvariable=analysis_left_var, values=tuple(group_labels), width=44,
-                                      state="readonly" if group_labels else "disabled")
-    analysis_left_combo.grid(row=1, column=1, padx=2, pady=4, sticky="w")
+        _include_checks = [
+            self._chk_assets, self._chk_analysis,
+            self._chk_other_maps, self._chk_index_stats,
+            self._chk_lines_segments, self._chk_atlas,
+        ]
+        for idx, chk in enumerate(_include_checks):
+            include_grid.addWidget(chk, idx // 2, idx % 2)
 
-    tk.Label(analysis_frame, text="Area B:").grid(row=2, column=0, padx=(6, 2), pady=4, sticky="w")
-    analysis_right_combo = tb.Combobox(analysis_frame, textvariable=analysis_right_var, values=tuple(group_labels), width=44,
-                                       state="readonly" if group_labels else "disabled")
-    analysis_right_combo.grid(row=2, column=1, padx=2, pady=4, sticky="w")
+        action_layout.addWidget(include_group)
 
-    if group_labels:
-        analysis_left_var.set(group_labels[0])
-        analysis_right_var.set(group_labels[1] if len(group_labels) > 1 else group_labels[0])
+        # Analysis presentation options
+        analysis_group = QGroupBox("Analysis presentation options")
+        analysis_grid = QGridLayout(analysis_group)
 
-    def _sync_analysis_controls(*_args):
-        enabled = bool(include_analysis_var.get())
-        mode = str(analysis_mode_var.get() or "single").lower()
-        if not enabled or not group_labels:
-            analysis_left_combo.configure(state="disabled")
-            analysis_right_combo.configure(state="disabled")
+        analysis_grid.addWidget(QLabel("Mode:"), 0, 0)
+        mode_widget = QWidget()
+        mode_lay = QHBoxLayout(mode_widget)
+        mode_lay.setContentsMargins(0, 0, 0, 0)
+        self._radio_single = QRadioButton("Single area")
+        self._radio_single.setChecked(True)
+        self._radio_compare = QRadioButton("Compare two areas")
+        self._radio_all = QRadioButton("All areas")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._radio_single)
+        self._mode_group.addButton(self._radio_compare)
+        self._mode_group.addButton(self._radio_all)
+        mode_lay.addWidget(self._radio_single)
+        mode_lay.addWidget(self._radio_compare)
+        mode_lay.addWidget(self._radio_all)
+        mode_lay.addStretch()
+        analysis_grid.addWidget(mode_widget, 0, 1)
+
+        try:
+            _cfg_tmp = read_config(config_file)
+            _gpq_tmp = parquet_dir_from_cfg(base_dir, _cfg_tmp)
+        except Exception:
+            _gpq_tmp = parquet_dir_from_cfg(base_dir, read_config(config_file))
+        group_choices = _analysis_group_choices(_gpq_tmp)
+        group_labels = [disp for _gid, disp in group_choices]
+        self._label_to_id = {disp: gid for gid, disp in group_choices}
+
+        analysis_grid.addWidget(QLabel("Area A:"), 1, 0)
+        self._combo_left = QComboBox()
+        self._combo_left.addItems(group_labels)
+        self._combo_left.setMinimumWidth(260)
+        analysis_grid.addWidget(self._combo_left, 1, 1)
+
+        analysis_grid.addWidget(QLabel("Area B:"), 2, 0)
+        self._combo_right = QComboBox()
+        self._combo_right.addItems(group_labels)
+        self._combo_right.setMinimumWidth(260)
+        analysis_grid.addWidget(self._combo_right, 2, 1)
+
+        if group_labels:
+            self._combo_left.setCurrentIndex(0)
+            self._combo_right.setCurrentIndex(1 if len(group_labels) > 1 else 0)
+
+        analysis_grid.setColumnStretch(1, 1)
+        action_layout.addWidget(analysis_group)
+
+        # Create report button + hint label
+        btn_row = QHBoxLayout()
+        create_btn = QPushButton("Create report")
+        create_btn.setObjectName("CreateReportBtn")
+        create_btn.setStyleSheet("QPushButton#CreateReportBtn { background-color: #28a745; color: white; padding: 6px 16px; font-weight: bold; }")
+        btn_row.addWidget(create_btn)
+        hint_label = QLabel("The report will include only the selected sections.")
+        btn_row.addWidget(hint_label)
+        btn_row.addStretch()
+        action_layout.addLayout(btn_row)
+
+        main_layout.addWidget(action_group)
+
+        # --- Bottom row: link + exit ---
+        bottom_row = QHBoxLayout()
+        link_var = QLabel("")
+        link_var.setStyleSheet("QLabel { color: #4ea3ff; }")
+        link_var.setFont(QFont("Segoe UI", 10))
+        link_var.setCursor(Qt.PointingHandCursor)
+        link_var.mousePressEvent = self._open_report_folder
+        bottom_row.addWidget(link_var)
+        bottom_row.addStretch()
+        exit_btn = QPushButton("Exit")
+        exit_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: #000; padding: 6px 16px; font-weight: bold; }")
+        exit_btn.clicked.connect(self.close)
+        bottom_row.addWidget(exit_btn)
+        main_layout.addLayout(bottom_row)
+
+        # --- Signals ---
+        _signals.log_message.connect(self._on_log_message)
+        _signals.progress_update.connect(self._on_progress_update)
+        _signals.link_update.connect(self._on_link_update)
+
+        # --- Control wiring ---
+        self._chk_analysis.stateChanged.connect(self._sync_analysis_controls)
+        self._mode_group.buttonClicked.connect(self._sync_analysis_controls)
+        self._sync_analysis_controls()
+
+        create_btn.clicked.connect(lambda: self._start_selected(base_dir, config_file, palette, desc))
+
+        # Store references for use in callbacks
+        self._base_dir = base_dir
+        self._group_labels = group_labels
+
+        write_to_log(f"Working directory: {base_dir}", base_dir)
+        write_to_log("Ready. Select report contents, then press 'Create report'.", base_dir)
+
+    # ---- Slots ----
+    def _on_log_message(self, text: str):
+        if log_widget is not None:
+            log_widget.appendPlainText(text)
+
+    def _on_progress_update(self, pct: float):
+        if progress_var is not None:
+            progress_var.setValue(int(pct))
+        if progress_label is not None:
+            progress_label.setText(f"{int(pct)}%")
+
+    def _on_link_update(self, text: str):
+        if link_var is not None:
+            link_var.setText(text)
+
+    def _sync_analysis_controls(self, *_args):
+        enabled = self._chk_analysis.isChecked()
+        if self._radio_single.isChecked():
+            mode = "single"
+        elif self._radio_compare.isChecked():
+            mode = "compare"
+        else:
+            mode = "all"
+
+        if not enabled or not self._group_labels:
+            self._combo_left.setEnabled(False)
+            self._combo_right.setEnabled(False)
             return
         if mode == "all":
-            analysis_left_combo.configure(state="disabled")
-            analysis_right_combo.configure(state="disabled")
+            self._combo_left.setEnabled(False)
+            self._combo_right.setEnabled(False)
         elif mode == "compare":
-            analysis_left_combo.configure(state="readonly")
-            analysis_right_combo.configure(state="readonly")
+            self._combo_left.setEnabled(True)
+            self._combo_right.setEnabled(True)
         else:
-            analysis_left_combo.configure(state="readonly")
-            analysis_right_combo.configure(state="disabled")
+            self._combo_left.setEnabled(True)
+            self._combo_right.setEnabled(False)
 
-    include_analysis_var.trace_add("write", _sync_analysis_controls)
-    analysis_mode_var.trace_add("write", _sync_analysis_controls)
-    _sync_analysis_controls()
-
-    def _start_selected():
+    def _start_selected(self, base_dir, config_file, palette, desc):
         if not any([
-            include_assets_var.get(),
-            include_analysis_var.get(),
-            include_other_maps_var.get(),
-            include_index_statistics_var.get(),
-            include_lines_and_segments_var.get(),
-            include_atlas_maps_var.get(),
+            self._chk_assets.isChecked(),
+            self._chk_analysis.isChecked(),
+            self._chk_other_maps.isChecked(),
+            self._chk_index_stats.isChecked(),
+            self._chk_lines_segments.isChecked(),
+            self._chk_atlas.isChecked(),
         ]):
             write_to_log("No report sections selected. Tick at least one box.", base_dir)
             return
 
         analysis_left_id = None
         analysis_right_id = None
-        if include_analysis_var.get():
-            left_label = (analysis_left_var.get() or "").strip()
-            right_label = (analysis_right_var.get() or "").strip()
-            analysis_left_id = label_to_id.get(left_label) if left_label else None
-            analysis_right_id = label_to_id.get(right_label) if right_label else None
+        if self._chk_analysis.isChecked():
+            left_label = self._combo_left.currentText().strip()
+            right_label = self._combo_right.currentText().strip()
+            analysis_left_id = self._label_to_id.get(left_label) if left_label else None
+            analysis_right_id = self._label_to_id.get(right_label) if right_label else None
+
+        if self._radio_single.isChecked():
+            mode = "single"
+        elif self._radio_compare.isChecked():
+            mode = "compare"
+        else:
+            mode = "all"
 
         _start_report_thread_selected(
             base_dir,
             config_file,
             palette,
             desc,
-            include_assets=include_assets_var.get(),
-            include_analysis_presentation=include_analysis_var.get(),
-            analysis_mode=analysis_mode_var.get(),
+            include_assets=self._chk_assets.isChecked(),
+            include_analysis_presentation=self._chk_analysis.isChecked(),
+            analysis_mode=mode,
             analysis_area_left=analysis_left_id,
             analysis_area_right=analysis_right_id,
-            include_other_maps=include_other_maps_var.get(),
-            include_index_statistics=include_index_statistics_var.get(),
-            include_lines_and_segments=include_lines_and_segments_var.get(),
-            include_atlas_maps=include_atlas_maps_var.get(),
+            include_other_maps=self._chk_other_maps.isChecked(),
+            include_index_statistics=self._chk_index_stats.isChecked(),
+            include_lines_and_segments=self._chk_lines_segments.isChecked(),
+            include_atlas_maps=self._chk_atlas.isChecked(),
         )
 
-    tb.Button(
-        action_frame,
-        text="Create report",
-        bootstyle="success",
-        width=18,
-        command=_start_selected,
-    ).grid(row=2, column=0, padx=6, pady=(6, 6), sticky="w")
-    tk.Label(
-        action_frame,
-        text="The report will include only the selected sections.",
-        anchor="w",
-        justify="left",
-        wraplength=420,
-    ).grid(row=2, column=1, padx=(4, 8), pady=(6, 6), sticky="w")
-
-    btn_frame = tk.Frame(root); btn_frame.pack(pady=(0, 6))
-    tb.Button(btn_frame, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.RIGHT, padx=6)
-
-    # Live link to report folder
-    def open_report_folder(event=None):
+    def _open_report_folder(self, event=None):
         if not last_report_path:
             return
         folder = os.path.dirname(last_report_path)
@@ -4671,21 +4735,26 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
                 try:
                     subprocess.Popen(["explorer", folder])
                 except Exception as ee:
-                    write_to_log(f"Failed to open folder: {ee}", base_dir)
+                    write_to_log(f"Failed to open folder: {ee}", self._base_dir)
         else:
-            write_to_log("Report folder not found.", base_dir)
+            write_to_log("Report folder not found.", self._base_dir)
 
-    link_var = tk.StringVar(value="")
-    link_label = tk.Label(root, textvariable=link_var, fg="#4ea3ff", cursor="hand2",
-                          font=("Segoe UI", 10))
-    link_label.pack(pady=(2, 8))
-    link_label.bind("<Button-1>", open_report_folder)
 
-    write_to_log(f"Working directory: {base_dir}", base_dir)
-    write_to_log("Ready. Select report contents, then press 'Create report'.", base_dir)
-    if master is None:
-        root.mainloop()
-    return root
+def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str = "", master=None):
+    """Create and show the ReportGeneratorWindow. Returns the window instance."""
+    app = QApplication.instance()
+    own_app = app is None
+    if own_app:
+        app = QApplication([])
+        app.setStyleSheet(_SHARED_STYLESHEET)
+
+    window = ReportGeneratorWindow(base_dir, config_file, palette, desc)
+    window.show()
+
+    if own_app:
+        app.exec()
+    return window
+
 
 # ---------------- In-process entry point (called by mesa.py via lazy import) ----------------
 def run(base_dir: str, master=None) -> None:
@@ -4697,7 +4766,6 @@ def run(base_dir: str, master=None) -> None:
     resolved = normalize_base_dir(base_dir)
     cfg_path = config_path(resolved)
     cfg = read_config(cfg_path)
-    theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
     palette_A2E, desc_A2E = read_sensitivity_palette_and_desc(cfg_path)
     PRIMARY_HEX = cfg['DEFAULT'].get('ui_primary_color', PRIMARY_HEX).strip() or PRIMARY_HEX
     try:
@@ -4709,7 +4777,7 @@ def run(base_dir: str, master=None) -> None:
         LIGHT_PRIMARY_HEX = _lighten(PRIMARY_HEX, 0.30)
     except Exception:
         pass
-    return launch_gui(resolved, cfg_path, palette_A2E, desc_A2E, theme, master=master)
+    return launch_gui(resolved, cfg_path, palette_A2E, desc_A2E, master=master)
 
 
 # ---------------- CLI ----------------
@@ -4732,9 +4800,8 @@ if __name__ == "__main__":
 
     cfg_path = config_path(base_dir)
     cfg = read_config(cfg_path)
-    theme = cfg['DEFAULT'].get('ttk_bootstrap_theme', 'flatly')
 
-    # Sensitivity palette + descriptions from config (A–E)
+    # Sensitivity palette + descriptions from config (A-E)
     palette_A2E, desc_A2E = read_sensitivity_palette_and_desc(cfg_path)
 
     if args.debug_atlas_sample:
@@ -4768,5 +4835,5 @@ if __name__ == "__main__":
         generate_report(base_dir, cfg_path, palette_A2E, desc_A2E,
                         report_mode=args.report_mode)
     else:
-        launch_gui(base_dir, cfg_path, palette_A2E, desc_A2E, theme)
+        launch_gui(base_dir, cfg_path, palette_A2E, desc_A2E)
 

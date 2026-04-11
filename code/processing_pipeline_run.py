@@ -27,9 +27,15 @@ from __future__ import annotations
 
 from mesa_shared import find_base_dir as resolve_base_dir, read_config, parquet_dir
 
-from locale_bootstrap import harden_locale_for_ttkbootstrap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QProgressBar,
+    QFrame, QSizePolicy,
+)
+from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-harden_locale_for_ttkbootstrap()
+from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
 
 import argparse
 import configparser
@@ -1464,341 +1470,311 @@ def run_selected(
 # ---------------------------------------------------------------------------
 
 
-def run_ui(base_dir: Path, cfg: configparser.ConfigParser, master=None) -> None:
-    import tkinter as tk
-    import tkinter.scrolledtext as scrolledtext
+# ---------------------------------------------------------------------------
+# Qt signal bridge for thread-safe UI updates
+# ---------------------------------------------------------------------------
 
-    try:
-        import ttkbootstrap as tb
-    except Exception:
-        tb = None
 
-    theme = "flatly"
-    try:
-        if "DEFAULT" in cfg:
-            theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", theme) or theme
-    except Exception:
-        pass
+class _RunnerSignals(QObject):
+    log_message = Signal(str)
+    progress_update = Signal(float)
+    task_finished = Signal()
 
-    if master is not None:
-        root = tk.Toplevel(master)
-    else:
-        root = tb.Window(themename=theme) if tb is not None else tk.Tk()
-    root.title("MESA – Process all")
-    try:
-        ico = base_dir / "system_resources" / "mesa.ico"
-        if ico.exists():
-            root.iconbitmap(str(ico))
-    except Exception:
-        pass
-    # Slightly bigger default window (requested): more room for options and log.
-    root.geometry("900x560")
 
-    # Make the log area the resizable region so buttons never get pushed off-screen.
-    root.grid_rowconfigure(0, weight=1)
-    root.grid_columnconfigure(0, weight=1)
+# ---------------------------------------------------------------------------
+# ProcessRunnerWindow (PySide6)
+# ---------------------------------------------------------------------------
 
-    # Availability
-    avail_data = detect_data_processing(base_dir, cfg)
-    avail_tiles = detect_tiles_processing(base_dir, cfg)
-    avail_lines = detect_lines_processing(base_dir, cfg)
-    avail_analysis = detect_analysis_processing(base_dir, cfg)
 
-    # Defaults: checked if available
-    var_data = tk.BooleanVar(value=avail_data.available)
-    var_data_explode = tk.BooleanVar(value=False)
-    gpq = parquet_dir(base_dir, cfg)
-    tiles_flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
-    tiles_default = bool(avail_tiles.available and (tiles_flat_exists or avail_data.available))
-    var_tiles = tk.BooleanVar(value=tiles_default)
-    var_lines = tk.BooleanVar(value=avail_lines.available)
-    var_analysis = tk.BooleanVar(value=avail_analysis.available)
+class ProcessRunnerWindow(QMainWindow):
+    def __init__(self, base_dir: Path, cfg: configparser.ConfigParser, parent=None):
+        super().__init__(parent)
+        self._base_dir = base_dir
+        self._cfg = cfg
+        self._signals = _RunnerSignals()
+        self._tail_state: dict[str, int] = {}
 
-    # --- layout (match other processing tools)
-    main_frame = tk.Frame(root)
-    main_frame.grid(row=0, column=0, sticky="nsew")
-    main_frame.grid_columnconfigure(0, weight=1)
-    main_frame.grid_rowconfigure(0, weight=1)
+        self.setWindowTitle("MESA \u2013 Process all")
+        self.resize(900, 560)
+        self.setMinimumSize(700, 440)
 
-    # Log output in a labeled frame
-    if tb is not None:
-        log_frame = tb.LabelFrame(main_frame, text="Log output", bootstyle="info")
-    else:
-        from tkinter import ttk
+        try:
+            ico = base_dir / "system_resources" / "mesa.ico"
+            if ico.exists():
+                self.setWindowIcon(QIcon(str(ico)))
+        except Exception:
+            pass
 
-        log_frame = ttk.LabelFrame(main_frame, text="Log output")
-    log_frame.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="nsew")
+        # Central widget
+        central = QWidget(objectName="CentralHost")
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
 
-    log_widget = scrolledtext.ScrolledText(log_frame, height=8)
-    log_widget.pack(fill=tk.BOTH, expand=True)
+        # Log area
+        log_group = QGroupBox("Log output")
+        log_lay = QVBoxLayout(log_group)
+        self._log_widget = QPlainTextEdit()
+        self._log_widget.setReadOnly(True)
+        self._log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        log_lay.addWidget(self._log_widget)
+        layout.addWidget(log_group, stretch=1)
 
-    # Progress bar row
-    progress_frame = tk.Frame(main_frame)
-    progress_frame.grid(row=1, column=0, pady=(0, 6))
+        # Progress bar row
+        prog_row = QHBoxLayout()
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedWidth(280)
+        prog_row.addWidget(self._progress_bar)
+        self._progress_label = QLabel("0%")
+        self._progress_label.setMinimumWidth(40)
+        prog_row.addWidget(self._progress_label)
+        prog_row.addStretch()
+        layout.addLayout(prog_row)
 
-    progress_var = tk.DoubleVar(value=0.0)
-    if tb is not None:
-        progress_bar = tb.Progressbar(
-            progress_frame,
-            orient="horizontal",
-            length=280,
-            mode="determinate",
-            variable=progress_var,
-            bootstyle="info",
+        # Info label
+        info_label = QLabel(
+            "Run one or more processing steps in one batch. "
+            "Unavailable steps are disabled when required input tables are missing."
         )
-    else:
-        from tkinter import ttk
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
 
-        progress_bar = ttk.Progressbar(
-            progress_frame,
-            orient="horizontal",
-            length=280,
-            mode="determinate",
-            variable=progress_var,
-        )
-    progress_bar.pack(side=tk.LEFT)
+        # Availability
+        avail_data = detect_data_processing(base_dir, cfg)
+        avail_tiles = detect_tiles_processing(base_dir, cfg)
+        avail_lines = detect_lines_processing(base_dir, cfg)
+        avail_analysis = detect_analysis_processing(base_dir, cfg)
 
-    progress_label = tk.Label(progress_frame, text="0%", bg="light grey")
-    progress_label.pack(side=tk.LEFT, padx=5)
+        gpq = parquet_dir(base_dir, cfg)
+        tiles_flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
+        tiles_default = bool(avail_tiles.available and (tiles_flat_exists or avail_data.available))
 
-    def ui_log(line: str) -> None:
-        log_widget.insert(tk.END, line + "\n")
-        log_widget.see(tk.END)
+        # Checkbox grid
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(10, 0, 10, 0)
 
-    def ui_progress(p: float) -> None:
-        p = max(0.0, min(100.0, float(p)))
-        progress_var.set(p)
-        progress_label.config(text=f"{int(p)}%")
+        # Headers
+        grid.addWidget(QLabel("Process"), 0, 0)
+        grid.addWidget(QLabel("Status"), 0, 1)
+        grid.addWidget(QLabel("Options"), 0, 2)
 
-    # Tail base_dir/log.txt for detailed progress output (data processing writes there).
-    _tail_state: dict[str, int] = {}
+        def _mk_row(row, text, checked, avail, status_override=None):
+            cb = QCheckBox(text)
+            cb.setChecked(checked and avail.available)
+            grid.addWidget(cb, row, 0)
+            if status_override is not None:
+                status = status_override
+            else:
+                status = "Ready" if avail.available else ("; ".join(avail.reasons) if avail.reasons else "Missing inputs")
+            lbl = QLabel(status)
+            grid.addWidget(lbl, row, 1)
+            if not avail.available:
+                cb.setEnabled(False)
+                cb.setChecked(False)
+            return cb
 
-    def _start_log_tailer(interval_ms: int = 750) -> None:
-        candidates = [base_dir / "log.txt"]
+        self._cb_data = _mk_row(1, "Data processing (presentation)", avail_data.available, avail_data)
+        tiles_status = "Run data processing first" if not tiles_flat_exists else None
+        self._cb_tiles = _mk_row(2, "Tiles processing (MBTiles)", tiles_default, avail_tiles, tiles_status)
+        self._cb_lines = _mk_row(3, "Lines processing (segments)", avail_lines.available, avail_lines)
+        self._cb_analysis = _mk_row(4, "Analysis processing (study areas)", avail_analysis.available, avail_analysis)
 
-        def _tail_once() -> None:
-            try:
-                for p in candidates:
-                    try:
-                        if not p.exists():
-                            continue
-                        key = str(p)
-                        with open(p, "r", encoding="utf-8", errors="replace") as f:
-                            pos = _tail_state.get(key, 0)
-                            try:
-                                f.seek(pos)
-                            except Exception:
-                                pos = 0
-                                f.seek(0)
-                            data = f.read()
-                            _tail_state[key] = f.tell()
-                        if data:
-                            for line in data.splitlines():
-                                if line.strip():
-                                    ui_log(line)
-                    except Exception:
-                        pass
-            finally:
-                try:
-                    root.after(interval_ms, _tail_once)
-                except Exception:
-                    pass
+        # Explode option in column 2, row 1
+        self._cb_data_explode = QCheckBox("Split MultiPolygons in tbl_flat")
+        self._cb_data_explode.setChecked(False)
+        grid.addWidget(self._cb_data_explode, 1, 2)
+
+        layout.addWidget(grid_widget)
+
+        # Sync logic for data option / tiles state
+        def _sync_data_option():
+            enabled = self._cb_data.isChecked() and avail_data.available
+            self._cb_data_explode.setEnabled(enabled)
+            if not enabled:
+                self._cb_data_explode.setChecked(False)
+
+        def _sync_tiles():
+            helper_ok = avail_tiles.available
+            data_ok = self._cb_data.isChecked() and avail_data.available
+            flat_ok = tiles_flat_exists
+            enabled = helper_ok and (data_ok or flat_ok)
+            self._cb_tiles.setEnabled(enabled)
+            if not enabled:
+                self._cb_tiles.setChecked(False)
+
+        self._cb_data.stateChanged.connect(_sync_data_option)
+        self._cb_data.stateChanged.connect(_sync_tiles)
+        _sync_data_option()
+        _sync_tiles()
+
+        # Button row
+        btn_row = QHBoxLayout()
+        self._process_btn = QPushButton("Process selected")
+        self._map_btn = QPushButton("Progress map")
+        exit_btn = QPushButton("Exit")
+
+        btn_row.addWidget(self._process_btn)
+        btn_row.addWidget(self._map_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(exit_btn)
+        layout.addLayout(btn_row)
+
+        # Connect buttons
+        self._process_btn.clicked.connect(self._on_process_click)
+        self._map_btn.clicked.connect(self._open_progress_map)
+        exit_btn.clicked.connect(self.close)
+
+        # Connect signals
+        self._signals.log_message.connect(self._append_log)
+        self._signals.progress_update.connect(self._set_progress)
+        self._signals.task_finished.connect(self._on_task_finished)
+
+        # Log tail timer
+        self._tail_timer = QTimer(self)
+        self._tail_timer.setInterval(750)
+        self._tail_timer.timeout.connect(self._tail_once)
 
         # Start at current EOF to avoid dumping old logs
+        log_path = base_dir / "log.txt"
+        try:
+            if log_path.exists():
+                self._tail_state[str(log_path)] = log_path.stat().st_size
+        except Exception:
+            pass
+        self._tail_timer.start()
+
+        # Initial log
+        self._append_log(f"{_ts()} - Base dir: {base_dir}")
+
+        # Apply stylesheet
+        # (applied on the window; app-level stylesheet set in run_ui)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _append_log(self, line: str) -> None:
+        self._log_widget.appendPlainText(line)
+
+    def _set_progress(self, p: float) -> None:
+        p = max(0.0, min(100.0, float(p)))
+        self._progress_bar.setValue(int(p))
+        self._progress_label.setText(f"{int(p)}%")
+
+    def _on_task_finished(self) -> None:
+        self._process_btn.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Log tailer
+    # ------------------------------------------------------------------
+
+    def _tail_once(self) -> None:
+        candidates = [self._base_dir / "log.txt"]
         for p in candidates:
             try:
-                if p.exists():
-                    _tail_state[str(p)] = p.stat().st_size
+                if not p.exists():
+                    continue
+                key = str(p)
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    pos = self._tail_state.get(key, 0)
+                    try:
+                        f.seek(pos)
+                    except Exception:
+                        pos = 0
+                        f.seek(0)
+                    data = f.read()
+                    self._tail_state[key] = f.tell()
+                if data:
+                    for line in data.splitlines():
+                        if line.strip():
+                            self._append_log(line)
             except Exception:
                 pass
-        root.after(interval_ms, _tail_once)
 
-    # Info text (like other tools)
-    info_label_text = (
-        "Run one or more processing steps in one batch. "
-        "Unavailable steps are disabled when required input tables are missing."
-    )
-    info_label = tk.Label(main_frame, text=info_label_text, wraplength=760, justify="left", anchor="w")
-    info_label.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 6))
+    # ------------------------------------------------------------------
+    # Progress map
+    # ------------------------------------------------------------------
 
-    # Controls (checkbox rows)
-    controls = tk.Frame(main_frame)
-    controls.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 6))
-    controls.grid_columnconfigure(0, weight=0)
-    controls.grid_columnconfigure(1, weight=1)
-    controls.grid_columnconfigure(2, weight=0)
-
-    # Header row
-    hdr1 = tk.Label(controls, text="Process", anchor="w")
-    hdr2 = tk.Label(controls, text="Status", anchor="w")
-    hdr3 = tk.Label(controls, text="Options", anchor="w")
-    hdr1.grid(row=0, column=0, sticky="w")
-    hdr2.grid(row=0, column=1, sticky="w", padx=10)
-    hdr3.grid(row=0, column=2, sticky="w", padx=10)
-
-    def _mk_row(
-        row: int,
-        text: str,
-        var: tk.BooleanVar,
-        avail: ProcessAvailability,
-        status_override: str | None = None,
-    ):
-        cb = tk.Checkbutton(controls, text=text, variable=var)
-        cb.grid(row=row, column=0, sticky="w")
-        if status_override is not None:
-            status = status_override
-        else:
-            status = "Ready" if avail.available else ("; ".join(avail.reasons) if avail.reasons else "Missing inputs")
-        lbl = tk.Label(controls, text=status, anchor="w")
-        lbl.grid(row=row, column=1, sticky="w", padx=10)
-        if not avail.available:
-            cb.configure(state=tk.DISABLED)
-            var.set(False)
-
-        return cb
-
-    cb_data = _mk_row(1, "Data processing (presentation)", var_data, avail_data)
-    tiles_status = "Run data processing first" if not tiles_flat_exists else None
-    cb_tiles = _mk_row(2, "Tiles processing (MBTiles)", var_tiles, avail_tiles, tiles_status)
-    _mk_row(3, "Lines processing (segments)", var_lines, avail_lines)
-    _mk_row(4, "Analysis processing (study areas)", var_analysis, avail_analysis)
-
-    # Optional data-processing settings.
-    options_frame = tk.Frame(controls)
-    options_frame.grid(row=1, column=2, sticky="w", padx=10)
-
-    # Explode MultiPolygons into individual Polygon rows in tbl_flat.
-    opt_data = tk.Checkbutton(
-        options_frame,
-        text="Split MultiPolygons in tbl_flat",
-        variable=var_data_explode,
-    )
-    opt_data.pack(anchor="w")
-
-    def _sync_data_option_state(*_args) -> None:
-        try:
-            enabled = bool(var_data.get()) and bool(avail_data.available)
-            opt_data.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
-            if not enabled:
-                var_data_explode.set(False)
-        except Exception:
-            pass
-
-    def _sync_tiles_state(*_args) -> None:
-        try:
-            helper_ok = bool(avail_tiles.available)
-            data_ok = bool(var_data.get()) and bool(avail_data.available)
-            flat_ok = bool(tiles_flat_exists)
-            enabled = helper_ok and (data_ok or flat_ok)
-            cb_tiles.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
-            if not enabled:
-                var_tiles.set(False)
-        except Exception:
-            pass
-
-    try:
-        var_data.trace_add("write", _sync_data_option_state)
-        var_data.trace_add("write", _sync_tiles_state)
-    except Exception:
-        pass
-    _sync_data_option_state()
-    _sync_tiles_state()
-
-    buttons = tk.Frame(main_frame)
-    buttons.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 10))
-
-    if tb is not None:
-        Button = tb.Button
-    else:
-        Button = tk.Button
-
-    button_width = 18
-    button_padx = 7
-    button_pady = 7
-
-    if tb is not None:
-        process_btn = Button(buttons, text="Process selected", width=button_width, bootstyle="primary")
-        map_btn = Button(buttons, text="Progress map", width=button_width, bootstyle="info")
-        exit_btn = Button(buttons, text="Exit", command=root.destroy, width=button_width, bootstyle="warning")
-    else:
-        process_btn = Button(buttons, text="Process selected", width=button_width)
-        map_btn = Button(buttons, text="Progress map", width=button_width)
-        exit_btn = Button(buttons, text="Exit", command=root.destroy, width=button_width)
-
-    process_btn.pack(side=tk.LEFT, padx=button_padx, pady=button_pady)
-    map_btn.pack(side=tk.LEFT, padx=button_padx, pady=button_pady)
-    exit_btn.pack(side=tk.RIGHT, padx=button_padx, pady=button_pady)
-
-    def open_progress_map() -> None:
+    def _open_progress_map(self) -> None:
         try:
             import processing_internal as dpi
             try:
                 import importlib.util as _importlib_util
                 if _importlib_util.find_spec("webview") is None:
-                    ui_log(f"{_ts()} - Progress map requires pywebview (Edge WebView2). It is not available in this build.")
+                    self._append_log(f"{_ts()} - Progress map requires pywebview (Edge WebView2). It is not available in this build.")
                     return
             except Exception:
                 pass
             try:
-                os.environ["MESA_BASE_DIR"] = str(base_dir)
+                os.environ["MESA_BASE_DIR"] = str(self._base_dir)
             except Exception:
                 pass
             try:
-                dpi.original_working_directory = str(base_dir)
+                dpi.original_working_directory = str(self._base_dir)
             except Exception:
                 pass
             try:
-                # Ensure status path is initialized so the minimap has something to read.
                 dpi.MINIMAP_STATUS_PATH = dpi.gpq_dir() / "__chunk_status.json"
                 dpi._init_idle_status()
             except Exception:
                 pass
             dpi.open_minimap_window()
         except Exception as exc:
-            ui_log(f"{_ts()} - Progress map unavailable: {exc}")
+            self._append_log(f"{_ts()} - Progress map unavailable: {exc}")
 
-    def worker() -> None:
-        process_btn.configure(state=tk.DISABLED)
+    # ------------------------------------------------------------------
+    # Worker
+    # ------------------------------------------------------------------
+
+    def _on_process_click(self) -> None:
+        self._process_btn.setEnabled(False)
+        t = threading.Thread(target=self._worker, daemon=True)
+        t.start()
+
+    def _worker(self) -> None:
         try:
             plan = ProcessPlan(
-                run_data=bool(var_data.get()),
-                explode_flat_multipolygons=bool(var_data_explode.get()),
-                run_tiles=bool(var_tiles.get()),
-                run_lines=bool(var_lines.get()),
-                run_analysis=bool(var_analysis.get()),
+                run_data=self._cb_data.isChecked(),
+                explode_flat_multipolygons=self._cb_data_explode.isChecked(),
+                run_tiles=self._cb_tiles.isChecked(),
+                run_lines=self._cb_lines.isChecked(),
+                run_analysis=self._cb_analysis.isChecked(),
             )
 
             def log_from_worker(msg: str) -> None:
-                root.after(0, lambda: ui_log(msg))
+                self._signals.log_message.emit(msg)
 
             def progress_from_worker(v: float) -> None:
-                root.after(0, lambda: ui_progress(v))
+                self._signals.progress_update.emit(v)
 
-            run_selected(base_dir, cfg, plan, log_from_worker, progress_from_worker)
-            root.after(0, lambda: ui_log(f"{_ts()} - ALL SELECTED PROCESSING COMPLETED"))
+            run_selected(self._base_dir, self._cfg, plan, log_from_worker, progress_from_worker)
+            self._signals.log_message.emit(f"{_ts()} - ALL SELECTED PROCESSING COMPLETED")
         except Exception as e:
-            # IMPORTANT: don't close over `e` in a deferred callback; the exception
-            # variable is cleared after the except block.
-            err_msg = f"{_ts()} - ERROR: {e}"
-            root.after(0, lambda m=err_msg: ui_log(m))
+            self._signals.log_message.emit(f"{_ts()} - ERROR: {e}")
         finally:
-            root.after(0, lambda: process_btn.configure(state=tk.NORMAL))
+            self._signals.task_finished.emit()
 
-    def on_click() -> None:
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
 
-    process_btn.configure(command=on_click)
-    map_btn.configure(command=open_progress_map)
+def run_ui(base_dir: Path, cfg: configparser.ConfigParser, master=None) -> None:
+    """Create and show the ProcessRunnerWindow."""
+    app = QApplication.instance()
+    own_app = False
+    if app is None:
+        app = QApplication(sys.argv)
+        own_app = True
 
-    # Initial log
-    ui_log(f"{_ts()} - Base dir: {base_dir}")
+    app.setStyleSheet(_SHARED_STYLESHEET)
 
-    _start_log_tailer()
+    win = ProcessRunnerWindow(base_dir, cfg, parent=master)
+    win.show()
 
-    if master is None:
-        root.mainloop()
-    return root
+    if own_app:
+        app.exec()
+    return win
 
 
 # ---------------------------------------------------------------------------
@@ -1807,7 +1783,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser, master=None) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="MESA – Unified processing runner (data/lines/analysis)")
+    p = argparse.ArgumentParser(description="MESA \u2013 Unified processing runner (data/lines/analysis)")
     p.add_argument("--original_working_directory", default=None, help="Mesa base directory")
     p.add_argument("--headless", action="store_true", help="Run without GUI")
     p.add_argument("--list", action="store_true", help="Print availability and exit")

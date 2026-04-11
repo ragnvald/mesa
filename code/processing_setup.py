@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-# MESA – Setup & Registration (2 tabs: Start and Vulnerability)
+# MESA – Setup & Registration (2 views: Indexes and Sensitivity)
 # Persistence: GeoParquet + JSON only (GPKG removed)
-
-from locale_bootstrap import harden_locale_for_ttkbootstrap
-
-harden_locale_for_ttkbootstrap()
+# PySide6 UI (migrated from ttkbootstrap).
 
 import os
 import sys
@@ -15,13 +12,6 @@ import datetime
 import statistics
 from pathlib import Path
 from typing import Optional
-
-import tkinter as tk
-from tkinter import messagebox, filedialog
-
-import ttkbootstrap as tb
-from ttkbootstrap.constants import INFO, PRIMARY, SUCCESS
-from ttkbootstrap import ttk as ttkb  # themed ttk widgets
 
 np = None
 pd = None
@@ -95,8 +85,8 @@ INDEX_WEIGHT_KEYS = {
     "sensitivity": "index_sensitivity_weights",
 }
 index_weight_settings: dict[str, list[int]] = {}
-index_weight_vars: dict[str, list[tk.StringVar]] = {}
-status_message_var: Optional[tk.StringVar] = None
+index_weight_vars: dict[str, list] = {}  # will hold QLineEdit references
+status_message_var = None  # will be a QLabel instance
 
 SENSITIVITY_PRODUCT_VALUES: list[int] = [1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 20, 25]
 
@@ -104,6 +94,17 @@ SENSITIVITY_PRODUCT_VALUES: list[int] = [1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16,
 original_working_directory = ""
 config_file = ""
 workingprojection_epsg = "4326"
+
+# PySide6 imports
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QGroupBox, QLabel, QPushButton, QLineEdit,
+    QScrollArea, QFrame, QSizePolicy, QMessageBox, QFileDialog,
+)
+from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt, Signal, QObject
+
+from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
 
 # -------------------------------
 # Path helpers
@@ -160,8 +161,8 @@ def find_base_dir(cli_arg: str | None) -> Path:
     candidates.append(APP_DIR)
 
     # Walk up a couple of levels from both START_CWD and APP_DIR
-    for root in (START_CWD, APP_DIR):
-        for up in [root.parent, root.parent.parent, root.parent.parent.parent]:
+    for root_dir in (START_CWD, APP_DIR):
+        for up in [root_dir.parent, root_dir.parent.parent, root_dir.parent.parent.parent]:
             if up and up != up.parent:
                 candidates.append(up)
 
@@ -177,7 +178,7 @@ def find_base_dir(cli_arg: str | None) -> Path:
     return (START_CWD if START_CWD.exists() else APP_DIR).resolve()
 
 # -------------------------------
-# Config (theme/CRS + A–E bins)
+# Config (theme/CRS + A-E bins)
 # -------------------------------
 def read_config(file_name: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
@@ -185,7 +186,7 @@ def read_config(file_name: str) -> configparser.ConfigParser:
     return cfg
 
 def read_config_classification(file_name: str) -> dict:
-    """Read A–E bins & descriptions from config.ini."""
+    """Read A-E bins & descriptions from config.ini."""
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(file_name, encoding="utf-8")
     classification.clear()
@@ -250,7 +251,7 @@ def _set_status_message(message: str) -> None:
     log_to_file(text)
     try:
         if status_message_var is not None:
-            status_message_var.set(text)
+            status_message_var.setText(text)
     except Exception:
         pass
 
@@ -380,7 +381,7 @@ def coerce_valid_int(text: str, valid_vals: list[int], fallback: int) -> int:
     v = max(min(v, max(valid_vals)), min(valid_vals))
     return int(min(valid_vals, key=lambda vv: abs(vv - v)))
 
-def enforce_vuln_dtypes_inplace(df: pd.DataFrame) -> None:
+def enforce_vuln_dtypes_inplace(df) -> None:
     for col in ('importance', 'susceptibility', 'sensitivity'):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
@@ -388,9 +389,9 @@ def enforce_vuln_dtypes_inplace(df: pd.DataFrame) -> None:
         if c in df.columns:
             df[c] = df[c].astype('string')
 
-def sanitize_vulnerability(df: pd.DataFrame,
+def sanitize_vulnerability(df,
                            valid_vals: list[int],
-                           fallback: int) -> pd.DataFrame:
+                           fallback: int):
     df = df.copy()
     for col in ['importance', 'susceptibility']:
         if col not in df.columns:
@@ -437,7 +438,7 @@ def _parquet_asset_group_path(base_dir: str) -> str:
     primary = (Path(base_dir).resolve() / PARQUET_ASSET_GROUP).resolve()
     return str(primary)
 
-def _empty_asset_group_frame() -> gpd.GeoDataFrame:
+def _empty_asset_group_frame():
     cols = [
         'id',
         'name_original',
@@ -463,7 +464,7 @@ def _candidate_asset_object_paths(base_dir: str) -> list[Path]:
     return candidates
 
 
-def _build_asset_groups_from_asset_object(base_dir: str) -> gpd.GeoDataFrame:
+def _build_asset_groups_from_asset_object(base_dir: str):
     """Best-effort reconstruction of tbl_asset_group when missing.
 
     If tbl_asset_object exists, aggregate by ref_asset_group and derive:
@@ -547,7 +548,7 @@ def _build_asset_groups_from_asset_object(base_dir: str) -> gpd.GeoDataFrame:
     return gdf
 
 
-def _coerce_geometry_series(raw: pd.Series):
+def _coerce_geometry_series(raw):
     def _to_geom(val):
         if val is None:
             return None
@@ -570,7 +571,7 @@ def _coerce_geometry_series(raw: pd.Series):
     return raw.apply(_to_geom)
 
 
-def _load_asset_group_without_geo_metadata(target: Path) -> gpd.GeoDataFrame:
+def _load_asset_group_without_geo_metadata(target: Path):
     try:
         df = pd.read_parquet(target)
     except Exception as err:
@@ -596,7 +597,7 @@ def _load_asset_group_without_geo_metadata(target: Path) -> gpd.GeoDataFrame:
         pass
     return gdf
 
-def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
+def load_asset_group(base_dir: str):
     candidates = _candidate_asset_group_paths(base_dir)
     target: Optional[Path] = None
     for idx, cand in enumerate(candidates):
@@ -667,7 +668,7 @@ def load_asset_group(base_dir: str) -> gpd.GeoDataFrame:
         log_to_file(f"Failed to persist sanitized tbl_asset_group defaults: {e}")
     return gdf
 
-def save_asset_group_to_parquet(gdf: gpd.GeoDataFrame, base_dir: str):
+def save_asset_group_to_parquet(gdf, base_dir: str):
     try:
         if gdf is None:
             return
@@ -683,7 +684,7 @@ def save_asset_group_to_parquet(gdf: gpd.GeoDataFrame, base_dir: str):
 # -------------------------------
 # Excel round-trip
 # -------------------------------
-def save_all_to_excel(gdf: pd.DataFrame, excel_path: str):
+def save_all_to_excel(gdf, excel_path: str):
     try:
         vuln_cols = ['id','name_original','susceptibility','importance','sensitivity','sensitivity_code','sensitivity_description']
         vcols = [c for c in vuln_cols if c in gdf.columns]
@@ -693,9 +694,9 @@ def save_all_to_excel(gdf: pd.DataFrame, excel_path: str):
         _set_status_message(f"Saved Excel workbook: {excel_path}")
     except Exception as e:
         log_to_file(f"Excel save failed: {e}")
-        messagebox.showerror("Error", f"Failed saving to Excel:\n{e}")
+        QMessageBox.critical(None, "Error", f"Failed saving to Excel:\n{e}")
 
-def _apply_vulnerability_from_df(df_x: pd.DataFrame):
+def _apply_vulnerability_from_df(df_x):
     global gdf_asset_group
     if df_x is None or df_x.empty: return
     for col in ['importance','susceptibility']:
@@ -726,65 +727,58 @@ def load_all_from_excel(excel_path: str):
         _set_status_message(f"Loaded Excel workbook: {excel_path}")
     except Exception as e:
         log_to_file(f"Excel load failed: {e}")
-        messagebox.showerror("Error", f"Failed reading Excel:\n{e}")
+        QMessageBox.critical(None, "Error", f"Failed reading Excel:\n{e}")
+
 
 # -------------------------------
-# Start tab
+# Vulnerability UI helpers
 # -------------------------------
-def build_start_tab(parent):
-    frm = ttkb.Frame(parent)
-    frm.pack(fill='both', expand=True, padx=12, pady=12)
+def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries_list, gdf):
+    try:
+        imp = coerce_valid_int(entry_importance.text().strip(), valid_input_values, FALLBACK_VULN)
+        sus = coerce_valid_int(entry_susceptibility.text().strip(), valid_input_values, FALLBACK_VULN)
+        sensitivity = int(imp) * int(sus)
+        code, desc = determine_category(max(1, sensitivity))
+        entries_list[index]['sensitivity'].setText(str(int(sensitivity)))
+        entries_list[index]['sensitivity_code'].setText(str(code))
+        entries_list[index]['sensitivity_description'].setText(str(desc))
+        gdf.at[index, 'importance'] = int(imp)
+        gdf.at[index, 'susceptibility'] = int(sus)
+        gdf.at[index, 'sensitivity'] = int(sensitivity)
+        gdf.at[index, 'sensitivity_code'] = str(code)
+        gdf.at[index, 'sensitivity_description'] = str(desc)
+    except Exception as e:
+        log_to_file(f"Input Error: {e}")
 
-    info = (
-        "Welcome to the setup utility.\n\n"
-        "• Use the Vulnerability tab to register importance and susceptibility per asset; sensitivity and the A–E "
-        "classification update automatically.\n"
-        "• The shortcuts below let you round-trip data to Excel or persist changes back to GeoParquet.\n\n"
-        "All files are written under the working directory that launched this helper."
-    )
-    ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0, 12))
+def refresh_vulnerability_grid_from_df():
+    for entry in entries_vuln:
+        name_original = entry['name'].text()
+        mask = (gdf_asset_group['name_original'] == name_original)
+        if mask.any():
+            idx = gdf_asset_group[mask].index[0]
+            entry['importance'].setText(str(int(gdf_asset_group.at[idx, 'importance'])))
+            entry['susceptibility'].setText(str(int(gdf_asset_group.at[idx, 'susceptibility'])))
+            entry['sensitivity'].setText(str(int(gdf_asset_group.at[idx, 'sensitivity'])))
+            entry['sensitivity_code'].setText(str(gdf_asset_group.at[idx, 'sensitivity_code']))
+            entry['sensitivity_description'].setText(str(gdf_asset_group.at[idx, 'sensitivity_description']))
 
-    btns = ttkb.Frame(frm)
-    btns.pack(anchor='w', pady=6)
-
-    def do_save_all_excel():
-        input_folder = os.path.join(original_working_directory, "input")
-        os.makedirs(input_folder, exist_ok=True)
-        excel_path = filedialog.asksaveasfilename(
-            title="Save Excel File",
-            initialdir=input_folder,
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
-        )
-        if excel_path:
-            save_all_to_excel(gdf_asset_group, excel_path)
-
-    def do_load_all_excel():
-        input_folder = os.path.join(original_working_directory, "input")
-        excel_path = filedialog.askopenfilename(
-            title="Select Excel File",
-            initialdir=input_folder,
-            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
-        )
-        if excel_path:
-            load_all_from_excel(excel_path)
-
-    def do_save_parquet():
-        update_all_vuln_rows(entries_vuln, gdf_asset_group)
-        enforce_vuln_dtypes_inplace(gdf_asset_group)
-        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-        save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        persist_index_weights_from_ui(strict=False, silent=True)
-        _set_status_message("Saved asset-group layer to GeoParquet.")
-
-    ttkb.Button(btns, text="Save all to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(side='left', padx=6)
-    ttkb.Button(btns, text="Load all from Excel", command=do_load_all_excel, bootstyle=INFO).pack(side='left', padx=6)
-    ttkb.Button(btns, text="Save to Parquet", command=do_save_parquet, bootstyle=PRIMARY).pack(side='left', padx=6)
-
-    global status_message_var
-    status_message_var = tk.StringVar(value="Ready")
-    status_label = ttkb.Label(frm, textvariable=status_message_var, justify='left', bootstyle="secondary")
-    status_label.pack(anchor='w', pady=(8, 0))
+def update_all_vuln_rows(entries_list, gdf):
+    """Sync all UI entry values back into dataframe before saving."""
+    name_map = {row['name'].text(): row for row in entries_list}
+    for idx, row in gdf.iterrows():
+        name = row.get('name_original', '')
+        ui = name_map.get(name)
+        if not ui:
+            continue
+        imp = coerce_valid_int(ui['importance'].text().strip(), valid_input_values, FALLBACK_VULN)
+        sus = coerce_valid_int(ui['susceptibility'].text().strip(), valid_input_values, FALLBACK_VULN)
+        sens = imp * sus
+        code, desc = determine_category(sens)
+        gdf.at[idx, 'importance'] = imp
+        gdf.at[idx, 'susceptibility'] = sus
+        gdf.at[idx, 'sensitivity'] = sens
+        gdf.at[idx, 'sensitivity_code'] = code
+        gdf.at[idx, 'sensitivity_description'] = desc
 
 
 def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list[int]]]:
@@ -792,18 +786,18 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
     if not index_weight_vars:
         return {}
     collected: dict[str, list[int]] = {}
-    for key, vars_list in index_weight_vars.items():
+    for key, widgets_list in index_weight_vars.items():
         defaults = INDEX_WEIGHT_DEFAULTS.get(key, INDEX_WEIGHT_DEFAULTS['importance'])
         labels = list(range(1, 6)) if key == "importance" else SENSITIVITY_PRODUCT_VALUES
         values: list[int] = []
-        for idx, var in enumerate(vars_list, start=1):
-            txt = (var.get() or "").strip()
+        for idx, widget in enumerate(widgets_list, start=1):
+            txt = (widget.text() or "").strip()
             if txt.isdigit():
                 val = int(txt)
             else:
                 if strict:
                     lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
-                    messagebox.showerror("Indices", f"Weight for value {lab} in {key} must be a positive integer.")
+                    QMessageBox.critical(None, "Indices", f"Weight for value {lab} in {key} must be a positive integer.")
                     return None
                 try:
                     val = int(float(txt))
@@ -813,7 +807,7 @@ def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list
             if val < 1:
                 if strict:
                     lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
-                    messagebox.showerror("Indices", f"Weight for value {lab} in {key} must be at least 1.")
+                    QMessageBox.critical(None, "Indices", f"Weight for value {lab} in {key} must be at least 1.")
                     return None
                 val = 1
             values.append(val)
@@ -836,161 +830,344 @@ def persist_index_weights_from_ui(strict: bool = True, silent: bool = False) -> 
     except Exception as err:
         log_to_file(f"Failed to persist index weights: {err}")
         if strict and not silent:
-            messagebox.showerror("Indexes", f"Could not save index weights:\n{err}")
+            QMessageBox.critical(None, "Indexes", f"Could not save index weights:\n{err}")
         elif not silent:
             _set_status_message("Index weights could not be saved (see log).")
         return False
 
 
-def build_indexes_tab(parent):
-    global index_weight_settings, index_weight_vars
-    frm = ttkb.Frame(parent)
-    frm.pack(fill='both', expand=True, padx=12, pady=12)
+# =====================================================================
+# PySide6 Window
+# =====================================================================
+class SetupWindow(QMainWindow):
 
-    info = (
-        "Configure weighting for the new importance and sensitivity indexes.\n"
-        "Importance uses input values 1–5. Sensitivity uses the product importance×susceptibility.\n"
-        "Weights must be positive integers; higher weights increase the contribution when\n"
-        "counting overlapping assets inside each mosaic cell."
-    )
-    ttkb.Label(frm, text=info, justify='left', wraplength=900).pack(anchor='w', pady=(0, 12))
+    def __init__(self, base_dir: str):
+        super().__init__()
+        self._base_dir = base_dir
+        self._build_ui()
 
-    sections = [
-        ("importance", "Importance index weights (1–5)", list(range(1, 6))),
-        ("sensitivity", "Sensitivity index (OWA)", SENSITIVITY_PRODUCT_VALUES),
-    ]
-    weight_vars: dict[str, list[tk.StringVar]] = {}
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        self.setWindowTitle("MESA - Setup & Registration (GeoParquet)")
+        self.resize(1100, 860)
+        self.setMinimumSize(800, 600)
 
-    for key, title, value_labels in sections:
-        box = ttkb.LabelFrame(frm, text=title, bootstyle="info")
-        box.pack(fill='x', pady=8)
+        try:
+            icon_path = resource_path(Path("system_resources") / "mesa.ico")
+            if icon_path.exists():
+                self.setWindowIcon(QIcon(str(icon_path)))
+        except Exception:
+            pass
 
-        vars_for_key: list[tk.StringVar] = []
-        current = index_weight_settings.get(key, INDEX_WEIGHT_DEFAULTS[key])
+        central = QWidget()
+        central.setObjectName("CentralHost")
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Lay out in 7 columns per line to keep the dialog readable.
-        per_line = 7
-        for idx, v in enumerate(value_labels):
-            block = (idx // per_line)
-            col = (idx % per_line) + 1
-            r0 = block * 2
-            ttkb.Label(box, text=str(v), width=6, anchor='center').grid(row=r0, column=col, padx=2, pady=(6, 2))
-            var = tk.StringVar(value=str(current[idx] if idx < len(current) else 1))
-            entry = ttkb.Entry(box, width=6, justify='center', textvariable=var)
-            entry.grid(row=r0 + 1, column=col, padx=2, pady=(0, 6))
-            vars_for_key.append(var)
+        # --- Left navigation panel ---
+        nav_widget = QWidget()
+        nav_widget.setFixedWidth(260)
+        nav_layout = QVBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(12, 12, 12, 12)
+        nav_layout.setSpacing(4)
 
-        ttkb.Label(box, text="Value", width=10, anchor='w').grid(row=0, column=0, padx=5, pady=(6, 2), sticky='w')
-        ttkb.Label(box, text="Weight", width=10, anchor='w').grid(row=1, column=0, padx=5, pady=(0, 6), sticky='w')
-        weight_vars[key] = vars_for_key
+        lbl_edit = QLabel("Edit")
+        lbl_edit.setStyleSheet("color: #9a8a6e; font-size: 9pt; font-weight: 600;")
+        nav_layout.addWidget(lbl_edit)
 
-    index_weight_vars = weight_vars
+        btn_indexes = QPushButton("Edit indexes")
+        btn_indexes.setProperty("role", "primary")
+        btn_indexes.clicked.connect(lambda: self._show_view("indexes"))
+        nav_layout.addWidget(btn_indexes)
 
-    # No "Save weights" button: weights are persisted as part of "Save to database".
+        btn_sensitivity = QPushButton("Edit sensitivity")
+        btn_sensitivity.setProperty("role", "primary")
+        btn_sensitivity.clicked.connect(lambda: self._show_view("sensitivity"))
+        nav_layout.addWidget(btn_sensitivity)
 
-# -------------------------------
-# Vulnerability UI
-# -------------------------------
-def setup_headers_vuln(frame, column_widths):
-    headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]
-    for idx, header in enumerate(headers):
-        label = ttkb.Label(frame, text=header, anchor='w', width=column_widths[idx])
-        label.grid(row=0, column=idx, padx=5, pady=5, sticky='ew')
-    return frame
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #cbb791;")
+        nav_layout.addSpacing(12)
+        nav_layout.addWidget(sep)
+        nav_layout.addSpacing(12)
 
-def _entry_validator_vuln(P: str) -> bool:
-    if P == "": return True
-    return P.isdigit() and int(P) in valid_input_values
+        lbl_data = QLabel("Data management")
+        lbl_data.setStyleSheet("color: #9a8a6e; font-size: 9pt; font-weight: 600;")
+        nav_layout.addWidget(lbl_data)
 
-def add_vuln_row(index, row, frame, entries_list, gdf):
-    vcmd = (frame.register(_entry_validator_vuln), "%P")
-    e_imp = ttkb.Entry(frame, width=column_widths[1], validate="key", validatecommand=vcmd)
-    e_imp.insert(0, str(getattr(row, 'importance', FALLBACK_VULN))); e_imp.grid(row=index, column=1, padx=5)
-    e_sus = ttkb.Entry(frame, width=column_widths[2], validate="key", validatecommand=vcmd)
-    e_sus.insert(0, str(getattr(row, 'susceptibility', FALLBACK_VULN))); e_sus.grid(row=index, column=2, padx=5)
-    e_imp.bind('<KeyRelease>', lambda _e, imp=e_imp, sus=e_sus, idx=index-1: calculate_sensitivity(imp, sus, idx, entries_list, gdf))
-    e_sus.bind('<KeyRelease>', lambda _e, imp=e_imp, sus=e_sus, idx=index-1: calculate_sensitivity(imp, sus, idx, entries_list, gdf))
-    l_name = ttkb.Label(frame, text=getattr(row, 'name_original', ''), anchor='w', width=column_widths[0]); l_name.grid(row=index, column=0, padx=5, sticky='ew')
-    l_sens = ttkb.Label(frame, text=str(getattr(row, 'sensitivity', '')), anchor='w', width=column_widths[3]); l_sens.grid(row=index, column=3, padx=5, sticky='ew')
-    l_code = ttkb.Label(frame, text=str(getattr(row, 'sensitivity_code', '')), anchor='w', width=column_widths[4]); l_code.grid(row=index, column=4, padx=5, sticky='ew')
-    l_desc = ttkb.Label(frame, text=str(getattr(row, 'sensitivity_description', '')), anchor='w', width=column_widths[5]); l_desc.grid(row=index, column=5, padx=5, sticky='ew')
-    entries_list.append({'row_index': index-1, 'name': l_name, 'importance': e_imp, 'susceptibility': e_sus,
-                         'sensitivity': l_sens, 'sensitivity_code': l_code, 'sensitivity_description': l_desc})
+        btn_save_excel = QPushButton("Save to Excel")
+        btn_save_excel.setProperty("role", "success")
+        btn_save_excel.clicked.connect(self._do_save_all_excel)
+        nav_layout.addWidget(btn_save_excel)
 
-def create_scrollable_area(parent):
-    outer = ttkb.Frame(parent)
-    canvas = tk.Canvas(outer, highlightthickness=0)
-    scroll_y = ttkb.Scrollbar(outer, orient="vertical", command=canvas.yview)
-    canvas.configure(yscrollcommand=scroll_y.set)
-    canvas.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
-    canvas.pack(side=tk.LEFT, fill="both", expand=True)
-    scroll_y.pack(side=tk.RIGHT, fill="y")
-    outer.pack(side=tk.TOP, fill="both", expand=True)
-    inner = ttkb.Frame(canvas)
-    canvas.create_window((0, 0), window=inner, anchor="nw")
-    return canvas, inner
+        btn_load_excel = QPushButton("Load from Excel")
+        btn_load_excel.clicked.connect(self._do_load_all_excel)
+        nav_layout.addWidget(btn_load_excel)
 
-def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries_list, gdf):
-    try:
-        imp = coerce_valid_int(entry_importance.get().strip(), valid_input_values, FALLBACK_VULN)
-        sus = coerce_valid_int(entry_susceptibility.get().strip(), valid_input_values, FALLBACK_VULN)
-        sensitivity = int(imp) * int(sus)
-        code, desc = determine_category(max(1, sensitivity))
-        entries_list[index]['sensitivity']['text'] = str(int(sensitivity))
-        entries_list[index]['sensitivity_code']['text'] = str(code)
-        entries_list[index]['sensitivity_description']['text'] = str(desc)
-        gdf.at[index, 'importance'] = int(imp)
-        gdf.at[index, 'susceptibility'] = int(sus)
-        gdf.at[index, 'sensitivity'] = int(sensitivity)
-        gdf.at[index, 'sensitivity_code'] = str(code)
-        gdf.at[index, 'sensitivity_description'] = str(desc)
-    except Exception as e:
-        log_to_file(f"Input Error: {e}")
+        btn_save_db = QPushButton("Save")
+        btn_save_db.setProperty("role", "primary")
+        btn_save_db.clicked.connect(self._do_save_database)
+        nav_layout.addWidget(btn_save_db)
 
-def refresh_vulnerability_grid_from_df():
-    for entry in entries_vuln:
-        name_original = entry['name'].cget("text")
-        mask = (gdf_asset_group['name_original'] == name_original)
-        if mask.any():
-            idx = gdf_asset_group[mask].index[0]
-            entry['importance'].delete(0, tk.END)
-            entry['importance'].insert(0, str(int(gdf_asset_group.at[idx, 'importance'])))
-            entry['susceptibility'].delete(0, tk.END)
-            entry['susceptibility'].insert(0, str(int(gdf_asset_group.at[idx, 'susceptibility'])))
-            entry['sensitivity']['text'] = str(int(gdf_asset_group.at[idx, 'sensitivity']))
-            entry['sensitivity_code']['text'] = str(gdf_asset_group.at[idx, 'sensitivity_code'])
-            entry['sensitivity_description']['text'] = str(gdf_asset_group.at[idx, 'sensitivity_description'])
+        nav_layout.addStretch(1)
 
-def update_all_vuln_rows(entries_list, gdf):
-    """Sync all UI entry values back into dataframe before saving."""
-    name_map = {row['name'].cget("text"): row for row in entries_list}
-    for idx, row in gdf.iterrows():
-        name = row.get('name_original', '')
-        ui = name_map.get(name)
-        if not ui:
-            continue
-        imp = coerce_valid_int(ui['importance'].get().strip(), valid_input_values, FALLBACK_VULN)
-        sus = coerce_valid_int(ui['susceptibility'].get().strip(), valid_input_values, FALLBACK_VULN)
-        sens = imp * sus
-        code, desc = determine_category(sens)
-        gdf.at[idx, 'importance'] = imp
-        gdf.at[idx, 'susceptibility'] = sus
-        gdf.at[idx, 'sensitivity'] = sens
-        gdf.at[idx, 'sensitivity_code'] = code
-        gdf.at[idx, 'sensitivity_description'] = desc
+        # Exit button at bottom
+        btn_exit = QPushButton("Exit")
+        btn_exit.setStyleSheet("""
+            QPushButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621; font-size: 9pt;
+                padding: 2px 8px;
+            }
+            QPushButton:hover { background: #e1d1ae; }
+            QPushButton:pressed { background: #d4c094; }
+        """)
+        btn_exit.clicked.connect(self._close_application)
+        nav_layout.addWidget(btn_exit)
 
-# -------------------------------
-# Misc helpers
-# -------------------------------
-def close_application():
-    try:
+        # Status label at bottom of nav
+        global status_message_var
+        self._status_label = QLabel("Ready")
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        status_message_var = self._status_label
+        nav_layout.addWidget(self._status_label)
+
+        main_layout.addWidget(nav_widget)
+
+        # --- Right content area ---
+        self._content_widget = QWidget()
+        content_layout = QVBoxLayout(self._content_widget)
+        content_layout.setContentsMargins(12, 12, 12, 12)
+        content_layout.setSpacing(0)
+
+        # Indexes view
+        self._view_indexes = QWidget()
+        self._build_indexes_view(self._view_indexes)
+
+        # Sensitivity view
+        self._view_sensitivity = QWidget()
+        self._build_sensitivity_view(self._view_sensitivity)
+
+        content_layout.addWidget(self._view_indexes)
+        content_layout.addWidget(self._view_sensitivity)
+
+        main_layout.addWidget(self._content_widget, stretch=1)
+
+        # Default view
+        self._show_view("sensitivity")
+
+    # ------------------------------------------------------------------
+    def _show_view(self, which: str):
+        which = (which or "").strip().lower()
+        if which == "indexes":
+            self._view_indexes.setVisible(True)
+            self._view_sensitivity.setVisible(False)
+        else:
+            self._view_indexes.setVisible(False)
+            self._view_sensitivity.setVisible(True)
+
+    # ------------------------------------------------------------------
+    def _build_indexes_view(self, parent: QWidget):
+        global index_weight_vars
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        info = (
+            "Configure weighting for the new importance and sensitivity indexes.\n"
+            "Importance uses input values 1-5. Sensitivity uses the product importance x susceptibility.\n"
+            "Weights must be positive integers; higher weights increase the contribution when\n"
+            "counting overlapping assets inside each mosaic cell."
+        )
+        info_label = QLabel(info)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        sections = [
+            ("importance", "Importance index weights (1-5)", list(range(1, 6))),
+            ("sensitivity", "Sensitivity index (OWA)", SENSITIVITY_PRODUCT_VALUES),
+        ]
+        weight_widgets: dict[str, list] = {}
+
+        for key, title, value_labels in sections:
+            box = QGroupBox(title)
+            grid = QGridLayout(box)
+            grid.setSpacing(4)
+
+            widgets_for_key: list = []
+            current = index_weight_settings.get(key, INDEX_WEIGHT_DEFAULTS[key])
+
+            # Lay out in 7 columns per line to keep the dialog readable.
+            per_line = 7
+
+            # Row 0 label headers
+            lbl_value = QLabel("Value")
+            lbl_value.setFixedWidth(60)
+            grid.addWidget(lbl_value, 0, 0)
+            lbl_weight = QLabel("Weight")
+            lbl_weight.setFixedWidth(60)
+            grid.addWidget(lbl_weight, 1, 0)
+
+            for idx_v, v in enumerate(value_labels):
+                block = (idx_v // per_line)
+                col = (idx_v % per_line) + 1
+                r0 = block * 2
+                val_label = QLabel(str(v))
+                val_label.setAlignment(Qt.AlignCenter)
+                val_label.setFixedWidth(50)
+                grid.addWidget(val_label, r0, col)
+
+                entry = QLineEdit(str(current[idx_v] if idx_v < len(current) else 1))
+                entry.setFixedWidth(50)
+                entry.setAlignment(Qt.AlignCenter)
+                grid.addWidget(entry, r0 + 1, col)
+                widgets_for_key.append(entry)
+
+            weight_widgets[key] = widgets_for_key
+            layout.addWidget(box)
+
+        index_weight_vars = weight_widgets
+        layout.addStretch(1)
+
+    # ------------------------------------------------------------------
+    def _build_sensitivity_view(self, parent: QWidget):
+        global entries_vuln
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setSpacing(4)
+        grid.setContentsMargins(4, 4, 4, 4)
+
+        # Headers
+        headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]
+        for col_idx, header in enumerate(headers):
+            lbl = QLabel(header)
+            lbl.setStyleSheet("font-weight: 600;")
+            grid.addWidget(lbl, 0, col_idx)
+
+        # Data rows
+        entries_vuln = []
+        for i, row in enumerate(gdf_asset_group.itertuples(), start=1):
+            self._add_vuln_row(i, row, grid, entries_vuln, gdf_asset_group)
+
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+    # ------------------------------------------------------------------
+    def _add_vuln_row(self, index, row, grid, entries_list, gdf):
+        l_name = QLabel(str(getattr(row, 'name_original', '')))
+        l_name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grid.addWidget(l_name, index, 0)
+
+        e_imp = QLineEdit(str(getattr(row, 'importance', FALLBACK_VULN)))
+        e_imp.setFixedWidth(80)
+        e_imp.setAlignment(Qt.AlignCenter)
+        grid.addWidget(e_imp, index, 1)
+
+        e_sus = QLineEdit(str(getattr(row, 'susceptibility', FALLBACK_VULN)))
+        e_sus.setFixedWidth(80)
+        e_sus.setAlignment(Qt.AlignCenter)
+        grid.addWidget(e_sus, index, 2)
+
+        l_sens = QLabel(str(getattr(row, 'sensitivity', '')))
+        l_sens.setFixedWidth(80)
+        l_sens.setAlignment(Qt.AlignCenter)
+        grid.addWidget(l_sens, index, 3)
+
+        l_code = QLabel(str(getattr(row, 'sensitivity_code', '')))
+        l_code.setFixedWidth(80)
+        l_code.setAlignment(Qt.AlignCenter)
+        grid.addWidget(l_code, index, 4)
+
+        l_desc = QLabel(str(getattr(row, 'sensitivity_description', '')))
+        l_desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grid.addWidget(l_desc, index, 5)
+
+        # Connect textChanged for live sensitivity calculation
+        row_idx = index - 1
+        e_imp.textChanged.connect(lambda _text, imp=e_imp, sus=e_sus, idx=row_idx: calculate_sensitivity(imp, sus, idx, entries_list, gdf))
+        e_sus.textChanged.connect(lambda _text, imp=e_imp, sus=e_sus, idx=row_idx: calculate_sensitivity(imp, sus, idx, entries_list, gdf))
+
+        entries_list.append({
+            'row_index': row_idx,
+            'name': l_name,
+            'importance': e_imp,
+            'susceptibility': e_sus,
+            'sensitivity': l_sens,
+            'sensitivity_code': l_code,
+            'sensitivity_description': l_desc,
+        })
+
+    # ------------------------------------------------------------------
+    def _do_save_all_excel(self):
+        input_folder = os.path.join(original_working_directory, "input")
+        os.makedirs(input_folder, exist_ok=True)
+        excel_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Excel File",
+            input_folder,
+            "Excel Files (*.xlsx);;All Files (*.*)",
+        )
+        if excel_path:
+            update_all_vuln_rows(entries_vuln, gdf_asset_group)
+            enforce_vuln_dtypes_inplace(gdf_asset_group)
+            save_all_to_excel(gdf_asset_group, excel_path)
+
+    def _do_load_all_excel(self):
+        input_folder = os.path.join(original_working_directory, "input")
+        excel_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Excel File",
+            input_folder,
+            "Excel Files (*.xlsx);;All Files (*.*)",
+        )
+        if excel_path:
+            load_all_from_excel(excel_path)
+
+    def _do_save_database(self):
         update_all_vuln_rows(entries_vuln, gdf_asset_group)
         enforce_vuln_dtypes_inplace(gdf_asset_group)
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-        persist_index_weights_from_ui(strict=False, silent=True)
         save_asset_group_to_parquet(gdf_ready, original_working_directory)
-    finally:
-        root.destroy()
+        persist_index_weights_from_ui(strict=False, silent=True)
+        _set_status_message("Saved asset-group layer to GeoParquet.")
+
+    # ------------------------------------------------------------------
+    def _close_application(self):
+        try:
+            update_all_vuln_rows(entries_vuln, gdf_asset_group)
+            enforce_vuln_dtypes_inplace(gdf_asset_group)
+            gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+            persist_index_weights_from_ui(strict=False, silent=True)
+            save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        finally:
+            self.close()
+
+    def closeEvent(self, event):
+        """Handle window close via X button."""
+        try:
+            update_all_vuln_rows(entries_vuln, gdf_asset_group)
+            enforce_vuln_dtypes_inplace(gdf_asset_group)
+            gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
+            persist_index_weights_from_ui(strict=False, silent=True)
+            save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        except Exception:
+            pass
+        event.accept()
+
 
 # -------------------------------
 # In-process entry point (called by mesa.py via lazy import)
@@ -1000,8 +1177,9 @@ def run(base_dir: str, master=None) -> None:
 
     mesa.py calls this instead of spawning a subprocess.
     """
-    global original_working_directory, status_message_var
+    global original_working_directory, config_file, status_message_var
     global valid_input_values, FALLBACK_VULN, gdf_asset_group, entries_vuln, root
+    global index_weight_settings, classification, workingprojection_epsg
 
     # Resolve base dir robustly
     resolved_base = find_base_dir(base_dir)
@@ -1035,195 +1213,46 @@ def run(base_dir: str, master=None) -> None:
             log_to_file("Seeded default index weights in config.ini")
         except Exception as err:
             log_to_file(f"Unable to seed index weights: {err}")
-    ttk_bootstrap_theme = _cfg_get_any(config, 'ttk_bootstrap_theme', fallback='flatly') or 'flatly'
+
     workingprojection_epsg = (
         _cfg_get_any(config, 'working_projection_epsg', fallback='')
         or _cfg_get_any(config, 'workingprojection_epsg', fallback='4326')
         or '4326'
     )
-    if master is not None:
-        root = tk.Toplevel(master)
-    else:
-        root = tb.Window(themename=ttk_bootstrap_theme)
-    root.title("MESA – Setup & Registration (GeoParquet)")
-    try:
-        icon_path = resource_path(Path("system_resources") / "mesa.ico")
-        if icon_path.exists():
-            root.iconbitmap(str(icon_path))
-    except Exception:
-        pass
-    root.geometry("1100x860")
 
-    loading_frame = ttkb.Frame(root, padding=(18, 18))
-    loading_frame.pack(fill="both", expand=True)
-    ttkb.Label(
-        loading_frame,
-        text="Loading processing setup...",
-        font=("Segoe UI", 12, "bold"),
-    ).pack(anchor="w", pady=(0, 8))
-    startup_status_var = tk.StringVar(value="Preparing data libraries...")
-    ttkb.Label(
-        loading_frame,
-        textvariable=startup_status_var,
-        justify="left",
-        wraplength=700,
-    ).pack(anchor="w")
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
-
-    startup_status_var.set("Loading GIS/data libraries...")
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
+    # Load data stack
     _load_runtime_data_stack()
 
-    startup_status_var.set("Loading asset-group data...")
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
+    # Load asset group
     gdf_asset_group = load_asset_group(original_working_directory)
     log_to_file(f"[processing_setup] asset grp: {_parquet_asset_group_path(original_working_directory)}")
     if gdf_asset_group is None:
         log_to_file("Failed to load tbl_asset_group (Parquet).")
-        root.destroy()
-        if master is not None:
-            return None
         sys.exit(1)
 
-    try:
-        loading_frame.destroy()
-    except Exception:
-        pass
+    # If QApplication already exists (e.g. launched from mesa.py),
+    # just create the window. Otherwise create a new app.
+    app = QApplication.instance()
+    own_app = False
+    if app is None:
+        app = QApplication([])
+        app.setStyleSheet(_SHARED_STYLESHEET)
+        own_app = True
 
-    # -------------------------------
-    # Layout: left navigation controls right content
-    # -------------------------------
-    root.grid_rowconfigure(0, weight=1)
-    root.grid_columnconfigure(0, weight=0)
-    root.grid_columnconfigure(1, weight=1)
+    window = SetupWindow(original_working_directory)
+    window.show()
+    root = window
 
-    nav = ttkb.Frame(root, padding=(12, 12))
-    nav.grid(row=0, column=0, sticky="ns")
-    nav.configure(width=260)
-    try:
-        nav.grid_propagate(False)
-    except Exception:
-        pass
-
-    content = ttkb.Frame(root, padding=(12, 12))
-    content.grid(row=0, column=1, sticky="nsew")
-    content.grid_rowconfigure(0, weight=1)
-    content.grid_columnconfigure(0, weight=1)
-
-    # Inline status
-    status_message_var = tk.StringVar(value="Ready")
-
-    def do_save_all_excel():
-        input_folder = os.path.join(original_working_directory, "input")
-        os.makedirs(input_folder, exist_ok=True)
-        excel_path = filedialog.asksaveasfilename(
-            title="Save Excel File",
-            initialdir=input_folder,
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
-        )
-        if excel_path:
-            update_all_vuln_rows(entries_vuln, gdf_asset_group)
-            enforce_vuln_dtypes_inplace(gdf_asset_group)
-            save_all_to_excel(gdf_asset_group, excel_path)
-
-    def do_load_all_excel():
-        input_folder = os.path.join(original_working_directory, "input")
-        excel_path = filedialog.askopenfilename(
-            title="Select Excel File",
-            initialdir=input_folder,
-            filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")]
-        )
-        if excel_path:
-            load_all_from_excel(excel_path)
-
-    def do_save_database():
-        # "Database" here is the project data store (GeoParquet + config.ini).
-        update_all_vuln_rows(entries_vuln, gdf_asset_group)
-        enforce_vuln_dtypes_inplace(gdf_asset_group)
-        gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-        save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        persist_index_weights_from_ui(strict=False, silent=True)
-        _set_status_message("Saved asset-group layer to GeoParquet.")
-
-    ttkb.Label(nav, text="Edit", bootstyle="secondary").pack(anchor="w", pady=(0, 8))
-
-    # Views (created below)
-    def show_view(which: str):
-        which = (which or "").strip().lower()
-        view_indexes.grid_forget()
-        view_sensitivity.grid_forget()
-        if which == "indexes":
-            view_indexes.grid(row=0, column=0, sticky="nsew")
-        else:
-            view_sensitivity.grid(row=0, column=0, sticky="nsew")
-
-    ttkb.Button(nav, text="Edit indexes", command=lambda: show_view("indexes"), bootstyle=PRIMARY).pack(fill="x", pady=4)
-    ttkb.Button(nav, text="Edit sensitivity", command=lambda: show_view("sensitivity"), bootstyle=PRIMARY).pack(fill="x", pady=4)
-
-    ttkb.Separator(nav).pack(fill="x", pady=12)
-    ttkb.Label(nav, text="Data management", bootstyle="secondary").pack(anchor="w", pady=(0, 8))
-    ttkb.Button(nav, text="Save to Excel", command=do_save_all_excel, bootstyle=SUCCESS).pack(fill="x", pady=4)
-    ttkb.Button(nav, text="Load from Excel", command=do_load_all_excel, bootstyle=INFO).pack(fill="x", pady=4)
-    ttkb.Button(nav, text="Save", command=do_save_database, bootstyle=PRIMARY).pack(fill="x", pady=4)
-
-    status_label = ttkb.Label(nav, textvariable=status_message_var, justify='left', bootstyle="secondary", wraplength=230)
-    status_label.pack(side='bottom', fill='x', pady=(12, 0))
-
-    # Right-side views
-    view_host = ttkb.Frame(content)
-    view_host.grid(row=0, column=0, sticky="nsew")
-    view_host.grid_rowconfigure(0, weight=1)
-    view_host.grid_columnconfigure(0, weight=1)
-
-    view_indexes = ttkb.Frame(view_host)
-    build_indexes_tab(view_indexes)
-
-    view_sensitivity = ttkb.Frame(view_host)
-    canvas_v, frame_v = create_scrollable_area(view_sensitivity)
-    entries_vuln = []
-    setup_headers_vuln(frame_v, column_widths)
-    for i, row in enumerate(gdf_asset_group.itertuples(), start=1):
-        add_vuln_row(i, row, frame_v, entries_vuln, gdf_asset_group)
-    frame_v.update_idletasks(); canvas_v.configure(scrollregion=canvas_v.bbox("all"))
-
-    # Default view
-    show_view("sensitivity")
-
-    # Keep the window stable when switching views (avoid auto-shrinking to content).
-    try:
-        root.update_idletasks()
-        root.minsize(root.winfo_width(), root.winfo_height())
-    except Exception:
-        pass
-
-    try:
-        root.protocol("WM_DELETE_WINDOW", close_application)
-    except Exception:
-        pass
-
-    if master is None:
-        root.mainloop()
-    return root
+    if own_app:
+        app.exec()
+    return window
 
 
 # -------------------------------
 # Entrypoint (single, Parquet+JSON)
 # -------------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='MESA – Setup & Registration (GeoParquet)')
+    parser = argparse.ArgumentParser(description='MESA - Setup & Registration (GeoParquet)')
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     args = parser.parse_args()
     run(args.original_working_directory)

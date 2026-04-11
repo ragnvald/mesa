@@ -46,7 +46,7 @@ from __future__ import annotations
 
 from mesa_shared import find_base_dir
 from mesa_constants import TABLE_GEOCODE_GROUP, TABLE_GEOCODE_OBJECT
-from locale_bootstrap import harden_locale_for_ttkbootstrap
+# locale_bootstrap no longer needed for PySide6
 
 import argparse
 import configparser
@@ -125,7 +125,6 @@ except Exception:
     ShapelySTRtree = None
 
 # -----------------------------------------------------------------------------
-harden_locale_for_ttkbootstrap()
 
 try:
     import fiona
@@ -150,103 +149,18 @@ try:
 except Exception:
     h3 = None
 
-# GUI / ttkbootstrap
-import tkinter as tk
-from tkinter import scrolledtext
-from tkinter import messagebox
+# GUI / PySide6
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QTabWidget,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QLabel, QPushButton, QPlainTextEdit, QLineEdit,
+    QCheckBox, QProgressBar, QFrame, QSizePolicy,
+    QMessageBox, QHeaderView, QTreeWidget, QTreeWidgetItem,
+)
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
 import json
 from pathlib import Path
-
-
-def _import_ttkbootstrap():
-    """Import ttkbootstrap with a locale-safe fallback.
-
-    On some Windows machines, a forced/unsupported locale can cause ttkbootstrap (or its
-    import chain) to raise locale.Error('unsupported locale setting'). In that case,
-    retry after switching to a safe locale.
-    """
-    try:
-        import ttkbootstrap as _ttk
-        from ttkbootstrap.constants import PRIMARY as _PRIMARY, INFO as _INFO, WARNING as _WARNING
-        return _ttk, _PRIMARY, _INFO, _WARNING, None, None
-    except Exception as e:
-        err1 = repr(e)
-        tb1 = traceback.format_exc()
-
-        try:
-            is_locale_problem = isinstance(e, locale.Error) or ("unsupported locale" in str(e).lower())
-        except Exception:
-            is_locale_problem = False
-
-        if is_locale_problem:
-            try:
-                # Prefer user default; fall back to the C locale.
-                for loc in ("", "C"):
-                    try:
-                        locale.setlocale(locale.LC_ALL, loc)
-                        break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-            try:
-                # Clear partially imported modules before retry.
-                for name in list(sys.modules.keys()):
-                    if name == "ttkbootstrap" or name.startswith("ttkbootstrap."):
-                        sys.modules.pop(name, None)
-            except Exception:
-                pass
-
-            try:
-                import ttkbootstrap as _ttk
-                from ttkbootstrap.constants import PRIMARY as _PRIMARY, INFO as _INFO, WARNING as _WARNING
-                return _ttk, _PRIMARY, _INFO, _WARNING, None, None
-            except Exception as e2:
-                err2 = f"{err1} | retry: {repr(e2)}"
-                tb2 = tb1 + "\n--- retry ---\n" + traceback.format_exc()
-                return None, None, None, None, err2, tb2
-
-        return None, None, None, None, err1, tb1
-
-
-ttk, PRIMARY, INFO, WARNING, _TTKBOOTSTRAP_IMPORT_ERROR, _TTKBOOTSTRAP_IMPORT_TRACE = _import_ttkbootstrap()
-
-
-def _ttkbootstrap_diagnostics() -> dict:
-    """Best-effort diagnostics for ttkbootstrap import failures in frozen builds."""
-    d: dict = {}
-    try:
-        d["frozen"] = bool(getattr(sys, "frozen", False))
-    except Exception:
-        d["frozen"] = False
-    try:
-        d["executable"] = sys.executable
-    except Exception:
-        pass
-    try:
-        d["cwd"] = os.getcwd()
-    except Exception:
-        pass
-    try:
-        meipass = getattr(sys, "_MEIPASS", None)
-        d["_MEIPASS"] = meipass
-        if meipass:
-            root = Path(meipass)
-            d["meipass_exists"] = root.exists()
-            d["meipass_ttkbootstrap_dir_exists"] = (root / "ttkbootstrap").exists()
-    except Exception:
-        pass
-    try:
-        d["ttkbootstrap_import_error"] = _TTKBOOTSTRAP_IMPORT_ERROR
-    except Exception:
-        pass
-    try:
-        if _TTKBOOTSTRAP_IMPORT_TRACE:
-            d["ttkbootstrap_import_trace_tail"] = _TTKBOOTSTRAP_IMPORT_TRACE[-1200:]
-    except Exception:
-        pass
-    return d
 
 
 # -----------------------------------------------------------------------------
@@ -288,17 +202,9 @@ AVG_HEX_AREA_KM2 = {
 # -----------------------------------------------------------------------------
 # GUI globals + heartbeat
 # -----------------------------------------------------------------------------
-root: Optional[tk.Tk] = None
-log_widget: Optional[tk.Widget] = None
-log_widgets: list[tk.Widget] = []
-mosaic_log_widget: Optional[tk.Widget] = None
-mosaic_log_from_file_mode: bool = False
+_gui_window: Optional["GeocodeManagerWindow"] = None
 log_main_thread_id: Optional[int] = None
-progress_var: Optional[tk.DoubleVar] = None
-progress_label: Optional[tk.Label] = None
 original_working_directory: Optional[str] = None
-mosaic_status_var: Optional[tk.StringVar] = None
-size_levels_var: Optional[tk.StringVar] = None
 
 HEARTBEAT_SECS = 10
 
@@ -462,48 +368,8 @@ def _auto_worker_count(cfg: configparser.ConfigParser | None) -> tuple[int, str]
 # Logging / progress
 # -----------------------------------------------------------------------------
 def update_progress(new_value: float):
-    if root is None or progress_var is None or progress_label is None:
-        return
-    def task():
-        v = max(0, min(100, float(new_value)))
-        progress_var.set(v)
-        progress_label.config(text=f"{int(v)}%")
-    try:
-        root.after(0, task)
-    except Exception:
-        pass
-
-
-def _append_formatted_to_log_targets(formatted: str) -> None:
-    targets: list[tk.Widget] = []
-    if log_widget is not None:
-        targets = [log_widget]
-    elif mosaic_log_widget is not None and not mosaic_log_from_file_mode:
-        targets = [mosaic_log_widget]
-    elif log_widgets:
-        targets = [log_widgets[0]]
-    for target in targets:
-        try:
-            if isinstance(target, ttk.Treeview):
-                iid = target.insert("", tk.END, values=(formatted,))
-                target.see(iid)
-                children = target.get_children()
-                if len(children) > 2500:
-                    for old_iid in children[:500]:
-                        target.delete(old_iid)
-                continue
-            try:
-                target.configure(state="normal")
-            except Exception:
-                pass
-            target.insert(tk.END, formatted + "\n")
-            target.see(tk.END)
-            try:
-                target.update_idletasks()
-            except Exception:
-                pass
-        except Exception:
-            pass
+    if _gui_window is not None:
+        _gui_window._signals.progress_update.emit(max(0.0, min(100.0, float(new_value))))
 
 
 def _tail_text_file(path: Path, max_lines: int = 20) -> list[str]:
@@ -517,20 +383,11 @@ def _tail_text_file(path: Path, max_lines: int = 20) -> list[str]:
         return []
 
 def log_to_gui(message: str, level: str = "INFO"):
-    global log_widgets, log_main_thread_id
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted = f"{timestamp} [{level}] - {message}"
 
-    if root is not None and log_main_thread_id is not None:
-        if threading.get_ident() == log_main_thread_id:
-            _append_formatted_to_log_targets(formatted)
-        else:
-            try:
-                root.after(0, lambda f=formatted: _append_formatted_to_log_targets(f))
-            except Exception:
-                pass
-    else:
-        _append_formatted_to_log_targets(formatted)
+    if _gui_window is not None:
+        _gui_window._signals.log_message.emit(formatted)
 
     if original_working_directory:
         try:
@@ -538,12 +395,10 @@ def log_to_gui(message: str, level: str = "INFO"):
                 f.write(formatted + "\n")
         except Exception:
             pass
-    if log_widget is None:
+    if _gui_window is None:
         try:
             print(formatted)
         except UnicodeEncodeError:
-            # Some Windows consoles/pipes use legacy encodings (e.g. cp1252) and will
-            # raise on characters like '≈' or '²'. Never let logging crash the tool.
             try:
                 s = formatted + "\n"
                 if hasattr(sys.stdout, "buffer") and sys.stdout.buffer is not None:
@@ -556,20 +411,26 @@ def log_to_gui(message: str, level: str = "INFO"):
                 pass
 
 
-def _run_in_thread(fn, *args, **kwargs):
+def _run_in_thread(fn, *args, on_done=None, **kwargs):
     """Run function in a daemon thread and surface exceptions in the GUI log."""
-    import threading, traceback
+    import threading as _thr, traceback as _tb
     def _wrap():
         try:
             fn(*args, **kwargs)
         except Exception as e:
-            log_to_gui(f"[H3] Error: {e}", "WARN")
+            log_to_gui(f"Error: {e}", "WARN")
             try:
-                tb = "".join(traceback.format_exc())
-                log_to_gui(tb, "WARN")
+                log_to_gui("".join(_tb.format_exc()), "WARN")
             except Exception:
                 pass
-    threading.Thread(target=_wrap, daemon=True).start()
+        finally:
+            if on_done is not None:
+                try:
+                    if _gui_window is not None:
+                        _gui_window._signals.task_finished.emit()
+                except Exception:
+                    pass
+    _thr.Thread(target=_wrap, daemon=True).start()
 
 def _fmt_eta(elapsed_s: float, done: int, total: int) -> str:
     if done <= 0 or total <= 0:
@@ -2924,372 +2785,502 @@ def format_level_size_list(levels: list[int]) -> str:
 # -----------------------------------------------------------------------------
 # GUI
 # -----------------------------------------------------------------------------
-def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", master=None):
-    global root, log_widget, mosaic_log_widget, mosaic_log_from_file_mode, log_main_thread_id, progress_var, progress_label, original_working_directory, mosaic_status_var, size_levels_var
-    original_working_directory = str(base)
+# =====================================================================
+# Shared stylesheet (same warm palette as mesa.py / asset_manage.py)
+# =====================================================================
+from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
 
-    try:
-        global HEARTBEAT_SECS
-        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
-    except Exception:
-        pass
 
-    if master is not None:
-        root = tk.Toplevel(master)
-    else:
-        theme = cfg["DEFAULT"].get("ttk_bootstrap_theme", "flatly") if ttk else None
-        root = ttk.Window(themename=theme) if ttk else tk.Tk()
-    log_main_thread_id = threading.get_ident()
-    root.title("Geocode manage (Mosaic / H3 / Import / Edit)")
+# =====================================================================
+# Thread-safe signal bridge
+# =====================================================================
+class _GeoSignals(QObject):
+    log_message = Signal(str)
+    progress_update = Signal(float)
+    task_finished = Signal()
+    mosaic_line = Signal(str)
 
-    notebook = ttk.Notebook(root) if ttk else None
-    if notebook is None:
-        messagebox.showerror("Missing UI dependency", "ttkbootstrap is required for geocode_manage GUI.")
-        root.destroy()
-        return
-    notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-    tab_mosaic = ttk.Frame(notebook)
-    tab_h3 = ttk.Frame(notebook)
-    tab_import = ttk.Frame(notebook)
-    tab_edit = ttk.Frame(notebook)
-    notebook.add(tab_mosaic, text="Basic mosaic")
-    notebook.add(tab_h3, text="H3 codes")
-    notebook.add(tab_import, text="Import and manage geocodes")
-    notebook.add(tab_edit, text="Edit geocodes")
+# =====================================================================
+# PySide6 main window
+# =====================================================================
+class GeocodeManagerWindow(QMainWindow):
 
-    tab_lookup = {
-        "": 0,
-        "mosaic": 0,
-        "basic": 0,
-        "h3": 1,
-        "other": 1,
-        "import": 2,
-        "bin": 2,
-        "edit": 3,
-        "group": 3,
-    }
-    try:
-        notebook.select(tab_lookup.get(str(start_tab).strip().lower(), 0))
-    except Exception:
-        pass
+    def __init__(self, base: Path, cfg: configparser.ConfigParser, start_tab: str = ""):
+        super().__init__()
+        self.base = base
+        self.cfg = cfg
+        self._signals = _GeoSignals()
+        self._signals.log_message.connect(self._on_log_message)
+        self._signals.progress_update.connect(self._on_progress)
+        self._signals.task_finished.connect(self._on_task_finished)
+        self._signals.mosaic_line.connect(self._on_mosaic_line)
 
-    mosaic_log = None
-    h3_log = None
-    import_log = None
-    # Mosaic tab log uses a Treeview list for robust rendering across themes.
+        self._active_log_tab = 0  # 0=mosaic, 1=h3, 2=import
 
-    global log_widgets
-    log_widgets = []
-    mosaic_log_widget = mosaic_log
-    mosaic_log_from_file_mode = True
+        self.geocode_df = None
+        self.edit_idx = 0
+        self.write_path = gpq_dir(base) / TABLE_GEOCODE_GROUP
+        self._h3_levels: list[int] = []
 
-    def _set_log_target(widget):
-        global log_widget
-        log_widget = widget
+        self._mosaic_tail_state: dict[str, object] = {"offset": 0, "carry": "", "active": False}
 
-    def _bind_treeview_copy(tv) -> None:
-        def _copy_selected(_event=None):
-            try:
-                selected = tv.selection()
-                if not selected:
-                    return "break"
-                lines: list[str] = []
-                for iid in selected:
-                    vals = tv.item(iid, "values")
-                    if not vals:
-                        continue
-                    lines.append(" | ".join(str(v) for v in vals))
-                text = "\n".join(lines).strip()
-                if not text:
-                    return "break"
-                root.clipboard_clear()
-                root.clipboard_append(text)
-                return "break"
-            except Exception:
-                return "break"
+        self._build_ui(start_tab)
+
+        # Start mosaic log tail timer
+        self._mosaic_timer = QTimer(self)
+        self._mosaic_timer.timeout.connect(self._refresh_mosaic_log_from_file)
+        self._mosaic_timer.start(350)
+
+        # Initial data load
+        self._refresh_group_list()
+        self._refresh_edit_data()
+        self._update_mosaic_status()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+    def _build_ui(self, start_tab: str):
+        self.setWindowTitle("Geocode manager")
+        self.resize(900, 640)
+        self.setMinimumSize(700, 480)
 
         try:
-            tv.bind("<Control-c>", _copy_selected)
-            tv.bind("<Control-C>", _copy_selected)
+            ico = self.base / "system_resources" / "mesa.ico"
+            if ico.exists():
+                self.setWindowIcon(QIcon(str(ico)))
         except Exception:
             pass
 
-    def _sync_log_target_with_tab(_event=None):
+        central = QWidget()
+        central.setObjectName("CentralHost")
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(10, 8, 10, 8)
+        main_layout.setSpacing(6)
+
+        # Tab row + Exit
+        tab_row = QHBoxLayout()
+        tab_row.setContentsMargins(0, 0, 0, 0)
+        tab_row.setSpacing(0)
+        self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        tab_row.addWidget(self.tabs, stretch=1)
+
+        exit_btn = QPushButton("Exit")
+        exit_btn.setFixedSize(72, 28)
+        exit_btn.setStyleSheet("""
+            QPushButton { background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621; font-size: 9pt; padding: 2px 8px; }
+            QPushButton:hover { background: #e1d1ae; }
+            QPushButton:pressed { background: #d4c094; }
+        """)
+        exit_btn.clicked.connect(self.close)
+        tab_row.addWidget(exit_btn, alignment=Qt.AlignTop)
+        main_layout.addLayout(tab_row, stretch=1)
+
+        # Build tabs
+        self._build_mosaic_tab()
+        self._build_h3_tab()
+        self._build_import_tab()
+        self._build_edit_tab()
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
+        main_layout.addWidget(self.progress_bar)
+
+        # Select start tab
+        tab_lookup = {"": 0, "mosaic": 0, "basic": 0, "h3": 1, "other": 1,
+                      "import": 2, "bin": 2, "edit": 3, "group": 3}
         try:
-            selected = notebook.select()
+            self.tabs.setCurrentIndex(tab_lookup.get(str(start_tab).strip().lower(), 0))
         except Exception:
-            selected = ""
-        if selected == str(tab_h3):
-            _set_log_target(h3_log)
-        elif selected == str(tab_import):
-            _set_log_target(import_log)
+            pass
+
+    # ---- Tab 1: Mosaic ----
+    def _build_mosaic_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("Create/update the basic mosaic geocode group."))
+
+        action_group = QGroupBox("Mosaic action")
+        action_layout = QHBoxLayout(action_group)
+        action_layout.addWidget(QLabel("Status:"))
+        self.mosaic_status_label = QLabel("")
+        self.mosaic_status_label.setStyleSheet("font-weight: 600; min-width: 100px;")
+        action_layout.addWidget(self.mosaic_status_label)
+        action_layout.addStretch()
+        build_btn = QPushButton("Build mosaic")
+        build_btn.setProperty("role", "primary")
+        build_btn.clicked.connect(self._run_mosaic)
+        action_layout.addWidget(build_btn)
+        layout.addWidget(action_group)
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        self.mosaic_log = QPlainTextEdit()
+        self.mosaic_log.setReadOnly(True)
+        self.mosaic_log.setMaximumHeight(200)
+        log_layout.addWidget(self.mosaic_log)
+        layout.addWidget(log_group, stretch=1)
+
+        self.tabs.addTab(tab, "Basic mosaic")
+
+    # ---- Tab 2: H3 ----
+    def _build_h3_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("Generate H3 geocodes from existing asset/geocode coverage."))
+
+        gen_group = QGroupBox("H3 generation")
+        gen_layout = QGridLayout(gen_group)
+        gen_layout.setHorizontalSpacing(10)
+        gen_layout.setVerticalSpacing(6)
+
+        gen_layout.addWidget(QLabel("Min m:"), 0, 0, Qt.AlignRight)
+        self.h3_min_edit = QLineEdit("50")
+        self.h3_min_edit.setFixedWidth(100)
+        gen_layout.addWidget(self.h3_min_edit, 0, 1)
+
+        gen_layout.addWidget(QLabel("Max m:"), 0, 2, Qt.AlignRight)
+        self.h3_max_edit = QLineEdit("50000")
+        self.h3_max_edit.setFixedWidth(100)
+        gen_layout.addWidget(self.h3_max_edit, 0, 3)
+
+        self.h3_levels_label = QLabel("(none)")
+        gen_layout.addWidget(QLabel("Matching levels:"), 1, 0, Qt.AlignRight)
+        gen_layout.addWidget(self.h3_levels_label, 1, 1, 1, 3)
+
+        self.h3_clear_check = QCheckBox("Delete existing H3 before generating")
+        gen_layout.addWidget(self.h3_clear_check, 2, 0, 1, 4)
+
+        btn_col = QVBoxLayout()
+        self.h3_suggest_btn = QPushButton("Suggest H3")
+        self.h3_suggest_btn.setProperty("role", "primary")
+        self.h3_suggest_btn.clicked.connect(self._suggest_h3)
+        btn_col.addWidget(self.h3_suggest_btn)
+        self.h3_generate_btn = QPushButton("Generate H3")
+        self.h3_generate_btn.setProperty("role", "primary")
+        self.h3_generate_btn.setEnabled(False)
+        self.h3_generate_btn.clicked.connect(self._generate_h3)
+        btn_col.addWidget(self.h3_generate_btn)
+        gen_layout.addLayout(btn_col, 0, 4, 3, 1)
+
+        if h3 is None:
+            self.h3_levels_label.setText("H3 library missing (pip install h3)")
+            self.h3_suggest_btn.setEnabled(False)
+            self.h3_generate_btn.setEnabled(False)
+
+        layout.addWidget(gen_group)
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        self.h3_log = QPlainTextEdit()
+        self.h3_log.setReadOnly(True)
+        log_layout.addWidget(self.h3_log)
+        layout.addWidget(log_group, stretch=1)
+
+        self.tabs.addTab(tab, "H3 codes")
+
+    # ---- Tab 3: Import ----
+    def _build_import_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("Import geocode datasets and manage existing geocode groups."))
+
+        import_group = QGroupBox("Import")
+        import_layout = QHBoxLayout(import_group)
+        import_layout.addWidget(QLabel("Import geocode datasets from input folder into GeoParquet tables."))
+        import_layout.addStretch()
+        import_btn = QPushButton("Import geocodes")
+        import_btn.setProperty("role", "primary")
+        import_btn.clicked.connect(self._run_import)
+        import_layout.addWidget(import_btn)
+        layout.addWidget(import_group)
+
+        group_group = QGroupBox("Geocode groups")
+        group_layout = QVBoxLayout(group_group)
+        self.group_tree = QTreeWidget()
+        self.group_tree.setHeaderLabels(["ID", "GIS group", "Layer name", "Origin", "User title", "Objects"])
+        self.group_tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.group_tree.setAlternatingRowColors(True)
+        header = self.group_tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.group_tree.setColumnWidth(0, 60)
+        self.group_tree.setColumnWidth(3, 100)
+        self.group_tree.setColumnWidth(4, 160)
+        self.group_tree.setColumnWidth(5, 80)
+        group_layout.addWidget(self.group_tree)
+
+        btn_row = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh list")
+        refresh_btn.clicked.connect(self._refresh_group_list)
+        btn_row.addWidget(refresh_btn)
+        delete_btn = QPushButton("Delete selected")
+        delete_btn.setProperty("role", "danger")
+        delete_btn.clicked.connect(self._delete_selected_groups)
+        btn_row.addWidget(delete_btn)
+        btn_row.addStretch()
+        group_layout.addLayout(btn_row)
+        layout.addWidget(group_group)
+
+        self.import_status_label = QLabel("")
+        self.import_status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        layout.addWidget(self.import_status_label)
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        self.import_log = QPlainTextEdit()
+        self.import_log.setReadOnly(True)
+        self.import_log.setMaximumHeight(150)
+        log_layout.addWidget(self.import_log)
+        layout.addWidget(log_group)
+
+        self.tabs.addTab(tab, "Import && manage geocodes")
+
+    # ---- Tab 4: Edit ----
+    def _build_edit_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("Edit geocode names, user titles and descriptions."))
+
+        self.edit_state_label = QLabel("")
+        self.edit_state_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        layout.addWidget(self.edit_state_label)
+
+        meta_group = QGroupBox("Current geocode")
+        meta_layout = QHBoxLayout(meta_group)
+        meta_layout.addWidget(QLabel("ID:"))
+        self.edit_id_label = QLabel("")
+        self.edit_id_label.setStyleSheet("font-weight: 600;")
+        meta_layout.addWidget(self.edit_id_label)
+        meta_layout.addSpacing(20)
+        meta_layout.addWidget(QLabel("GIS name:"))
+        self.edit_gis_label = QLabel("")
+        self.edit_gis_label.setStyleSheet("font-weight: 600;")
+        meta_layout.addWidget(self.edit_gis_label)
+        meta_layout.addStretch()
+        layout.addWidget(meta_group)
+
+        form_group = QGroupBox("Editable fields")
+        form = QGridLayout(form_group)
+        form.setColumnStretch(1, 1)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+
+        form.addWidget(QLabel("Layer name"), 0, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self.edit_name = QLineEdit()
+        form.addWidget(self.edit_name, 0, 1)
+
+        form.addWidget(QLabel("User title"), 1, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self.edit_title = QLineEdit()
+        form.addWidget(self.edit_title, 1, 1)
+
+        form.addWidget(QLabel("Description"), 2, 0, Qt.AlignRight | Qt.AlignTop)
+        self.edit_desc = QPlainTextEdit()
+        self.edit_desc.setMaximumHeight(140)
+        form.addWidget(self.edit_desc, 2, 1)
+
+        layout.addWidget(form_group, stretch=1)
+
+        self.edit_info_label = QLabel("")
+        self.edit_info_label.setStyleSheet("color: #9a8a6e; font-size: 8pt;")
+        layout.addWidget(self.edit_info_label)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.edit_counter_label = QLabel("0 / 0")
+        self.edit_counter_label.setStyleSheet("font-weight: 600; min-width: 60px;")
+        controls.addWidget(self.edit_counter_label)
+        prev_btn = QPushButton("Previous")
+        prev_btn.clicked.connect(lambda: self._navigate(-1))
+        controls.addWidget(prev_btn)
+        next_btn = QPushButton("Next")
+        next_btn.clicked.connect(lambda: self._navigate(1))
+        controls.addWidget(next_btn)
+        controls.addStretch()
+        reload_btn = QPushButton("Reload")
+        reload_btn.clicked.connect(self._refresh_edit_data)
+        controls.addWidget(reload_btn)
+        del_btn = QPushButton("Delete")
+        del_btn.setProperty("role", "danger")
+        del_btn.clicked.connect(self._delete_current_group)
+        controls.addWidget(del_btn)
+        save_next_btn = QPushButton("Save && Next")
+        save_next_btn.setProperty("role", "primary")
+        save_next_btn.clicked.connect(self._save_and_next)
+        controls.addWidget(save_next_btn)
+        save_btn = QPushButton("Save")
+        save_btn.setProperty("role", "success")
+        save_btn.clicked.connect(self._save_current)
+        controls.addWidget(save_btn)
+        layout.addLayout(controls)
+
+        self.tabs.addTab(tab, "Edit geocodes")
+
+    # ------------------------------------------------------------------
+    # Signal slots (UI-thread safe)
+    # ------------------------------------------------------------------
+    def _on_log_message(self, text: str):
+        tab = self.tabs.currentIndex()
+        if tab == 0:
+            self.mosaic_log.appendPlainText(text)
+        elif tab == 1:
+            self.h3_log.appendPlainText(text)
+        elif tab == 2:
+            self.import_log.appendPlainText(text)
         else:
-            _set_log_target(None)
+            self.h3_log.appendPlainText(text)
 
-    # ---------------- Tab 1: Mosaic ----------------
-    ttk.Label(tab_mosaic, text="Create/update the basic mosaic geocode group.").pack(anchor="w", padx=8, pady=(8, 4))
+    def _on_progress(self, value: float):
+        self.progress_bar.setValue(int(value))
 
-    mosaic_frame = ttk.LabelFrame(tab_mosaic, text="Mosaic action", bootstyle="secondary")
-    mosaic_frame.pack(fill=tk.X, padx=8, pady=(2, 6))
-    mosaic_status_var = tk.StringVar(value="")
-    ttk.Label(mosaic_frame, text="Status:").grid(row=0, column=0, padx=4, pady=4, sticky="w")
-    status_label = ttk.Label(mosaic_frame, textvariable=mosaic_status_var, width=18)
-    status_label.grid(row=0, column=1, padx=(0, 10), pady=4, sticky="w")
+    def _on_task_finished(self):
+        self._refresh_group_list()
+        self._refresh_edit_data()
 
-    def _update_mosaic_status():
-        exists = mosaic_exists(base)
-        if mosaic_status_var.get() not in ("Running…", "Completed", "No faces"):
-            mosaic_status_var.set("OK" if exists else "REQUIRED")
+    def _on_mosaic_line(self, text: str):
+        self.mosaic_log.appendPlainText(text)
+
+    def _on_tab_changed(self, index: int):
+        self._active_log_tab = index
+
+    # ------------------------------------------------------------------
+    # Mosaic
+    # ------------------------------------------------------------------
+    def _update_mosaic_status(self):
+        exists = mosaic_exists(self.base)
+        status = "OK" if exists else "REQUIRED"
+        color = "#4d7c0f" if exists else "#b02a37"
+        self.mosaic_status_label.setText(status)
+        self.mosaic_status_label.setStyleSheet(f"font-weight: 600; color: {color}; min-width: 100px;")
+
+    def _run_mosaic(self):
+        self.mosaic_log.clear()
+        self.mosaic_log.appendPlainText("--- Mosaic run started ---")
         try:
-            status_label.configure(bootstyle=("success" if exists else "danger"))
+            lp = Path(original_working_directory or str(self.base)) / "log.txt"
+            self._mosaic_tail_state["offset"] = int(lp.stat().st_size) if lp.exists() else 0
         except Exception:
-            pass
+            self._mosaic_tail_state["offset"] = 0
+        self._mosaic_tail_state["carry"] = ""
+        self._mosaic_tail_state["active"] = True
+        self.mosaic_status_label.setText("Running\u2026")
+        self.mosaic_status_label.setStyleSheet("font-weight: 600; color: #b45309; min-width: 100px;")
 
-    def _run_mosaic_inline():
-        _set_log_target(None)
-        _clear_mosaic_log_view()
         try:
-            _append_mosaic_line("--- Mosaic run started ---")
-        except Exception:
-            pass
-        try:
-            lp = Path(original_working_directory or str(base)) / "log.txt"
-            if lp.exists():
-                _mosaic_tail_state["offset"] = int(lp.stat().st_size)
-            else:
-                _mosaic_tail_state["offset"] = 0
-        except Exception:
-            _mosaic_tail_state["offset"] = 0
-        _mosaic_tail_state["carry"] = ""
-        _mosaic_tail_state["active"] = True
-        log_to_gui("[Mosaic] Build requested.", "INFO")
-        try:
-            buf = float(cfg["DEFAULT"].get("mosaic_buffer_m", "25"))
+            buf = float(self.cfg["DEFAULT"].get("mosaic_buffer_m", "25"))
         except Exception:
             buf = 25.0
         try:
-            grid = float(cfg["DEFAULT"].get("mosaic_grid_size_m", "1000"))
+            grid = float(self.cfg["DEFAULT"].get("mosaic_grid_size_m", "1000"))
         except Exception:
             grid = 1000.0
-        mosaic_status_var.set("Running…")
 
         def _after(success):
-            def _ui():
-                _update_mosaic_status()
-                mosaic_status_var.set("Completed" if success else "No faces")
-                log_to_gui(
-                    f"[Mosaic] Build finished with status: {'Completed' if success else 'No faces'}.",
-                    "INFO",
-                )
-            try:
-                root.after(100, _ui)
-            except Exception:
-                pass
+            self._signals.mosaic_line.emit(
+                f"Mosaic finished: {'Completed' if success else 'No faces'}")
+            # schedule UI update
+            QTimer.singleShot(200, self._update_mosaic_status)
 
-        _run_in_thread(run_mosaic, base, buf, grid, _after)
+        _run_in_thread(run_mosaic, self.base, buf, grid, _after, on_done=True)
 
-    ttk.Button(mosaic_frame, text="Build mosaic", width=18, bootstyle=PRIMARY, command=_run_mosaic_inline).grid(
-        row=0, column=2, padx=4, pady=4, sticky="e"
-    )
+    def _refresh_mosaic_log_from_file(self):
+        try:
+            if not bool(self._mosaic_tail_state.get("active", False)):
+                try:
+                    lp = Path(original_working_directory or str(self.base)) / "log.txt"
+                    if lp.exists():
+                        self._mosaic_tail_state["offset"] = int(lp.stat().st_size)
+                except Exception:
+                    pass
+                return
 
-    lf_mosaic_log = ttk.LabelFrame(tab_mosaic, text="Log", bootstyle="info")
-    lf_mosaic_log.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    mosaic_log_frame = ttk.Frame(lf_mosaic_log)
-    mosaic_log_frame.pack(fill=tk.BOTH, expand=True)
-    mosaic_log_frame.columnconfigure(0, weight=1)
-    mosaic_log_frame.rowconfigure(0, weight=1)
-    mosaic_log = ttk.Treeview(mosaic_log_frame, columns=("line",), show="headings", height=3)
-    mosaic_log.heading("line", text="Mosaic log")
-    mosaic_log.column("line", anchor="w", stretch=True, width=880)
-    mosaic_log.grid(in_=mosaic_log_frame, row=0, column=0, sticky="nsew")
-    mosaic_scroll = ttk.Scrollbar(mosaic_log_frame, orient="vertical", command=mosaic_log.yview)
-    mosaic_scroll.grid(row=0, column=1, sticky="ns")
-    mosaic_log.configure(yscrollcommand=mosaic_scroll.set)
-    _bind_treeview_copy(mosaic_log)
+            lp = Path(original_working_directory or str(self.base)) / "log.txt"
+            if not lp.exists() or not lp.is_file():
+                return
+            start_offset = int(self._mosaic_tail_state.get("offset", 0) or 0)
+            carry = str(self._mosaic_tail_state.get("carry", "") or "")
+            with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(max(0, start_offset))
+                chunk = f.read()
+                self._mosaic_tail_state["offset"] = int(f.tell())
 
-    # ---------------- Tab 2: H3 ----------------
-    ttk.Label(tab_h3, text="Generate H3 geocodes from existing asset/geocode coverage.").pack(anchor="w", padx=8, pady=(8, 4))
+            if chunk:
+                text = carry + chunk
+                lines = text.splitlines()
+                if text and not text.endswith(("\n", "\r")):
+                    self._mosaic_tail_state["carry"] = lines.pop() if lines else text
+                else:
+                    self._mosaic_tail_state["carry"] = ""
+                for ln in lines:
+                    self.mosaic_log.appendPlainText(ln)
+                    if "Step [Mosaic] COMPLETED" in ln or "Step [Mosaic] FAILED" in ln:
+                        self._mosaic_tail_state["active"] = False
+        except Exception:
+            pass
 
-    size_frame = ttk.LabelFrame(tab_h3, text="H3 generation", bootstyle="secondary")
-    size_frame.pack(fill=tk.X, padx=8, pady=(2, 6))
-    size_frame.columnconfigure(5, weight=1)
-
-    ttk.Label(size_frame, text="Min m:").grid(row=0, column=0, padx=4, pady=4, sticky="e")
-    ttk.Label(size_frame, text="Max m:").grid(row=0, column=2, padx=4, pady=4, sticky="e")
-    min_var = tk.StringVar(value="50")
-    max_var = tk.StringVar(value="50000")
-    ttk.Entry(size_frame, textvariable=min_var, width=12).grid(row=0, column=1, padx=4, pady=4, sticky="w")
-    ttk.Entry(size_frame, textvariable=max_var, width=12).grid(row=0, column=3, padx=4, pady=4, sticky="w")
-
-    size_levels_var = tk.StringVar(value="(none)")
-    ttk.Label(size_frame, text="Matching levels:").grid(row=1, column=0, padx=4, pady=2, sticky="e")
-    ttk.Label(size_frame, textvariable=size_levels_var, anchor="w").grid(row=1, column=1, columnspan=5, padx=4, pady=2, sticky="w")
-
-    clear_h3_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(
-        size_frame,
-        text="Delete existing H3 before generating",
-        variable=clear_h3_var,
-        bootstyle=INFO,
-    ).grid(row=2, column=0, columnspan=4, padx=4, pady=(2, 6), sticky="w")
-
-    def _suggest_levels():
-        _set_log_target(h3_log)
+    # ------------------------------------------------------------------
+    # H3
+    # ------------------------------------------------------------------
+    def _suggest_h3(self):
         log_to_gui("[H3] Suggest requested.", "INFO")
         try:
-            min_m = float(min_var.get())
-            max_m = float(max_var.get())
+            min_m = float(self.h3_min_edit.text())
+            max_m = float(self.h3_max_edit.text())
             if min_m <= 0 or max_m <= 0 or max_m < min_m:
                 raise ValueError
         except Exception:
             log_to_gui("Enter valid positive meter values (min <= max).", "WARN")
             return
-
         min_km, max_km = min_m / 1000.0, max_m / 1000.0
-        levels = suggest_h3_levels_by_size(min_km, max_km)
-        size_levels_var.set(format_level_size_list(levels))
+        self._h3_levels = suggest_h3_levels_by_size(min_km, max_km)
+        self.h3_levels_label.setText(format_level_size_list(self._h3_levels))
+        self.h3_generate_btn.setEnabled(bool(self._h3_levels))
+        log_to_gui(
+            f"Suggested H3 levels: {self._h3_levels}" if self._h3_levels
+            else "No H3 levels for that size range.", "INFO"
+        )
 
-        def _generate_size_based():
-            _set_log_target(h3_log)
-            if not levels:
-                log_to_gui("No suggested levels to generate.", "WARN")
-                return
-            log_to_gui(f"[H3] Generate requested for levels: {levels}", "INFO")
-            _run_in_thread(write_h3_levels, base, levels, clear_existing=bool(clear_h3_var.get()))
+    def _generate_h3(self):
+        if not self._h3_levels:
+            log_to_gui("No suggested levels to generate.", "WARN")
+            return
+        log_to_gui(f"[H3] Generate requested for levels: {self._h3_levels}", "INFO")
+        levels = list(self._h3_levels)
+        clear = self.h3_clear_check.isChecked()
+        _run_in_thread(write_h3_levels, self.base, levels, clear_existing=clear, on_done=True)
 
-        gen_btn.configure(command=_generate_size_based, state=("normal" if levels else "disabled"))
-        log_to_gui(f"Suggested H3 levels: {levels}" if levels else "No H3 levels for that size range.", "INFO")
+    # ------------------------------------------------------------------
+    # Import
+    # ------------------------------------------------------------------
+    def _run_import(self):
+        log_to_gui("[Import] Import requested.", "INFO")
+        _run_in_thread(run_import_geocodes, self.base, self.cfg, on_done=True)
 
-    btn_h3 = ttk.Frame(size_frame)
-    btn_h3.grid(row=0, column=5, rowspan=3, padx=4, pady=4, sticky="e")
-    sugg_btn = ttk.Button(btn_h3, text="Suggest H3", width=16, bootstyle=PRIMARY, command=_suggest_levels)
-    gen_btn = ttk.Button(btn_h3, text="Generate H3", width=16, bootstyle=PRIMARY, state="disabled")
-    sugg_btn.pack(side=tk.TOP, padx=2, pady=(0, 4), anchor="e")
-    gen_btn.pack(side=tk.TOP, padx=2, pady=0, anchor="e")
-
-    if h3 is None:
-        size_levels_var.set("H3 library missing (pip install h3)")
-        sugg_btn.configure(state="disabled")
-        gen_btn.configure(state="disabled")
-
-    lf_h3_log = ttk.LabelFrame(tab_h3, text="Log", bootstyle="info")
-    lf_h3_log.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    h3_log_frame = ttk.Frame(lf_h3_log)
-    h3_log_frame.pack(fill=tk.BOTH, expand=True)
-    h3_log_frame.columnconfigure(0, weight=1)
-    h3_log_frame.rowconfigure(0, weight=1)
-    h3_log = ttk.Treeview(h3_log_frame, columns=("line",), show="headings", height=4)
-    h3_log.heading("line", text="H3 log")
-    h3_log.column("line", anchor="w", stretch=True, width=860)
-    h3_log.grid(in_=h3_log_frame, row=0, column=0, sticky="nsew")
-    h3_scroll = ttk.Scrollbar(h3_log_frame, orient="vertical", command=h3_log.yview)
-    h3_scroll.grid(row=0, column=1, sticky="ns")
-    h3_log.configure(yscrollcommand=h3_scroll.set)
-    _bind_treeview_copy(h3_log)
-
-    # ---------------- Tab 3: Import geocodes ----------------
-    ttk.Label(tab_import, text="Import geocode datasets and manage existing geocode groups.").pack(anchor="w", padx=8, pady=(8, 4))
-
-    import_actions = ttk.LabelFrame(tab_import, text="Import", bootstyle="secondary")
-    import_actions.pack(fill=tk.X, padx=8, pady=(2, 6))
-    ttk.Label(import_actions, text="Import geocode datasets from input folder into GeoParquet tables.").pack(side=tk.LEFT, padx=8, pady=6)
-
-    group_frame = ttk.LabelFrame(tab_import, text="Geocode groups", bootstyle="secondary")
-    group_frame.pack(fill=tk.X, expand=False, padx=8, pady=(0, 6))
-    group_frame.columnconfigure(0, weight=1)
-    group_frame.rowconfigure(0, weight=1)
-
-    group_tree = ttk.Treeview(
-        group_frame,
-        columns=("id", "gis", "name", "origin", "title", "objects"),
-        show="headings",
-        selectmode="extended",
-        height=4,
-    )
-    group_tree.heading("id", text="ID")
-    group_tree.heading("gis", text="GIS group")
-    group_tree.heading("name", text="Layer name")
-    group_tree.heading("origin", text="Origin")
-    group_tree.heading("title", text="User title")
-    group_tree.heading("objects", text="Objects")
-    group_tree.column("id", width=70, anchor="w", stretch=False)
-    group_tree.column("gis", width=220, anchor="w")
-    group_tree.column("name", width=220, anchor="w")
-    group_tree.column("origin", width=110, anchor="w", stretch=False)
-    group_tree.column("title", width=180, anchor="w")
-    group_tree.column("objects", width=90, anchor="e", stretch=False)
-    group_tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
-
-    group_scroll = ttk.Scrollbar(group_frame, orient="vertical", command=group_tree.yview)
-    group_tree.configure(yscrollcommand=group_scroll.set)
-    group_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
-
-    import_status_var = tk.StringVar(value="")
-    ttk.Label(tab_import, textvariable=import_status_var, bootstyle="secondary").pack(fill=tk.X, padx=8, pady=(0, 4))
-
-    import_group_actions = ttk.Frame(tab_import)
-    import_group_actions.pack(fill=tk.X, padx=8, pady=(0, 6))
-
-    # ---------------- Tab 4: Edit geocodes ----------------
-    ttk.Label(tab_edit, text="Edit geocode names, user titles and descriptions.").pack(anchor="w", padx=8, pady=(8, 4))
-
-    read_path = geoparquet_path(base, "tbl_geocode_group")
-    write_path = gpq_dir(base) / TABLE_GEOCODE_GROUP
-
-    edit_state_var = tk.StringVar(value="")
-    edit_counter_var = tk.StringVar(value="0 / 0")
-    edit_info_var = tk.StringVar(value="")
-    edit_id_var = tk.StringVar(value="")
-    edit_gis_var = tk.StringVar(value="")
-    edit_name_var = tk.StringVar(value="")
-    edit_title_var = tk.StringVar(value="")
-
-    geocode_df = None
-    edit_idx = 0
-
-    ttk.Label(tab_edit, textvariable=edit_state_var).pack(fill=tk.X, padx=8, pady=(0, 6))
-
-    edit_meta = ttk.LabelFrame(tab_edit, text="Current geocode", bootstyle="secondary")
-    edit_meta.pack(fill=tk.X, padx=8, pady=(0, 6))
-    ttk.Label(edit_meta, text="ID:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-    ttk.Label(edit_meta, textvariable=edit_id_var).grid(row=0, column=1, sticky="w", padx=2, pady=4)
-    ttk.Label(edit_meta, text="GIS name:").grid(row=0, column=2, sticky="w", padx=(16, 6), pady=4)
-    ttk.Label(edit_meta, textvariable=edit_gis_var).grid(row=0, column=3, sticky="w", padx=2, pady=4)
-
-    edit_form = ttk.LabelFrame(tab_edit, text="Editable fields", bootstyle="secondary")
-    edit_form.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    edit_form.columnconfigure(1, weight=1)
-
-    ttk.Label(edit_form, text="Layer name").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-    ttk.Entry(edit_form, textvariable=edit_name_var, width=44).grid(row=0, column=1, sticky="ew", padx=6, pady=4)
-    ttk.Label(edit_form, text="User title").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-    ttk.Entry(edit_form, textvariable=edit_title_var, width=44).grid(row=1, column=1, sticky="ew", padx=6, pady=4)
-
-    ttk.Label(edit_form, text="Description").grid(row=2, column=0, sticky="nw", padx=6, pady=4)
-    edit_desc_txt = scrolledtext.ScrolledText(edit_form, height=7, wrap="word")
-    edit_desc_txt.grid(row=2, column=1, sticky="nsew", padx=6, pady=4)
-    edit_form.rowconfigure(2, weight=1)
-
-    ttk.Label(tab_edit, textvariable=edit_info_var, bootstyle="secondary").pack(fill=tk.X, padx=8, pady=(0, 6))
-
-    def _load_geocode_group_df():
-        cols = ["id", "name", "name_gis_geocodegroup", "geocode_origin", "title_user", "description", "geometry"]
+    def _refresh_group_list(self):
         try:
-            gdf, _ = _load_existing_geocodes(base)
-            for c in cols:
-                if c not in gdf.columns:
-                    gdf[c] = ""
-            return gdf
+            existing_g, existing_o = _load_existing_geocodes(self.base)
         except Exception as exc:
-            messagebox.showerror("Error", f"Failed to read geocode group file:\n{exc}")
-            return gpd.GeoDataFrame(columns=cols, geometry="geometry", crs="EPSG:4326")
-
-    def _refresh_group_list():
-        try:
-            existing_g, existing_o = _load_existing_geocodes(base)
-        except Exception as exc:
-            import_status_var.set(f"Failed to load geocode groups: {exc}")
+            self.import_status_label.setText(f"Failed to load geocode groups: {exc}")
             return
 
         obj_counts: dict[int, int] = {}
@@ -3298,13 +3289,12 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", m
                 s = existing_o["ref_geocodegroup"].dropna().astype(int).value_counts()
                 obj_counts = {int(k): int(v) for k, v in s.items()}
             except Exception:
-                obj_counts = {}
+                pass
 
-        for item in group_tree.get_children():
-            group_tree.delete(item)
+        self.group_tree.clear()
 
         if existing_g.empty:
-            import_status_var.set("No geocode groups found.")
+            self.import_status_label.setText("No geocode groups found.")
             return
 
         try:
@@ -3313,146 +3303,124 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", m
             rows = existing_g
 
         for idx, row in rows.iterrows():
-            rid_raw = row.get("id", "")
             try:
-                rid = int(rid_raw)
+                rid = int(row.get("id", -1))
             except Exception:
                 rid = -1
             gis_name = str(row.get("name_gis_geocodegroup", "") or "")
             layer_name = str(row.get("name", "") or "")
             origin = _normalize_geocode_origin(row.get("geocode_origin", ""), gis_name)
             title_user = str(row.get("title_user", "") or "")
-            object_count = obj_counts.get(rid, 0) if rid >= 0 else 0
+            obj_count = obj_counts.get(rid, 0) if rid >= 0 else 0
 
-            item_id = f"grp_{idx}_{rid}_{gis_name}" if gis_name else f"grp_{idx}_{rid}"
-            group_tree.insert(
-                "",
-                tk.END,
-                iid=item_id,
-                values=(rid if rid >= 0 else "", gis_name, layer_name, origin, title_user, object_count),
-            )
+            item = QTreeWidgetItem([
+                str(rid) if rid >= 0 else "", gis_name, layer_name, origin, title_user, str(obj_count)
+            ])
+            self.group_tree.addTopLevelItem(item)
 
-        import_status_var.set(f"Groups: {len(existing_g)} | Total objects: {len(existing_o)}")
+        self.import_status_label.setText(f"Groups: {len(existing_g)}  |  Total objects: {len(existing_o)}")
 
-    def _delete_selected_groups():
-        _set_log_target(import_log)
+    def _delete_selected_groups(self):
         log_to_gui("[Import] Delete selected requested.", "INFO")
-        selected = group_tree.selection()
+        selected = self.group_tree.selectedItems()
         if not selected:
-            messagebox.showinfo("Delete geocodes", "Select one or more geocode groups to delete.")
+            QMessageBox.information(self, "Delete geocodes", "Select one or more geocode groups to delete.")
             return
 
         names_imported: list[str] = []
-        skipped_non_imported: list[str] = []
+        skipped: list[str] = []
         for item in selected:
-            vals = group_tree.item(item, "values")
-            if len(vals) >= 4:
-                name = str(vals[1] or "").strip()
-                origin = _normalize_geocode_origin(vals[3], name)
-                if name and origin == GEOCODE_ORIGIN_IMPORTED:
-                    names_imported.append(name)
-                elif name:
-                    skipped_non_imported.append(name)
+            name = item.text(1).strip()
+            origin = _normalize_geocode_origin(item.text(3), name)
+            if name and origin == GEOCODE_ORIGIN_IMPORTED:
+                names_imported.append(name)
+            elif name:
+                skipped.append(name)
+
         names_imported = sorted(set(names_imported))
-        skipped_non_imported = sorted(set(skipped_non_imported))
+        skipped = sorted(set(skipped))
         if not names_imported:
-            message = "Only imported geocode groups can be deleted from this tab."
-            if skipped_non_imported:
-                preview_skip = ", ".join(skipped_non_imported[:4])
-                if len(skipped_non_imported) > 4:
-                    preview_skip += f" (+{len(skipped_non_imported) - 4} more)"
-                message += f"\n\nSkipped: {preview_skip}"
-            messagebox.showwarning("Delete geocodes", message)
+            msg = "Only imported geocode groups can be deleted from this tab."
+            if skipped:
+                msg += f"\n\nSkipped: {', '.join(skipped[:4])}"
+            QMessageBox.warning(self, "Delete geocodes", msg)
             return
 
         preview = ", ".join(names_imported[:4])
         if len(names_imported) > 4:
             preview += f" (+{len(names_imported) - 4} more)"
-        skip_line = ""
-        if skipped_non_imported:
-            skip_preview = ", ".join(skipped_non_imported[:4])
-            if len(skipped_non_imported) > 4:
-                skip_preview += f" (+{len(skipped_non_imported) - 4} more)"
-            skip_line = f"\n\nWill be skipped (not imported):\n{skip_preview}"
-        ok = messagebox.askyesno(
-            "Confirm delete",
-            f"Delete selected imported geocode groups?\n\n{preview}{skip_line}\n\nThis also removes linked geocode objects.",
-        )
-        if not ok:
+        ok = QMessageBox.question(self, "Confirm delete",
+            f"Delete selected imported geocode groups?\n\n{preview}\n\nThis also removes linked geocode objects.",
+            QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
             return
 
-        _set_log_target(import_log)
-        _clear_geocode_groups(base, names_imported)
+        _clear_geocode_groups(self.base, names_imported)
         log_to_gui(f"[Import] Deleted imported groups: {', '.join(names_imported)}", "INFO")
-        _refresh_group_list()
-        _refresh_edit_data()
+        self._refresh_group_list()
+        self._refresh_edit_data()
 
-    def _run_import_and_refresh():
-        _set_log_target(import_log)
-        log_to_gui("[Import] Import requested.", "INFO")
-
-        def _job():
-            run_import_geocodes(base, cfg)
-            try:
-                root.after(0, _refresh_group_list)
-                root.after(0, _refresh_edit_data)
-            except Exception:
-                pass
-
-        _run_in_thread(_job)
-
-    def _update_counter():
-        nonlocal geocode_df, edit_idx
-        total = len(geocode_df) if geocode_df is not None else 0
-        current = (edit_idx + 1) if total else 0
-        edit_counter_var.set(f"{current} / {total}")
-
-    def _clear_editor():
-        edit_id_var.set("")
-        edit_gis_var.set("")
-        edit_name_var.set("")
-        edit_title_var.set("")
-        edit_desc_txt.delete("1.0", tk.END)
-        _update_counter()
-
-    def _load_record():
-        nonlocal geocode_df, edit_idx
-        if geocode_df is None or len(geocode_df) == 0:
-            _clear_editor()
-            edit_state_var.set("No geocode groups found. Build/import geocodes first.")
-            return
-        edit_idx = max(0, min(edit_idx, len(geocode_df) - 1))
-        row = geocode_df.iloc[edit_idx]
-        edit_id_var.set(str(row.get("id", "") or ""))
-        edit_gis_var.set(str(row.get("name_gis_geocodegroup", "") or ""))
-        edit_name_var.set(str(row.get("name", "") or ""))
-        edit_title_var.set(str(row.get("title_user", "") or ""))
-        edit_desc_txt.delete("1.0", tk.END)
-        edit_desc_txt.insert(tk.END, str(row.get("description", "") or ""))
-        _update_counter()
-        edit_state_var.set(f"Record {edit_idx + 1} of {len(geocode_df)}")
-
-    def _write_back_to_df():
-        nonlocal geocode_df, edit_idx
-        if geocode_df is None or len(geocode_df) == 0:
-            return
-        geocode_df.at[edit_idx, "name"] = (edit_name_var.get() or "").strip()
-        geocode_df.at[edit_idx, "title_user"] = (edit_title_var.get() or "").strip()
-        geocode_df.at[edit_idx, "description"] = edit_desc_txt.get("1.0", tk.END).strip()
-
-    def _save_current() -> bool:
-        nonlocal geocode_df
-        if geocode_df is None or len(geocode_df) == 0:
-            messagebox.showinfo("Nothing to save", "There are no geocode groups to save.")
-            return False
-
-        _write_back_to_df()
-        write_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = write_path.with_suffix(".tmp.parquet")
+    # ------------------------------------------------------------------
+    # Edit
+    # ------------------------------------------------------------------
+    def _load_geocode_group_df(self):
+        cols = ["id", "name", "name_gis_geocodegroup", "geocode_origin", "title_user", "description", "geometry"]
         try:
-            geocode_df.to_parquet(tmp_path, index=False)
-            os.replace(tmp_path, write_path)
-            edit_state_var.set("Saved.")
+            gdf, _ = _load_existing_geocodes(self.base)
+            for c in cols:
+                if c not in gdf.columns:
+                    gdf[c] = ""
+            return gdf
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to read geocode group file:\n{exc}")
+            return gpd.GeoDataFrame(columns=cols, geometry="geometry", crs="EPSG:4326")
+
+    def _update_counter(self):
+        total = len(self.geocode_df) if self.geocode_df is not None else 0
+        current = (self.edit_idx + 1) if total else 0
+        self.edit_counter_label.setText(f"{current} / {total}")
+
+    def _clear_editor(self):
+        self.edit_id_label.setText("")
+        self.edit_gis_label.setText("")
+        self.edit_name.setText("")
+        self.edit_title.setText("")
+        self.edit_desc.setPlainText("")
+        self._update_counter()
+
+    def _load_record(self):
+        if self.geocode_df is None or len(self.geocode_df) == 0:
+            self._clear_editor()
+            self.edit_state_label.setText("No geocode groups found. Build/import geocodes first.")
+            return
+        self.edit_idx = max(0, min(self.edit_idx, len(self.geocode_df) - 1))
+        row = self.geocode_df.iloc[self.edit_idx]
+        self.edit_id_label.setText(str(row.get("id", "") or ""))
+        self.edit_gis_label.setText(str(row.get("name_gis_geocodegroup", "") or ""))
+        self.edit_name.setText(str(row.get("name", "") or ""))
+        self.edit_title.setText(str(row.get("title_user", "") or ""))
+        self.edit_desc.setPlainText(str(row.get("description", "") or ""))
+        self._update_counter()
+        self.edit_state_label.setText(f"Record {self.edit_idx + 1} of {len(self.geocode_df)}")
+
+    def _write_back_to_df(self):
+        if self.geocode_df is None or len(self.geocode_df) == 0:
+            return
+        self.geocode_df.at[self.edit_idx, "name"] = (self.edit_name.text() or "").strip()
+        self.geocode_df.at[self.edit_idx, "title_user"] = (self.edit_title.text() or "").strip()
+        self.geocode_df.at[self.edit_idx, "description"] = self.edit_desc.toPlainText().strip()
+
+    def _save_current(self) -> bool:
+        if self.geocode_df is None or len(self.geocode_df) == 0:
+            QMessageBox.information(self, "Nothing to save", "There are no geocode groups to save.")
+            return False
+        self._write_back_to_df()
+        self.write_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.write_path.with_suffix(".tmp.parquet")
+        try:
+            self.geocode_df.to_parquet(tmp_path, index=False)
+            os.replace(tmp_path, self.write_path)
+            self.edit_state_label.setText("Saved.")
             return True
         except Exception as exc:
             try:
@@ -3460,221 +3428,82 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", m
                     tmp_path.unlink()
             except Exception:
                 pass
-            messagebox.showerror("Error", f"Failed to save geocode edits:\n{exc}")
+            QMessageBox.critical(self, "Error", f"Failed to save geocode edits:\n{exc}")
             return False
 
-    def _save_and_next():
-        if _save_current():
-            _navigate(+1)
+    def _save_and_next(self):
+        if self._save_current():
+            self._navigate(+1)
 
-    def _navigate(step: int):
-        nonlocal geocode_df, edit_idx
-        if geocode_df is None or len(geocode_df) == 0:
+    def _navigate(self, step: int):
+        if self.geocode_df is None or len(self.geocode_df) == 0:
             return
-        _write_back_to_df()
-        edit_idx = max(0, min(edit_idx + int(step), len(geocode_df) - 1))
-        _load_record()
+        self._write_back_to_df()
+        self.edit_idx = max(0, min(self.edit_idx + int(step), len(self.geocode_df) - 1))
+        self._load_record()
 
-    def _refresh_edit_data():
-        nonlocal geocode_df, edit_idx
-        geocode_df = _load_geocode_group_df()
-        edit_idx = min(edit_idx, max((len(geocode_df) if geocode_df is not None else 0) - 1, 0))
-        _load_record()
-        total = len(geocode_df) if geocode_df is not None else 0
-        actual_path = _existing_parquet_path(base, "tbl_geocode_group") or write_path
-        edit_info_var.set(f"Geocode group file: {actual_path} | rows: {total}")
+    def _refresh_edit_data(self):
+        self.geocode_df = self._load_geocode_group_df()
+        self.edit_idx = min(self.edit_idx, max((len(self.geocode_df) if self.geocode_df is not None else 0) - 1, 0))
+        self._load_record()
+        total = len(self.geocode_df) if self.geocode_df is not None else 0
+        actual_path = _existing_parquet_path(self.base, "tbl_geocode_group") or self.write_path
+        self.edit_info_label.setText(f"Geocode group file: {actual_path}  |  rows: {total}")
 
-    def _delete_current_group():
-        nonlocal geocode_df, edit_idx
-        if geocode_df is None or len(geocode_df) == 0:
-            messagebox.showinfo("Delete geocode", "There is no geocode group to delete.")
+    def _delete_current_group(self):
+        if self.geocode_df is None or len(self.geocode_df) == 0:
+            QMessageBox.information(self, "Delete geocode", "There is no geocode group to delete.")
             return
-
-        gis_name = (edit_gis_var.get() or "").strip()
+        gis_name = (self.edit_gis_label.text() or "").strip()
         if not gis_name:
-            messagebox.showerror("Delete geocode", "Current record has no GIS group name.")
+            QMessageBox.critical(self, "Delete geocode", "Current record has no GIS group name.")
             return
-
-        ok = messagebox.askyesno(
-            "Confirm delete",
+        ok = QMessageBox.question(self, "Confirm delete",
             f"Delete geocode group '{gis_name}'?\n\nThis also removes linked geocode objects.",
-        )
-        if not ok:
+            QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
             return
+        _clear_geocode_groups(self.base, [gis_name])
+        self._refresh_group_list()
+        self._refresh_edit_data()
+        self.edit_state_label.setText(f"Deleted geocode group: {gis_name}")
 
-        _clear_geocode_groups(base, [gis_name])
-        _refresh_group_list()
-        _refresh_edit_data()
-        edit_state_var.set(f"Deleted geocode group: {gis_name}")
 
-    ttk.Button(import_actions, text="Import geocodes", bootstyle=PRIMARY, command=_run_import_and_refresh).pack(side=tk.RIGHT, padx=8, pady=6)
-    ttk.Button(import_group_actions, text="Refresh list", command=_refresh_group_list).pack(side=tk.LEFT)
-    ttk.Button(import_group_actions, text="Delete selected", bootstyle="danger", command=_delete_selected_groups).pack(side=tk.LEFT, padx=(6, 0))
-
-    import_log_frame = ttk.LabelFrame(tab_import, text="Log", bootstyle="info")
-    import_log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-    import_log_inner = ttk.Frame(import_log_frame)
-    import_log_inner.pack(fill=tk.BOTH, expand=True)
-    import_log_inner.columnconfigure(0, weight=1)
-    import_log_inner.rowconfigure(0, weight=1)
-    import_log = ttk.Treeview(import_log_inner, columns=("line",), show="headings", height=3)
-    import_log.heading("line", text="Import log")
-    import_log.column("line", anchor="w", stretch=True, width=860)
-    import_log.grid(in_=import_log_inner, row=0, column=0, sticky="nsew")
-    import_scroll = ttk.Scrollbar(import_log_inner, orient="vertical", command=import_log.yview)
-    import_scroll.grid(row=0, column=1, sticky="ns")
-    import_log.configure(yscrollcommand=import_scroll.set)
-    _bind_treeview_copy(import_log)
-
-    log_widgets = [h3_log, import_log]
-
-    edit_actions = ttk.Frame(tab_edit)
-    edit_actions.pack(fill=tk.X, padx=8, pady=(0, 8))
-    ttk.Label(edit_actions, textvariable=edit_counter_var).pack(side=tk.LEFT)
-    ttk.Button(edit_actions, text="Previous", command=lambda: _navigate(-1)).pack(side=tk.LEFT, padx=(12, 0))
-    ttk.Button(edit_actions, text="Next", command=lambda: _navigate(1)).pack(side=tk.LEFT, padx=(6, 0))
-    ttk.Button(edit_actions, text="Reload", command=_refresh_edit_data).pack(side=tk.RIGHT, padx=(0, 6))
-    ttk.Button(edit_actions, text="Delete", bootstyle="danger", command=_delete_current_group).pack(side=tk.RIGHT, padx=(0, 6))
-    ttk.Button(edit_actions, text="Save & Next", bootstyle="primary", command=_save_and_next).pack(side=tk.RIGHT, padx=(0, 6))
-    ttk.Button(edit_actions, text="Save", bootstyle="success", command=_save_current).pack(side=tk.RIGHT)
-
-    _refresh_group_list()
-    _refresh_edit_data()
-
-    # ---------------- Shared footer ----------------
-    footer = ttk.Frame(root)
-    footer.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 8))
-    ttk.Button(footer, text="Exit", bootstyle=WARNING, command=root.destroy).pack(side=tk.RIGHT)
-
-    progress_var = tk.DoubleVar()
-    pbar = ttk.Progressbar(footer, orient="horizontal", mode="determinate", variable=progress_var, bootstyle="info")
-    pbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-
-    progress_label = ttk.Label(footer, text="0%")
-    progress_label.place(in_=pbar, relx=0.5, rely=0.5, anchor="center")
+# =====================================================================
+# Entry points
+# =====================================================================
+def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", master=None):
+    """Create and show the GeocodeManagerWindow."""
+    global _gui_window, original_working_directory
+    original_working_directory = str(base)
 
     try:
-        root.resizable(True, True)
+        global HEARTBEAT_SECS
+        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
     except Exception:
         pass
 
-    try:
-        notebook.bind("<<NotebookTabChanged>>", _sync_log_target_with_tab)
-    except Exception:
-        pass
-    _sync_log_target_with_tab()
+    app = QApplication.instance()
+    own_app = False
+    if app is None:
+        app = QApplication([])
+        app.setStyleSheet(_SHARED_STYLESHEET)
+        own_app = True
 
-    startup_line = f"{datetime.datetime.now().strftime('%Y.%m.%d %H:%M:%S')} [INFO] - Log window initialized."
-    for _lw in (h3_log, import_log):
-        try:
-            if isinstance(_lw, ttk.Treeview):
-                iid = _lw.insert("", tk.END, values=(startup_line,))
-                _lw.see(iid)
-            else:
-                _lw.insert(tk.END, startup_line + "\n")
-                _lw.see(tk.END)
-        except Exception:
-            pass
-    try:
-        mosaic_log.insert("", tk.END, values=(startup_line,))
-    except Exception:
-        pass
-
-    _mosaic_tail_state: dict[str, object] = {
-        "offset": 0,
-        "carry": "",
-        "active": False,
-    }
-
-    def _clear_mosaic_log_view() -> None:
-        try:
-            for iid in mosaic_log.get_children():
-                mosaic_log.delete(iid)
-        except Exception:
-            pass
-
-    def _append_mosaic_line(line: str) -> None:
-        try:
-            iid = mosaic_log.insert("", tk.END, values=(line,))
-            mosaic_log.see(iid)
-            children = mosaic_log.get_children()
-            if len(children) > 2500:
-                for old_iid in children[:500]:
-                    mosaic_log.delete(old_iid)
-        except Exception:
-            pass
-
-    def _refresh_mosaic_log_from_file() -> None:
-        try:
-            if root is None or not root.winfo_exists():
-                return
-        except Exception:
-            return
-
-        try:
-            if not bool(_mosaic_tail_state.get("active", False)):
-                try:
-                    lp = Path(original_working_directory or str(base)) / "log.txt"
-                    if lp.exists():
-                        _mosaic_tail_state["offset"] = int(lp.stat().st_size)
-                except Exception:
-                    pass
-            else:
-                lp = Path(original_working_directory or str(base)) / "log.txt"
-                if lp.exists() and lp.is_file():
-                    start_offset = int(_mosaic_tail_state.get("offset", 0) or 0)
-                    carry = str(_mosaic_tail_state.get("carry", "") or "")
-                    with open(lp, "r", encoding="utf-8", errors="replace") as f:
-                        f.seek(max(0, start_offset))
-                        chunk = f.read()
-                        _mosaic_tail_state["offset"] = int(f.tell())
-
-                    if chunk:
-                        text = carry + chunk
-                        lines = text.splitlines()
-                        if text and not text.endswith(("\n", "\r")):
-                            _mosaic_tail_state["carry"] = lines.pop() if lines else text
-                        else:
-                            _mosaic_tail_state["carry"] = ""
-
-                        for ln in lines:
-                            _append_mosaic_line(ln)
-                            if "Step [Mosaic] COMPLETED" in ln or "Step [Mosaic] FAILED" in ln:
-                                _mosaic_tail_state["active"] = False
-        except Exception:
-            pass
-
-        try:
-            root.after(350, _refresh_mosaic_log_from_file)
-        except Exception:
-            pass
-
-    try:
-        root.after(350, _refresh_mosaic_log_from_file)
-    except Exception:
-        pass
-
-    # NOTE: Keep mosaic log as direct in-memory stream from log_to_gui.
-    # This mirrors previous working behavior and avoids file-tail overwrite races.
+    _gui_window = GeocodeManagerWindow(base, cfg, start_tab)
+    _gui_window.show()
 
     log_to_gui(f"Base dir: {base}")
     log_to_gui(f"GeoParquet out: {gpq_dir(base)}")
-    log_to_gui("Geocode manage ready (Basic mosaic / H3 geocodes / Import geocodes / Edit geocodes).")
-    _update_mosaic_status()
-    if master is None:
-        root.mainloop()
-    return root
+    log_to_gui("Geocode manage ready.")
 
-# -----------------------------------------------------------------------------
-# In-process entry point (called by mesa.py via lazy import)
-# -----------------------------------------------------------------------------
+    if own_app:
+        app.exec()
+    return _gui_window
+
+
 def run(base_dir: str, master=None):
-    """Launch the geocode management GUI in-process.
-
-    mesa.py calls this instead of spawning a subprocess.  The helper is imported
-    once and reused for the session lifetime, so heavy libraries (geopandas, h3,
-    etc.) are loaded only on the first call.
-    """
+    """In-process entry point called by mesa.py via lazy import."""
     global _PARQUET_SUBDIR, original_working_directory, HEARTBEAT_SECS
     base = find_base_dir(base_dir)
     cfg = read_config(config_path(base))
@@ -3687,19 +3516,14 @@ def run(base_dir: str, master=None):
     return build_gui(base, cfg, start_tab="", master=master)
 
 
-# -----------------------------------------------------------------------------
-# Entrypoint
-# -----------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Manage geocodes (Mosaic/H3/Edit)")
     parser.add_argument("--nogui", action="store_true", help="Run in CLI mode")
     parser.add_argument("--original_working_directory", required=False, help="Path to running folder")
-
     parser.add_argument("--h3", action="store_true", help="Generate H3 by range")
     parser.add_argument("--h3-from", dest="h3_from", type=int, default=3)
     parser.add_argument("--h3-to", dest="h3_to", type=int, default=6)
     parser.add_argument("--h3-levels", dest="h3_levels", type=str, default="", help="Comma-separated list, e.g. 5,6,7")
-
     parser.add_argument("--mosaic", action="store_true", help="Generate basic mosaic and publish as geocode")
     parser.add_argument("--buffer-m", dest="buffer_m", type=float, default=25.0)
     parser.add_argument("--grid-size-m", dest="grid_size_m", type=float, default=1000.0)
@@ -3710,16 +3534,10 @@ def main():
     base = find_base_dir(args.original_working_directory)
     cfg = read_config(config_path(base))
 
-    # Respect custom parquet folder if provided
-    global _PARQUET_SUBDIR
+    global _PARQUET_SUBDIR, original_working_directory, HEARTBEAT_SECS
     _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
-
-    global original_working_directory
     original_working_directory = str(base)
-
-    # heartbeat secs
     try:
-        global HEARTBEAT_SECS
         HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
     except Exception:
         pass
@@ -3741,10 +3559,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        mp.set_start_method("spawn", force=False)  # Windows-safe
+        mp.set_start_method("spawn", force=False)
     except RuntimeError:
         pass
-    # Important for PyInstaller child processes on Windows:
     try:
         mp.freeze_support()
     except Exception:
