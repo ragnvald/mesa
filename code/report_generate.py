@@ -4530,7 +4530,7 @@ class ReportGeneratorWindow(QMainWindow):
         self._chk_other_maps.setChecked(True)
         self._chk_index_stats = QCheckBox("Index statistics")
         self._chk_index_stats.setChecked(True)
-        self._chk_lines_segments = QCheckBox("Lines && segments")
+        self._chk_lines_segments = QCheckBox("Lines")
         self._chk_lines_segments.setChecked(True)
         self._chk_atlas = QCheckBox("Atlas maps (detailed)")
         self._chk_atlas.setChecked(False)

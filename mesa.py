@@ -1906,7 +1906,7 @@ class MesaMainWindow(QMainWindow):
                  "Import assets and edit asset groups in one tool."),
                 ("Geocodes", geocodes_grids,
                  "Create or refresh the hexagon/tile grids that support analysis."),
-                ("Lines && segments", edit_lines,
+                ("Lines", edit_lines,
                  "Import and edit lines (transport, rivers, utilities, etc)."),
                 ("Atlas", make_atlas,
                  "Create/import atlas polygons and edit atlas page metadata in one tool."),
@@ -2233,7 +2233,7 @@ class MesaMainWindow(QMainWindow):
         insights_row.addWidget(self._assets_box)
 
         self._lines_box, self._lines_cells = _make_insight_box(
-            "Lines && segments", "Metric", "Value", 4)
+            "Lines", "Metric", "Value", 4)
         insights_row.addWidget(self._lines_box)
 
         self._analysis_box, self._analysis_cells = _make_insight_box(
