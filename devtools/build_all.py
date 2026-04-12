@@ -90,6 +90,17 @@ def resolve_main_script() -> Path:
     searched = "\n  - ".join(str(c) for c in candidates)
     fail(f"Could not find '{APP_NAME}.py'. Searched:\n  - {searched}")
 
+
+def resolve_app_icon() -> Path | None:
+    candidates = [
+        PROJECT_ROOT / "system_resources" / "mesa.ico",
+        CODE_DIR / "system_resources" / "mesa.ico",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
 # ---------------------------------------------------------------------------
 # Setup / Cleanup
 # ---------------------------------------------------------------------------
@@ -550,6 +561,7 @@ def build_helper(basename: str) -> None:
         extra_collects += COLLECT_WEBVIEW
 
     # Ensure Tcl/Tk data is bundled (some helpers may still need it indirectly).
+    icon_path = resolve_app_icon()
     args = FLAGS_HELPER + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + extra_collects + [
         "--name", basename,
         "--distpath", str(TOOLS_DIST),
@@ -557,6 +569,8 @@ def build_helper(basename: str) -> None:
         "--specpath", str(BUILD_FOLDER_ROOT / "helper_specs"),
         str(pyfile),
     ]
+    if icon_path is not None:
+        args[0:0] = ["--icon", str(icon_path)]
     run_pyinstaller(args)
     elapsed = time.perf_counter() - start
     log(f"[HELPER] Finished '{basename}' in {elapsed:.1f}s")
@@ -579,6 +593,7 @@ def build_main() -> None:
         data_args += add_data_arg(sysres, "system_resources")
 
     entry_point = resolve_main_script()
+    icon_path = resolve_app_icon()
 
     args = FLAGS_MAIN + [
         "--name", APP_NAME,
@@ -588,6 +603,8 @@ def build_main() -> None:
         # Allow PyInstaller to find local helper modules (geocode_manage, etc.)
         "--paths", str(CODE_DIR),
     ] + PKG_RESOURCES_HIDDEN_IMPORTS + MESA_INPROCESS_HIDDEN_IMPORTS + data_args + [str(entry_point)]
+    if icon_path is not None:
+        args[0:0] = ["--icon", str(icon_path)]
 
     run_pyinstaller(args)
     elapsed = time.perf_counter() - start

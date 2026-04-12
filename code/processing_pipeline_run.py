@@ -1481,6 +1481,21 @@ class _RunnerSignals(QObject):
     task_finished = Signal()
 
 
+def _shared_window_icon(base_dir: Path) -> QIcon:
+    for candidate in (
+        base_dir / "system_resources" / "icon.png",
+        base_dir / "system_resources" / "mesa.ico",
+    ):
+        try:
+            if candidate.exists():
+                icon = QIcon(str(candidate))
+                if not icon.isNull():
+                    return icon
+        except Exception:
+            pass
+    return QIcon()
+
+
 # ---------------------------------------------------------------------------
 # ProcessRunnerWindow (PySide6)
 # ---------------------------------------------------------------------------
@@ -1499,9 +1514,9 @@ class ProcessRunnerWindow(QMainWindow):
         self.setMinimumSize(700, 440)
 
         try:
-            ico = base_dir / "system_resources" / "mesa.ico"
-            if ico.exists():
-                self.setWindowIcon(QIcon(str(ico)))
+            icon = _shared_window_icon(base_dir)
+            if not icon.isNull():
+                self.setWindowIcon(icon)
         except Exception:
             pass
 
@@ -1781,8 +1796,14 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser, master=None) -> None:
         own_app = True
 
     apply_shared_stylesheet(app)
+    try:
+        icon = _shared_window_icon(base_dir)
+        if not icon.isNull():
+            app.setWindowIcon(icon)
+    except Exception:
+        pass
 
-    win = ProcessRunnerWindow(base_dir, cfg, parent=master)
+    win = ProcessRunnerWindow(base_dir, cfg, parent=None)
     win.show()
 
     if own_app:

@@ -1,6 +1,7 @@
 # Learning log: UI capture and tooling operations (MESA)
 
-Purpose: keep practical, reusable knowledge from UI screenshot work and related tooling changes.
+Purpose: keep practical, reusable knowledge from UI screenshot work, build/package operations, and launcher behavior.
+Historical notes are kept only when they still explain why a later decision exists; superseded constraints should be marked clearly so old guidance does not override current practice.
 
 ## Quick start
 
@@ -19,7 +20,7 @@ Expected output target for batch runs:
 
 This log currently covers:
 
-- Desktop UI capture for `mesa.py` (`Workflows`, `Status`, `Settings`, `About`)
+- Desktop UI capture for `mesa.py` (`Workflows`, `Status`, `Config`, `Tune processing`, `Manage MESA data`, `About`)
 - Helper UI capture for tools under `code/`
 - Capture tooling placement and path conventions under `devtools/`
 
@@ -32,7 +33,12 @@ These moved from `code/` to `devtools/` and should be referenced by new docs/scr
 - `devtools/capture_ui_active_batch.py`
 - `devtools/screenshot_active_window.py`
 
+Current launcher entrypoint:
+
+- `mesa.py`
+
 If you see old paths like `code/compile_win_11.bat` or `code/capture_ui_active_batch.py`, update them.
+If you see old launcher references like `mesa_qt.py`, treat them as stale historical names and update them to `mesa.py`.
 
 ## Stable capture defaults
 
@@ -55,8 +61,10 @@ Desktop tab file mapping:
 
 - `Workflows` -> `ui_mesa_desktop.png`
 - `Status` -> `ui_mesa_desktop_tab2.png`
-- `Settings` -> `ui_mesa_desktop_tab3.png`
-- `About` -> `ui_mesa_desktop_tab4.png`
+- `Config` -> `ui_mesa_desktop_tab3.png`
+- `Tune processing` -> `ui_mesa_desktop_tab4.png`
+- `Manage MESA data` -> `ui_mesa_desktop_tab5.png`
+- `About` -> `ui_mesa_desktop_tab6.png`
 
 ## Known pitfalls and fixes
 
@@ -72,8 +80,8 @@ Desktop tab file mapping:
 - Problem: desktop tab screenshots end up identical
   - Fix: explicitly switch tab and wait before each capture
 
-- Problem: new capture launch blocked by already running helper window
-  - Fix: pre-flight cleanup of stale `mesa.py`/helper Python processes
+- Problem: new capture launch blocked by already running helper window or locked packaged executable
+  - Fix: pre-flight cleanup of stale `mesa.py`, `mesa.exe`, and helper processes before starting captures or rebuilds
 
 ## Geocode UI lessons (recent)
 
@@ -86,6 +94,8 @@ Desktop tab file mapping:
 - `devtools/compile_win_11.bat` is now the canonical full-build entrypoint.
 - `devtools/build_all.py` must resolve `code/` relative to project root, not relative to script folder assumptions from old layout.
 - Keep compile verification lightweight (`py_compile`, `--help`) unless explicit user approval is given for full builds.
+- Do not start larger runs (full compile builds, long processing jobs, broad capture batches, or similar multi-minute operations) without checking with the user first, even if they are technically possible and even if a previous turn included a similar request.
+- Stop any running `dist\mesa\mesa.exe` before rebuilding, or the flatten/copy stage can fail on a locked output file.
 
 ## Screenshot references used in docs
 
@@ -95,9 +105,13 @@ Desktop tabs:
 
 ![Status](../mesa.wiki/images/ui_mesa_desktop_tab2.png)
 
-![Settings](../mesa.wiki/images/ui_mesa_desktop_tab3.png)
+![Config](../mesa.wiki/images/ui_mesa_desktop_tab3.png)
 
-![About](../mesa.wiki/images/ui_mesa_desktop_tab4.png)
+![Tune processing](../mesa.wiki/images/ui_mesa_desktop_tab4.png)
+
+![Manage MESA data](../mesa.wiki/images/ui_mesa_desktop_tab5.png)
+
+![About](../mesa.wiki/images/ui_mesa_desktop_tab6.png)
 
 Selected helper examples:
 
@@ -151,7 +165,7 @@ When a problem is solved, add a short entry here with:
 - Implementation choice:
   - Keep user comments/order in `config.ini` by updating only key lines under `[DEFAULT]` (line-level replacement), instead of rewriting the full INI with `ConfigParser.write()`.
 - User-facing behavior:
-  - After tuning, show a plain-text explanation listing detected hardware, rationale, and old→new values for each updated key.
+  - After tuning, show a plain-text explanation listing detected hardware, rationale, and old->new values for each updated key.
 
 - Rollback extension:
   - Save a lightweight backup JSON at `output/processing_tuning_backup.json` containing only tuned keys and their pre-tune values.
@@ -192,7 +206,8 @@ When a problem is solved, add a short entry here with:
 - Root cause:
   - Multiple requirements files caused ambiguity about which venv should be used for daily work vs packaging.
 - Practical fix / decision:
-  - Standardize `.venv` for development (`requirements_all_win311.txt`) and `.venv_compile` for packaging (`requirements_compile_win311.txt`).
+  - Standardize `.venv` for development (`requirements_all_win311.txt`).
+  - Use `.venv_compile` for packaging when it exists, but keep `.venv` as a supported fallback so builds still run in environments where the compile-specific venv has not been created yet.
 
 ## Webview helper packaging lesson (2026-03-23)
 
@@ -213,15 +228,14 @@ When a problem is solved, add a short entry here with:
 - Practical fix / decision:
   - Keep `config.ini` as the release/version label, but also stamp each packaged build with an explicit build timestamp to reduce confusion.
 
-## Processing setup must stay out-of-process (2026-03-23)
+## Historical note (superseded, 2026-03-23): Processing setup briefly stayed out-of-process
 
-- What changed:
-  - `devtools/build_all.py` now builds `processing_setup.exe` as a normal helper.
-  - `mesa.py` now launches Processing setup as an external GUI process instead of running the module inside `mesa.exe`.
-- Root cause:
-  - `processing_setup.py` is a heavy Tk/GeoPandas helper and starts its own `tb.Window(...).mainloop()`. Running that inside the already-running launcher process made the compiled app look hung and risked nested-Tk issues.
-- Practical fix / decision:
-  - Keep Tk helpers in separate processes. The main launcher should orchestrate them, not embed them.
+- What was true at the time:
+  - Before the PySide6 migration, `processing_setup.py` still behaved like a heavy Tk helper and was safer to keep out-of-process.
+- Why this is superseded:
+  - The current helper is PySide6-based, exposes `run(base_dir, master=None)`, and is now one of the embedded Qt helpers launched in-process from `mesa.py`.
+- Current rule:
+  - Do not rely on this older out-of-process restriction when documenting or changing current launcher behavior.
 
 ## PySide6 launcher and helper finalisation (2026-04-12)
 
@@ -275,7 +289,7 @@ When a problem is solved, add a short entry here with:
 - Root cause:
   - Importing the full GIS/data stack at module import time made frozen helpers look hung before any visible window or status message appeared.
 - Practical fix / decision:
-  - For desktop helpers, show a small loading window first and then import heavy runtime dependencies.
+  - For desktop helpers, defer heavy runtime imports until after the lightweight UI shell is ready.
   - For pywebview helpers, keep the bridge object cheap and initialise GIS/storage backends on first API use.
 
 ## Launcher source runs should self-correct to `.venv` (2026-03-24)
@@ -289,27 +303,29 @@ When a problem is solved, add a short entry here with:
   - Correct the interpreter before importing heavy GUI/runtime dependencies.
   - When relaunching, also set `VIRTUAL_ENV` and prepend the venv `Scripts` folder to `PATH` so descendant processes inherit the expected development environment.
 
-## Source launcher can embed selected helpers via `run(...)` hooks (2026-04-07)
+## Embedded helper launch model (current, 2026-04-12)
 
 - What changed:
-  - `mesa.py` now lazy-imports several helper modules during source runs and launches them in-process on the Tk main thread.
-  - Helpers that are safe to embed expose `run(base_dir, master=...)` and create `tk.Toplevel(...)` windows instead of always owning their own root/mainloop.
+  - `mesa.py` now lazy-imports selected helper modules and launches the embedded Qt helpers in-process through their `run(base_dir, master=None)` entry points.
+  - This applies to both source runs and packaged `mesa.exe` runs for helpers that are bundled as hidden imports.
 - Root cause:
-  - Spawning every helper as a separate Python process in development added startup cost and duplicated heavy imports, but creating extra Tk roots from worker threads caused unstable window behavior.
+  - Launching every helper as a separate process duplicated heavy imports and made the embedded-helper packaging strategy inconsistent with the runtime launcher logic.
 - Practical fix / decision:
-  - Keep frozen `.exe` behavior out-of-process.
-  - For source runs, schedule helper startup with `root.after(...)`, cache imported modules, and restore `cwd` after importing helpers with module-level side effects.
+  - Use in-process launch for the embedded PySide6 helpers.
+  - Keep subprocess launch only for tools that are intentionally standalone, such as the pywebview helpers and the raster-tiles helper.
+  - Do not rely on old Tk-specific rules such as `tk.Toplevel(...)` or `root.after(...)` when describing the current launcher model.
 
-## PySide6 migration from PyQt5 (2026-04-11)
+## PySide6 as canonical Qt binding (2026-04-11)
 
 - What changed:
-  - `mesa_qt.py` switched from PyQt5 to PySide6 (6.11.0), the official Qt for Python binding.
+  - The desktop launcher moved to `mesa.py`, using PySide6 (6.11.0) as the canonical Qt binding.
   - Color palette reworked from cool blue/slate to warm green/oker earth-tone palette, inspired by GRASP Desktop.
 - Key API differences:
-  - `app.exec_()` → `app.exec()` (PySide6 uses the non-underscore form).
+  - `app.exec_()` -> `app.exec()` (PySide6 uses the non-underscore form).
   - Enum paths like `QFont.Bold` still work in PySide6 6.x as compat aliases (resolves to `QFont.Weight.Bold`).
   - Import paths change from `PyQt5.QtWidgets` to `PySide6.QtWidgets` etc., but class/function names are identical.
 - Practical fix / decision:
   - PySide6 chosen over PyQt5 for: LGPL licensing, active maintenance by Qt Company, better long-term support.
-  - Keep PyQt5 in `requirements_all_win311.txt` temporarily (GRASP project still uses it); add PySide6 alongside.
+  - `mesa_qt.py` is no longer the canonical launcher name; update docs and comments to `mesa.py`.
+  - Keep PyQt5 in `requirements_all_win311.txt` only where other repos/projects still depend on it; MESA itself should be documented as PySide6-based.
   - Color palette uses GRASP-inspired earth tones: background `#f3ecdf`, text `#3f3528`, accents `#715a36`/`#9b7c3d`, success `#4d7c0f`, warning `#b45309`, danger `#b02a37`.

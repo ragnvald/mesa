@@ -722,7 +722,10 @@ def _launch_helper_inprocess(file_name: str, base_dir: str | None = None):
     if not callable(run_fn):
         raise AttributeError(f"Module '{file_name}' does not expose a callable run() entry point")
 
-    return _track_helper_window(run_fn(launch_base, master=main_window))
+    # These helpers are standalone Qt windows. Do not parent them to the
+    # launcher main window, or Windows can treat them as owned child windows
+    # with inconsistent title-bar/taskbar icon behaviour.
+    return _track_helper_window(run_fn(launch_base, master=None))
 
 
 def _launch_helper_subprocess(file_name: str, extra_args: list[str] | None = None):

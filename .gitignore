@@ -37,7 +37,11 @@ win/
 mbtiles/
 .tmp*
 output/cache/
+output/geoparquet/
+output/mbtiles/
 output/tile_cache/
+output/tmp/
+output/*.json
 output/reports
 log.txt
 code/log.txt
