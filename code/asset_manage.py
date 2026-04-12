@@ -60,7 +60,6 @@ QWidget#CentralHost {
     background-color: #f3ecdf;
 }
 QWidget {
-    background-color: transparent;
     color: #3f3528;
     font-family: "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
     font-size: 10pt;
@@ -173,7 +172,7 @@ QLineEdit {
 QLineEdit:focus {
     border-color: #b99763;
 }
-QPlainTextEdit {
+QPlainTextEdit, QTextEdit {
     background: #fffdf8;
     border: 1px solid #d9cab1;
     border-radius: 6px;
@@ -183,25 +182,92 @@ QPlainTextEdit {
     selection-background-color: #d7bb7f;
     selection-color: #2f2517;
 }
-QPlainTextEdit:focus {
+QPlainTextEdit:focus, QTextEdit:focus {
     border-color: #b99763;
+}
+QComboBox {
+    background: #fffdf8;
+    border: 1px solid #d9cab1;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 10pt;
+    min-width: 60px;
+}
+QComboBox:hover { border-color: #b99763; }
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox QAbstractItemView {
+    background: #fffdf8;
+    border: 1px solid #d9cab1;
+    selection-background-color: #d7bb7f;
+    selection-color: #2f2517;
+}
+QTableWidget {
+    background: #fffdf8;
+    border: 1px solid #d9cab1;
+    border-radius: 6px;
+    gridline-color: #e2d5bf;
+    font-size: 9pt;
+    alternate-background-color: #f6efdf;
+}
+QTableWidget::item { padding: 4px 8px; }
+QHeaderView::section {
+    background: #eee5d7;
+    color: #5c4a2f;
+    border: 1px solid #d5c3a4;
+    padding: 4px 8px;
+    font-weight: 600;
+    font-size: 9pt;
+}
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+QSplitter::handle {
+    background: #d5c3a4;
 }
 QCheckBox {
     spacing: 6px;
     font-size: 10pt;
 }
 QCheckBox::indicator {
-    width: 15px;
-    height: 15px;
+    width: 16px;
+    height: 16px;
     border-radius: 3px;
 }
 QCheckBox::indicator:unchecked {
-    background: #dfc792;
-    border: 1px solid #684d24;
+    background: #f5edd8;
+    border: 1.5px solid #9a8260;
+}
+QCheckBox::indicator:unchecked:hover {
+    border-color: #715a36;
+    background: #efe3cc;
 }
 QCheckBox::indicator:checked {
-    background: #9a7230;
-    border: 1px solid #513912;
+    background: #715a36;
+    border: 1.5px solid #513912;
+}
+QCheckBox::indicator:checked:hover {
+    background: #8a6d3a;
+}
+QCheckBox::indicator:disabled {
+    background: #e5dcc9;
+    border-color: #c4b699;
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+}
+QRadioButton::indicator:unchecked {
+    background: #f5edd8;
+    border: 1.5px solid #9a8260;
+}
+QRadioButton::indicator:checked {
+    background: #715a36;
+    border: 1.5px solid #513912;
 }
 QProgressBar {
     background: #e7dbc4;
@@ -231,6 +297,21 @@ QScrollBar::handle:vertical:hover {
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
 }
+QScrollBar:horizontal {
+    background: transparent;
+    height: 8px;
+}
+QScrollBar::handle:horizontal {
+    background: #d0bc97;
+    border-radius: 4px;
+    min-width: 30px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #b99763;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
 QToolTip {
     background: #3f3528;
     color: #faf6ee;
@@ -240,6 +321,56 @@ QToolTip {
     font-size: 9pt;
 }
 """
+
+
+def _generate_indicator_stylesheet() -> str:
+    """Generate QSS with checkmark/radio-dot images for checked indicators."""
+    import tempfile as _tmpmod
+    from PySide6.QtGui import QPainter, QPen, QPixmap, QColor
+
+    _dir = os.path.join(_tmpmod.gettempdir(), "mesa_indicators")
+    os.makedirs(_dir, exist_ok=True)
+    _check = os.path.join(_dir, "check.png")
+    _dot = os.path.join(_dir, "dot.png")
+
+    # White checkmark on transparent
+    pm = QPixmap(16, 16)
+    pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor("#ffffff"), 2.2)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.drawLine(3, 8, 6, 12)
+    p.drawLine(6, 12, 13, 4)
+    p.end()
+    pm.save(_check, "PNG")
+
+    # White dot on transparent
+    pm2 = QPixmap(16, 16)
+    pm2.fill(QColor(0, 0, 0, 0))
+    p2 = QPainter(pm2)
+    p2.setRenderHint(QPainter.Antialiasing)
+    p2.setPen(Qt.NoPen)
+    p2.setBrush(QColor("#ffffff"))
+    p2.drawEllipse(4, 4, 8, 8)
+    p2.end()
+    pm2.save(_dot, "PNG")
+
+    cu = _check.replace("\\", "/")
+    du = _dot.replace("\\", "/")
+    return f'''
+QCheckBox::indicator:checked {{ image: url("{cu}"); }}
+QRadioButton::indicator:checked {{ image: url("{du}"); }}
+'''
+
+
+def apply_shared_stylesheet(app) -> None:
+    """Apply ASSET_STYLESHEET plus generated indicator images to a QApplication."""
+    css = ASSET_STYLESHEET + _generate_indicator_stylesheet()
+    app.setStyleSheet(css)
+
 
 BASE_DIR: Path = Path(".").resolve()
 _CFG: configparser.ConfigParser | None = None
@@ -346,7 +477,6 @@ def _ensure_cfg() -> configparser.ConfigParser:
         cfg["DEFAULT"] = {}
     d = cfg["DEFAULT"]
     d.setdefault("parquet_folder", _PARQUET_SUBDIR)
-    d.setdefault("ttk_bootstrap_theme", "flatly")
     d.setdefault("workingprojection_epsg", "4326")
     d.setdefault("input_folder_asset", "input/asset")
     d.setdefault("asset_group_parquet_file", "tbl_asset_group.parquet")
@@ -437,7 +567,6 @@ def load_settings() -> dict:
     return {
         "input_folder_asset": d.get("input_folder_asset", "input/asset"),
         "working_epsg": int(d.get("workingprojection_epsg", "4326")),
-        "ttk_theme": d.get("ttk_bootstrap_theme", "flatly"),
         "asset_group_file": d.get("asset_group_parquet_file", "tbl_asset_group.parquet"),
         "import_validate_geometries": _bool_setting(d.get("import_validate_geometries", "false"), False),
         "import_simplify_geometries": _bool_setting(d.get("import_simplify_geometries", "false"), False),
@@ -596,29 +725,25 @@ class AssetManagerWindow(QMainWindow):
         main_layout.setContentsMargins(10, 8, 10, 8)
         main_layout.setSpacing(6)
 
-        # Tab bar row with Exit button
-        tab_row = QHBoxLayout()
-        tab_row.setContentsMargins(0, 0, 0, 0)
-        tab_row.setSpacing(0)
-
         self.tabs = QTabWidget()
-        tab_row.addWidget(self.tabs, stretch=1)
 
+        # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
-        exit_btn.setFixedSize(72, 28)
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
-            QPushButton {
+            QPushButton#CornerExitButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 9pt;
-                padding: 2px 8px;
+                border-radius: 4px; color: #453621; font-size: 8pt;
+                padding: 2px 14px; margin: 2px 6px;
             }
-            QPushButton:hover { background: #e1d1ae; }
-            QPushButton:pressed { background: #d4c094; }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
         """)
         exit_btn.clicked.connect(self._request_close)
-        tab_row.addWidget(exit_btn, alignment=Qt.AlignTop)
+        self.tabs.setCornerWidget(exit_btn, Qt.TopRightCorner)
 
-        main_layout.addLayout(tab_row, stretch=1)
+        main_layout.addWidget(self.tabs, stretch=1)
 
         # --- Import tab ---
         import_tab = QWidget()
@@ -1144,7 +1269,7 @@ def run(base_dir: str, master=None):
     own_app = False
     if app is None:
         app = QApplication([])
-        app.setStyleSheet(ASSET_STYLESHEET)
+        apply_shared_stylesheet(app)
         own_app = True
     window = AssetManagerWindow(BASE_DIR)
     window.show()
@@ -1167,7 +1292,7 @@ def main():
     _ensure_cfg()
 
     app = QApplication([])
-    app.setStyleSheet(ASSET_STYLESHEET)
+    apply_shared_stylesheet(app)
 
     try:
         ico = BASE_DIR / "system_resources" / "mesa.ico"

@@ -254,10 +254,9 @@ def tcltk_data_args() -> list[str]:
 #   Helpers: full GIS stack, onefile
 #   Main: lean (no GIS), onedir then flattened to FINAL_DIST
 # ---------------------------------------------------------------------------
-COLLECT_TTKBOOTSTRAP = [
-    # ttkbootstrap ships theme assets (tcl/images). Use collect-all to reliably
-    # bundle both code + assets into frozen builds.
-    "--collect-all", "ttkbootstrap",
+COLLECT_PYSIDE6 = [
+    # PySide6 ships Qt plugins, platform themes, and shared libraries.
+    "--collect-all", "PySide6",
 ]
 
 COLLECT_GIS_STACK = [
@@ -330,9 +329,8 @@ MAIN_COLLECTS = [
     # Core data stack
     "--collect-data", "pandas",
     "--collect-data", "pyarrow",
-    # ttkbootstrap ships theme assets (tcl/images). Use collect-all to reliably
-    # bundle both code + assets into frozen builds.
-    "--collect-all", "ttkbootstrap",
+    # PySide6 ships Qt plugins, platform themes, and shared libraries.
+    "--collect-all", "PySide6",
     # Full GIS stack - required by the 7 helpers that now run in-process inside mesa.exe
     "--collect-all", "shapely",
     "--collect-all", "pyproj",
@@ -428,7 +426,7 @@ def helper_collects_for(basename: str) -> list[str]:
 
     if HELPERS_FULL_DEPS:
         collects: list[str] = []
-        collects += COLLECT_TTKBOOTSTRAP
+        collects += COLLECT_PYSIDE6
         collects += PKG_RESOURCES_HIDDEN_IMPORTS
         collects += COLLECT_GIS_STACK
         collects += COLLECT_PANDAS
@@ -474,7 +472,7 @@ def helper_collects_for(basename: str) -> list[str]:
     )
 
     collects: list[str] = []
-    collects += COLLECT_TTKBOOTSTRAP
+    collects += COLLECT_PYSIDE6
     # Always include these small runtime deps to prevent frozen-startup failures
     # caused by transitive pkg_resources imports.
     collects += PKG_RESOURCES_HIDDEN_IMPORTS
@@ -551,7 +549,7 @@ def build_helper(basename: str) -> None:
         # Minimap uses pywebview from the internal module.
         extra_collects += COLLECT_WEBVIEW
 
-    # Ensure Tcl/Tk data is bundled for helpers too (many use ttkbootstrap/tkinter).
+    # Ensure Tcl/Tk data is bundled (some helpers may still need it indirectly).
     args = FLAGS_HELPER + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + extra_collects + [
         "--name", basename,
         "--distpath", str(TOOLS_DIST),
@@ -566,12 +564,12 @@ def build_helper(basename: str) -> None:
 def build_main() -> None:
     start = time.perf_counter()
     log("[MAIN] Building 'mesa'...")
-    # Keep the main app lean; UI launcher only needs ttkbootstrap, pandas, and pyarrow.
+    # Keep the main app lean; UI launcher only needs PySide6, pandas, and pyarrow.
     # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported in mesa.py only when
-    # Status metrics need geometry calculations, and will be loaded from system Python.
+    # status metrics need geometry calculations, and will be loaded from system Python.
     data_args: list[str] = []
 
-    # Ensure Tcl/Tk data is bundled for tkinter/ttkbootstrap.
+    # Ensure Tcl/Tk data is bundled (Tcl/Tk may still be needed indirectly).
     # (Fixes runtime error: "Tk data directory ... not found" in compiled builds.)
     data_args += tcltk_data_args()
 

@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from asset_manage import apply_shared_stylesheet
 
 import argparse
 import configparser
@@ -414,7 +414,7 @@ def run_data_process(
             step=1.2,
             interval_s=0.8,
         )
-        dpi.run_headless(str(base_dir), explode_flat_multipolygons=bool(explode_flat_multipolygons))
+        dpi.run_headless(str(base_dir), explode_flat_multipolygons=bool(explode_flat_multipolygons), log_fn=log_fn)
         stop_pulse.set()
         try:
             pulse_thread.join(timeout=0.2)
@@ -1526,12 +1526,12 @@ class ProcessRunnerWindow(QMainWindow):
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
-        self._progress_bar.setFixedWidth(280)
-        prog_row.addWidget(self._progress_bar)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        prog_row.addWidget(self._progress_bar, stretch=1)
         self._progress_label = QLabel("0%")
         self._progress_label.setMinimumWidth(40)
         prog_row.addWidget(self._progress_label)
-        prog_row.addStretch()
         layout.addLayout(prog_row)
 
         # Info label
@@ -1667,6 +1667,15 @@ class ProcessRunnerWindow(QMainWindow):
 
     def _on_task_finished(self) -> None:
         self._process_btn.setEnabled(True)
+        # Resume log-file tailing; skip to current EOF so we don't replay
+        # lines already shown via the worker's direct signal path.
+        log_path = self._base_dir / "log.txt"
+        try:
+            if log_path.exists():
+                self._tail_state[str(log_path)] = log_path.stat().st_size
+        except Exception:
+            pass
+        self._tail_timer.start()
 
     # ------------------------------------------------------------------
     # Log tailer
@@ -1732,6 +1741,10 @@ class ProcessRunnerWindow(QMainWindow):
 
     def _on_process_click(self) -> None:
         self._process_btn.setEnabled(False)
+        # Pause log-file tailing while the worker is running — the worker
+        # sends lines directly via signals, and _log_line also writes to
+        # log.txt, so tailing would duplicate every line.
+        self._tail_timer.stop()
         t = threading.Thread(target=self._worker, daemon=True)
         t.start()
 
@@ -1767,7 +1780,7 @@ def run_ui(base_dir: Path, cfg: configparser.ConfigParser, master=None) -> None:
         app = QApplication(sys.argv)
         own_app = True
 
-    app.setStyleSheet(_SHARED_STYLESHEET)
+    apply_shared_stylesheet(app)
 
     win = ProcessRunnerWindow(base_dir, cfg, parent=master)
     win.show()

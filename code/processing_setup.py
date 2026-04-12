@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-# MESA – Setup & Registration (2 views: Indexes and Sensitivity)
+# MESA – Processing setup (2 tabs: Sensitivity and Index weights)
 # Persistence: GeoParquet + JSON only (GPKG removed)
 # PySide6 UI (migrated from ttkbootstrap).
 
@@ -100,11 +100,12 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QGroupBox, QLabel, QPushButton, QLineEdit,
     QScrollArea, QFrame, QSizePolicy, QMessageBox, QFileDialog,
+    QTabWidget,
 )
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtCore import Qt, Signal, QObject
 
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from asset_manage import apply_shared_stylesheet
 
 # -------------------------------
 # Path helpers
@@ -848,9 +849,9 @@ class SetupWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _build_ui(self):
-        self.setWindowTitle("MESA - Setup & Registration (GeoParquet)")
-        self.resize(1100, 860)
-        self.setMinimumSize(800, 600)
+        self.setWindowTitle("MESA - Processing setup")
+        self.resize(960, 620)
+        self.setMinimumSize(740, 440)
 
         try:
             icon_path = resource_path(Path("system_resources") / "mesa.ico")
@@ -862,130 +863,98 @@ class SetupWindow(QMainWindow):
         central = QWidget()
         central.setObjectName("CentralHost")
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
 
-        # --- Left navigation panel ---
-        nav_widget = QWidget()
-        nav_widget.setFixedWidth(260)
-        nav_layout = QVBoxLayout(nav_widget)
-        nav_layout.setContentsMargins(12, 12, 12, 12)
-        nav_layout.setSpacing(4)
+        # --- Tabs: Sensitivity + Indexes ---
+        self._tabs = QTabWidget()
+        main_layout.addWidget(self._tabs, stretch=1)
 
-        lbl_edit = QLabel("Edit")
-        lbl_edit.setStyleSheet("color: #9a8a6e; font-size: 9pt; font-weight: 600;")
-        nav_layout.addWidget(lbl_edit)
+        # Tab 1 – Sensitivity
+        self._view_sensitivity = QWidget()
+        self._build_sensitivity_view(self._view_sensitivity)
+        self._tabs.addTab(self._view_sensitivity, "Sensitivity")
 
-        btn_indexes = QPushButton("Edit indexes")
-        btn_indexes.setProperty("role", "primary")
-        btn_indexes.clicked.connect(lambda: self._show_view("indexes"))
-        nav_layout.addWidget(btn_indexes)
+        # Tab 2 – Indexes
+        self._view_indexes = QWidget()
+        self._build_indexes_view(self._view_indexes)
+        self._tabs.addTab(self._view_indexes, "Index weights")
 
-        btn_sensitivity = QPushButton("Edit sensitivity")
-        btn_sensitivity.setProperty("role", "primary")
-        btn_sensitivity.clicked.connect(lambda: self._show_view("sensitivity"))
-        nav_layout.addWidget(btn_sensitivity)
-
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #cbb791;")
-        nav_layout.addSpacing(12)
-        nav_layout.addWidget(sep)
-        nav_layout.addSpacing(12)
-
-        lbl_data = QLabel("Data management")
-        lbl_data.setStyleSheet("color: #9a8a6e; font-size: 9pt; font-weight: 600;")
-        nav_layout.addWidget(lbl_data)
-
-        btn_save_excel = QPushButton("Save to Excel")
-        btn_save_excel.setProperty("role", "success")
-        btn_save_excel.clicked.connect(self._do_save_all_excel)
-        nav_layout.addWidget(btn_save_excel)
-
-        btn_load_excel = QPushButton("Load from Excel")
-        btn_load_excel.clicked.connect(self._do_load_all_excel)
-        nav_layout.addWidget(btn_load_excel)
-
-        btn_save_db = QPushButton("Save")
-        btn_save_db.setProperty("role", "primary")
-        btn_save_db.clicked.connect(self._do_save_database)
-        nav_layout.addWidget(btn_save_db)
-
-        nav_layout.addStretch(1)
-
-        # Exit button at bottom
-        btn_exit = QPushButton("Exit")
-        btn_exit.setStyleSheet("""
+        # --- Right corner: data-management buttons + Exit ---
+        _corner_css = """
             QPushButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 9pt;
-                padding: 2px 8px;
+                border-radius: 4px; color: #453621; font-size: 8pt;
+                padding: 2px 8px; margin: 1px 2px; min-width: 0;
             }
             QPushButton:hover { background: #e1d1ae; }
             QPushButton:pressed { background: #d4c094; }
-        """)
-        btn_exit.clicked.connect(self._close_application)
-        nav_layout.addWidget(btn_exit)
+        """
+        corner = QWidget()
+        corner_lay = QHBoxLayout(corner)
+        corner_lay.setContentsMargins(0, 0, 0, 0)
+        corner_lay.setSpacing(2)
 
-        # Status label at bottom of nav
+        btn_save_excel = QPushButton("Save to Excel")
+        btn_save_excel.setStyleSheet(_corner_css)
+        btn_save_excel.clicked.connect(self._do_save_all_excel)
+        corner_lay.addWidget(btn_save_excel)
+
+        btn_load_excel = QPushButton("Load from Excel")
+        btn_load_excel.setStyleSheet(_corner_css)
+        btn_load_excel.clicked.connect(self._do_load_all_excel)
+        corner_lay.addWidget(btn_load_excel)
+
+        btn_save_db = QPushButton("Save")
+        btn_save_db.setStyleSheet(_corner_css.replace("#eadfc8", "#d9bd7d")
+                                              .replace("#b79f73", "#9b7c3d")
+                                              .replace("#e1d1ae", "#e1c78d")
+                                              .replace("#d4c094", "#cfb06f"))
+        btn_save_db.clicked.connect(self._do_save_database)
+        corner_lay.addWidget(btn_save_db)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedHeight(18)
+        sep.setStyleSheet("color: #cbb791;")
+        corner_lay.addWidget(sep)
+
+        exit_btn = QPushButton("Exit")
+        exit_btn.setStyleSheet(_corner_css)
+        exit_btn.clicked.connect(self._close_application)
+        corner_lay.addWidget(exit_btn)
+
+        self._tabs.setCornerWidget(corner, Qt.TopRightCorner)
+
+        # --- Status label at bottom ---
         global status_message_var
         self._status_label = QLabel("Ready")
-        self._status_label.setWordWrap(True)
         self._status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
         status_message_var = self._status_label
-        nav_layout.addWidget(self._status_label)
-
-        main_layout.addWidget(nav_widget)
-
-        # --- Right content area ---
-        self._content_widget = QWidget()
-        content_layout = QVBoxLayout(self._content_widget)
-        content_layout.setContentsMargins(12, 12, 12, 12)
-        content_layout.setSpacing(0)
-
-        # Indexes view
-        self._view_indexes = QWidget()
-        self._build_indexes_view(self._view_indexes)
-
-        # Sensitivity view
-        self._view_sensitivity = QWidget()
-        self._build_sensitivity_view(self._view_sensitivity)
-
-        content_layout.addWidget(self._view_indexes)
-        content_layout.addWidget(self._view_sensitivity)
-
-        main_layout.addWidget(self._content_widget, stretch=1)
-
-        # Default view
-        self._show_view("sensitivity")
-
-    # ------------------------------------------------------------------
-    def _show_view(self, which: str):
-        which = (which or "").strip().lower()
-        if which == "indexes":
-            self._view_indexes.setVisible(True)
-            self._view_sensitivity.setVisible(False)
-        else:
-            self._view_indexes.setVisible(False)
-            self._view_sensitivity.setVisible(True)
+        main_layout.addWidget(self._status_label)
 
     # ------------------------------------------------------------------
     def _build_indexes_view(self, parent: QWidget):
         global index_weight_vars
         layout = QVBoxLayout(parent)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
         info = (
-            "Configure weighting for the new importance and sensitivity indexes.\n"
-            "Importance uses input values 1-5. Sensitivity uses the product importance x susceptibility.\n"
-            "Weights must be positive integers; higher weights increase the contribution when\n"
-            "counting overlapping assets inside each mosaic cell."
+            "Index weights control how importance and sensitivity values are aggregated "
+            "when multiple asset layers overlap within the same mosaic cell.\n\n"
+            "Importance index — Each asset layer has an importance value from 1 (low) to 5 (high). "
+            "The weight assigned here determines how much each importance level contributes to the "
+            "aggregated importance score. A higher weight increases the influence of that level.\n\n"
+            "Sensitivity index (OWA) — Sensitivity is the product of importance × susceptibility "
+            "(resulting in values like 1, 2, 3, …, 25). The Ordered Weighted Average (OWA) weights "
+            "here determine how overlapping sensitivity values are combined. This allows you to "
+            "emphasise either the highest or lowest sensitivity overlaps."
         )
         info_label = QLabel(info)
         info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #5c4a2f; font-size: 9pt; padding: 4px 0;")
         layout.addWidget(info_label)
 
         sections = [
@@ -1038,8 +1007,16 @@ class SetupWindow(QMainWindow):
     def _build_sensitivity_view(self, parent: QWidget):
         global entries_vuln
         layout = QVBoxLayout(parent)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        info = QLabel(
+            "Set the importance and susceptibility for each asset layer. "
+            "Sensitivity is calculated automatically as importance × susceptibility."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #5c4a2f; font-size: 9pt; padding: 4px 0;")
+        layout.addWidget(info)
 
         # Scroll area
         scroll = QScrollArea()
@@ -1050,6 +1027,7 @@ class SetupWindow(QMainWindow):
         grid = QGridLayout(container)
         grid.setSpacing(4)
         grid.setContentsMargins(4, 4, 4, 4)
+        grid.setAlignment(Qt.AlignTop)
 
         # Headers
         headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]
@@ -1236,7 +1214,7 @@ def run(base_dir: str, master=None) -> None:
     own_app = False
     if app is None:
         app = QApplication([])
-        app.setStyleSheet(_SHARED_STYLESHEET)
+        apply_shared_stylesheet(app)
         own_app = True
 
     window = SetupWindow(original_working_directory)
@@ -1252,7 +1230,7 @@ def run(base_dir: str, master=None) -> None:
 # Entrypoint (single, Parquet+JSON)
 # -------------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='MESA - Setup & Registration (GeoParquet)')
+    parser = argparse.ArgumentParser(description='MESA - Processing setup')
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
     args = parser.parse_args()
     run(args.original_working_directory)

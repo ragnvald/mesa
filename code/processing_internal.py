@@ -3,7 +3,7 @@
 # UI: two panes (left: logs/progress/buttons; right: minimap launcher).
 # Minimap opens in a separate, low-priority helper process (pywebview + Leaflet + OSM).
 
-import os, sys, math, re, time, random, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
+import os, sys, math, re, time, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
 import configparser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from asset_manage import apply_shared_stylesheet
 
 import traceback as _traceback
 
@@ -56,6 +56,10 @@ _gui_window = None
 # When true, GUI log updates are driven by the log tailer (tailing log.txt).
 # Avoid also inserting via log_to_gui() to prevent duplicate lines.
 _GUI_LOG_TAILER_ACTIVE = False
+
+# External log callback — set by processing_pipeline_run.py so that headless
+# log output flows directly to the caller's GUI instead of stdout.
+_external_log_fn = None  # type: Callable[[str], None] | None
 
 
 class _ProcessingSignals(QObject):
@@ -355,12 +359,20 @@ def log_to_gui(widget, message: str):
             _signals.log_message.emit(formatted)
     except Exception:
         pass
+    # Write to log.txt
     try:
         with open(base_dir() / "log.txt", "a", encoding="utf-8") as f:
             f.write(formatted + "\n")
     except Exception:
-        print(formatted, flush=True)
-    if _gui_window is None:
+        pass
+    # Route to external callback (headless mode called from pipeline runner)
+    if _external_log_fn is not None:
+        try:
+            _external_log_fn(formatted)
+        except Exception:
+            pass
+    elif _gui_window is None:
+        # Fallback to stdout only when no GUI and no external callback
         print(formatted, flush=True)
 
 
@@ -2873,7 +2885,7 @@ let MAP, GROUP;
 function init(){
   try {
     MAP = L.map('map', { zoomSnap: 0.25 });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(MAP);
+    L.tileLayer('__TILE_URL__', {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(MAP);
     GROUP = L.featureGroup().addTo(MAP);
     MAP.setView([59.9,10.75], 4); // harmless default
     refresh();
@@ -3007,6 +3019,22 @@ def _map_process_entry(status_path_str: str):
             pass
         return
 
+    # Start local OSM tile proxy (same approach as other MESA viewers)
+    _osm_proxy = None
+    tile_url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # fallback
+    try:
+        from mesa_osm_tiles import start_osm_tile_proxy, build_osm_user_agent, choose_cache_dir
+        ua = build_osm_user_agent("MESA-Minimap")
+        _osm_proxy = start_osm_tile_proxy(
+            user_agent=ua,
+            cache_dir=choose_cache_dir("mesa_minimap_tiles"),
+        )
+        tile_url = f"{_osm_proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
+    except Exception:
+        pass  # fall back to direct URL (may be blocked by OSM)
+
+    html = MAP_HTML.replace("__TILE_URL__", tile_url)
+
     class MapApi:
         def __init__(self, status_path: Path):
             self.status_path = str(status_path)
@@ -3019,7 +3047,7 @@ def _map_process_entry(status_path_str: str):
 
     api = MapApi(Path(status_path_str))
     try:
-        webview.create_window(title="Minimap — chunks", html=MAP_HTML, js_api=api, width=600, height=600)
+        webview.create_window(title="Minimap — chunks", html=html, js_api=api, width=600, height=600)
     except Exception as exc:
         try:
             log_to_gui(None, f"[Minimap] create_window failed: {exc}")
@@ -3040,7 +3068,14 @@ def _map_process_entry(status_path_str: str):
                 log_to_gui(None, f"[Minimap] webview start failed (fallback): {exc2}")
             except Exception:
                 pass
-            return
+    finally:
+        # Stop the OSM tile proxy when the minimap window closes
+        if _osm_proxy is not None:
+            try:
+                from mesa_osm_tiles import stop_osm_tile_proxy
+                stop_osm_tile_proxy(_osm_proxy)
+            except Exception:
+                pass
 
 def open_minimap_window():
     """Spawn the map helper process (single instance)."""
@@ -3475,11 +3510,14 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
 _EXPLODE_TBL_FLAT_MULTIPOLYGONS: bool = False
 
 
-def run_headless(original_working_directory_arg: str | None = None, *, explode_flat_multipolygons: bool = False) -> None:
+def run_headless(original_working_directory_arg: str | None = None, *, explode_flat_multipolygons: bool = False, log_fn=None) -> None:
     """Entry point for headless processing (callable from other modules).
 
     This mirrors the __main__ headless initialization without calling sys.exit.
+    If *log_fn* is provided, log output is routed there instead of stdout.
     """
+    global _external_log_fn
+    _external_log_fn = log_fn
     # Windows + PyInstaller: ensure child processes bootstrap correctly.
     try:
         import multiprocessing as _mp
@@ -3525,7 +3563,10 @@ def run_headless(original_working_directory_arg: str | None = None, *, explode_f
     global _EXPLODE_TBL_FLAT_MULTIPOLYGONS
     _EXPLODE_TBL_FLAT_MULTIPOLYGONS = bool(explode_flat_multipolygons)
 
-    run_processing_pipeline(cfg_path)
+    try:
+        run_processing_pipeline(cfg_path)
+    finally:
+        _external_log_fn = None
 
 
 if __name__ == "__main__":
@@ -3587,7 +3628,7 @@ if __name__ == "__main__":
 
     # --- PySide6 GUI mode ---
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setStyleSheet(_SHARED_STYLESHEET)
+    apply_shared_stylesheet(app)
 
     _signals = _ProcessingSignals()
 
@@ -3662,6 +3703,7 @@ class ProcessingInternalWindow(QMainWindow):
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(False)
         self._progress_bar.setFixedWidth(260)
         progress_frame.addWidget(self._progress_bar)
         progress_bar = self._progress_bar

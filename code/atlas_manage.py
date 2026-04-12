@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from asset_manage import apply_shared_stylesheet
 
 
 BASE_DIR: Path = Path(".").resolve()
@@ -94,7 +94,6 @@ def _ensure_cfg() -> configparser.ConfigParser:
 
     d = cfg["DEFAULT"]
     d.setdefault("parquet_folder", _PARQUET_SUBDIR)
-    d.setdefault("ttk_bootstrap_theme", "flatly")
     d.setdefault("workingprojection_epsg", "4326")
     d.setdefault("input_folder_atlas", "input/atlas")
     d.setdefault("atlas_parquet_file", TABLE_ATLAS)
@@ -315,29 +314,25 @@ class AtlasManagerWindow(QMainWindow):
         main_layout.setContentsMargins(10, 8, 10, 8)
         main_layout.setSpacing(6)
 
-        # Tab bar row with Exit button
-        tab_row = QHBoxLayout()
-        tab_row.setContentsMargins(0, 0, 0, 0)
-        tab_row.setSpacing(0)
-
         self.tabs = QTabWidget()
-        tab_row.addWidget(self.tabs, stretch=1)
 
+        # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
-        exit_btn.setFixedSize(72, 28)
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
-            QPushButton {
+            QPushButton#CornerExitButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 9pt;
-                padding: 2px 8px;
+                border-radius: 4px; color: #453621; font-size: 8pt;
+                padding: 2px 14px; margin: 2px 6px;
             }
-            QPushButton:hover { background: #e1d1ae; }
-            QPushButton:pressed { background: #d4c094; }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
         """)
         exit_btn.clicked.connect(self.close)
-        tab_row.addWidget(exit_btn, alignment=Qt.AlignTop)
+        self.tabs.setCornerWidget(exit_btn, Qt.TopRightCorner)
 
-        main_layout.addLayout(tab_row, stretch=1)
+        main_layout.addWidget(self.tabs, stretch=1)
 
         # --- Create / Import tab ---
         create_tab = QWidget()
@@ -1393,7 +1388,7 @@ def run(base_dir: str, master=None):
     own_app = False
     if app is None:
         app = QApplication([])
-        app.setStyleSheet(_SHARED_STYLESHEET)
+        apply_shared_stylesheet(app)
         own_app = True
     window = AtlasManagerWindow(BASE_DIR)
     window.show()
@@ -1416,7 +1411,7 @@ def main():
     _ensure_cfg()
 
     app = QApplication([])
-    app.setStyleSheet(_SHARED_STYLESHEET)
+    apply_shared_stylesheet(app)
 
     try:
         ico = BASE_DIR / "system_resources" / "mesa.ico"

@@ -10,9 +10,9 @@ from PySide6.QtWidgets import (
     QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QRadioButton,
     QComboBox, QProgressBar, QFrame, QSizePolicy, QButtonGroup, QMessageBox,
 )
-from PySide6.QtGui import QIcon, QFont, QDesktopServices
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from asset_manage import apply_shared_stylesheet
 
 import geopandas as gpd
 import pandas as pd
@@ -60,8 +60,7 @@ except ModuleNotFoundError as exc:
         "  requirements_compile_win311.txt (or requirements_all_win311.txt)\n\n"
         f"Original error: {exc}"
     )
-    import sys as _sys
-    print(msg, file=_sys.stderr, flush=True)
+    print(msg, file=sys.stderr, flush=True)
     try:
         _app = QApplication.instance() or QApplication([])
         QMessageBox.critical(None, "MESA report engine", msg)
@@ -4746,7 +4745,7 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     own_app = app is None
     if own_app:
         app = QApplication([])
-        app.setStyleSheet(_SHARED_STYLESHEET)
+        apply_shared_stylesheet(app)
 
     window = ReportGeneratorWindow(base_dir, config_file, palette, desc)
     window.show()

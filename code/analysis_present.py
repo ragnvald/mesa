@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, Signal, QObject
 
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from asset_manage import apply_shared_stylesheet
 from mesa_shared import find_base_dir as resolve_base_dir
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
@@ -1690,6 +1690,22 @@ class ComparisonWindow(QMainWindow):
         self.notebook.addTab(self.sankey_view, "Area difference (Sankey)")
         self.comparison_view = ComparisonTotalsView()
         self.notebook.addTab(self.comparison_view, "Comparison totals")
+
+        # Compact Exit button in tab bar corner
+        exit_btn = QPushButton("Exit")
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setFixedHeight(24)
+        exit_btn.setStyleSheet("""
+            QPushButton#CornerExitButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621; font-size: 8pt;
+                padding: 2px 14px; margin: 2px 6px;
+            }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
+        """)
+        exit_btn.clicked.connect(self.close)
+        self.notebook.setCornerWidget(exit_btn, Qt.TopRightCorner)
         main_layout.addWidget(self.notebook, 1)
 
         # Report feedback
@@ -1705,14 +1721,12 @@ class ComparisonWindow(QMainWindow):
         self.report_link.hide()
         main_layout.addWidget(self.report_link)
 
-        # Footer buttons
+        # Footer
         footer_layout = QHBoxLayout()
         btn_report = QPushButton("Print report")
         btn_report.clicked.connect(self._export_comprehensive_report)
-        footer_layout.addWidget(btn_report, 1)
-        btn_exit = QPushButton("Exit")
-        btn_exit.clicked.connect(self.close)
-        footer_layout.addWidget(btn_exit, 1)
+        footer_layout.addWidget(btn_report)
+        footer_layout.addStretch()
         main_layout.addLayout(footer_layout)
 
         # State
@@ -1976,7 +1990,7 @@ def main(argv: Optional[List[str]] = None, master=None) -> None:
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-        app.setStyleSheet(_SHARED_STYLESHEET)
+        apply_shared_stylesheet(app)
         own_app = True
     else:
         own_app = False

@@ -2,6 +2,7 @@ import os
 import locale
 import sys
 import warnings
+import importlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -103,6 +104,7 @@ import configparser
 import platform
 import shutil
 import json
+import tempfile
 from datetime import datetime
 import threading
 import pyarrow.parquet as pq
@@ -141,6 +143,17 @@ RESOURCE_BASE = getattr(sys, "_MEIPASS", PROJECT_BASE)
 # Qt application reference (assigned when UI initializes)
 app = None
 main_window = None
+_launched_helper_windows = []
+
+INPROCESS_HELPERS = {
+    "geocode_manage",
+    "asset_manage",
+    "processing_setup",
+    "processing_pipeline_run",
+    "atlas_manage",
+    "report_generate",
+    "analysis_present",
+}
 
 # ---------------------------------------------------------------------
 # Path resolver
@@ -675,8 +688,43 @@ def get_script_paths(file_name: str):
     return python_script, exe_file
 
 # ---------------------------------------------------------------------
-# Helper launcher  (always out-of-process -- Qt cannot host Tk windows)
+# Helper launchers
 # ---------------------------------------------------------------------
+def _ensure_code_dir_on_syspath() -> None:
+    code_dir = os.path.join(PROJECT_BASE, "code")
+    if not os.path.isdir(code_dir):
+        return
+
+    norm_target = os.path.normcase(os.path.abspath(code_dir))
+    for entry in sys.path:
+        try:
+            if os.path.normcase(os.path.abspath(entry)) == norm_target:
+                return
+        except Exception:
+            continue
+    sys.path.insert(0, code_dir)
+
+
+def _track_helper_window(window):
+    if window is None:
+        return None
+    _launched_helper_windows.append(window)
+    return window
+
+
+def _launch_helper_inprocess(file_name: str, base_dir: str | None = None):
+    _ensure_code_dir_on_syspath()
+    launch_base = os.path.abspath(base_dir or original_working_directory or PROJECT_BASE)
+    log_to_logfile(f"Launching {file_name} in-process with base_dir={launch_base}")
+
+    module = importlib.import_module(file_name)
+    run_fn = getattr(module, "run", None)
+    if not callable(run_fn):
+        raise AttributeError(f"Module '{file_name}' does not expose a callable run() entry point")
+
+    return _track_helper_window(run_fn(launch_base, master=main_window))
+
+
 def _launch_helper_subprocess(file_name: str, extra_args: list[str] | None = None):
     """Launch a helper tool as a subprocess. Works for both source and frozen."""
     python_script, exe_file = get_script_paths(file_name)
@@ -688,29 +736,51 @@ def _launch_helper_subprocess(file_name: str, extra_args: list[str] | None = Non
         _launch_gui_process([python_exe, python_script, *args], f"{file_name} script")
 
 
+def _launch_helper(file_name: str, extra_args: list[str] | None = None, base_dir: str | None = None):
+    if file_name in INPROCESS_HELPERS:
+        try:
+            return _launch_helper_inprocess(file_name, base_dir=base_dir)
+        except Exception as exc:
+            log_to_logfile(f"Failed to launch {file_name} in-process: {exc}")
+            python_script, exe_file = get_script_paths(file_name)
+            if os.path.exists(python_script) or os.path.exists(exe_file):
+                log_to_logfile(f"Falling back to subprocess launch for {file_name}")
+                return _launch_helper_subprocess(file_name, extra_args)
+
+            if main_window is not None:
+                QMessageBox.critical(
+                    main_window,
+                    "Launch failed",
+                    f"Could not open '{file_name}'.\n\n{exc}",
+                )
+            return None
+
+    return _launch_helper_subprocess(file_name, extra_args)
+
+
 # ---------------------------------------------------------------------
 # Button handlers
 # ---------------------------------------------------------------------
 def geocodes_grids():
-    log_to_logfile("Launching geocode_manage subprocess")
-    _launch_helper_subprocess("geocode_manage", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching geocode_manage")
+    _launch_helper("geocode_manage", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def open_assets():
-    log_to_logfile("Launching asset_manage subprocess")
-    _launch_helper_subprocess("asset_manage", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching asset_manage")
+    _launch_helper("asset_manage", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def edit_processing_setup():
-    log_to_logfile("Launching processing_setup subprocess")
-    _launch_helper_subprocess("processing_setup", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching processing_setup")
+    _launch_helper("processing_setup", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def open_process_all():
     log_to_logfile("[Process] STARTED")
-    log_to_logfile("Launching processing_pipeline_run subprocess")
-    _launch_helper_subprocess("processing_pipeline_run", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching processing_pipeline_run")
+    _launch_helper("processing_pipeline_run", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def make_atlas():
-    log_to_logfile("Launching atlas_manage subprocess")
-    _launch_helper_subprocess("atlas_manage", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching atlas_manage")
+    _launch_helper("atlas_manage", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def open_maps_overview():
     log_to_logfile("Launching map_overview subprocess")
@@ -721,16 +791,16 @@ def open_asset_layers_viewer():
     _launch_helper_subprocess("asset_map_view")
 
 def open_present_files():
-    log_to_logfile("Launching report_generate subprocess")
-    _launch_helper_subprocess("report_generate", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching report_generate")
+    _launch_helper("report_generate", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def open_data_analysis_setup():
     log_to_logfile("Launching analysis_setup subprocess")
     _launch_helper_subprocess("analysis_setup", ["--original_working_directory", original_working_directory])
 
 def open_data_analysis_presentation():
-    log_to_logfile("Launching analysis_present subprocess")
-    _launch_helper_subprocess("analysis_present", ["--original_working_directory", original_working_directory])
+    log_to_logfile("Launching analysis_present")
+    _launch_helper("analysis_present", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def edit_lines():
     chosen_base = _preferred_lines_base_dir()
@@ -1235,7 +1305,6 @@ QWidget#CentralWidget {
     background-color: #f3ecdf;
 }
 QWidget {
-    background-color: transparent;
     color: #3f3528;
     font-family: "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
     font-size: 10pt;
@@ -1425,18 +1494,54 @@ QHeaderView::section {
 }
 
 /* ---- Checkboxes ---- */
+QCheckBox {
+    spacing: 6px;
+}
 QCheckBox::indicator {
-    width: 15px;
-    height: 15px;
+    width: 16px;
+    height: 16px;
     border-radius: 3px;
 }
 QCheckBox::indicator:unchecked {
-    background: #dfc792;
-    border: 1px solid #684d24;
+    background: #f5edd8;
+    border: 1.5px solid #9a8260;
+}
+QCheckBox::indicator:unchecked:hover {
+    border-color: #715a36;
+    background: #efe3cc;
 }
 QCheckBox::indicator:checked {
-    background: #9a7230;
-    border: 1px solid #513912;
+    background: #715a36;
+    border: 1.5px solid #513912;
+}
+QCheckBox::indicator:checked:hover {
+    background: #8a6d3a;
+}
+QCheckBox::indicator:disabled {
+    background: #e5dcc9;
+    border-color: #c4b699;
+}
+
+/* ---- Radio buttons ---- */
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+}
+QRadioButton::indicator:unchecked {
+    background: #f5edd8;
+    border: 1.5px solid #9a8260;
+}
+QRadioButton::indicator:unchecked:hover {
+    border-color: #715a36;
+    background: #efe3cc;
+}
+QRadioButton::indicator:checked {
+    background: #715a36;
+    border: 1.5px solid #513912;
+}
+QRadioButton::indicator:checked:hover {
+    background: #8a6d3a;
 }
 
 /* ---- Scroll bars (thin, modern) ---- */
@@ -1705,8 +1810,8 @@ class MesaMainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         # Size: 5:3 aspect ratio, large enough for all content
-        self.resize(1340, 804)
-        self.setMinimumSize(1000, 600)
+        self.resize(1160, 740)
+        self.setMinimumSize(900, 560)
 
         # Central widget
         central = QWidget()
@@ -1750,31 +1855,25 @@ class MesaMainWindow(QMainWindow):
     # Tabs (with Exit button right-aligned on the tab bar row)
     # ------------------------------------------------------------------
     def _build_tabs(self):
-        # Row: tab bar on the left, Exit button on the right
-        tab_row = QHBoxLayout()
-        tab_row.setContentsMargins(0, 0, 0, 0)
-        tab_row.setSpacing(0)
-
         self._tabs = QTabWidget()
-        tab_row.addWidget(self._tabs, stretch=1)
 
-        # Exit button sitting right of the tab bar
+        # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
         exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setFixedSize(72, 28)
+        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
             QPushButton#CornerExitButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 9pt;
-                padding: 2px 8px;
+                border-radius: 4px; color: #453621; font-size: 8pt;
+                padding: 2px 14px; margin: 2px 6px;
             }
             QPushButton#CornerExitButton:hover { background: #e1d1ae; }
             QPushButton#CornerExitButton:pressed { background: #d4c094; }
         """)
         exit_btn.clicked.connect(self.close)
-        tab_row.addWidget(exit_btn, alignment=Qt.AlignTop)
+        self._tabs.setCornerWidget(exit_btn, Qt.TopRightCorner)
 
-        self._main_layout.addLayout(tab_row, stretch=1)
+        self._main_layout.addWidget(self._tabs, stretch=1)
 
         self._build_workflows_tab()
         self._build_status_tab()
@@ -3404,7 +3503,51 @@ if __name__ == "__main__":
     _mp.freeze_support()
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(MESA_STYLESHEET)
+
+    # Generate checkmark / radio-dot indicator images for QSS
+    _indicator_dir = os.path.join(tempfile.gettempdir(), "mesa_indicators")
+    os.makedirs(_indicator_dir, exist_ok=True)
+    _check_path = os.path.join(_indicator_dir, "check.png")
+    _dot_path = os.path.join(_indicator_dir, "dot.png")
+
+    from PySide6.QtGui import QPainter, QPen, QPixmap, QColor
+    # Checkmark (white ✓ on transparent)
+    _pm = QPixmap(16, 16)
+    _pm.fill(QColor(0, 0, 0, 0))
+    _p = QPainter(_pm)
+    _p.setRenderHint(QPainter.Antialiasing)
+    _pen = QPen(QColor("#ffffff"), 2.2)
+    _pen.setCapStyle(Qt.RoundCap)
+    _pen.setJoinStyle(Qt.RoundJoin)
+    _p.setPen(_pen)
+    _p.drawLine(3, 8, 6, 12)
+    _p.drawLine(6, 12, 13, 4)
+    _p.end()
+    _pm.save(_check_path, "PNG")
+
+    # Radio dot (white circle on transparent)
+    _pm2 = QPixmap(16, 16)
+    _pm2.fill(QColor(0, 0, 0, 0))
+    _p2 = QPainter(_pm2)
+    _p2.setRenderHint(QPainter.Antialiasing)
+    _p2.setPen(Qt.NoPen)
+    _p2.setBrush(QColor("#ffffff"))
+    _p2.drawEllipse(4, 4, 8, 8)
+    _p2.end()
+    _pm2.save(_dot_path, "PNG")
+
+    # Inject indicator image paths into stylesheet
+    _check_url = _check_path.replace("\\", "/")
+    _dot_url = _dot_path.replace("\\", "/")
+    _indicator_css = f"""
+QCheckBox::indicator:checked {{
+    image: url("{_check_url}");
+}}
+QRadioButton::indicator:checked {{
+    image: url("{_dot_url}");
+}}
+"""
+    app.setStyleSheet(MESA_STYLESHEET + _indicator_css)
 
     # Set application-wide icon
     icon_path = resolve_path(os.path.join("system_resources", "mesa.ico"))

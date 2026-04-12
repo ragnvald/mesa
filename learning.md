@@ -223,6 +223,42 @@ When a problem is solved, add a short entry here with:
 - Practical fix / decision:
   - Keep Tk helpers in separate processes. The main launcher should orchestrate them, not embed them.
 
+## PySide6 launcher and helper finalisation (2026-04-12)
+
+- What changed:
+  - `mesa.py` now launches the migrated Qt helpers (`geocode_manage`, `asset_manage`, `processing_setup`, `processing_pipeline_run`, `atlas_manage`, `report_generate`, `analysis_present`) in-process through their `run()` entry points when they are bundled inside `mesa.exe`.
+  - `devtools/build_all.py` now collects `PySide6` instead of `ttkbootstrap` for the main app and helper packaging profiles.
+  - Shared styling is now applied through `asset_manage.apply_shared_stylesheet()` so the desktop and helper windows use the same generated checkbox/radio indicator assets and corner-button styling.
+  - Legacy Tk-only bootstrap artifacts (`mesa_tk_old.py` and `code/locale_bootstrap.py`) were removed from the active code path.
+
+- Root cause:
+  - The packaged launcher still tried to start helpers like `asset_manage.exe` as standalone subprocesses even after the build started embedding those helpers as hidden imports inside `mesa.exe`.
+
+- Practical fix / decision:
+  - Standardise on PySide6 as the canonical desktop UI runtime.
+  - Use explicit in-process helper launching for embedded Qt modules, while keeping subprocess launching only for tools that still need to stay standalone.
+  - Remove obsolete `ttkbootstrap` configuration fields from active runtime settings where they no longer affect behaviour.
+
+- UI refinements included in the same pass:
+  - Embedded `Exit` buttons in the tab bar corner across the main desktop and helper windows.
+  - Smaller default window footprints for better fit on common laptop displays.
+  - Consistent progress-bar and log-panel behaviour in the processing runner and internal processing UI.
+
+## Processing runner log routing and minimap stability (2026-04-12)
+
+- What changed:
+  - `processing_pipeline_run.py` now forwards headless processing logs directly into the runner UI instead of relying on file tailing during the active run.
+  - `processing_internal.py` now accepts an external log callback in `run_headless()` and resets it safely when the run completes.
+  - The minimap helper now routes OpenStreetMap requests through the local MESA tile proxy and shuts that proxy down when the window closes.
+
+- Root cause:
+  - Direct UI logging and background file tailing could duplicate every processing line in the runner.
+  - Direct OpenStreetMap tile access is less reliable in packaged helper windows and can be blocked or rate-limited.
+
+- Practical fix / decision:
+  - During active processing, prefer signal/callback-based log delivery to the parent window and resume file tailing only after the worker finishes.
+  - Use the same local tile-proxy approach in the minimap that other MESA viewers already use.
+
 ## Root README scope split (2026-03-23)
 
 - What changed:

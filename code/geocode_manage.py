@@ -160,7 +160,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 import json
-from pathlib import Path
 
 
 # -----------------------------------------------------------------------------
@@ -2788,7 +2787,7 @@ def format_level_size_list(levels: list[int]) -> str:
 # =====================================================================
 # Shared stylesheet (same warm palette as mesa.py / asset_manage.py)
 # =====================================================================
-from asset_manage import ASSET_STYLESHEET as _SHARED_STYLESHEET
+from asset_manage import apply_shared_stylesheet
 
 
 # =====================================================================
@@ -2859,25 +2858,25 @@ class GeocodeManagerWindow(QMainWindow):
         main_layout.setContentsMargins(10, 8, 10, 8)
         main_layout.setSpacing(6)
 
-        # Tab row + Exit
-        tab_row = QHBoxLayout()
-        tab_row.setContentsMargins(0, 0, 0, 0)
-        tab_row.setSpacing(0)
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        tab_row.addWidget(self.tabs, stretch=1)
 
+        # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
-        exit_btn.setFixedSize(72, 28)
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
-            QPushButton { background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 9pt; padding: 2px 8px; }
-            QPushButton:hover { background: #e1d1ae; }
-            QPushButton:pressed { background: #d4c094; }
+            QPushButton#CornerExitButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621; font-size: 8pt;
+                padding: 2px 14px; margin: 2px 6px;
+            }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
         """)
         exit_btn.clicked.connect(self.close)
-        tab_row.addWidget(exit_btn, alignment=Qt.AlignTop)
-        main_layout.addLayout(tab_row, stretch=1)
+        self.tabs.setCornerWidget(exit_btn, Qt.TopRightCorner)
+        main_layout.addWidget(self.tabs, stretch=1)
 
         # Build tabs
         self._build_mosaic_tab()
@@ -3487,7 +3486,7 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", m
     own_app = False
     if app is None:
         app = QApplication([])
-        app.setStyleSheet(_SHARED_STYLESHEET)
+        apply_shared_stylesheet(app)
         own_app = True
 
     _gui_window = GeocodeManagerWindow(base, cfg, start_tab)
