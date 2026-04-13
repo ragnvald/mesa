@@ -75,7 +75,10 @@ Desktop tab file mapping:
   - Fix: use active-window or process-tree-based window targeting
 
 - Problem: right/bottom clipping or offset on Windows
-  - Fix: enforce DPI-aware bounds + ensure window is fully on-screen before capture
+  - Fix: enforce DPI-aware bounds + ensure window is fully inside the usable desktop work area, not just inside the full monitor bounds
+
+- Problem: some `pywebview` helpers capture with the Windows taskbar or oversized empty margins
+  - Fix: compare `DwmGetWindowAttribute(...EXTENDED_FRAME_BOUNDS...)` against `GetWindowRect()` and fall back to `GetWindowRect()` when the DWM rectangle is implausibly larger than the real window
 
 - Problem: desktop tab screenshots end up identical
   - Fix: explicitly switch tab and wait before each capture

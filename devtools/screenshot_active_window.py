@@ -34,6 +34,16 @@ def _set_dpi_awareness() -> None:
         pass
 
 
+def _dwm_bounds_look_reasonable(
+    base_bounds: tuple[int, int, int, int] | None,
+    dwm_bounds: tuple[int, int, int, int],
+    max_border_delta: int = 32,
+) -> bool:
+    if base_bounds is None:
+        return True
+    return all(abs(dwm - base) <= max_border_delta for dwm, base in zip(dwm_bounds, base_bounds))
+
+
 def _get_window_bounds(hwnd: int, client_only: bool) -> tuple[int, int, int, int]:
     user32 = ctypes.windll.user32
 
@@ -51,6 +61,9 @@ def _get_window_bounds(hwnd: int, client_only: bool) -> tuple[int, int, int, int
         return left, top, right, bottom
 
     rect = wintypes.RECT()
+    base_bounds = None
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        base_bounds = (rect.left, rect.top, rect.right, rect.bottom)
     dwmapi = getattr(ctypes.windll, "dwmapi", None)
     if dwmapi is not None:
         try:
@@ -61,13 +74,15 @@ def _get_window_bounds(hwnd: int, client_only: bool) -> tuple[int, int, int, int
                 ctypes.sizeof(rect),
             )
             if result == 0:
-                return rect.left, rect.top, rect.right, rect.bottom
+                dwm_bounds = (rect.left, rect.top, rect.right, rect.bottom)
+                if _dwm_bounds_look_reasonable(base_bounds, dwm_bounds):
+                    return dwm_bounds
         except Exception:
             pass
 
-    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+    if base_bounds is None:
         raise RuntimeError("GetWindowRect failed")
-    return rect.left, rect.top, rect.right, rect.bottom
+    return base_bounds
 
 
 def main() -> None:

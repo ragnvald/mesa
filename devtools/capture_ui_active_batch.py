@@ -13,6 +13,7 @@ import psutil
 from PIL import ImageGrab
 
 DWMWA_EXTENDED_FRAME_BOUNDS = 9
+SPI_GETWORKAREA = 0x0030
 SW_RESTORE = 9
 SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
@@ -128,8 +129,31 @@ def enum_windows() -> list[tuple[int, int, str]]:
     return found
 
 
+def window_title(hwnd: int) -> str:
+    n = user32.GetWindowTextLengthW(hwnd)
+    if n <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value.strip()
+
+
+def _dwm_bounds_look_reasonable(
+    base_bounds: tuple[int, int, int, int] | None,
+    dwm_bounds: tuple[int, int, int, int],
+    max_border_delta: int = 32,
+) -> bool:
+    if base_bounds is None:
+        return True
+    return all(abs(dwm - base) <= max_border_delta for dwm, base in zip(dwm_bounds, base_bounds))
+
+
 def window_bounds(hwnd: int) -> tuple[int, int, int, int]:
     rect = wintypes.RECT()
+    base_bounds = None
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        base_bounds = (rect.left, rect.top, rect.right, rect.bottom)
+
     dwmapi = getattr(ctypes.windll, "dwmapi", None)
     if dwmapi is not None:
         try:
@@ -140,13 +164,22 @@ def window_bounds(hwnd: int) -> tuple[int, int, int, int]:
                 ctypes.sizeof(rect),
             )
             if result == 0:
-                return rect.left, rect.top, rect.right, rect.bottom
+                dwm_bounds = (rect.left, rect.top, rect.right, rect.bottom)
+                if _dwm_bounds_look_reasonable(base_bounds, dwm_bounds):
+                    return dwm_bounds
         except Exception:
             pass
 
-    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+    if base_bounds is None:
         raise RuntimeError("GetWindowRect failed")
-    return rect.left, rect.top, rect.right, rect.bottom
+    return base_bounds
+
+
+def desktop_work_area() -> tuple[int, int, int, int]:
+    rect = wintypes.RECT()
+    if user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+        return rect.left, rect.top, rect.right, rect.bottom
+    return 0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 
 def ensure_on_screen(hwnd: int) -> None:
@@ -154,22 +187,26 @@ def ensure_on_screen(hwnd: int) -> None:
     width = right - left
     height = bottom - top
 
-    sw = user32.GetSystemMetrics(0)
-    sh = user32.GetSystemMetrics(1)
+    work_left, work_top, work_right, work_bottom = desktop_work_area()
+    work_width = max(420, work_right - work_left - 16)
+    work_height = max(260, work_bottom - work_top - 16)
+
+    target_width = min(width, work_width)
+    target_height = min(height, work_height)
 
     x = left
     y = top
-    if left < 0:
-        x = 8
-    if top < 0:
-        y = 8
-    if right > sw:
-        x = max(8, sw - width - 8)
-    if bottom > sh:
-        y = max(8, sh - height - 8)
+    if x < work_left + 8:
+        x = work_left + 8
+    if y < work_top + 8:
+        y = work_top + 8
+    if x + target_width > work_right - 8:
+        x = max(work_left + 8, work_right - target_width - 8)
+    if y + target_height > work_bottom - 8:
+        y = max(work_top + 8, work_bottom - target_height - 8)
 
     user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER)
+    user32.SetWindowPos(hwnd, 0, x, y, target_width, target_height, SWP_NOZORDER)
     user32.SetForegroundWindow(hwnd)
     time.sleep(0.35)
 
@@ -279,20 +316,43 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
 
 
-def capture_helper(helper: HelperCapture, repo: Path, py: Path, wiki_images: Path) -> None:
+def capture_helper(helper: HelperCapture, repo: Path, py: Path, wiki_images: Path) -> bool:
     proc = subprocess.Popen([str(py), *helper.args], cwd=repo)
     try:
         hwnd, title = find_app_window(proc.pid, helper.title_hint, timeout=300.0)
         if hwnd is None:
             print(f"FAIL {helper.key}: window not found")
-            return
-        ensure_on_screen(hwnd)
+            return False
+        try:
+            ensure_on_screen(hwnd)
+        except Exception as exc:
+            print(f"WARN {helper.key}: initial window placement failed: {exc}")
         print(f"Waiting {int(helper.wait_seconds)}s for {helper.key} render...")
         time.sleep(helper.wait_seconds)
-        ensure_on_screen(hwnd)
+
+        # Some helpers replace an initial loading window with the final window.
+        refreshed_hwnd, refreshed_title = find_app_window(proc.pid, helper.title_hint, timeout=15.0)
+        current_hwnd = refreshed_hwnd or hwnd
+        current_title = refreshed_title or title
+
         out_path = wiki_images / f"ui_{helper.key}.png"
-        capture_hwnd(hwnd, out_path)
-        print(f"OK   {helper.key}: {title} -> {out_path.name}")
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                ensure_on_screen(current_hwnd)
+                capture_hwnd(current_hwnd, out_path)
+                print(f"OK   {helper.key}: {current_title} -> {out_path.name}")
+                return True
+            except Exception as exc:
+                last_error = exc
+                print(f"WARN {helper.key}: capture attempt {attempt} failed: {exc}")
+                time.sleep(1.0)
+                refreshed_hwnd, refreshed_title = find_app_window(proc.pid, helper.title_hint, timeout=10.0)
+                if refreshed_hwnd is not None:
+                    current_hwnd = refreshed_hwnd
+                    current_title = refreshed_title or window_title(refreshed_hwnd) or current_title
+        print(f"FAIL {helper.key}: {last_error}")
+        return False
     finally:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
 
@@ -312,10 +372,17 @@ def _default_wiki_images(repo: Path) -> Path:
     return candidates[-1]
 
 
+def _parse_helper_keys(raw: str) -> set[str] | None:
+    keys = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    return keys or None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Batch-capture MESA helper UIs into wiki image files.")
     parser.add_argument("--repo", default="", help="Path to mesa repo (default: inferred from script location)")
     parser.add_argument("--wiki-images", default="", help="Path to mesa.wiki/images (default: auto-detected)")
+    parser.add_argument("--skip-desktop", action="store_true", help="Skip desktop tab captures")
+    parser.add_argument("--helpers", default="", help="Comma-separated helper keys to capture (default: all)")
     args = parser.parse_args()
 
     set_dpi_awareness()
@@ -332,7 +399,8 @@ def main() -> None:
     print(f"Repo: {repo}")
     print(f"Output dir: {wiki_images}")
 
-    capture_mesa_tabs(repo, py, wiki_images)
+    if not args.skip_desktop:
+        capture_mesa_tabs(repo, py, wiki_images)
 
     helpers = [
         HelperCapture("geocode_create", ["code/geocode_manage.py", "--start-tab", "h3", "--original_working_directory", str(repo)], "geocode manage", 35.0),
@@ -349,8 +417,22 @@ def main() -> None:
         HelperCapture("line_manage", ["code/line_manage.py", "--original_working_directory", str(repo)], "edit line", 40.0),
     ]
 
+    helper_filter = _parse_helper_keys(args.helpers)
+    if helper_filter:
+        known = {helper.key.lower() for helper in helpers}
+        unknown = sorted(helper_filter - known)
+        if unknown:
+            print(f"WARN unknown helper key(s): {', '.join(unknown)}")
+        helpers = [helper for helper in helpers if helper.key.lower() in helper_filter]
+
+    failures: list[str] = []
     for helper in helpers:
-        capture_helper(helper, repo, py, wiki_images)
+        ok = capture_helper(helper, repo, py, wiki_images)
+        if not ok:
+            failures.append(helper.key)
+
+    if failures:
+        raise SystemExit(f"Capture failures: {', '.join(failures)}")
 
 
 if __name__ == "__main__":
