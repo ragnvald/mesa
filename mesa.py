@@ -1632,7 +1632,7 @@ QLabel[role="footer"] {
 # Custom widgets
 # =====================================================================
 from PySide6.QtGui import QPainter, QPen, QBrush
-from PySide6.QtWidgets import QProgressDialog
+from PySide6.QtWidgets import QProgressDialog, QLineEdit, QCheckBox
 
 
 class _ActionCard(QFrame):
@@ -1883,6 +1883,7 @@ class MesaMainWindow(QMainWindow):
         self._build_config_tab()
         self._build_tune_tab()
         self._build_manage_tab()
+        self._build_geonode_tab()
         self._build_about_tab()
 
     # ---- Tab 1: Workflows ----
@@ -2305,8 +2306,8 @@ class MesaMainWindow(QMainWindow):
         }
         color = STATUS_COLORS.get(status_role, "#ef4444")
         bullet = QLabel("\u2B24")  # filled circle
-        bullet.setStyleSheet(f"QLabel {{ color: {color}; font-size: 12pt; }}")
-        bullet.setFixedWidth(22)
+        bullet.setStyleSheet(f"QLabel {{ color: {color}; font-size: 16pt; }}")
+        bullet.setFixedWidth(28)
         bullet.setAlignment(Qt.AlignCenter)
         self._status_layout.addWidget(bullet, row_idx, 0)
 
@@ -3383,7 +3384,386 @@ class MesaMainWindow(QMainWindow):
             f"Removed: {removed} items\nKept: {len(kept)} system files",
         )
 
-    # ---- Tab 6: About ----
+    # ---- Tab 6: Publish to GeoNode ----
+    def _build_geonode_tab(self):
+        _ensure_code_dir_on_syspath()
+        import queue as _queue
+        self._geonode_log_queue: _queue.Queue = _queue.Queue()
+        self._geonode_cancel_event = __import__("threading").Event()
+        self._geonode_layer_checkboxes: dict = {}   # id → QCheckBox
+        self._geonode_confirm_event = __import__("threading").Event()
+        self._geonode_confirm_result: str = "skip"  # "replace" or "skip"
+
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(0)
+
+        # ── two-column body ──────────────────────────────────────────────
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        outer.addLayout(body, stretch=1)
+
+        # ── LEFT: layer list ─────────────────────────────────────────────
+        layers_group = QGroupBox("Layers to publish")
+        layers_group.setFixedWidth(272)
+        layers_outer = QVBoxLayout(layers_group)
+        layers_outer.setContentsMargins(8, 8, 8, 8)
+        layers_outer.setSpacing(0)
+
+        # Scrollable inner widget
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        inner_widget = QWidget()
+        inner_vbox = QVBoxLayout(inner_widget)
+        inner_vbox.setContentsMargins(0, 0, 4, 0)
+        inner_vbox.setSpacing(0)
+
+        # Load layer catalogue
+        try:
+            from geonode_export import layer_info as _layer_info  # type: ignore[import]
+            gpq_dir = _detect_geoparquet_dir()
+            info = _layer_info(gpq_dir)
+            sens_layers = info["sensitivity"]
+            supp_layers = info["supporting"]
+        except Exception:
+            import geonode_export as _ge  # type: ignore[import]
+            sens_layers = []
+            supp_layers = [{**l, "available": False, "row_count": None}
+                           for l in _ge.SUPPORTING_LAYERS]
+
+        # Store all layer defs for use in export
+        self._geonode_all_layers = sens_layers + supp_layers
+
+        def _add_section_header(text: str):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                "color: #6a5533; font-size: 8pt; font-weight: bold;"
+                "padding: 4px 0px 2px 0px;"
+            )
+            inner_vbox.addWidget(lbl)
+
+        def _add_layer_row(layer: dict):
+            available = layer.get("available", False)
+            row_count = layer.get("row_count")
+
+            row_widget = QWidget()
+            row_layout = QVBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 2, 0, 2)
+            row_layout.setSpacing(1)
+
+            cb = QCheckBox(layer["label"])
+            cb.setChecked(layer["default_checked"] and available)
+            cb.setEnabled(available)
+            cb.setToolTip(layer["hint"])
+            if not available:
+                cb.setStyleSheet("color: #aaa;")
+            row_layout.addWidget(cb)
+            self._geonode_layer_checkboxes[layer["id"]] = cb
+
+            detail_parts = []
+            if row_count is not None:
+                detail_parts.append(f"{row_count:,} features")
+            elif not available:
+                detail_parts.append("not yet generated")
+            if layer.get("size_note"):
+                detail_parts.append(layer["size_note"])
+            if layer.get("sld_field"):
+                detail_parts.append("A-E styled")
+            if detail_parts:
+                detail = QLabel("    " + "  \u00b7  ".join(detail_parts))
+                detail.setStyleSheet(
+                    "color: #888; font-size: 8pt;" if available
+                    else "color: #bbb; font-size: 8pt;"
+                )
+                row_layout.addWidget(detail)
+
+            inner_vbox.addWidget(row_widget)
+
+        # Section 1: sensitivity (one per geocode group)
+        if sens_layers:
+            _add_section_header("Geocode layers (A-E styled)")
+            for layer in sens_layers:
+                _add_layer_row(layer)
+        else:
+            _add_section_header("Geocode layers")
+            placeholder = QLabel("    Run processing first to generate tbl_flat.")
+            placeholder.setStyleSheet("color: #aaa; font-size: 8pt;")
+            inner_vbox.addWidget(placeholder)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #d4c8a8; margin: 6px 0px 2px 0px;")
+        inner_vbox.addWidget(sep)
+
+        # Section 2: supporting layers
+        _add_section_header("Supporting data")
+        for layer in supp_layers:
+            _add_layer_row(layer)
+
+        inner_vbox.addStretch()
+        scroll.setWidget(inner_widget)
+        layers_outer.addWidget(scroll)
+        body.addWidget(layers_group)
+
+        # ── RIGHT: connection + actions + log ────────────────────────────
+        right = QVBoxLayout()
+        right.setSpacing(10)
+        body.addLayout(right, stretch=1)
+
+        # Connection group
+        conn_group = QGroupBox("GeoNode server")
+        conn_layout = QGridLayout(conn_group)
+        conn_layout.setSpacing(8)
+        conn_layout.setColumnMinimumWidth(0, 80)
+        conn_layout.setColumnStretch(1, 1)
+
+        conn_layout.addWidget(QLabel("Server URL"), 0, 0)
+        self._geonode_url = QLineEdit()
+        self._geonode_url.setPlaceholderText("http://your-geonode-server/")
+        conn_layout.addWidget(self._geonode_url, 0, 1)
+
+        conn_layout.addWidget(QLabel("Username"), 1, 0)
+        self._geonode_username = QLineEdit()
+        self._geonode_username.setPlaceholderText("admin")
+        conn_layout.addWidget(self._geonode_username, 1, 1)
+
+        conn_layout.addWidget(QLabel("Password"), 2, 0)
+        self._geonode_password = QLineEdit()
+        self._geonode_password.setEchoMode(QLineEdit.Password)
+        self._geonode_password.setPlaceholderText("password")
+        conn_layout.addWidget(self._geonode_password, 2, 1)
+
+        conn_btn_row = QHBoxLayout()
+        test_btn = QPushButton("Test connection")
+        test_btn.setFixedWidth(140)
+        test_btn.clicked.connect(self._geonode_test_connection)
+        conn_btn_row.addWidget(test_btn)
+        self._geonode_conn_status = QLabel("Not tested")
+        self._geonode_conn_status.setProperty("role", "muted")
+        conn_btn_row.addWidget(self._geonode_conn_status)
+        conn_btn_row.addStretch()
+        conn_layout.addLayout(conn_btn_row, 3, 0, 1, 2)
+        right.addWidget(conn_group)
+
+        # Publish / cancel buttons
+        pub_row = QHBoxLayout()
+        pub_row.setSpacing(8)
+        self._geonode_export_btn = QPushButton("Publish selected layers")
+        self._geonode_export_btn.setProperty("role", "primary")
+        self._geonode_export_btn.setFixedWidth(190)
+        self._geonode_export_btn.clicked.connect(self._geonode_start_export)
+        pub_row.addWidget(self._geonode_export_btn)
+        self._geonode_cancel_btn = QPushButton("Cancel")
+        self._geonode_cancel_btn.setFixedWidth(80)
+        self._geonode_cancel_btn.setEnabled(False)
+        self._geonode_cancel_btn.clicked.connect(self._geonode_cancel)
+        pub_row.addWidget(self._geonode_cancel_btn)
+        pub_row.addStretch()
+        right.addLayout(pub_row)
+
+        # Map option
+        self._geonode_create_map_cb = QCheckBox("Combine published layers into a GeoNode Map")
+        self._geonode_create_map_cb.setChecked(True)
+        right.addWidget(self._geonode_create_map_cb)
+
+        # Log
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(8, 8, 8, 8)
+        self._geonode_log = QPlainTextEdit()
+        self._geonode_log.setReadOnly(True)
+        self._geonode_log.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 9pt;"
+        )
+        log_layout.addWidget(self._geonode_log)
+        right.addWidget(log_group, stretch=1)
+
+        self._tabs.addTab(tab, "Publish to GeoNode")
+
+        # Load saved connection settings
+        self._geonode_load_settings()
+
+        # Timer to drain the log queue
+        self._geonode_log_timer = QTimer(self)
+        self._geonode_log_timer.timeout.connect(self._geonode_drain_log)
+        self._geonode_log_timer.start(200)
+
+    def _geonode_settings_path(self) -> str:
+        secrets_dir = os.path.join(original_working_directory, "secrets")
+        os.makedirs(secrets_dir, exist_ok=True)
+        return os.path.join(secrets_dir, "geonode.ini")
+
+    def _geonode_load_settings(self):
+        try:
+            import configparser as _cp
+            cfg = _cp.ConfigParser()
+            cfg.read(self._geonode_settings_path(), encoding="utf-8")
+            url = cfg.get("connection", "url", fallback="")
+            username = cfg.get("connection", "username", fallback="")
+            if url:
+                self._geonode_url.setText(url)
+            if username:
+                self._geonode_username.setText(username)
+        except Exception:
+            pass
+
+    def _geonode_save_settings(self):
+        try:
+            import configparser as _cp
+            cfg = _cp.ConfigParser()
+            cfg["connection"] = {
+                "url": self._geonode_url.text().strip(),
+                "username": self._geonode_username.text().strip(),
+            }
+            with open(self._geonode_settings_path(), "w", encoding="utf-8") as f:
+                cfg.write(f)
+        except Exception:
+            pass
+
+    def _geonode_test_connection(self):
+        from geonode_export import test_connection as _test_conn  # type: ignore[import]
+        url = self._geonode_url.text().strip()
+        username = self._geonode_username.text().strip()
+        password = self._geonode_password.text()
+        if not url or not username or not password:
+            self._geonode_conn_status.setText("Fill in URL, username, and password first.")
+            return
+        self._geonode_conn_status.setText("Testing …")
+        QApplication.processEvents()
+        ok, msg = _test_conn(url, username, password)
+        self._geonode_conn_status.setText(msg)
+        if ok:
+            self._geonode_conn_status.setStyleSheet("color: #2a7a2a;")
+            self._geonode_save_settings()
+        else:
+            self._geonode_conn_status.setStyleSheet("color: #b00;")
+
+    def _geonode_start_export(self):
+        from geonode_export import export_layers as _export_layers  # type: ignore[import]
+
+        url = self._geonode_url.text().strip()
+        username = self._geonode_username.text().strip()
+        password = self._geonode_password.text()
+
+        if not url or not username or not password:
+            QMessageBox.warning(self, "Missing credentials",
+                                "Please fill in the server URL, username, and password.")
+            return
+
+        selected = [
+            lid for lid, cb in self._geonode_layer_checkboxes.items()
+            if cb.isChecked()
+        ]
+        if not selected:
+            QMessageBox.warning(self, "No layers selected",
+                                "Select at least one layer to publish.")
+            return
+
+        self._geonode_log.clear()
+        self._geonode_cancel_event.clear()
+        self._geonode_export_btn.setEnabled(False)
+        self._geonode_cancel_btn.setEnabled(True)
+        self._geonode_save_settings()
+
+        gpq_dir = _detect_geoparquet_dir()
+        config_path = os.path.join(original_working_directory, "config.ini")
+        styles_dir = os.path.join(original_working_directory, "output", "geonode_styles")
+
+        def _run():
+            def _log(msg: str):
+                self._geonode_log_queue.put(msg)
+
+            def _confirm_cb(layer_name: str, existing_pk: int) -> bool:
+                """Ask the main thread whether to replace an existing layer."""
+                self._geonode_confirm_event.clear()
+                self._geonode_confirm_result = "skip"
+                self._geonode_log_queue.put(
+                    f"__CONFIRM__:{layer_name}:{existing_pk}"
+                )
+                self._geonode_confirm_event.wait(timeout=120)
+                return self._geonode_confirm_result == "replace"
+
+            try:
+                _log(f"Starting export to {url}")
+                _log(f"Layers: {', '.join(selected)}\n")
+                results = _export_layers(
+                    url, username, password, selected, gpq_dir,
+                    _log, self._geonode_cancel_event,
+                    config_path=config_path,
+                    styles_output_dir=styles_dir,
+                    all_layers=getattr(self, "_geonode_all_layers", None),
+                    confirm_cb=_confirm_cb,
+                    create_map=self._geonode_create_map_cb.isChecked(),
+                )
+                success_count = sum(1 for r in results if r["success"])
+                fail_count = len(results) - success_count
+                _log(f"\n------------------------------")
+                _log(f"Done. {success_count} layer(s) published, {fail_count} failed.")
+            except Exception as _exc:
+                import traceback as _tb
+                _log(f"\nUnhandled error in export thread:")
+                _log(_tb.format_exc())
+            finally:
+                self._geonode_log_queue.put("__DONE__")
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    def _geonode_cancel(self):
+        self._geonode_cancel_event.set()
+        self._geonode_cancel_btn.setEnabled(False)
+        self._geonode_log.appendPlainText("Cancelling …")
+
+    def _geonode_drain_log(self):
+        import queue as _queue
+        try:
+            while True:
+                msg = self._geonode_log_queue.get_nowait()
+                if msg == "__DONE__":
+                    self._geonode_export_btn.setEnabled(True)
+                    self._geonode_cancel_btn.setEnabled(False)
+                elif msg.startswith("__CONFIRM__:"):
+                    # Format: __CONFIRM__:<layer_name>:<pk>
+                    try:
+                        parts = msg.split(":", 2)
+                        layer_name = parts[1] if len(parts) > 1 else "?"
+                        existing_pk = parts[2] if len(parts) > 2 else "?"
+                        ans = QMessageBox.question(
+                            self,
+                            "Layer already exists",
+                            f"'{layer_name}' already exists on GeoNode (pk={existing_pk}).\n\n"
+                            "Replace it (delete and re-upload) or skip?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No,
+                        )
+                        if ans == QMessageBox.StandardButton.Yes:
+                            self._geonode_confirm_result = "replace"
+                            self._geonode_log.appendPlainText(
+                                f"  Replacing existing '{layer_name}' ..."
+                            )
+                        else:
+                            self._geonode_confirm_result = "skip"
+                            self._geonode_log.appendPlainText(
+                                f"  Skipping '{layer_name}' (already exists)."
+                            )
+                    except Exception:
+                        self._geonode_confirm_result = "skip"
+                    finally:
+                        self._geonode_confirm_event.set()
+                elif msg.startswith("__MAP__:"):
+                    map_url = msg[len("__MAP__:"):]
+                    self._geonode_log.appendPlainText(f"  Map URL: {map_url}")
+                else:
+                    self._geonode_log.appendPlainText(msg)
+        except _queue.Empty:
+            pass
+
+    # ---- Tab 7: About ----
     def _build_about_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
