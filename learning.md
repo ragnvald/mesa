@@ -258,6 +258,18 @@ When a problem is solved, add a short entry here with:
 
 - UI refinements included in the same pass:
   - Embedded `Exit` buttons in the tab bar corner across the main desktop and helper windows.
+
+## macOS development venv split from Windows bundle (2026-04-17)
+
+- What changed:
+  - Added `requirements_macos_dev.txt` for source-based development on macOS.
+  - Bootstrapped `.venv` with Python 3.11 and installed the macOS-focused dependency set there.
+- Root cause:
+  - The canonical `requirements_all_win311.txt` is intentionally Windows-oriented and failed on macOS at `psycopg2==2.9.9` because `pg_config` was unavailable.
+  - That Windows bundle also includes packaging-only and Windows-specific tools that are not needed for routine source runs on macOS.
+- Practical fix / decision:
+  - Keep the Windows requirements files unchanged as the packaging/runtime baseline.
+  - Use `requirements_macos_dev.txt` on macOS for launcher/helper development and lightweight verification.
   - Smaller default window footprints for better fit on common laptop displays.
   - Consistent progress-bar and log-panel behaviour in the processing runner and internal processing UI.
 
@@ -344,3 +356,20 @@ When a problem is solved, add a short entry here with:
   - Use the Zenodo API (`https://zenodo.org/api/records/<id>`) as the source of truth for title, DOI, publication date, description, and bundled filename.
   - Use `gh` for the actual GitHub release creation so authentication stays with the local CLI session.
   - Generate a release preview first, then publish with `python devtools\github_release_from_zenodo.py <record-id> --publish`.
+
+## Apple Silicon awareness for processing tuning (2026-04-23)
+
+- What changed:
+  - `_recommended_processing_tuning` in `mesa.py` now branches on `os_name == "darwin"` + `machine.startswith("arm")`. When both hold, it:
+    - Reads the performance-core count via `sysctl hw.perflevel0.physicalcpu` and sizes the worker cap as `max(2, min(P-2, P))` (capped at 16), so efficiency cores do not inflate the cap.
+    - Subtracts 2 GB from the RAM-tier `approx_gb_per_worker` with a floor of 2.5 GB, reflecting the more memory-efficient macOS runtime for this workload.
+    - Uses `mem_target_frac = 0.70` instead of `0.85` because Apple Silicon uses unified memory shared with the GPU/WindowServer.
+  - Baseline `config.ini` was also updated to match the M4 Max case: `auto_workers_max=10`, `approx_gb_per_worker=4.0`, `mem_target_frac=0.70`, `mosaic_auto_worker_max=10`, `mosaic_auto_worker_fraction=0.65`.
+- Root cause:
+  - The original ladder used only logical CPU count and a fixed `0.85` memory fraction. That ladder was calibrated for Windows x86_64 with discrete GPUs; on an Apple M4 Max (16c = 12 P + 4 E, 64 GB unified) it under-used P-cores and left too little headroom for the GPU/WindowServer.
+- Non-regression guarantee:
+  - The non-Apple-Silicon path is byte-identical to the prior behaviour (Windows ladder, `mem_target_frac=0.85`, same chunking constants). Intel Macs (`darwin` + `x86_64`) correctly fall through to that same path because the gate requires both `darwin` AND `arm*`.
+  - Verified by unit-executing the function with simulated hosts: Windows 16c/64 GB, Windows 8c/16 GB, Apple M4 Max 16c/64 GB, Apple M2 base 8c/16 GB, and Intel Mac 8c/16 GB.
+- Practical rule for future tuning changes:
+  - Keep platform-specific adjustments additive behind a narrow gate so the Windows packaging baseline never shifts by accident.
+  - If more Apple-specific tuning is needed (E-core behaviour, thermal-throttling hints), store the probe result in `cap_row` at capture time rather than re-probing inside the tuning function.

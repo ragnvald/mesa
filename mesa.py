@@ -10,14 +10,17 @@ _MESA_SKIP_VENV_RELAUNCH = "MESA_SKIP_VENV_RELAUNCH"
 
 
 def _preferred_repo_dev_python() -> Path | None:
-    if os.name != "nt":
-        return None
     try:
-        scripts_dir = Path(__file__).resolve().parent / ".venv" / "Scripts"
+        venv_dir = Path(__file__).resolve().parent / ".venv"
     except Exception:
         return None
-    current_name = Path(sys.executable or "").name.lower()
-    preferred_names = ["pythonw.exe", "python.exe"] if current_name == "pythonw.exe" else ["python.exe", "pythonw.exe"]
+    if os.name == "nt":
+        scripts_dir = venv_dir / "Scripts"
+        current_name = Path(sys.executable or "").name.lower()
+        preferred_names = ["pythonw.exe", "python.exe"] if current_name == "pythonw.exe" else ["python.exe", "pythonw.exe"]
+    else:
+        scripts_dir = venv_dir / "bin"
+        preferred_names = ["python3", "python"]
     for exe_name in preferred_names:
         candidate = scripts_dir / exe_name
         if candidate.exists():
@@ -42,7 +45,7 @@ def _venv_env_overrides(python_exe: Path) -> dict[str, str]:
 def _ensure_repo_dev_venv() -> None:
     if __name__ != "__main__":
         return
-    if os.name != "nt" or getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False):
         return
     if os.environ.get(_MESA_SKIP_VENV_RELAUNCH) == "1":
         return
@@ -50,11 +53,11 @@ def _ensure_repo_dev_venv() -> None:
     if preferred_python is None:
         return
     try:
-        current_python = Path(sys.executable).resolve()
-        preferred_python = preferred_python.resolve()
+        venv_dir = preferred_python.parent.parent.resolve()
+        current_prefix = Path(getattr(sys, "prefix", "")).resolve()
     except Exception:
         return
-    if current_python == preferred_python:
+    if current_prefix == venv_dir:
         return
 
     env = _venv_env_overrides(preferred_python)
@@ -2842,18 +2845,43 @@ class MesaMainWindow(QMainWindow):
         if ram_total <= 0:
             ram_total = 16.0
 
-        if logical <= 4:
-            worker_cap = 2
-        elif logical <= 8:
-            worker_cap = 4
-        elif logical <= 12:
-            worker_cap = 6
-        elif logical <= 16:
-            worker_cap = 8
-        elif logical <= 24:
-            worker_cap = 10
+        os_name = str(cap_row.get("os_name") or platform.system()).strip().lower()
+        machine = str(cap_row.get("machine") or platform.machine()).strip().lower()
+        is_apple_silicon = (os_name == "darwin") and machine.startswith("arm")
+
+        # On Apple Silicon, read the performance-core count so the worker cap
+        # reflects P-cores rather than counting slower E-cores as equals.
+        p_cores = None
+        if is_apple_silicon:
+            try:
+                res = subprocess.run(
+                    ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if res.returncode == 0:
+                    val = int((res.stdout or "").strip() or 0)
+                    if val > 0:
+                        p_cores = val
+            except Exception:
+                p_cores = None
+
+        if is_apple_silicon:
+            base = p_cores if p_cores else logical
+            worker_cap = max(2, min(base - 2, base))
+            worker_cap = min(worker_cap, 16)
         else:
-            worker_cap = 12
+            if logical <= 4:
+                worker_cap = 2
+            elif logical <= 8:
+                worker_cap = 4
+            elif logical <= 12:
+                worker_cap = 6
+            elif logical <= 16:
+                worker_cap = 8
+            elif logical <= 24:
+                worker_cap = 10
+            else:
+                worker_cap = 12
 
         if ram_total <= 12:
             approx_gb_per_worker = 2.5
@@ -2884,12 +2912,21 @@ class MesaMainWindow(QMainWindow):
             chunk_size = 22000
             cell_size = 10000
 
+        # Apple Silicon has unified memory (GPU + CPU share RAM) and a more
+        # memory-efficient runtime, so shrink per-worker footprint and reserve
+        # more headroom for the GPU/WindowServer.
+        if is_apple_silicon:
+            approx_gb_per_worker = max(2.5, approx_gb_per_worker - 2.0)
+            mem_target_frac = 0.70
+        else:
+            mem_target_frac = 0.85
+
         recommendations = {
             "max_workers": "0",
             "auto_workers_min": "1",
             "auto_workers_max": str(worker_cap),
             "approx_gb_per_worker": f"{approx_gb_per_worker:.1f}",
-            "mem_target_frac": "0.85",
+            "mem_target_frac": f"{mem_target_frac:.2f}",
             "target_geocodes_per_chunk": str(int(target_geocodes)),
             "chunk_backlog_multiplier": "3.5",
             "chunk_cells_min": "2",
@@ -2901,12 +2938,23 @@ class MesaMainWindow(QMainWindow):
             "cell_size": str(int(cell_size)),
         }
 
-        rationale = (
-            f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
-            f"Using auto worker mode with an upper cap of {worker_cap} and "
-            f"moderate memory headroom (mem_target_frac=0.85). "
-            "Chunking is tuned toward better load balancing to reduce slow end-of-run tails."
-        )
+        if is_apple_silicon:
+            p_note = f", P-cores: {p_cores}" if p_cores else ""
+            rationale = (
+                f"Detected Apple Silicon. Logical CPU: {logical}{p_note}. "
+                f"RAM: {ram_total:.1f} GB (unified with GPU). "
+                f"Worker cap {worker_cap} sized from performance cores, leaving headroom for OS/GPU. "
+                f"Using mem_target_frac={mem_target_frac:.2f} and "
+                f"approx_gb_per_worker={approx_gb_per_worker:.1f} to reserve unified memory "
+                "for the GPU/WindowServer."
+            )
+        else:
+            rationale = (
+                f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
+                f"Using auto worker mode with an upper cap of {worker_cap} and "
+                f"moderate memory headroom (mem_target_frac={mem_target_frac:.2f}). "
+                "Chunking is tuned toward better load balancing to reduce slow end-of-run tails."
+            )
         return recommendations, rationale
 
     def _update_default_keys_preserve_comments(self, path, updates):
