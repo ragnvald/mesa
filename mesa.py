@@ -2921,6 +2921,37 @@ class MesaMainWindow(QMainWindow):
         else:
             mem_target_frac = 0.85
 
+        # Per-stage caps. These are independent from the Stage 2 CPU cap so
+        # that a memory-skewed stage (flatten large-partition phase) does not
+        # drag every other stage down to its conservative limit.
+        #
+        # Scale flatten_approx_gb_per_worker by RAM tier so the auto RAM-budget
+        # math gives a reasonable worker count on smaller hosts too.
+        if ram_total <= 16:
+            flatten_gb = 5.0
+        elif ram_total <= 32:
+            flatten_gb = 8.0
+        elif ram_total <= 64:
+            flatten_gb = 12.0
+        else:
+            flatten_gb = 14.0
+
+        # Large-partition flatten cap: unified memory squeezes tighter, so keep
+        # 2 on Apple Silicon regardless of RAM; Windows/Linux can relax slightly
+        # on big-RAM hosts because the 30% headroom is not also absorbing the GPU.
+        if is_apple_silicon:
+            flatten_large_cap = 2 if ram_total <= 96 else 3
+        else:
+            if ram_total <= 32:
+                flatten_large_cap = 2
+            elif ram_total <= 96:
+                flatten_large_cap = 3
+            else:
+                flatten_large_cap = 4
+
+        # Small-partition, backfill, and tiles caps stay on auto (0) because
+        # their per-worker RAM is small enough that the auto RAM-budget path
+        # naturally scales with the machine.
         recommendations = {
             "max_workers": "0",
             "auto_workers_min": "1",
@@ -2936,6 +2967,14 @@ class MesaMainWindow(QMainWindow):
             "asset_soft_limit": str(int(asset_soft_limit)),
             "chunk_size": str(int(chunk_size)),
             "cell_size": str(int(cell_size)),
+            # Per-stage caps (see processing_internal.flatten_tbl_stacked)
+            "flatten_max_workers": str(flatten_large_cap),
+            "flatten_small_max_workers": "0",
+            "flatten_approx_gb_per_worker": f"{flatten_gb:.1f}",
+            "flatten_large_partition_mb": "50",
+            "backfill_max_workers": "0",
+            "tiles_max_workers": "0",
+            "tiles_approx_gb_per_worker": "3.0",
         }
 
         if is_apple_silicon:
@@ -2943,17 +2982,23 @@ class MesaMainWindow(QMainWindow):
             rationale = (
                 f"Detected Apple Silicon. Logical CPU: {logical}{p_note}. "
                 f"RAM: {ram_total:.1f} GB (unified with GPU). "
-                f"Worker cap {worker_cap} sized from performance cores, leaving headroom for OS/GPU. "
-                f"Using mem_target_frac={mem_target_frac:.2f} and "
-                f"approx_gb_per_worker={approx_gb_per_worker:.1f} to reserve unified memory "
-                "for the GPU/WindowServer."
+                f"Stage 2 worker cap {worker_cap} sized from performance cores, "
+                f"leaving headroom for OS/GPU. mem_target_frac={mem_target_frac:.2f}, "
+                f"approx_gb_per_worker={approx_gb_per_worker:.1f}. "
+                f"Per-stage caps: flatten-large={flatten_large_cap} (tight due to unified memory), "
+                f"flatten-small/backfill/tiles=auto so small and I/O-bound phases can "
+                f"saturate P-cores. flatten_approx_gb_per_worker={flatten_gb:.1f} "
+                f"scales the auto RAM budget for the skewed partition tail."
             )
         else:
             rationale = (
                 f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
-                f"Using auto worker mode with an upper cap of {worker_cap} and "
-                f"moderate memory headroom (mem_target_frac={mem_target_frac:.2f}). "
-                "Chunking is tuned toward better load balancing to reduce slow end-of-run tails."
+                f"Stage 2 cap {worker_cap}, mem_target_frac={mem_target_frac:.2f}. "
+                f"Per-stage caps: flatten-large={flatten_large_cap} (conservative to avoid "
+                f"pandas ballooning on the largest partitions), "
+                f"flatten-small/backfill/tiles=auto (scale to CPU bound by RAM budget). "
+                f"flatten_approx_gb_per_worker={flatten_gb:.1f}, "
+                f"tiles_approx_gb_per_worker=3.0."
             )
         return recommendations, rationale
 

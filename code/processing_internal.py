@@ -530,38 +530,80 @@ def _tiles_procs_from_config() -> int | None:
     """Choose a reasonable worker count for tiles_create_raster.
 
     Notes:
-    - The tiles helper has its own multiprocessing pool.
+    - The tiles helper has its own multiprocessing pool, with every worker
+      receiving a pickled copy of the per-group geometry list at init time.
+      On large groups that copy can run to several GB per worker, so worker
+      count should respect the RAM budget in addition to CPU count.
+    - Resolution order: explicit tiles_max_workers > generic max_workers > auto.
+      Auto considers CPU count, tiles_approx_gb_per_worker and mem_target_frac.
     - Frozen Windows builds have higher process-spawn overhead, so we cap lower.
-    - If config.ini sets max_workers, reuse it as a sensible user-controlled hint.
     """
     try:
         cpu = int(os.cpu_count() or 8)
     except Exception:
         cpu = 8
 
+    tiles_override = 0
     max_workers = 0
+    tiles_gb = 3.0
+    mem_frac = 0.70
+    auto_max = 0
     try:
         cfg_path = base_dir() / "config.ini"
         cfg_local = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
         cfg_local.read(cfg_path, encoding="utf-8")
         if "DEFAULT" in cfg_local:
-            raw = (cfg_local["DEFAULT"].get("max_workers", "0") or "0").strip()
-            max_workers = int(raw) if raw else 0
+            d = cfg_local["DEFAULT"]
+            def _int(key: str, default: int = 0) -> int:
+                raw = (d.get(key, "") or "").strip()
+                try:
+                    return int(raw) if raw else default
+                except Exception:
+                    return default
+            def _float(key: str, default: float) -> float:
+                raw = (d.get(key, "") or "").strip()
+                try:
+                    return float(raw) if raw else default
+                except Exception:
+                    return default
+            max_workers   = _int("max_workers", 0)
+            tiles_override = _int("tiles_max_workers", 0)
+            auto_max      = _int("auto_workers_max", 0)
+            tiles_gb      = _float("tiles_approx_gb_per_worker", 3.0)
+            mem_frac      = _float("mem_target_frac", 0.70)
     except Exception:
-        max_workers = 0
+        pass
 
-    # If user did not specify workers, pick a moderate default.
-    if max_workers <= 0:
-        max_workers = max(1, cpu // 2)
+    tiles_gb = max(0.5, tiles_gb)
+    mem_frac = min(0.95, max(0.30, mem_frac))
+
+    # 1) Explicit tiles-specific override wins.
+    if tiles_override > 0:
+        workers = tiles_override
+    # 2) Generic max_workers acts as a user-controlled hint.
+    elif max_workers > 0:
+        workers = max_workers
+    # 3) Auto: cap by CPU and by RAM budget.
+    else:
+        workers = max(1, cpu // 2)
+        try:
+            import psutil  # type: ignore
+            avail_gb = float(psutil.virtual_memory().available) / (1024 ** 3)
+            ram_cap = max(1, int((avail_gb * mem_frac) // tiles_gb))
+            workers = min(workers, ram_cap)
+        except Exception:
+            pass
+        if auto_max > 0:
+            workers = min(workers, auto_max)
 
     # Avoid oversubscription.
-    max_workers = max(1, min(max_workers, cpu))
+    workers = max(1, min(workers, cpu))
 
     # Frozen builds: keep the pool moderate to limit spawn overhead.
     if getattr(sys, "frozen", False):
-        return max(2, min(8, max_workers))
+        return max(2, min(8, workers))
 
-    return max_workers
+    return workers
 
 
 def _spawn_tiles_subprocess(minzoom: int|None=None, maxzoom: int|None=None, procs: int | None = None):
@@ -2370,10 +2412,19 @@ def _flatten_worker(args):
 def _backfill_worker(args):
     """
     Backfill area_m2 to a single tbl_stacked parquet file.
-    args: (parquet_path, area_map_df)
+    args: (parquet_path, area_map_source)
+      area_map_source may be a pandas DataFrame (legacy path) or a path-like
+      pointing at a parquet file. Reading from a path avoids pickling a large
+      DataFrame across every spawn boundary, which dominated driver-process
+      memory on large runs.
     """
-    path, area_map = args
+    path, area_map_source = args
     try:
+        # Accept str, pathlib.Path, or DataFrame.
+        if isinstance(area_map_source, (str, os.PathLike)):
+            area_map = pd.read_parquet(area_map_source)
+        else:
+            area_map = area_map_source
         part = gpd.read_parquet(path)
         if 'code' not in part.columns:
             return 0
@@ -2433,7 +2484,16 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     # 3. Run Parallel Map
     partials = []
 
-    # Determine workers (use same semantics as Stage 2 auto workers)
+    # Determine workers.
+    #
+    # Flatten is memory-hungry in a way Stage 2 is not: each worker reads an
+    # entire tbl_stacked partition (parquet) with gpd.read_parquet, then runs
+    # several groupbys, merges and sort/dedupe passes whose pandas intermediates
+    # can peak at many times the raw partition size. Partition size is also
+    # highly skewed (a small tail of very large partitions), so capping by CPU
+    # count is unsafe. We honour a flatten-specific cap and a RAM budget so a
+    # run on a 64 GB unified-memory host does not blow past total RAM just
+    # because there are many cores available.
     cpu_cap = 1
     try:
         cpu_cap = max(1, multiprocessing.cpu_count())
@@ -2444,6 +2504,14 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         max_workers = cfg_get_int(cfg_local, "max_workers", 0)
     except Exception:
         max_workers = 0
+    try:
+        flatten_workers_override = cfg_get_int(cfg_local, "flatten_max_workers", 0)
+    except Exception:
+        flatten_workers_override = 0
+    try:
+        flatten_small_override = cfg_get_int(cfg_local, "flatten_small_max_workers", 0)
+    except Exception:
+        flatten_small_override = 0
 
     try:
         auto_min_workers = max(1, cfg_get_int(cfg_local, "auto_workers_min", 1))
@@ -2454,32 +2522,118 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     except Exception:
         auto_max_override = 0
 
-    if max_workers <= 0:
-        # "Auto": start with CPU count, then apply optional auto cap/min.
-        max_workers = cpu_cap
-        if auto_max_override > 0:
-            max_workers = min(max_workers, max(auto_min_workers, auto_max_override))
-        max_workers = max(max_workers, auto_min_workers)
-    else:
-        max_workers = max(1, max_workers)
+    # Conservative per-worker RAM estimate for the flatten stage. The Stage 2
+    # value (approx_gb_per_worker) reflects bounded chunks, not whole partitions,
+    # so multiply for flatten unless the user has set flatten_approx_gb_per_worker
+    # explicitly.
+    try:
+        approx_gb = float(cfg_local.get("DEFAULT", "approx_gb_per_worker", fallback="4.0"))
+    except Exception:
+        approx_gb = 4.0
+    try:
+        flatten_gb = float(cfg_local.get("DEFAULT", "flatten_approx_gb_per_worker",
+                                         fallback=str(approx_gb * 3.0)))
+    except Exception:
+        flatten_gb = approx_gb * 3.0
+    flatten_gb = max(2.0, flatten_gb)
 
-    # Never spawn more processes than work items.
-    max_workers = max(1, min(max_workers, cpu_cap, len(files)))
+    try:
+        mem_frac = float(cfg_local.get("DEFAULT", "mem_target_frac", fallback="0.70"))
+    except Exception:
+        mem_frac = 0.70
+    mem_frac = min(0.95, max(0.30, mem_frac))
 
-    log_to_gui(log_widget, f"Flattening {len(files)} partitions using {max_workers} workers…")
+    # Two-phase size split. Partition sizes are heavily skewed: the vast
+    # majority are tiny, but a small tail of large partitions drives worst-case
+    # memory. Separating them lets us run the small tail with broad
+    # parallelism (near-zero per-worker RAM) while still capping the heavy
+    # tail conservatively.
+    try:
+        large_threshold_mb = float(cfg_local.get(
+            "DEFAULT", "flatten_large_partition_mb", fallback="50"))
+    except Exception:
+        large_threshold_mb = 50.0
+    threshold_bytes = int(max(1.0, large_threshold_mb) * 1024 * 1024)
 
-    if _mp_allowed() and max_workers > 1:
-        with multiprocessing.get_context("spawn").Pool(max_workers) as pool:
-            args = [(f, ranges_map, desc_map, index_weights) for f in files]
-            results = pool.map(_flatten_worker, args)
-            for res in results:
+    try:
+        sized = [(p, p.stat().st_size) for p in files]
+    except Exception:
+        sized = [(p, 0) for p in files]
+
+    large_sized = [t for t in sized if t[1] >= threshold_bytes]
+    small_sized = [t for t in sized if t[1] <  threshold_bytes]
+    large_sized.sort(key=lambda t: t[1], reverse=True)
+    small_sized.sort(key=lambda t: t[1], reverse=True)
+    large_files = [p for p, _ in large_sized]
+    small_files = [p for p, _ in small_sized]
+
+    def _resolve_phase_workers(override: int, per_worker_gb: float, count: int, label: str) -> int:
+        # Shared resolution: explicit override > generic max_workers > auto+RAM.
+        if override > 0:
+            w = override
+        elif max_workers > 0:
+            w = max_workers
+        else:
+            w = cpu_cap
+            try:
+                import psutil  # type: ignore
+                avail_gb = float(psutil.virtual_memory().available) / (1024 ** 3)
+                ram_cap = max(1, int((avail_gb * mem_frac) // max(0.5, per_worker_gb)))
+                w = min(w, ram_cap)
+                log_to_gui(log_widget,
+                           f"[{label}] RAM budget: avail={avail_gb:.1f} GB, "
+                           f"target_frac={mem_frac:.2f}, per-worker~{per_worker_gb:.1f} GB "
+                           f"-> RAM cap={ram_cap}")
+            except Exception:
+                pass
+            if auto_max_override > 0:
+                w = min(w, max(auto_min_workers, auto_max_override))
+            w = max(w, auto_min_workers)
+        return max(1, min(w, cpu_cap, max(1, count)))
+
+    workers_large = _resolve_phase_workers(
+        flatten_workers_override, flatten_gb, len(large_files), "flatten-large")
+    # Small partitions (<50 MB on disk) don't trigger the pandas groupby/merge
+    # ballooning that large ones do; per-worker footprint is typically under
+    # 1-2 GB. Use ~1/4 of the large estimate (floor 1.0 GB) so we saturate
+    # cores. On Windows this likewise lifts small-phase parallelism to CPU
+    # count instead of inheriting the tight flatten_max_workers=2 cap.
+    small_gb_per_worker = max(1.0, flatten_gb / 4.0)
+    workers_small = _resolve_phase_workers(
+        flatten_small_override, small_gb_per_worker, len(small_files), "flatten-small")
+
+    log_to_gui(log_widget,
+               f"Flattening {len(files)} partitions in two phases: "
+               f"{len(large_files)} large (>={large_threshold_mb:.0f} MB) with {workers_large} workers, "
+               f"{len(small_files)} small with {workers_small} workers.")
+
+    def _run_flatten_pool(paths, n_workers: int, label: str) -> None:
+        if not paths:
+            return
+        log_to_gui(log_widget, f"[{label}] {len(paths)} partitions using {n_workers} workers…")
+        if _mp_allowed() and n_workers > 1:
+            # imap_unordered so each worker's payload is consumed and released
+            # as it returns, rather than buffering all partials to the end.
+            with multiprocessing.get_context("spawn").Pool(n_workers) as pool:
+                args = [(f, ranges_map, desc_map, index_weights) for f in paths]
+                for res in pool.imap_unordered(_flatten_worker, args, chunksize=1):
+                    if res is not None:
+                        partials.append(res)
+        else:
+            for f in paths:
+                res = _flatten_worker((f, ranges_map, desc_map, index_weights))
                 if res is not None:
                     partials.append(res)
-    else:
-        for f in files:
-            res = _flatten_worker((f, ranges_map, desc_map, index_weights))
-            if res is not None:
-                partials.append(res)
+
+    # Pay the heavy phase first: big partitions run when the worker pool is
+    # freshest and nothing else is queued. Once they're done, swap to a wider
+    # pool for the small tail.
+    _run_flatten_pool(large_files, workers_large, "flatten-large")
+    _run_flatten_pool(small_files, workers_small, "flatten-small")
+
+    # Expose the large-phase value as max_workers for downstream sections
+    # (e.g. backfill) that still read it as a fallback.
+    max_workers = workers_large
 
     if not partials:
         log_to_gui(log_widget, "No data produced during flattening; writing empty tbl_flat.")
@@ -2739,15 +2893,56 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         
         if files:
             touched = 0
-            if _mp_allowed() and max_workers > 1:
-                with multiprocessing.get_context("spawn").Pool(max_workers) as pool:
-                    args = [(f, area_map) for f in files]
+            # Backfill is I/O-heavy but pandas-merge-light: each worker holds
+            # one partition + one area_map lookup and writes back. Per-worker
+            # RAM is ~1-2 GB, so it can run with far more parallelism than
+            # flatten without risking OOM. Resolve its worker count
+            # independently from flatten_max_workers.
+            try:
+                backfill_override = cfg_get_int(cfg_local, "backfill_max_workers", 0)
+            except Exception:
+                backfill_override = 0
+            try:
+                backfill_workers = _resolve_phase_workers(
+                    backfill_override, 2.0, len(files), "backfill")
+            except NameError:
+                # Defensive fallback if called before the flatten block runs.
+                backfill_workers = max(1, min(cpu_cap, len(files),
+                                              backfill_override or max_workers or 2))
+
+            # Persist area_map to a small parquet and pass its path to workers
+            # instead of pickling the whole DataFrame across every spawn
+            # boundary. This cuts driver-process RSS dramatically on large
+            # runs where tbl_flat / area_map can be several GB.
+            area_map_path = gpq_dir() / "__area_map.parquet"
+            try:
+                area_map.to_parquet(area_map_path, index=False)
+                worker_area_arg = area_map_path
+            except Exception as e:
+                log_to_gui(log_widget,
+                           f"Could not persist area_map to disk; falling back "
+                           f"to in-memory pickle: {e}")
+                worker_area_arg = area_map
+                area_map_path = None
+
+            log_to_gui(log_widget,
+                       f"Backfill: {len(files)} partitions using {backfill_workers} workers…")
+            if _mp_allowed() and backfill_workers > 1:
+                with multiprocessing.get_context("spawn").Pool(backfill_workers) as pool:
+                    args = [(f, worker_area_arg) for f in files]
                     for count in pool.imap_unordered(_backfill_worker, args):
                         touched += count
             else:
                 for f in files:
-                    touched += _backfill_worker((f, area_map))
-            
+                    touched += _backfill_worker((f, worker_area_arg))
+
+            # Clean up the scratch file once workers are done.
+            if area_map_path is not None:
+                try:
+                    area_map_path.unlink()
+                except Exception:
+                    pass
+
             log_to_gui(log_widget, f"Backfilled area_m2 to {len(files)} parts ({touched:,} rows).")
     except Exception as e:
         log_to_gui(log_widget, f"Backfill failed: {e}")
@@ -2826,7 +3021,11 @@ def run_processing_pipeline(config_file: Path):
         log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
         flatten_tbl_stacked(config_file, working_epsg); update_progress(95)
 
-        for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
+        # __mosaic_faces_tmp is produced by geocode_manage.py's polygonize
+        # step; the mosaic path does not clean it itself, so by the time the
+        # pipeline reaches this point it can be several hundred MB of dead
+        # weight. Fold it into the same Stage 3 cleanup sweep.
+        for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out", "__mosaic_faces_tmp"]:
             _rm_rf(_dataset_dir(temp_dir))
         
         log_to_gui(log_widget, "Core processing (stages 1-3) finished. Preparing raster tiles stage…")

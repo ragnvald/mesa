@@ -373,3 +373,21 @@ When a problem is solved, add a short entry here with:
 - Practical rule for future tuning changes:
   - Keep platform-specific adjustments additive behind a narrow gate so the Windows packaging baseline never shifts by accident.
   - If more Apple-specific tuning is needed (E-core behaviour, thermal-throttling hints), store the probe result in `cap_row` at capture time rather than re-probing inside the tuning function.
+
+## Per-stage worker caps for skewed workloads (2026-04-24)
+
+- Rule:
+  - Stages with highly skewed per-item memory footprints need **per-stage worker caps**, not one global `max_workers`. `processing_internal.py` now exposes four independent caps in `config.ini` (all `0 = auto`):
+    - `flatten_max_workers` - large-partition flatten phase (pandas groupby/merge can balloon whole partitions; keep conservative, e.g. 2 on 64 GB).
+    - `flatten_small_max_workers` - small-partition flatten phase (no ballooning; can saturate CPU).
+    - `backfill_max_workers` - post-flatten area_m2 backfill (I/O-bound; can run with broad parallelism).
+    - `tiles_max_workers` - mbtiles raster generation (each worker holds a pickled geometry list; RAM scales with workers × group size).
+- Why:
+  - Original code used `max_workers` / CPU count for every stage. On an M4 Max (64 GB unified memory) a single tbl_stacked run produced 1363 partitions with median 202 KB, p95 19 MB, max 687 MB. With `max_workers=10` the flatten stage tried to allocate ~139 GB and choked. Halving to 2 workers fixed the crash but left CPU at ~15% utilisation through the other phases because the same conservative cap applied everywhere.
+- How to apply:
+  - On memory-constrained or unified-memory hosts (Apple Silicon), keep `flatten_max_workers` low (2-3) and let the other three caps auto-size via RAM budget.
+  - On Windows/Linux workstations with ample RAM and many cores, set all four to `0` - the auto path multiplies by `mem_target_frac / flatten_approx_gb_per_worker` (or the stage-specific per-worker estimate) and clamps to CPU count, which scales up naturally.
+  - Heavy-first partitioning: `flatten_tbl_stacked` splits files at `flatten_large_partition_mb` (default 50 MB) and runs the large tail first with the tight cap, then the long small tail with a wider pool. The small phase's per-worker RAM estimate is ~1/4 of the large phase's to match its actual footprint.
+  - Large auxiliary DataFrames (e.g. `area_map`) are persisted to a scratch parquet (`__area_map.parquet`) before the pool spawns, so workers read it lazily instead of inheriting a pickled copy across every spawn boundary. This cuts driver-process RSS by several GB per run.
+- Non-regression guarantee:
+  - All four caps default to `0 = auto`. With no config changes and no psutil, the code paths fall back to the same CPU-based heuristic used previously. Existing Windows baselines are only affected if the user explicitly opts in by setting the new keys or by adopting the updated `config.ini` defaults.
