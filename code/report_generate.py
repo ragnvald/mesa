@@ -96,7 +96,6 @@ _REPORT_INSET_SHADOW_DY = 0.008
 # ---------------- GUI / globals ----------------
 log_widget = None        # QPlainTextEdit (set when GUI is up)
 progress_var = None      # QProgressBar (set when GUI is up)
-progress_label = None    # QLabel showing percentage
 last_report_path = None
 link_var = None          # QLabel used as hyperlink
 
@@ -4470,7 +4469,7 @@ class ReportGeneratorWindow(QMainWindow):
 
     def __init__(self, base_dir: str, config_file: str, palette: dict, desc: dict, parent=None):
         super().__init__(parent)
-        global log_widget, progress_var, progress_label, link_var, _gui_window, _signals
+        global log_widget, progress_var, link_var, _gui_window, _signals
 
         _gui_window = self
         _signals = _ReportSignals()
@@ -4506,11 +4505,11 @@ class ReportGeneratorWindow(QMainWindow):
         progress_var = QProgressBar()
         progress_var.setRange(0, 100)
         progress_var.setValue(0)
+        progress_var.setTextVisible(True)
+        progress_var.setFormat("%p%")
+        progress_var.setAlignment(Qt.AlignCenter)
         progress_var.setFixedWidth(300)
         pframe.addWidget(progress_var)
-        progress_label = QLabel("0%")
-        progress_label.setFixedWidth(40)
-        pframe.addWidget(progress_label)
         pframe.addStretch()
         main_layout.addLayout(pframe)
 
@@ -4650,8 +4649,6 @@ class ReportGeneratorWindow(QMainWindow):
     def _on_progress_update(self, pct: float):
         if progress_var is not None:
             progress_var.setValue(int(pct))
-        if progress_label is not None:
-            progress_label.setText(f"{int(pct)}%")
 
     def _on_link_update(self, text: str):
         if link_var is not None:

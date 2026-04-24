@@ -1541,12 +1541,11 @@ class ProcessRunnerWindow(QMainWindow):
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
-        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("%p%")
+        self._progress_bar.setAlignment(Qt.AlignCenter)
         self._progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         prog_row.addWidget(self._progress_bar, stretch=1)
-        self._progress_label = QLabel("0%")
-        self._progress_label.setMinimumWidth(40)
-        prog_row.addWidget(self._progress_label)
         layout.addLayout(prog_row)
 
         # Info label
@@ -1678,7 +1677,6 @@ class ProcessRunnerWindow(QMainWindow):
     def _set_progress(self, p: float) -> None:
         p = max(0.0, min(100.0, float(p)))
         self._progress_bar.setValue(int(p))
-        self._progress_label.setText(f"{int(p)}%")
 
     def _on_task_finished(self) -> None:
         self._process_btn.setEnabled(True)

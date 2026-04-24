@@ -2160,8 +2160,8 @@ class MesaMainWindow(QMainWindow):
             row_layout.setSpacing(6)
 
             color_bar = QFrame()
-            color_bar.setFixedSize(4, 20)
-            color_bar.setStyleSheet(f"background: {TIMELINE_COLORS['success']}; border-radius: 2px;")
+            color_bar.setFixedSize(8, 20)
+            color_bar.setStyleSheet(f"background: {TIMELINE_COLORS['success']}; border-radius: 3px;")
             row_layout.addWidget(color_bar)
 
             title_lbl = QLabel("Event")
@@ -2306,8 +2306,8 @@ class MesaMainWindow(QMainWindow):
         }
         color = STATUS_COLORS.get(status_role, "#ef4444")
         bullet = QLabel("\u2B24")  # filled circle
-        bullet.setStyleSheet(f"QLabel {{ color: {color}; font-size: 16pt; }}")
-        bullet.setFixedWidth(28)
+        bullet.setStyleSheet(f"QLabel {{ color: {color}; font-size: 14pt; }}")
+        bullet.setFixedWidth(24)
         bullet.setAlignment(Qt.AlignCenter)
         self._status_layout.addWidget(bullet, row_idx, 0)
 
@@ -2486,7 +2486,7 @@ class MesaMainWindow(QMainWindow):
                 break
             color_bar, title_lbl, dur_lbl, time_lbl = self._timeline_entries[idx]
             color = TIMELINE_COLORS.get(style_key, "#9ca3af")
-            color_bar.setStyleSheet(f"background: {color}; border-radius: 2px;")
+            color_bar.setStyleSheet(f"background: {color}; border-radius: 3px;")
             title_lbl.setText(title)
             dur_lbl.setText(durations.get(title, "--"))
             time_lbl.setText(timestamp)

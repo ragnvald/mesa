@@ -297,8 +297,7 @@ def cfg_get_float(cfg: configparser.ConfigParser, key: str, default: float) -> f
 # ----------------------------
 def _current_progress_display() -> str:
     stage = (progress_stage_text or "").strip()
-    pct_text = f"{int(_progress_value)}%"
-    return f"{stage}: {pct_text}" if stage else pct_text
+    return stage if stage else "Preparations"
 
 
 def _refresh_progress_label():
@@ -310,7 +309,7 @@ def _refresh_progress_label():
 
 
 def set_progress_stage(stage_name: str):
-    """Set the descriptive stage text that prefixes the percentage label."""
+    """Set the descriptive stage text shown beneath the percentage bar."""
     global progress_stage_text
     try:
         progress_stage_text = (stage_name or "").strip()
@@ -3699,20 +3698,24 @@ class ProcessingInternalWindow(QMainWindow):
         log_widget = self._log_widget
 
         # Progress row
-        progress_frame = QHBoxLayout()
+        progress_wrap = QVBoxLayout()
+        progress_wrap.setContentsMargins(0, 0, 0, 0)
+        progress_wrap.setSpacing(4)
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
-        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("%p%")
+        self._progress_bar.setAlignment(Qt.AlignCenter)
         self._progress_bar.setFixedWidth(260)
-        progress_frame.addWidget(self._progress_bar)
+        progress_wrap.addWidget(self._progress_bar)
         progress_bar = self._progress_bar
 
         self._progress_label = QLabel(_current_progress_display())
-        progress_frame.addWidget(self._progress_label)
-        progress_frame.addStretch()
+        self._progress_label.setAlignment(Qt.AlignCenter)
+        progress_wrap.addWidget(self._progress_label)
         progress_label = self._progress_label
-        left_layout.addLayout(progress_frame)
+        left_layout.addLayout(progress_wrap)
 
         # Info text
         info = (f"This is where all calculations are made. Information is provided every {HEARTBEAT_SECS} seconds.\n"

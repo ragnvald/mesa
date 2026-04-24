@@ -332,3 +332,15 @@ When a problem is solved, add a short entry here with:
   - `mesa_qt.py` is no longer the canonical launcher name; update docs and comments to `mesa.py`.
   - Keep PyQt5 in `requirements_all_win311.txt` only where other repos/projects still depend on it; MESA itself should be documented as PySide6-based.
   - Color palette uses GRASP-inspired earth tones: background `#f3ecdf`, text `#3f3528`, accents `#715a36`/`#9b7c3d`, success `#4d7c0f`, warning `#b45309`, danger `#b02a37`.
+
+## GitHub release posts from Zenodo (2026-04-16)
+
+- What changed:
+  - Added `devtools/github_release_from_zenodo.py` to generate a GitHub release title, tag, and markdown body directly from a Zenodo record, then optionally publish it with `gh release create`.
+  - Used it to publish the GitHub prerelease for Zenodo record `19615520` as tag `5.0-beta-2026.04.16`.
+- Root cause:
+  - Release posts had previously been written manually on GitHub even though the canonical release metadata already existed in Zenodo.
+- Practical fix / decision:
+  - Use the Zenodo API (`https://zenodo.org/api/records/<id>`) as the source of truth for title, DOI, publication date, description, and bundled filename.
+  - Use `gh` for the actual GitHub release creation so authentication stays with the local CLI session.
+  - Generate a release preview first, then publish with `python devtools\github_release_from_zenodo.py <record-id> --publish`.
