@@ -105,7 +105,7 @@ pycodestyle==2.11.1
 pycparser==2.21
 pycryptodomex==3.20.0
 pygame==2.5.2
-Pygments==2.17.2
+Pygments==2.20.0
 pygubu==0.31
 pygubu-designer==0.36
 pyinstaller==6.4.0
@@ -131,7 +131,7 @@ rasterio==1.3.9
 reactivex==4.0.4
 regex==2023.10.3
 reportlab==4.2.0
-requests==2.32.4
+requests==2.33.0
 Rtree==1.2.0
 screeninfo==0.8.1
 selenium==4.15.2
