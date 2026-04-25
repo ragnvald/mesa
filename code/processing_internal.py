@@ -415,6 +415,79 @@ def _log_memory_snapshot(context: str, extra: dict | None = None, force: bool = 
         pass
 
 # ----------------------------
+# Memory panic watchdog helper
+# ----------------------------
+def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int):
+    """
+    Start a daemon thread that monitors psutil.virtual_memory().percent and
+    terminates the registered multiprocessing pool if pressure crosses
+    panic_pct for grace_s consecutive seconds. Returns (state, stop_event,
+    thread). Caller must:
+      - assign state["pool"] = pool right after the pool is opened
+      - check state["triggered"] inside the imap_unordered loop and break
+      - call stop_event.set() when the pool block exits
+    The watchdog is a no-op if psutil is unavailable.
+    """
+    import threading as _threading
+    state = {"triggered": False, "pool": None, "since": None,
+             "panic_pct": int(panic_pct), "grace_s": int(grace_s),
+             "label": str(label)}
+    stop = _threading.Event()
+
+    def _run():
+        if psutil is None:
+            return
+        while not stop.wait(2.0):
+            try:
+                pct = psutil.virtual_memory().percent
+                now = time.time()
+                if pct >= state["panic_pct"]:
+                    if state["since"] is None:
+                        state["since"] = now
+                    elif (now - state["since"]) >= state["grace_s"] and not state["triggered"]:
+                        state["triggered"] = True
+                        try:
+                            rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+                        except Exception:
+                            rss_gb = float("nan")
+                        log_to_gui(
+                            log_widget,
+                            f"[PANIC:{state['label']}] RAM pressure {pct:.0f}% "
+                            f">= {state['panic_pct']}% for {state['grace_s']}s "
+                            f"(parent RSS ~{rss_gb:.1f} GB). Terminating pool to "
+                            f"avoid swap death. Lower max_workers or per-stage caps "
+                            f"and retry."
+                        )
+                        pool = state.get("pool")
+                        if pool is not None:
+                            try:
+                                pool.terminate()
+                            except Exception:
+                                pass
+                        return
+                else:
+                    state["since"] = None
+            except Exception:
+                pass
+
+    t = _threading.Thread(target=_run, daemon=True)
+    t.start()
+    return state, stop, t
+
+
+def _panic_cfg(cfg: "configparser.ConfigParser | None" = None) -> tuple[int, int]:
+    """Read mem_panic_percent / mem_panic_grace_secs from cfg with safe defaults."""
+    pct, grace = 75, 10
+    try:
+        cfg_ref = cfg if cfg is not None else _ensure_cfg()
+        pct = max(50, min(99, cfg_get_int(cfg_ref, "mem_panic_percent", 75)))
+        grace = max(1, cfg_get_int(cfg_ref, "mem_panic_grace_secs", 10))
+    except Exception:
+        pass
+    return pct, grace
+
+
+# ----------------------------
 # Raster tiles integration helpers
 # ----------------------------
 def _tbl_flat_path() -> Path:
@@ -1603,10 +1676,19 @@ def _intersection_worker(args):
 # Memory heuristics
 # ----------------------------
 def _estimate_worker_memory_gb(asset_df: gpd.GeoDataFrame,
-                               geocode_df: gpd.GeoDataFrame) -> tuple[float | None, float | None]:
+                               geocode_df: gpd.GeoDataFrame,
+                               cfg: "configparser.ConfigParser | None" = None,
+                               ) -> tuple[float | None, float | None]:
     """
     Approximate memory footprint for one worker when dataframes are pickled
     to child processes (Windows spawn). Returns (~GB per worker, ~GB of data).
+
+    The default 1.5x overhead multiplier is conservative for the worst case
+    (full pickled copy + sindex + groupby buffers). On hosts where workers
+    actually hold only chunk slices, observed RSS is closer to 0.7-0.9x of
+    data size, so the estimate caps worker count too aggressively. The
+    config knob `stage2_worker_overhead_multiplier` lets the operator tune
+    this per dataset/host without changing code.
     """
     def _estimate_gdf(gdf: gpd.GeoDataFrame) -> float:
         if gdf is None or len(gdf) == 0:
@@ -1645,8 +1727,18 @@ def _estimate_worker_memory_gb(asset_df: gpd.GeoDataFrame,
     if total_gb <= 0:
         return None, None
 
-    # Each worker holds full assets+geocodes; add overhead for spatial index/geometry copies
-    per_worker_gb = max(0.75, total_gb * 1.5)
+    # Each worker holds full assets+geocodes; add overhead for spatial index/geometry copies.
+    # Floor the multiplier at 1.0 even if the operator has lowered it: anything below
+    # that ignores join-result expansion (an sjoin can multiply rows several-fold) and
+    # has caused 100+ GB peak-RSS events on large Apple Silicon datasets where
+    # psutil's "available" reading misled the budgeting math.
+    multiplier = 1.5
+    if cfg is not None:
+        try:
+            multiplier = max(1.0, cfg_get_float(cfg, "stage2_worker_overhead_multiplier", 1.5))
+        except Exception:
+            multiplier = 1.5
+    per_worker_gb = max(0.75, total_gb * multiplier)
     return per_worker_gb, total_gb
 
 # ----------------------------
@@ -1779,7 +1871,7 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         if keep:
             assets = assets.merge(groups[keep], left_on='ref_asset_group', right_on='id', how='left')
 
-    est_worker_gb, est_data_gb = _estimate_worker_memory_gb(assets, geocodes)
+    est_worker_gb, est_data_gb = _estimate_worker_memory_gb(assets, geocodes, cfg)
     effective_worker_gb = max(0.5, approx_gb_per_worker)
     if est_worker_gb:
         effective_worker_gb = max(effective_worker_gb, est_worker_gb)
@@ -1819,15 +1911,49 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
         if psutil is not None:
             vm = psutil.virtual_memory()
             avail_gb = vm.available / (1024**3)
+            total_gb = vm.total / (1024**3)
+            try:
+                parent_rss_gb = float(psutil.Process().memory_info().rss) / (1024**3)
+            except Exception:
+                parent_rss_gb = 0.0
             headroom_gb = max(0.5, cfg_get_float(cfg, "mem_headroom_gb", 1.5))
+
+            # Available-based budget: how much we can grow into right now.
             avail_after_headroom = max(0.5, avail_gb - headroom_gb)
-            budget_gb = max(0.5, avail_after_headroom * mem_target_frac)
-            allowed = max(1, int(budget_gb // max(0.5, effective_worker_gb)))
+            avail_budget_gb = max(0.5, avail_after_headroom * mem_target_frac)
+            allowed_avail = max(1, int(avail_budget_gb // max(0.5, effective_worker_gb)))
+
+            # Total-RAM-based ceiling: protects against macOS unified memory
+            # over-reporting "available" (which on M-series can stay high right
+            # up until the host falls into swap-death). Treats the whole RAM
+            # bank minus parent-process RSS as the real ceiling, then applies
+            # mem_target_frac on top so we never plan to consume the whole box.
+            total_after_parent = max(0.5, total_gb - parent_rss_gb)
+            total_budget_gb = max(0.5, total_after_parent * mem_target_frac)
+            allowed_total = max(1, int(total_budget_gb // max(0.5, effective_worker_gb)))
+
+            allowed = min(allowed_avail, allowed_total)
+
             log_to_gui(
                 log_widget,
-                f"[workers] RAM avail ~{avail_gb:.1f} GB -> budget ~{budget_gb:.1f} GB (headroom {headroom_gb:.1f} GB, {effective_worker_gb:.1f} GB/worker) => {allowed} workers",
+                f"[workers] RAM total {total_gb:.1f} GB, avail {avail_gb:.1f} GB, "
+                f"parent ~{parent_rss_gb:.1f} GB; "
+                f"avail-budget {avail_budget_gb:.1f} GB ({allowed_avail} workers), "
+                f"total-budget {total_budget_gb:.1f} GB ({allowed_total} workers); "
+                f"per-worker ~{effective_worker_gb:.1f} GB -> using {allowed} workers."
             )
             max_workers = min(max_workers, allowed)
+
+            # Predicted peak preview so the operator sees the worst case
+            # (parent + N workers x per-worker) before the pool spawns.
+            est_peak = parent_rss_gb + max_workers * effective_worker_gb
+            peak_pct = 100.0 * est_peak / max(1.0, total_gb)
+            warn = " — WARNING: predicted peak exceeds 90% of RAM" if peak_pct >= 90 else ""
+            log_to_gui(
+                log_widget,
+                f"[workers] predicted peak RSS ~{est_peak:.1f} GB "
+                f"(~{peak_pct:.0f}% of {total_gb:.1f} GB){warn}"
+            )
     except Exception:
         pass
 
@@ -2607,6 +2733,8 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
                f"{len(large_files)} large (>={large_threshold_mb:.0f} MB) with {workers_large} workers, "
                f"{len(small_files)} small with {workers_small} workers.")
 
+    panic_pct, panic_grace_s = _panic_cfg(cfg_local)
+
     def _run_flatten_pool(paths, n_workers: int, label: str) -> None:
         if not paths:
             return
@@ -2614,11 +2742,33 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         if _mp_allowed() and n_workers > 1:
             # imap_unordered so each worker's payload is consumed and released
             # as it returns, rather than buffering all partials to the end.
-            with multiprocessing.get_context("spawn").Pool(n_workers) as pool:
-                args = [(f, ranges_map, desc_map, index_weights) for f in paths]
-                for res in pool.imap_unordered(_flatten_worker, args, chunksize=1):
-                    if res is not None:
-                        partials.append(res)
+            pstate, pstop, pthread = _start_panic_watchdog(label, panic_pct, panic_grace_s)
+            try:
+                with multiprocessing.get_context("spawn").Pool(n_workers) as pool:
+                    pstate["pool"] = pool
+                    args = [(f, ranges_map, desc_map, index_weights) for f in paths]
+                    try:
+                        for res in pool.imap_unordered(_flatten_worker, args, chunksize=1):
+                            if pstate["triggered"]:
+                                raise RuntimeError(
+                                    f"{label} aborted by memory panic watchdog "
+                                    f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
+                                )
+                            if res is not None:
+                                partials.append(res)
+                    except Exception:
+                        if pstate["triggered"]:
+                            raise RuntimeError(
+                                f"{label} aborted by memory panic watchdog "
+                                f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
+                            )
+                        raise
+                    finally:
+                        pstate["pool"] = None
+            finally:
+                pstop.set()
+                try: pthread.join(timeout=1.5)
+                except Exception: pass
         else:
             for f in paths:
                 res = _flatten_worker((f, ranges_map, desc_map, index_weights))
@@ -2928,10 +3078,26 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
             log_to_gui(log_widget,
                        f"Backfill: {len(files)} partitions using {backfill_workers} workers…")
             if _mp_allowed() and backfill_workers > 1:
-                with multiprocessing.get_context("spawn").Pool(backfill_workers) as pool:
-                    args = [(f, worker_area_arg) for f in files]
-                    for count in pool.imap_unordered(_backfill_worker, args):
-                        touched += count
+                bf_pct, bf_grace = _panic_cfg(cfg_local)
+                pstate, pstop, pthread = _start_panic_watchdog("backfill", bf_pct, bf_grace)
+                try:
+                    with multiprocessing.get_context("spawn").Pool(backfill_workers) as pool:
+                        pstate["pool"] = pool
+                        args = [(f, worker_area_arg) for f in files]
+                        try:
+                            for count in pool.imap_unordered(_backfill_worker, args):
+                                if pstate["triggered"]:
+                                    raise RuntimeError(
+                                        f"backfill aborted by memory panic watchdog "
+                                        f"(>{bf_pct}% RAM for >={bf_grace}s)"
+                                    )
+                                touched += count
+                        finally:
+                            pstate["pool"] = None
+                finally:
+                    pstop.set()
+                    try: pthread.join(timeout=1.5)
+                    except Exception: pass
             else:
                 for f in files:
                     touched += _backfill_worker((f, worker_area_arg))
@@ -3582,6 +3748,16 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     except Exception: geom_types = ["Polygon","MultiPolygon","LineString","Point"]
     progress_state = {"done": 0, "rows": 0, "started_at": time.time()}
     hb_stop = threading.Event()
+
+    # Memory panic watchdog. Stage 2 can move from comfortable to swapping
+    # within seconds when an sjoin against a dense asset region produces 10x
+    # the row count the estimator predicted. The watchdog terminates the
+    # pool cleanly when host RAM pressure crosses mem_panic_percent.
+    panic_pct, panic_grace_s = _panic_cfg()
+    panic_state, panic_stop, wd_thread = _start_panic_watchdog(
+        "intersect", panic_pct, panic_grace_s
+    )
+
     def _heartbeat():
         while not hb_stop.wait(HEARTBEAT_SECS):
             try:
@@ -3651,21 +3827,39 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     if _mp_allowed() and max_workers > 1:
         ctx = multiprocessing.get_context("spawn")
         with ctx.Pool(processes=max_workers, initializer=_intersect_pool_init, initargs=(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
-            for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
-                progress_state["done"] += 1; done_count = progress_state["done"]
-                if logs:
-                    for line in logs: log_to_gui(log_widget, line)
-                if err:
-                    error_msg = err; log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
-                    try: pool.terminate()
-                    except Exception: pass
-                    break
-                written += int(nrows or 0); progress_state["rows"] = written
-                if paths:
-                    if isinstance(paths, list): files.extend(paths)
-                    else: files.append(paths)
-                _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
-                if done_count % 8 == 0: gc.collect()
+            panic_state["pool"] = pool
+            try:
+                for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
+                    if panic_state["triggered"]:
+                        error_msg = (
+                            f"intersection aborted by memory panic watchdog "
+                            f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
+                        )
+                        break
+                    progress_state["done"] += 1; done_count = progress_state["done"]
+                    if logs:
+                        for line in logs: log_to_gui(log_widget, line)
+                    if err:
+                        error_msg = err; log_to_gui(log_widget, f"[intersect] Chunk {idx} failed: {err}")
+                        try: pool.terminate()
+                        except Exception: pass
+                        break
+                    written += int(nrows or 0); progress_state["rows"] = written
+                    if paths:
+                        if isinstance(paths, list): files.extend(paths)
+                        else: files.append(paths)
+                    _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
+                    if done_count % 8 == 0: gc.collect()
+            except Exception as e:
+                if panic_state["triggered"]:
+                    error_msg = (
+                        f"intersection aborted by memory panic watchdog "
+                        f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
+                    )
+                else:
+                    raise
+            finally:
+                panic_state["pool"] = None
     else:
         _intersect_pool_init(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)
         for args in iterable:
@@ -3683,6 +3877,9 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
             if done_count % 8 == 0: gc.collect()
     try:
         hb_stop.set(); hb_thread.join(timeout=1.5)
+        try:
+            panic_stop.set(); wd_thread.join(timeout=1.5)
+        except Exception: pass
     except Exception: pass
     try:
         for c in cells_meta: c["state"] = "done"
