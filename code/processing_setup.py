@@ -100,7 +100,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QGroupBox, QLabel, QPushButton, QLineEdit,
     QScrollArea, QFrame, QSizePolicy, QMessageBox, QFileDialog,
-    QTabWidget,
+    QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView,
 )
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtCore import Qt, Signal, QObject
@@ -840,6 +841,20 @@ def persist_index_weights_from_ui(strict: bool = True, silent: bool = False) -> 
 # =====================================================================
 # PySide6 Window
 # =====================================================================
+class _NumericTableItem(QTableWidgetItem):
+    # Sort numerically by the value stored in Qt.UserRole so "10" is larger
+    # than "2" (default QTableWidgetItem sort is lexicographic on the text).
+    def __lt__(self, other):
+        try:
+            a = self.data(Qt.UserRole)
+            b = other.data(Qt.UserRole)
+            if a is not None and b is not None:
+                return float(a) < float(b)
+        except Exception:
+            pass
+        return super().__lt__(other)
+
+
 class SetupWindow(QMainWindow):
 
     def __init__(self, base_dir: str):
@@ -1012,82 +1027,172 @@ class SetupWindow(QMainWindow):
 
         info = QLabel(
             "Set the importance and susceptibility for each asset layer. "
-            "Sensitivity is calculated automatically as importance × susceptibility."
+            "Sensitivity is calculated automatically as importance × susceptibility. "
+            "Click a column header to sort."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #5c4a2f; font-size: 9pt; padding: 4px 0;")
         layout.addWidget(info)
 
-        # Scroll area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-
-        container = QWidget()
-        grid = QGridLayout(container)
-        grid.setSpacing(4)
-        grid.setContentsMargins(4, 4, 4, 4)
-        grid.setAlignment(Qt.AlignTop)
-
-        # Headers
         headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]
-        for col_idx, header in enumerate(headers):
-            lbl = QLabel(header)
-            lbl.setStyleSheet("font-weight: 600;")
-            grid.addWidget(lbl, 0, col_idx)
+        table = QTableWidget(0, len(headers), parent)
+        table.setHorizontalHeaderLabels(headers)
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        )
 
-        # Data rows
+        hdr = table.horizontalHeader()
+        hdr.setSectionsClickable(True)
+        hdr.setSortIndicatorShown(True)
+        # Responsive column sizing: the two text columns share leftover width,
+        # the four numeric columns size to their contents.
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)           # Dataset
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Importance
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Susceptibility
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Sensitivity
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Code
+        hdr.setSectionResizeMode(5, QHeaderView.Stretch)           # Description
+
+        self._vuln_table = table
+        # Guard to stop the itemChanged handler re-entering when it writes back
+        # the derived sensitivity/code/description cells.
+        self._vuln_suppress_itemchanged = False
+
         entries_vuln = []
-        for i, row in enumerate(gdf_asset_group.itertuples(), start=1):
-            self._add_vuln_row(i, row, grid, entries_vuln, gdf_asset_group)
+        # Disable sorting while populating so row positions stay stable; we
+        # enable sorting + apply the default A-Z sort once the table is full.
+        table.setSortingEnabled(False)
+        for i, row in enumerate(gdf_asset_group.itertuples()):
+            self._add_vuln_row(i, row, table, entries_vuln, gdf_asset_group)
+        table.setSortingEnabled(True)
+        table.sortItems(0, Qt.AscendingOrder)
 
-        scroll.setWidget(container)
-        layout.addWidget(scroll)
+        table.itemChanged.connect(self._on_vuln_item_changed)
+
+        layout.addWidget(table, stretch=1)
 
     # ------------------------------------------------------------------
-    def _add_vuln_row(self, index, row, grid, entries_list, gdf):
-        l_name = QLabel(str(getattr(row, 'name_original', '')))
-        l_name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        grid.addWidget(l_name, index, 0)
+    def _add_vuln_row(self, row_idx_0based, row, table, entries_list, gdf):
+        name_val = str(getattr(row, 'name_original', ''))
+        imp_val = int(coerce_valid_int(
+            str(getattr(row, 'importance', FALLBACK_VULN)),
+            valid_input_values, FALLBACK_VULN,
+        ))
+        sus_val = int(coerce_valid_int(
+            str(getattr(row, 'susceptibility', FALLBACK_VULN)),
+            valid_input_values, FALLBACK_VULN,
+        ))
+        try:
+            sens_val = int(getattr(row, 'sensitivity', 0) or 0)
+        except Exception:
+            sens_val = 0
+        if sens_val <= 0:
+            sens_val = imp_val * sus_val
+        code_val = str(getattr(row, 'sensitivity_code', '') or '')
+        desc_val = str(getattr(row, 'sensitivity_description', '') or '')
 
-        e_imp = QLineEdit(str(getattr(row, 'importance', FALLBACK_VULN)))
-        e_imp.setFixedWidth(80)
-        e_imp.setAlignment(Qt.AlignCenter)
-        grid.addWidget(e_imp, index, 1)
+        row_pos = table.rowCount()
+        table.insertRow(row_pos)
 
-        e_sus = QLineEdit(str(getattr(row, 'susceptibility', FALLBACK_VULN)))
-        e_sus.setFixedWidth(80)
-        e_sus.setAlignment(Qt.AlignCenter)
-        grid.addWidget(e_sus, index, 2)
+        # Column 0 - Dataset (read-only, text sort)
+        name_item = QTableWidgetItem(name_val)
+        name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+        name_item.setData(Qt.UserRole, row_idx_0based)
+        table.setItem(row_pos, 0, name_item)
 
-        l_sens = QLabel(str(getattr(row, 'sensitivity', '')))
-        l_sens.setFixedWidth(80)
-        l_sens.setAlignment(Qt.AlignCenter)
-        grid.addWidget(l_sens, index, 3)
+        # Column 1 - Importance (editable, numeric sort)
+        imp_item = _NumericTableItem(str(imp_val))
+        imp_item.setTextAlignment(Qt.AlignCenter)
+        imp_item.setData(Qt.UserRole, imp_val)
+        table.setItem(row_pos, 1, imp_item)
 
-        l_code = QLabel(str(getattr(row, 'sensitivity_code', '')))
-        l_code.setFixedWidth(80)
-        l_code.setAlignment(Qt.AlignCenter)
-        grid.addWidget(l_code, index, 4)
+        # Column 2 - Susceptibility (editable, numeric sort)
+        sus_item = _NumericTableItem(str(sus_val))
+        sus_item.setTextAlignment(Qt.AlignCenter)
+        sus_item.setData(Qt.UserRole, sus_val)
+        table.setItem(row_pos, 2, sus_item)
 
-        l_desc = QLabel(str(getattr(row, 'sensitivity_description', '')))
-        l_desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        grid.addWidget(l_desc, index, 5)
+        # Column 3 - Sensitivity (read-only, numeric sort)
+        sens_item = _NumericTableItem(str(sens_val))
+        sens_item.setFlags(sens_item.flags() & ~Qt.ItemIsEditable)
+        sens_item.setTextAlignment(Qt.AlignCenter)
+        sens_item.setData(Qt.UserRole, sens_val)
+        table.setItem(row_pos, 3, sens_item)
 
-        # Connect textChanged for live sensitivity calculation
-        row_idx = index - 1
-        e_imp.textChanged.connect(lambda _text, imp=e_imp, sus=e_sus, idx=row_idx: calculate_sensitivity(imp, sus, idx, entries_list, gdf))
-        e_sus.textChanged.connect(lambda _text, imp=e_imp, sus=e_sus, idx=row_idx: calculate_sensitivity(imp, sus, idx, entries_list, gdf))
+        # Column 4 - Code (read-only, text sort)
+        code_item = QTableWidgetItem(code_val)
+        code_item.setFlags(code_item.flags() & ~Qt.ItemIsEditable)
+        code_item.setTextAlignment(Qt.AlignCenter)
+        table.setItem(row_pos, 4, code_item)
+
+        # Column 5 - Description (read-only, text sort)
+        desc_item = QTableWidgetItem(desc_val)
+        desc_item.setFlags(desc_item.flags() & ~Qt.ItemIsEditable)
+        table.setItem(row_pos, 5, desc_item)
 
         entries_list.append({
-            'row_index': row_idx,
-            'name': l_name,
-            'importance': e_imp,
-            'susceptibility': e_sus,
-            'sensitivity': l_sens,
-            'sensitivity_code': l_code,
-            'sensitivity_description': l_desc,
+            'row_index': row_idx_0based,
+            'name': name_item,
+            'importance': imp_item,
+            'susceptibility': sus_item,
+            'sensitivity': sens_item,
+            'sensitivity_code': code_item,
+            'sensitivity_description': desc_item,
         })
+
+    # ------------------------------------------------------------------
+    def _on_vuln_item_changed(self, item):
+        if self._vuln_suppress_itemchanged:
+            return
+        col = item.column()
+        if col not in (1, 2):
+            return
+        row_pos = item.row()
+        name_item = self._vuln_table.item(row_pos, 0)
+        if name_item is None:
+            return
+        idx = None
+        for k, entry in enumerate(entries_vuln):
+            if entry['name'] is name_item:
+                idx = k
+                break
+        if idx is None:
+            return
+
+        self._vuln_suppress_itemchanged = True
+        try:
+            # Coerce user input and normalise display + numeric sort key.
+            try:
+                v = int(coerce_valid_int(
+                    (item.text() or "").strip(),
+                    valid_input_values, FALLBACK_VULN,
+                ))
+                item.setData(Qt.UserRole, v)
+                if item.text() != str(v):
+                    item.setText(str(v))
+            except Exception:
+                pass
+
+            calculate_sensitivity(
+                entries_vuln[idx]['importance'],
+                entries_vuln[idx]['susceptibility'],
+                idx,
+                entries_vuln,
+                gdf_asset_group,
+            )
+
+            # Refresh the sort key on the derived Sensitivity cell so numeric
+            # sorting on that column reflects the new value.
+            sens_item = entries_vuln[idx]['sensitivity']
+            try:
+                sens_item.setData(Qt.UserRole, int(sens_item.text() or 0))
+            except Exception:
+                pass
+        finally:
+            self._vuln_suppress_itemchanged = False
 
     # ------------------------------------------------------------------
     def _do_save_all_excel(self):
