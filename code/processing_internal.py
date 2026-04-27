@@ -487,6 +487,54 @@ def _panic_cfg(cfg: "configparser.ConfigParser | None" = None) -> tuple[int, int
     return pct, grace
 
 
+def _start_lifetime_panic_watchdog(panic_pct: int = 90, grace_s: int = 5):
+    """Process-wide sentinel that hard-exits the parent if RAM pressure stays
+    above panic_pct for grace_s seconds. Complements the per-pool watchdog
+    (_start_panic_watchdog) by also covering parent-side work between pools.
+    Returns the stop event, or None if psutil is unavailable.
+    See learning.md "Parent-side memory in the pipeline" for context.
+    """
+    import threading as _threading
+    if psutil is None:
+        return None
+    stop = _threading.Event()
+    state = {"since": None}
+
+    def _run():
+        while not stop.wait(1.0):
+            try:
+                pct = float(psutil.virtual_memory().percent)
+                now = time.time()
+                if pct >= panic_pct:
+                    if state["since"] is None:
+                        state["since"] = now
+                    elif (now - state["since"]) >= grace_s:
+                        try:
+                            rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+                            sw_gb  = psutil.swap_memory().used / (1024 ** 3)
+                            log_to_gui(
+                                log_widget,
+                                f"[PANIC:lifetime] catastrophic RAM pressure "
+                                f"{pct:.0f}% >= {panic_pct}% for {grace_s}s "
+                                f"(parent RSS ~{rss_gb:.1f} GB, swap "
+                                f"~{sw_gb:.1f} GB). Hard-exiting process to "
+                                f"free the host. All pipeline progress for "
+                                f"this run is lost; rerun after the host "
+                                f"recovers."
+                            )
+                        except Exception:
+                            pass
+                        os._exit(137)
+                else:
+                    state["since"] = None
+            except Exception:
+                pass
+
+    t = _threading.Thread(target=_run, daemon=True, name="mesa-lifetime-panic")
+    t.start()
+    return stop
+
+
 # ----------------------------
 # Raster tiles integration helpers
 # ----------------------------
@@ -893,6 +941,12 @@ def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
       3) <base>/input/geoparquet/<name>.parquet
       4) <base>/input/geoparquet/<name>/  (partitioned)
     Returns empty GeoDataFrame if none found.
+
+    WARNING: materialises the entire dataset (all parts, all geometries)
+    into a single in-process GeoDataFrame. Do not call from the parent
+    process for known-large tables (tbl_stacked, tbl_flat). Use a
+    directory glob for presence checks, pyarrow.dataset(...).count_rows()
+    for row counts, or read inside a worker process.
     """
     out_root = gpq_dir()
     in_root  = base_dir() / "input" / "geoparquet"
@@ -1970,11 +2024,45 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
     _ = intersect_assets_geocodes(assets, geocodes, cell_size_m, max_workers,
                                   asset_soft_limit, geocode_soft_limit)
 
+    # Release Stage 2 working sets before Stage 3 starts so flatten workers
+    # don't inherit the parent's intersect-time RSS.
     try:
-        sample = read_parquet_or_empty("tbl_stacked")
-        log_to_gui(log_widget, f"tbl_stacked rows (sample read): {len(sample):,}")
+        del assets, geocodes, groups
+    except Exception:
+        pass
+    try:
+        global _GRID_BBOX_MAP, _GRID_GDF, _GRID_OUT_DIR
+        _GRID_BBOX_MAP = {}
+        _GRID_GDF = None
+        _GRID_OUT_DIR = None
+    except Exception:
+        pass
+    for _ in range(2):
+        try:
+            gc.collect()
+        except Exception:
+            pass
+    if psutil is not None:
+        try:
+            rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+            sw = psutil.swap_memory()
+            log_to_gui(
+                log_widget,
+                f"[stage2->stage3] post-intersect cleanup: parent RSS {rss_gb:.2f} GB, "
+                f"swap_used {sw.used/(1024**3):.1f} GB"
+            )
+        except Exception:
+            pass
+
+    # Presence check only - never materialise tbl_stacked here. See
+    # learning.md "Parent-side memory in the pipeline" and the docstring on
+    # read_parquet_or_empty.
+    try:
+        ds_dir = _dataset_dir("tbl_stacked")
+        n_parts = len(list(ds_dir.glob("*.parquet"))) if ds_dir.exists() else 0
+        log_to_gui(log_widget, f"tbl_stacked parts on disk: {n_parts}")
     except Exception as e:
-        log_to_gui(log_widget, f"tbl_stacked read check failed: {e}")
+        log_to_gui(log_widget, f"tbl_stacked presence check failed: {e}")
 
     update_progress(50)
 
@@ -2565,7 +2653,8 @@ def _backfill_worker(args):
     except Exception:
         return 0
 
-def flatten_tbl_stacked(config_file: Path, working_epsg: str):
+def flatten_tbl_stacked(config_file: Path, working_epsg: str,
+                        *, cleanup_slivers: bool = True):
     log_to_gui(log_widget, "Building presentation table (tbl_flat)…")
 
     # 1. Identify input files
@@ -2606,6 +2695,54 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     except Exception:
         cfg_local = configparser.ConfigParser()
     index_weights = _load_index_weight_settings(cfg_local)
+
+    # 2b. Pre-flight memory check - refuse to start under existing pressure.
+    try:
+        preflight_max_pct = max(20, min(95, cfg_get_int(
+            cfg_local, "flatten_preflight_max_vm_percent", 60)))
+    except Exception:
+        preflight_max_pct = 60
+    try:
+        preflight_max_swap_gb = max(0.0, cfg_get_float(
+            cfg_local, "flatten_preflight_max_swap_gb", 5.0))
+    except Exception:
+        preflight_max_swap_gb = 5.0
+    if psutil is not None:
+        try:
+            vm = psutil.virtual_memory()
+            sw = psutil.swap_memory()
+            vm_pct = float(vm.percent)
+            swap_gb = float(sw.used) / (1024 ** 3)
+            log_to_gui(
+                log_widget,
+                f"[flatten] pre-flight: vm.percent={vm_pct:.1f}% (limit {preflight_max_pct}%), "
+                f"swap_used={swap_gb:.1f} GB (limit {preflight_max_swap_gb:.1f} GB)"
+            )
+            reasons = []
+            if vm_pct > preflight_max_pct:
+                reasons.append(
+                    f"vm.percent {vm_pct:.1f}% > {preflight_max_pct}%"
+                )
+            if swap_gb > preflight_max_swap_gb:
+                reasons.append(
+                    f"swap_used {swap_gb:.1f} GB > {preflight_max_swap_gb:.1f} GB "
+                    f"(swap residue from a previous stage)"
+                )
+            if reasons:
+                msg = (
+                    "[flatten] PRE-FLIGHT ABORT: " + "; ".join(reasons) + ". "
+                    "Host is too memory-constrained to start flatten safely. "
+                    "Wait for swap to drain (or restart the process), then "
+                    "rerun via run_flatten_only.py to skip the intersect "
+                    "rebuild."
+                )
+                log_to_gui(log_widget, msg)
+                raise RuntimeError(msg)
+        except RuntimeError:
+            raise
+        except Exception:
+            # Don't let psutil hiccups block flatten.
+            pass
 
     # 3. Run Parallel Map
     partials = []
@@ -2669,27 +2806,37 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         mem_frac = 0.70
     mem_frac = min(0.95, max(0.30, mem_frac))
 
-    # Two-phase size split. Partition sizes are heavily skewed: the vast
-    # majority are tiny, but a small tail of large partitions drives worst-case
-    # memory. Separating them lets us run the small tail with broad
-    # parallelism (near-zero per-worker RAM) while still capping the heavy
-    # tail conservatively.
+    # Three-phase size split (partition sizes are heavily skewed):
+    #   huge  (>= flatten_huge_partition_mb)  -> SERIAL (1 worker)
+    #   large (>= flatten_large_partition_mb) -> workers_large in parallel
+    #   small (<  flatten_large_partition_mb) -> workers_small in parallel
     try:
         large_threshold_mb = float(cfg_local.get(
             "DEFAULT", "flatten_large_partition_mb", fallback="50"))
     except Exception:
         large_threshold_mb = 50.0
-    threshold_bytes = int(max(1.0, large_threshold_mb) * 1024 * 1024)
+    try:
+        huge_threshold_mb = float(cfg_local.get(
+            "DEFAULT", "flatten_huge_partition_mb", fallback="200"))
+    except Exception:
+        huge_threshold_mb = 200.0
+    if huge_threshold_mb < large_threshold_mb:
+        huge_threshold_mb = large_threshold_mb
+    large_bytes = int(max(1.0, large_threshold_mb) * 1024 * 1024)
+    huge_bytes  = int(max(1.0, huge_threshold_mb) * 1024 * 1024)
 
     try:
         sized = [(p, p.stat().st_size) for p in files]
     except Exception:
         sized = [(p, 0) for p in files]
 
-    large_sized = [t for t in sized if t[1] >= threshold_bytes]
-    small_sized = [t for t in sized if t[1] <  threshold_bytes]
+    huge_sized  = [t for t in sized if t[1] >= huge_bytes]
+    large_sized = [t for t in sized if huge_bytes > t[1] >= large_bytes]
+    small_sized = [t for t in sized if t[1] <  large_bytes]
+    huge_sized.sort(key=lambda t: t[1], reverse=True)
     large_sized.sort(key=lambda t: t[1], reverse=True)
     small_sized.sort(key=lambda t: t[1], reverse=True)
+    huge_files  = [p for p, _ in huge_sized]
     large_files = [p for p, _ in large_sized]
     small_files = [p for p, _ in small_sized]
 
@@ -2728,10 +2875,23 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
     workers_small = _resolve_phase_workers(
         flatten_small_override, small_gb_per_worker, len(small_files), "flatten-small")
 
-    log_to_gui(log_widget,
-               f"Flattening {len(files)} partitions in two phases: "
-               f"{len(large_files)} large (>={large_threshold_mb:.0f} MB) with {workers_large} workers, "
-               f"{len(small_files)} small with {workers_small} workers.")
+    if huge_files:
+        max_size_mb = max(t[1] for t in huge_sized) / (1024 * 1024)
+        log_to_gui(
+            log_widget,
+            f"Flattening {len(files)} partitions in three phases: "
+            f"{len(huge_files)} huge (>={huge_threshold_mb:.0f} MB, biggest {max_size_mb:.0f} MB) "
+            f"SERIAL, "
+            f"{len(large_files)} large (>={large_threshold_mb:.0f} MB) with {workers_large} workers, "
+            f"{len(small_files)} small with {workers_small} workers."
+        )
+    else:
+        log_to_gui(
+            log_widget,
+            f"Flattening {len(files)} partitions in two phases: "
+            f"{len(large_files)} large (>={large_threshold_mb:.0f} MB) with {workers_large} workers, "
+            f"{len(small_files)} small with {workers_small} workers."
+        )
 
     panic_pct, panic_grace_s = _panic_cfg(cfg_local)
 
@@ -2775,10 +2935,21 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
                 if res is not None:
                     partials.append(res)
 
-    # Pay the heavy phase first: big partitions run when the worker pool is
-    # freshest and nothing else is queued. Once they're done, swap to a wider
-    # pool for the small tail.
+    # Heaviest phase first, with progressively wider parallelism. gc.collect
+    # between phases gives the OS a chance to reclaim pages before the next
+    # round opens fresh worker memory.
+    if huge_files:
+        _run_flatten_pool(huge_files, 1, "flatten-huge")
+        try:
+            gc.collect()
+        except Exception:
+            pass
     _run_flatten_pool(large_files, workers_large, "flatten-large")
+    if large_files:
+        try:
+            gc.collect()
+        except Exception:
+            pass
     _run_flatten_pool(small_files, workers_small, "flatten-small")
 
     # Expose the large-phase value as max_workers for downstream sections
@@ -2994,6 +3165,31 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
         except Exception as e:
             log_to_gui(log_widget, f"[tbl_flat] MultiPolygon split failed; continuing without split: {e}")
 
+    # 6b. Sliver cleanup. Polygonised mosaics often produce a long tail of
+    # zero-area or sub-square-meter cells from edge precision; they pollute
+    # tbl_flat without representing any real area. Configurable threshold so
+    # advanced users can keep them (or raise the cutoff) via config + UI.
+    if cleanup_slivers and len(tbl_flat) > 0 and "area_m2" in tbl_flat.columns:
+        try:
+            sliver_min_m2 = float(cfg_local.get(
+                "DEFAULT", "flatten_sliver_min_area_m2", fallback="1.0"))
+        except Exception:
+            sliver_min_m2 = 1.0
+        try:
+            area_num = pd.to_numeric(tbl_flat["area_m2"], errors="coerce")
+            keep = area_num.fillna(0) >= sliver_min_m2
+            n_drop = int((~keep).sum())
+            if n_drop > 0:
+                before_n = len(tbl_flat)
+                tbl_flat = tbl_flat.loc[keep].reset_index(drop=True)
+                log_to_gui(log_widget,
+                           f"[tbl_flat] Sliver cleanup: dropped {n_drop:,} rows "
+                           f"with area_m2 < {sliver_min_m2:g} m^2 "
+                           f"({before_n:,} -> {len(tbl_flat):,}).")
+        except Exception as e:
+            log_to_gui(log_widget,
+                       f"[tbl_flat] Sliver cleanup skipped (error: {e}).")
+
     # 7. Select Columns & Write
     preferred = [
         'ref_geocodegroup','name_gis_geocodegroup','code',
@@ -3137,7 +3333,16 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str):
 # ----------------------------
 # Top-level process
 # ----------------------------
-def run_processing_pipeline(config_file: Path):
+def run_processing_pipeline(config_file: Path,
+                            *,
+                            run_prep: bool = True,
+                            run_intersect: bool = True,
+                            run_flatten: bool = True,
+                            cleanup_slivers: bool = True):
+    """Stages can be skipped independently. Soft validation: each stage that
+    depends on a previous output checks the artifact on disk and skips with a
+    clear log line instead of erroring out."""
+    lifetime_panic_stop = None
     try:
         cfg = read_config(config_file)
         set_global_cfg(cfg)  # <-- make parquet_folder available to gpq_dir()
@@ -3147,6 +3352,18 @@ def run_processing_pipeline(config_file: Path):
             HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
         except Exception:
             pass
+
+        # Process-wide RAM sentinel; backstop for parent-side work between
+        # pools. See learning.md "Parent-side memory in the pipeline".
+        try:
+            lp_pct = max(60, min(99, cfg_get_int(cfg, "mem_lifetime_panic_percent", 90)))
+        except Exception:
+            lp_pct = 90
+        try:
+            lp_grace = max(1, cfg_get_int(cfg, "mem_lifetime_panic_grace_secs", 5))
+        except Exception:
+            lp_grace = 5
+        lifetime_panic_stop = _start_lifetime_panic_watchdog(lp_pct, lp_grace)
 
         working_epsg = str(cfg["DEFAULT"].get("workingprojection_epsg","4326")).strip()
         raw_max_workers = str(cfg["DEFAULT"].get("max_workers", "")).strip()
@@ -3175,29 +3392,54 @@ def run_processing_pipeline(config_file: Path):
                       "approx_gb_per_worker": f"{approx_gb_per_worker:.2f}"},
                      force=True)
 
-        log_to_gui(log_widget, "[Stage 1/4] Preparing workspace and status files…")
-        cleanup_outputs(); update_progress(5)
-        _init_idle_status()
+        if run_prep:
+            log_to_gui(log_widget, "[Stage 1/4] Preparing workspace and status files…")
+            cleanup_outputs(); update_progress(5)
+            _init_idle_status()
+        else:
+            log_to_gui(log_widget, "[Stage 1/4] Skipped (Prep unchecked).")
 
-        log_to_gui(log_widget, "[Stage 2/4] Building stacked dataset (intersections & classification)…")
-        process_tbl_stacked(cfg, working_epsg, cell_size, max_workers,
-                            approx_gb_per_worker, mem_target_frac,
-                            asset_soft_limit, geocode_soft_limit)
+        if run_intersect:
+            log_to_gui(log_widget, "[Stage 2/4] Building stacked dataset (intersections & classification)…")
+            process_tbl_stacked(cfg, working_epsg, cell_size, max_workers,
+                                approx_gb_per_worker, mem_target_frac,
+                                asset_soft_limit, geocode_soft_limit)
+        else:
+            log_to_gui(log_widget, "[Stage 2/4] Skipped (Intersect unchecked).")
 
-        log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
-        flatten_tbl_stacked(config_file, working_epsg); update_progress(95)
+        if run_flatten:
+            ds_dir = _dataset_dir("tbl_stacked")
+            n_parts = len(list(ds_dir.glob("*.parquet"))) if ds_dir.exists() else 0
+            if n_parts == 0:
+                log_to_gui(log_widget,
+                           "[Stage 3/4] Skipped: tbl_stacked has 0 parts on disk. "
+                           "Run Intersect first (or rerun with Intersect checked).")
+            else:
+                log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
+                flatten_tbl_stacked(config_file, working_epsg,
+                                    cleanup_slivers=cleanup_slivers); update_progress(95)
+        else:
+            log_to_gui(log_widget, "[Stage 3/4] Skipped (Flatten unchecked).")
 
         # __mosaic_faces_tmp is produced by geocode_manage.py's polygonize
-        # step; the mosaic path does not clean it itself, so by the time the
-        # pipeline reaches this point it can be several hundred MB of dead
-        # weight. Fold it into the same Stage 3 cleanup sweep.
-        for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out", "__mosaic_faces_tmp"]:
-            _rm_rf(_dataset_dir(temp_dir))
-        
+        # step; the mosaic path does not clean it itself. Only sweep when we
+        # actually ran a stage that may have produced these scratches.
+        if run_prep or run_intersect or run_flatten:
+            for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out", "__mosaic_faces_tmp"]:
+                _rm_rf(_dataset_dir(temp_dir))
+
         log_to_gui(log_widget, "Core processing (stages 1-3) finished. Preparing raster tiles stage…")
     except Exception as e:
         log_to_gui(log_widget, f"Error during processing: {e}")
         raise
+    finally:
+        # Always stop the lifetime watchdog so a second pipeline run in the
+        # same process does not stack daemon threads.
+        if lifetime_panic_stop is not None:
+            try:
+                lifetime_panic_stop.set()
+            except Exception:
+                pass
 
 # ----------------------------
 # Minimap (Leaflet in pywebview) — helper process
@@ -3888,6 +4130,11 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     if error_msg: raise RuntimeError(error_msg)
     if not files:
         log_to_gui(log_widget, "No intersections; tbl_stacked is empty.")
+        # Release before returning so caller's frame doesn't keep these alive.
+        try: del chunks, tagged
+        except Exception: pass
+        try: gc.collect()
+        except Exception: pass
         return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
     final_ds = _dataset_dir("tbl_stacked"); _rm_rf(final_ds)
     try: Path(tmp_parts).rename(final_ds)
@@ -3896,6 +4143,12 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
         for f in Path(tmp_parts).glob("*.parquet"): shutil.move(str(f), str(final_ds / f.name))
         _rm_rf(tmp_parts)
     log_to_gui(log_widget, f"tbl_stacked dataset written as folder with {len(files)} parts and ~{written:,} rows: {final_ds}")
+    # Release intersect working sets before returning so the caller can
+    # transition to flatten without inheriting them.
+    try: del chunks, tagged, chunk_cells
+    except Exception: pass
+    try: gc.collect()
+    except Exception: pass
     return gpd.GeoDataFrame(geometry=[], crs=geocode_data.crs)
 
 
@@ -3905,11 +4158,20 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
 _EXPLODE_TBL_FLAT_MULTIPOLYGONS: bool = False
 
 
-def run_headless(original_working_directory_arg: str | None = None, *, explode_flat_multipolygons: bool = False, log_fn=None) -> None:
+def run_headless(original_working_directory_arg: str | None = None,
+                 *,
+                 explode_flat_multipolygons: bool = False,
+                 log_fn=None,
+                 run_prep: bool = True,
+                 run_intersect: bool = True,
+                 run_flatten: bool = True,
+                 cleanup_slivers: bool = True) -> None:
     """Entry point for headless processing (callable from other modules).
 
     This mirrors the __main__ headless initialization without calling sys.exit.
     If *log_fn* is provided, log output is routed there instead of stdout.
+    The run_prep/run_intersect/run_flatten flags are forwarded to
+    run_processing_pipeline so callers can rerun individual data stages.
     """
     global _external_log_fn
     _external_log_fn = log_fn
@@ -3959,7 +4221,11 @@ def run_headless(original_working_directory_arg: str | None = None, *, explode_f
     _EXPLODE_TBL_FLAT_MULTIPOLYGONS = bool(explode_flat_multipolygons)
 
     try:
-        run_processing_pipeline(cfg_path)
+        run_processing_pipeline(cfg_path,
+                                run_prep=run_prep,
+                                run_intersect=run_intersect,
+                                run_flatten=run_flatten,
+                                cleanup_slivers=cleanup_slivers)
     finally:
         _external_log_fn = None
 

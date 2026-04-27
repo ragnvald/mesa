@@ -30,7 +30,7 @@ from mesa_shared import find_base_dir as resolve_base_dir, read_config, parquet_
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QProgressBar,
-    QFrame, QSizePolicy,
+    QFrame, QSizePolicy, QRadioButton, QButtonGroup,
 )
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
@@ -90,11 +90,21 @@ class ProcessAvailability:
 
 @dataclass(frozen=True)
 class ProcessPlan:
-    run_data: bool
+    # Data-processing sub-stages. Any True triggers run_data_process; the
+    # internal pipeline honours each flag independently with soft validation.
+    run_prep: bool
+    run_intersect: bool
+    run_flatten: bool
     explode_flat_multipolygons: bool
+    cleanup_slivers: bool
     run_tiles: bool
     run_lines: bool
     run_analysis: bool
+
+    @property
+    def run_data(self) -> bool:
+        """True if any of the three data sub-stages is selected."""
+        return bool(self.run_prep or self.run_intersect or self.run_flatten)
 
 
 def _exists_any(paths: Iterable[Path]) -> bool:
@@ -389,8 +399,16 @@ def run_data_process(
     progress_fn: Callable[[float], None],
     *,
     explode_flat_multipolygons: bool = False,
+    run_prep: bool = True,
+    run_intersect: bool = True,
+    run_flatten: bool = True,
+    cleanup_slivers: bool = True,
 ) -> None:
     """Run the data-processing pipeline.
+
+    Sub-stages (prep / intersect / flatten) can be skipped independently
+    via the run_* flags; the internal pipeline does soft validation and
+    logs a clear skip line when an upstream artifact is missing.
 
     Important: when frozen (PyInstaller), calling a .py via `sys.executable` does not work.
     We therefore run the pipeline in-process by importing the internal module.
@@ -414,7 +432,15 @@ def run_data_process(
             step=1.2,
             interval_s=0.8,
         )
-        dpi.run_headless(str(base_dir), explode_flat_multipolygons=bool(explode_flat_multipolygons), log_fn=log_fn)
+        dpi.run_headless(
+            str(base_dir),
+            explode_flat_multipolygons=bool(explode_flat_multipolygons),
+            log_fn=log_fn,
+            run_prep=bool(run_prep),
+            run_intersect=bool(run_intersect),
+            run_flatten=bool(run_flatten),
+            cleanup_slivers=bool(cleanup_slivers),
+        )
         stop_pulse.set()
         try:
             pulse_thread.join(timeout=0.2)
@@ -1420,12 +1446,23 @@ def run_selected(
     if plan.run_data:
         try:
             s, e = ranges.get("data", (0.0, 100.0))
-            _log_line(base_dir, log_fn, f"[Process] Progress range data: {s:.1f}% -> {e:.1f}%")
+            sub_summary = ", ".join([
+                name for name, on in [("prep", plan.run_prep),
+                                       ("intersect", plan.run_intersect),
+                                       ("flatten", plan.run_flatten)]
+                if on
+            ]) or "(none)"
+            _log_line(base_dir, log_fn,
+                      f"[Process] Progress range data: {s:.1f}% -> {e:.1f}% (sub-stages: {sub_summary})")
             run_data_process(
                 base_dir,
                 log_fn,
                 make_slice_progress(s, e),
                 explode_flat_multipolygons=bool(plan.explode_flat_multipolygons),
+                run_prep=bool(plan.run_prep),
+                run_intersect=bool(plan.run_intersect),
+                run_flatten=bool(plan.run_flatten),
+                cleanup_slivers=bool(plan.cleanup_slivers),
             )
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
@@ -1437,8 +1474,14 @@ def run_selected(
             _log_line(base_dir, log_fn, f"[Process] Progress range tiles: {s:.1f}% -> {e:.1f}%")
             gpq = parquet_dir(base_dir, cfg)
             if not _exists_any([gpq / "tbl_flat.parquet"]):
-                raise FileNotFoundError("tbl_flat.parquet is missing; run data processing first")
-            run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
+                # Soft skip: user opted in to tiles but the upstream artifact
+                # is not on disk. Honour the rerun-parts intent rather than
+                # failing the whole batch.
+                _log_line(base_dir, log_fn,
+                          "Tiles: skipped - tbl_flat.parquet is missing. "
+                          "Run Flatten (or Data processing end-to-end) first.")
+            else:
+                run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
         except Exception as exc:
             _log_line(base_dir, log_fn, f"ERROR: raster tiles failed: {exc}")
             had_errors = True
@@ -1548,14 +1591,6 @@ class ProcessRunnerWindow(QMainWindow):
         prog_row.addWidget(self._progress_bar, stretch=1)
         layout.addLayout(prog_row)
 
-        # Info label
-        info_label = QLabel(
-            "Run one or more processing steps in one batch. "
-            "Unavailable steps are disabled when required input tables are missing."
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-
         # Availability
         avail_data = detect_data_processing(base_dir, cfg)
         avail_tiles = detect_tiles_processing(base_dir, cfg)
@@ -1566,8 +1601,37 @@ class ProcessRunnerWindow(QMainWindow):
         tiles_flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
         tiles_default = bool(avail_tiles.available and (tiles_flat_exists or avail_data.available))
 
-        # Checkbox grid
+        # Stash availability for the Normal-mode worker, which builds a plan
+        # straight from these instead of reading checkbox state.
+        self._avail_data = avail_data
+        self._avail_tiles = avail_tiles
+        self._avail_lines = avail_lines
+        self._avail_analysis = avail_analysis
+        self._tiles_flat_exists = tiles_flat_exists
+
+        # Mode selector: Normal hides the checkbox grid and runs everything
+        # available in one click. Advanced shows the per-stage checkboxes.
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self._rb_normal   = QRadioButton("Normal")
+        self._rb_advanced = QRadioButton("Advanced")
+        self._rb_normal.setChecked(True)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._rb_normal)
+        self._mode_group.addButton(self._rb_advanced)
+        mode_row.addWidget(self._rb_normal)
+        mode_row.addWidget(self._rb_advanced)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+
+        # Info label adapts to the active mode.
+        self._info_label = QLabel()
+        self._info_label.setWordWrap(True)
+        layout.addWidget(self._info_label)
+
+        # Checkbox grid (only visible in Advanced mode).
         grid_widget = QWidget()
+        self._advanced_panel = grid_widget
         grid = QGridLayout(grid_widget)
         grid.setContentsMargins(10, 0, 10, 0)
 
@@ -1591,43 +1655,114 @@ class ProcessRunnerWindow(QMainWindow):
                 cb.setChecked(False)
             return cb
 
-        self._cb_data = _mk_row(1, "Data processing (presentation)", avail_data.available, avail_data)
-        tiles_status = "Run data processing first" if not tiles_flat_exists else None
-        self._cb_tiles = _mk_row(2, "Tiles processing (MBTiles)", tiles_default, avail_tiles, tiles_status)
-        self._cb_lines = _mk_row(3, "Lines processing (segments)", avail_lines.available, avail_lines)
-        self._cb_analysis = _mk_row(4, "Analysis processing (study areas)", avail_analysis.available, avail_analysis)
+        # Row 1: master "Process" checkbox (cascades to data sub-stages + tiles).
+        self._cb_data_master = QCheckBox("Process (data: prep + intersect + flatten + tiles)")
+        self._cb_data_master.setTristate(True)
+        self._cb_data_master.setEnabled(avail_data.available)
+        self._cb_data_master.setChecked(avail_data.available)
+        grid.addWidget(self._cb_data_master, 1, 0)
+        master_status = "Ready" if avail_data.available else (
+            "; ".join(avail_data.reasons) if avail_data.reasons else "Missing inputs")
+        grid.addWidget(QLabel(master_status), 1, 1)
 
-        # Explode option in column 2, row 1
+        # Flatten options stack vertically in column 2 of the master row.
+        opts_col = QVBoxLayout()
+        opts_col.setContentsMargins(0, 0, 0, 0)
+        opts_col.setSpacing(2)
         self._cb_data_explode = QCheckBox("Split MultiPolygons in tbl_flat")
         self._cb_data_explode.setChecked(False)
-        grid.addWidget(self._cb_data_explode, 1, 2)
+        opts_col.addWidget(self._cb_data_explode)
+        # Sliver cleanup defaults on; uncheck to keep zero-area / <1 m^2 rows.
+        self._cb_cleanup_slivers = QCheckBox("Drop sliver cells (<1 m²)")
+        self._cb_cleanup_slivers.setChecked(True)
+        opts_col.addWidget(self._cb_cleanup_slivers)
+        opts_host = QWidget()
+        opts_host.setLayout(opts_col)
+        grid.addWidget(opts_host, 1, 2)
+
+        # Sub-rows 1a / 1b / 1c: three data sub-stages, indented.
+        def _mk_sub(row, text, default_checked):
+            cb = QCheckBox("    " + text)  # indent for visual hierarchy
+            cb.setEnabled(avail_data.available)
+            cb.setChecked(default_checked and avail_data.available)
+            grid.addWidget(cb, row, 0)
+            return cb
+
+        self._cb_prep      = _mk_sub(2, "Prep (workspace, status)", avail_data.available)
+        self._cb_intersect = _mk_sub(3, "Intersect (build tbl_stacked)", avail_data.available)
+        self._cb_flatten   = _mk_sub(4, "Flatten (build tbl_flat)", avail_data.available)
+
+        # Existing rows shifted down. Tiles cascades from master too.
+        tiles_status = "Run Flatten (or full data) first" if not tiles_flat_exists else None
+        self._cb_tiles = _mk_row(5, "Tiles processing (MBTiles)", tiles_default, avail_tiles, tiles_status)
+        self._cb_lines = _mk_row(6, "Lines processing (segments)", avail_lines.available, avail_lines)
+        self._cb_analysis = _mk_row(7, "Analysis processing (study areas)", avail_analysis.available, avail_analysis)
 
         layout.addWidget(grid_widget)
 
-        # Sync logic for data option / tiles state
+        # ----- Master <-> sub cascade -----
+        # Use `clicked` (fires only on user interaction, not setCheckState) so
+        # programmatic updates don't recurse - no guard flag needed.
+        sub_cbs = [self._cb_prep, self._cb_intersect, self._cb_flatten, self._cb_tiles]
+
+        def _on_master_clicked():
+            state = self._cb_data_master.checkState()
+            # Tristate cycles user clicks through Unchecked → PartiallyChecked → Checked;
+            # treat Partial as "user wants all on".
+            if state == Qt.PartiallyChecked:
+                state = Qt.Checked
+                self._cb_data_master.setCheckState(Qt.Checked)
+            new_checked = (state == Qt.Checked)
+            for cb in sub_cbs:
+                if cb.isEnabled():
+                    cb.setChecked(new_checked)
+            _sync_data_option()
+            _sync_tiles()
+
+        def _refresh_master_state():
+            enabled_subs = [cb for cb in sub_cbs if cb.isEnabled()]
+            if not enabled_subs:
+                self._cb_data_master.setCheckState(Qt.Unchecked)
+                return
+            states = [cb.isChecked() for cb in enabled_subs]
+            if all(states):
+                self._cb_data_master.setCheckState(Qt.Checked)
+            elif any(states):
+                self._cb_data_master.setCheckState(Qt.PartiallyChecked)
+            else:
+                self._cb_data_master.setCheckState(Qt.Unchecked)
+
         def _sync_data_option():
-            enabled = self._cb_data.isChecked() and avail_data.available
+            # Explode option requires Flatten; it's the stage that writes tbl_flat.
+            enabled = self._cb_flatten.isChecked() and avail_data.available
             self._cb_data_explode.setEnabled(enabled)
             if not enabled:
                 self._cb_data_explode.setChecked(False)
 
         def _sync_tiles():
             helper_ok = avail_tiles.available
-            data_ok = self._cb_data.isChecked() and avail_data.available
+            flatten_ok = self._cb_flatten.isChecked() and avail_data.available
             flat_ok = tiles_flat_exists
-            enabled = helper_ok and (data_ok or flat_ok)
+            enabled = helper_ok and (flatten_ok or flat_ok)
             self._cb_tiles.setEnabled(enabled)
             if not enabled:
                 self._cb_tiles.setChecked(False)
 
-        self._cb_data.stateChanged.connect(_sync_data_option)
-        self._cb_data.stateChanged.connect(_sync_tiles)
+        self._cb_data_master.clicked.connect(_on_master_clicked)
+        for cb in sub_cbs:
+            cb.clicked.connect(_refresh_master_state)
+        # Flatten controls availability of the explode option and (along with
+        # an on-disk tbl_flat) controls Tiles availability.
+        self._cb_flatten.clicked.connect(_sync_data_option)
+        self._cb_flatten.clicked.connect(_sync_tiles)
+
         _sync_data_option()
         _sync_tiles()
+        _refresh_master_state()
 
         # Button row
         btn_row = QHBoxLayout()
-        self._process_btn = QPushButton("Process selected")
+        self._process_btn = QPushButton("Process")
         self._map_btn = QPushButton("Progress map")
         exit_btn = QPushButton("Exit")
 
@@ -1641,6 +1776,23 @@ class ProcessRunnerWindow(QMainWindow):
         self._process_btn.clicked.connect(self._on_process_click)
         self._map_btn.clicked.connect(self._open_progress_map)
         exit_btn.clicked.connect(self.close)
+
+        # Mode toggle: hide the per-stage grid + rename the button in Normal.
+        def _apply_mode():
+            advanced = self._rb_advanced.isChecked()
+            self._advanced_panel.setVisible(advanced)
+            self._process_btn.setText("Process all selected" if advanced else "Process")
+            self._info_label.setText(
+                "Advanced mode: pick exactly which stages to run. Unavailable "
+                "stages stay disabled. Useful for reruns of a single sub-step."
+                if advanced else
+                "Normal mode: one click runs every stage that has its inputs "
+                "ready. Switch to Advanced to pick individual sub-stages."
+            )
+
+        self._rb_normal.toggled.connect(_apply_mode)
+        self._rb_advanced.toggled.connect(_apply_mode)
+        _apply_mode()
 
         # Connect signals
         self._signals.log_message.connect(self._append_log)
@@ -1763,13 +1915,30 @@ class ProcessRunnerWindow(QMainWindow):
 
     def _worker(self) -> None:
         try:
-            plan = ProcessPlan(
-                run_data=self._cb_data.isChecked(),
-                explode_flat_multipolygons=self._cb_data_explode.isChecked(),
-                run_tiles=self._cb_tiles.isChecked(),
-                run_lines=self._cb_lines.isChecked(),
-                run_analysis=self._cb_analysis.isChecked(),
-            )
+            if self._rb_advanced.isChecked():
+                plan = ProcessPlan(
+                    run_prep=self._cb_prep.isChecked(),
+                    run_intersect=self._cb_intersect.isChecked(),
+                    run_flatten=self._cb_flatten.isChecked(),
+                    explode_flat_multipolygons=self._cb_data_explode.isChecked(),
+                    cleanup_slivers=self._cb_cleanup_slivers.isChecked(),
+                    run_tiles=self._cb_tiles.isChecked(),
+                    run_lines=self._cb_lines.isChecked(),
+                    run_analysis=self._cb_analysis.isChecked(),
+                )
+            else:
+                # Normal mode: run everything available, no advanced toggles.
+                data_on = self._avail_data.available
+                plan = ProcessPlan(
+                    run_prep=data_on,
+                    run_intersect=data_on,
+                    run_flatten=data_on,
+                    explode_flat_multipolygons=False,
+                    cleanup_slivers=True,
+                    run_tiles=self._avail_tiles.available and (data_on or self._tiles_flat_exists),
+                    run_lines=self._avail_lines.available,
+                    run_analysis=self._avail_analysis.available,
+                )
 
             def log_from_worker(msg: str) -> None:
                 self._signals.log_message.emit(msg)
@@ -1821,11 +1990,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--list", action="store_true", help="Print availability and exit")
     p.add_argument("--dry-run", action="store_true", help="Print planned actions and exit")
 
-    p.add_argument("--no-data", action="store_true", help="Do not run data processing")
+    p.add_argument("--no-data", action="store_true", help="Do not run any data sub-stage")
+    # Per-sub-stage skips (data processing). Default is to run all three when
+    # --no-data is not set; pass --no-prep / --no-intersect / --no-flatten to
+    # rerun a subset.
+    p.add_argument("--no-prep", action="store_true", help="Skip Prep sub-stage of data processing")
+    p.add_argument("--no-intersect", action="store_true", help="Skip Intersect sub-stage of data processing")
+    p.add_argument("--no-flatten", action="store_true", help="Skip Flatten sub-stage of data processing")
     p.add_argument(
         "--explode-flat-multipolygons",
         action="store_true",
         help="When running data processing, split MultiPolygon geometries in tbl_flat into individual Polygon rows",
+    )
+    p.add_argument(
+        "--no-cleanup-slivers",
+        action="store_true",
+        help="Keep zero-area / sub-1-m^2 sliver rows in tbl_flat (default: drop them)",
     )
     p.add_argument("--no-tiles", action="store_true", help="Do not run raster tiles (MBTiles) after data processing")
     p.add_argument("--no-lines", action="store_true", help="Do not run lines processing")
@@ -1850,10 +2030,14 @@ def main() -> None:
     avail_lines = detect_lines_processing(base_dir, cfg)
     avail_analysis = detect_analysis_processing(base_dir, cfg)
 
+    data_on = avail_data.available and not bool(args.no_data)
     default_plan = ProcessPlan(
-        run_data=avail_data.available and not bool(args.no_data),
+        run_prep=data_on and not bool(args.no_prep),
+        run_intersect=data_on and not bool(args.no_intersect),
+        run_flatten=data_on and not bool(args.no_flatten),
         explode_flat_multipolygons=bool(args.explode_flat_multipolygons),
-        run_tiles=avail_data.available and not bool(args.no_data) and not bool(args.no_tiles),
+        cleanup_slivers=not bool(args.no_cleanup_slivers),
+        run_tiles=data_on and not bool(args.no_tiles),
         run_lines=avail_lines.available and not bool(args.no_lines),
         run_analysis=avail_analysis.available and not bool(args.no_analysis),
     )
@@ -1867,8 +2051,12 @@ def main() -> None:
 
     if args.dry_run:
         selected = []
-        if default_plan.run_data:
-            selected.append("data")
+        if default_plan.run_prep:
+            selected.append("data:prep")
+        if default_plan.run_intersect:
+            selected.append("data:intersect")
+        if default_plan.run_flatten:
+            selected.append("data:flatten")
         if default_plan.run_tiles:
             selected.append("tiles")
         if default_plan.run_lines:
