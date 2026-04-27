@@ -572,6 +572,7 @@ def load_settings() -> dict:
         "import_simplify_geometries": _bool_setting(d.get("import_simplify_geometries", "false"), False),
         "import_simplify_tolerance_m": float(d.get("import_simplify_tolerance_m", "1.0")),
         "import_simplify_preserve_topology": _bool_setting(d.get("import_simplify_preserve_topology", "true"), True),
+        "import_dissolve_grid_cells": _bool_setting(d.get("import_dissolve_grid_cells", "true"), True),
     }
 
 
@@ -813,6 +814,16 @@ class AssetManagerWindow(QMainWindow):
         self.simplify_check = QCheckBox("Simplify geometries")
         self.simplify_check.setChecked(bool(self.settings["import_simplify_geometries"]))
         opt_row.addWidget(self.simplify_check)
+
+        # Merge touching polygons that share identical attribute values into
+        # one feature. Helps both vector grid layers (one polygon per cell)
+        # and any dataset that's been needlessly split into adjacent slivers.
+        # Per-area attribute values are preserved; non-touching features
+        # stay separate.
+        self.dissolve_check = QCheckBox("Dissolve adjacent polygons (recommended)")
+        self.dissolve_check.setChecked(bool(self.settings["import_dissolve_grid_cells"]))
+        opt_row.addWidget(self.dissolve_check)
+
         opt_row.addStretch()
         layout.addLayout(opt_row)
 
@@ -916,6 +927,7 @@ class AssetManagerWindow(QMainWindow):
             cfg = _ensure_cfg()
             cfg["DEFAULT"]["import_validate_geometries"] = "true" if self.validate_check.isChecked() else "false"
             cfg["DEFAULT"]["import_simplify_geometries"] = "true" if self.simplify_check.isChecked() else "false"
+            cfg["DEFAULT"]["import_dissolve_grid_cells"]  = "true" if self.dissolve_check.isChecked()  else "false"
         except Exception:
             pass
 
@@ -988,6 +1000,58 @@ class AssetManagerWindow(QMainWindow):
             return geom.buffer(0)
         except Exception:
             return geom
+
+    def _dissolve_by_attributes(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
+        """Merge polygons that share identical non-geometry attribute values
+        and are touching. Splits the dissolved multipart back into single-part
+        polygons so non-touching features stay separate. Preserves all
+        attribute values per area.
+
+        Designed for raster-derived layers where each pixel is its own
+        polygon; for irregular vector data with all-distinct attributes the
+        operation is a near no-op (and the log line will say so).
+        """
+        if gdf is None or gdf.empty or "geometry" not in gdf.columns:
+            return gdf
+        if not self.dissolve_check.isChecked():
+            return gdf
+        if len(gdf) < 2:
+            return gdf
+        attr_cols = [c for c in gdf.columns if c != gdf.geometry.name]
+        if not attr_cols:
+            return gdf
+
+        n_in = len(gdf)
+        try:
+            # Coerce attribute columns to a hashable string form so groupby
+            # works regardless of source dtype quirks (datetimes, decimals,
+            # mixed object columns from heterogeneous shapefiles).
+            work = gdf.copy()
+            for c in attr_cols:
+                try:
+                    work[c] = work[c].astype("string")
+                except Exception:
+                    work[c] = work[c].astype(str)
+            t0 = time.time()
+            dissolved = work.dissolve(by=attr_cols, as_index=False)
+            exploded = dissolved.explode(index_parts=False, ignore_index=True)
+            n_out = len(exploded)
+            dt = time.time() - t0
+            if n_out < n_in:
+                pct = 100.0 * (n_in - n_out) / n_in
+                self._log(
+                    f"{label}: dissolve merged {n_in:,} -> {n_out:,} polygons "
+                    f"({pct:.1f}% reduction, {dt:.1f}s)"
+                )
+            else:
+                self._log(
+                    f"{label}: dissolve found nothing to merge "
+                    f"({n_in:,} polygons unchanged, {dt:.1f}s)"
+                )
+            return exploded
+        except Exception as exc:
+            self._log(f"{label}: dissolve failed ({exc}) - keeping original", "WARN")
+            return gdf
 
     def _apply_quality_controls(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
         if gdf is None or gdf.empty or "geometry" not in gdf.columns:
@@ -1067,6 +1131,7 @@ class AssetManagerWindow(QMainWindow):
                     if gdf.empty:
                         continue
                     gdf = self._apply_quality_controls(gdf, f"Assets:{fp.name}:{layer}")
+                    gdf = self._dissolve_by_attributes(gdf, f"Assets:{fp.name}:{layer}")
                     bbox_polygon = box(*gdf.total_bounds)
                     count = len(gdf)
                     asset_groups.append({
@@ -1102,6 +1167,7 @@ class AssetManagerWindow(QMainWindow):
                 if gdf.empty:
                     continue
                 gdf = self._apply_quality_controls(gdf, f"Assets:{fp.name}")
+                gdf = self._dissolve_by_attributes(gdf, f"Assets:{fp.name}")
                 layer = fp.stem
                 bbox_polygon = box(*gdf.total_bounds)
                 count = len(gdf)
