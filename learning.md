@@ -409,3 +409,15 @@ When a problem is solved, add a short entry here with:
   - The docstring on `read_parquet_or_empty()` carries the same warning. Read it before calling.
 - Non-regression guarantee:
   - The fix replaces the offending block with `len(list(ds_dir.glob("*.parquet")))` and adds the lifetime watchdog with conservative defaults (90%/5s) wired through `mem_lifetime_panic_percent` / `mem_lifetime_panic_grace_secs`. Existing per-pool watchdogs, per-stage caps, three-phase split, and pre-flight checks are unchanged. Windows baseline behaviour is unaffected unless `psutil` is available and pressure crosses the new lifetime threshold (which it should not under normal operation).
+
+## QTimer.singleShot from worker threads is a no-op (2026-04-27)
+
+- Rule:
+  - Never call `QTimer.singleShot(ms, slot)` from a non-GUI thread. The static `QTimer.singleShot` binds to the calling thread's event loop; a Python `threading.Thread` worker has no Qt event loop, so the slot never fires. Route GUI updates from worker threads through a `Signal` defined on a `QObject` that lives on the GUI thread; Qt's auto-connection will queue the call onto the GUI thread.
+- Why:
+  - In `code/geocode_manage.py`, `_run_mosaic` started `run_mosaic` in a daemon thread via `_run_in_thread`. The mosaic step's `_after(success)` callback runs at the tail end of `run_mosaic` *inside that same worker thread*. The previous code used `QTimer.singleShot(200, self._update_mosaic_status)` to refresh the status label from "Running…" to "OK"/"REQUIRED". The log line and progress bar updated correctly (those went through `self._signals.mosaic_line.emit(...)` and `progress_update.emit(...)`, both `Signal`s, which are queued cross-thread), but the status label stayed pinned at "Running…" forever because the QTimer slot never executed.
+- How to apply:
+  - When you see a worker thread that needs to refresh the GUI on completion, add a dedicated `Signal()` to the window's `_Signals` `QObject`, connect it to the slot in `__init__`, and `emit()` from the worker. The fix here added `mosaic_finished = Signal()` and replaced the `QTimer.singleShot` call with `self._signals.mosaic_finished.emit()`.
+  - This pattern already existed in the same file for `mosaic_line` and `task_finished`. The bug was a one-off shortcut that bypassed it.
+- Non-regression guarantee:
+  - The fix is a three-line change confined to mosaic completion routing: a new `Signal`, one `connect` call, and one `emit` swap. The worker function (`run_mosaic`), the thread runner (`_run_in_thread`), and `_update_mosaic_status` itself are unchanged. No new dependencies; no behaviour change on other threads or other helpers.

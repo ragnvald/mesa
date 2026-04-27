@@ -2798,6 +2798,7 @@ class _GeoSignals(QObject):
     progress_update = Signal(float)
     task_finished = Signal()
     mosaic_line = Signal(str)
+    mosaic_finished = Signal()
 
 
 # =====================================================================
@@ -2814,6 +2815,7 @@ class GeocodeManagerWindow(QMainWindow):
         self._signals.progress_update.connect(self._on_progress)
         self._signals.task_finished.connect(self._on_task_finished)
         self._signals.mosaic_line.connect(self._on_mosaic_line)
+        self._signals.mosaic_finished.connect(self._update_mosaic_status)
 
         self._active_log_tab = 0  # 0=mosaic, 1=h3, 2=import
 
@@ -3197,8 +3199,10 @@ class GeocodeManagerWindow(QMainWindow):
         def _after(success):
             self._signals.mosaic_line.emit(
                 f"Mosaic finished: {'Completed' if success else 'No faces'}")
-            # schedule UI update
-            QTimer.singleShot(200, self._update_mosaic_status)
+            # _after runs in the worker thread; route status update through a
+            # signal so it executes on the GUI thread (QTimer.singleShot from
+            # a non-GUI thread binds to a non-existent event loop).
+            self._signals.mosaic_finished.emit()
 
         _run_in_thread(run_mosaic, self.base, buf, grid, _after, on_done=True)
 
