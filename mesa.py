@@ -2952,6 +2952,27 @@ class MesaMainWindow(QMainWindow):
         # Small-partition, backfill, and tiles caps stay on auto (0) because
         # their per-worker RAM is small enough that the auto RAM-budget path
         # naturally scales with the machine.
+
+        # Mosaic boundary extraction (basic_mosaic). Each worker holds a
+        # bounded asset/grid slice and ~1.5 GB peak; CPU-bound, not RAM-bound.
+        # Apple Silicon gets a tighter fraction and an explicit cap because
+        # unified memory is shared with GPU/WindowServer; Windows/Linux let
+        # the cpu*fraction product drive worker count (max=0 = unbounded,
+        # still capped by per-worker RAM budget).
+        if is_apple_silicon:
+            mosaic_fraction = 0.65
+            mosaic_max = 10 if ram_total <= 96 else 12
+        else:
+            mosaic_fraction = 0.75
+            mosaic_max = 0
+        # Smaller chunks improve load balancing on hosts with many workers;
+        # the overhead is negligible above ~250.
+        if logical >= 16:
+            mosaic_chunk_size = 250
+        elif logical >= 8:
+            mosaic_chunk_size = 500
+        else:
+            mosaic_chunk_size = 1000
         recommendations = {
             "max_workers": "0",
             "auto_workers_min": "1",
@@ -2975,6 +2996,10 @@ class MesaMainWindow(QMainWindow):
             "backfill_max_workers": "0",
             "tiles_max_workers": "0",
             "tiles_approx_gb_per_worker": "3.0",
+            # Mosaic (basic_mosaic boundary extraction)
+            "mosaic_auto_worker_fraction": f"{mosaic_fraction:.2f}",
+            "mosaic_auto_worker_max": str(mosaic_max),
+            "mosaic_extract_chunk_size": str(mosaic_chunk_size),
         }
 
         if is_apple_silicon:
@@ -2988,9 +3013,12 @@ class MesaMainWindow(QMainWindow):
                 f"Per-stage caps: flatten-large={flatten_large_cap} (tight due to unified memory), "
                 f"flatten-small/backfill/tiles=auto so small and I/O-bound phases can "
                 f"saturate P-cores. flatten_approx_gb_per_worker={flatten_gb:.1f} "
-                f"scales the auto RAM budget for the skewed partition tail."
+                f"scales the auto RAM budget for the skewed partition tail. "
+                f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max}, "
+                f"chunk_size={mosaic_chunk_size} (capped to leave GPU/WindowServer headroom)."
             )
         else:
+            mosaic_max_label = "unbounded" if mosaic_max == 0 else str(mosaic_max)
             rationale = (
                 f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
                 f"Stage 2 cap {worker_cap}, mem_target_frac={mem_target_frac:.2f}. "
@@ -2998,7 +3026,9 @@ class MesaMainWindow(QMainWindow):
                 f"pandas ballooning on the largest partitions), "
                 f"flatten-small/backfill/tiles=auto (scale to CPU bound by RAM budget). "
                 f"flatten_approx_gb_per_worker={flatten_gb:.1f}, "
-                f"tiles_approx_gb_per_worker=3.0."
+                f"tiles_approx_gb_per_worker=3.0. "
+                f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max_label}, "
+                f"chunk_size={mosaic_chunk_size}."
             )
         return recommendations, rationale
 

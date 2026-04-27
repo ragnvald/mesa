@@ -421,3 +421,16 @@ When a problem is solved, add a short entry here with:
   - This pattern already existed in the same file for `mosaic_line` and `task_finished`. The bug was a one-off shortcut that bypassed it.
 - Non-regression guarantee:
   - The fix is a three-line change confined to mosaic completion routing: a new `Signal`, one `connect` call, and one `emit` swap. The worker function (`run_mosaic`), the thread runner (`_run_in_thread`), and `_update_mosaic_status` itself are unchanged. No new dependencies; no behaviour change on other threads or other helpers.
+
+## Evaluate must cover every host-sensitive config family (2026-04-27)
+
+- Rule:
+  - When a config family scales with host capability (CPU count, RAM tier, unified-vs-discrete memory), `_recommended_processing_tuning` in `mesa.py` must emit values for *all* keys in that family. A key the function doesn't touch keeps whatever's in the repo default `config.ini`, which is calibrated to whoever last committed it.
+- Why:
+  - The mosaic boundary-extraction stage has its own worker-sizing knobs (`mosaic_auto_worker_fraction`, `mosaic_auto_worker_max`, `mosaic_extract_chunk_size`) that are independent of `max_workers` / `auto_workers_max`. The Apple Silicon tuning pass (commits `99e5956` and `ba24a32`) set those keys to M4-tight values in the committed `config.ini` (fraction=0.65, max=10, chunk_size=1000) but did not extend `_recommended_processing_tuning` to write them. Result on a 16-core / 127 GB Windows host running Evaluate → Commit: Stage 2 / flatten / backfill / tiles all moved to Windows-appropriate values, but mosaic kept the M4-tight settings silently. Mosaic ran with 10 workers (16 × 0.65 capped at 10) and coarse 1000-asset chunks, leaving 6 cores idle through the long tail.
+  - The user noticed because the mosaic step felt incredibly slow and asked "did I forget to turn some knobs?". Yes — knobs Evaluate did not know about.
+- How to apply:
+  - When adding a new platform-sensitive config family, audit `_recommended_processing_tuning` and add the keys to its `recommendations` dict and rationale text. Test by simulating at least three hosts (e.g. Windows 16C/127GB, Apple M4 16C/64GB, Apple M2 8C/16GB) and confirm each row produces sensible values.
+  - For mosaic specifically: Apple Silicon gets `fraction=0.65, max=10` (max=12 above 96 GB) because unified memory limits how much extraction parallelism is safe. Non-Apple gets `fraction=0.75, max=0` (unbounded; per-worker 1.5 GB RAM budget naturally caps it). `mosaic_extract_chunk_size` ladders 1000/500/250 by core count to improve load balance as worker count grows.
+- Non-regression guarantee:
+  - The change is additive: existing keys keep their values, three new keys appear in the Evaluate table. Users who never click Commit see no change. The repo-default `config.ini` is unchanged in this commit; first-run users on either platform should run Evaluate → Commit to get host-appropriate values. Future tuning passes for new config families should follow this pattern.
