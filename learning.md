@@ -391,3 +391,21 @@ When a problem is solved, add a short entry here with:
   - Large auxiliary DataFrames (e.g. `area_map`) are persisted to a scratch parquet (`__area_map.parquet`) before the pool spawns, so workers read it lazily instead of inheriting a pickled copy across every spawn boundary. This cuts driver-process RSS by several GB per run.
 - Non-regression guarantee:
   - All four caps default to `0 = auto`. With no config changes and no psutil, the code paths fall back to the same CPU-based heuristic used previously. Existing Windows baselines are only affected if the user explicitly opts in by setting the new keys or by adopting the updated `config.ini` defaults.
+
+## Parent-side memory in the pipeline (2026-04-26)
+
+- Rule:
+  - In `code/processing_internal.py`, the parent process must never materialise a known-large dataset (`tbl_stacked`, `tbl_flat`, similar partitioned outputs) into a single in-process `(Geo)DataFrame`. This applies most strictly to the windows *between* worker pools (e.g. between intersect and flatten), where no panic watchdog is alive.
+  - For row counts: use `pyarrow.dataset.dataset(<path>).count_rows()` or reuse the count already logged by `intersect_assets_geocodes` ("tbl_stacked dataset written as folder with N parts and ~M rows").
+  - For presence checks: glob the partition directory.
+  - For actual data work on these tables: read inside a worker process.
+- Why:
+  - Three previous memory fixes on this branch (`99e5956` → `8b878c5` → `ba24a32`) all bolted guards onto worker pools - per-pool watchdog, per-stage worker caps, three-phase huge/large/small flatten split, flatten pre-flight RAM/swap check. All correct, all scoped to *inside* `Pool(...)` blocks.
+  - The April-26 incident was caused by a 4-line "post-intersect cleanup" debug log added in the unguarded gap between intersect's pool and flatten's pool: `sample = read_parquet_or_empty("tbl_stacked"); log_to_gui(... f"tbl_stacked rows (sample read): {len(sample):,}")`. `read_parquet_or_empty()` resolves a partitioned directory to `gpd.read_parquet(<dir>)`, which materialises the entire dataset (1363 parts, 92,430,523 rows, geometries included) into the parent's RSS - tens of GB on top of the ~10 GB of intersect residue. None of the existing watchdogs fired because none were running in that window. The host swap-stalled; the process eventually died with no flatten log lines and no `tbl_flat`.
+  - The variable was named `sample`. It was not a sample. The row count it printed was already in the log 11 seconds earlier.
+- How to apply:
+  - Before adding any read in `process_tbl_stacked`, `flatten_tbl_stacked`, `intersect_assets_geocodes`, or any code that runs in the parent between stages, check: "is this materialising a known-large dataset?" If yes, replace with a glob (presence), `count_rows()` (count), or move it inside a worker.
+  - The new `_start_lifetime_panic_watchdog()` (started by `run_processing_pipeline`, default 90% RAM for 5s → `os._exit(137)`) is a backstop that frees the host but kills the run's progress. Treat it as a smoke alarm, not a fire suppression system - it is not a substitute for not making the allocation in the first place.
+  - The docstring on `read_parquet_or_empty()` carries the same warning. Read it before calling.
+- Non-regression guarantee:
+  - The fix replaces the offending block with `len(list(ds_dir.glob("*.parquet")))` and adds the lifetime watchdog with conservative defaults (90%/5s) wired through `mem_lifetime_panic_percent` / `mem_lifetime_panic_grace_secs`. Existing per-pool watchdogs, per-stage caps, three-phase split, and pre-flight checks are unchanged. Windows baseline behaviour is unaffected unless `psutil` is available and pressure crosses the new lifetime threshold (which it should not under normal operation).

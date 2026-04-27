@@ -572,6 +572,7 @@ def load_settings() -> dict:
         "import_simplify_geometries": _bool_setting(d.get("import_simplify_geometries", "false"), False),
         "import_simplify_tolerance_m": float(d.get("import_simplify_tolerance_m", "1.0")),
         "import_simplify_preserve_topology": _bool_setting(d.get("import_simplify_preserve_topology", "true"), True),
+        "import_dissolve_grid_cells": _bool_setting(d.get("import_dissolve_grid_cells", "true"), True),
     }
 
 
@@ -813,6 +814,16 @@ class AssetManagerWindow(QMainWindow):
         self.simplify_check = QCheckBox("Simplify geometries")
         self.simplify_check.setChecked(bool(self.settings["import_simplify_geometries"]))
         opt_row.addWidget(self.simplify_check)
+
+        # Merge touching polygons that share identical attribute values into
+        # one feature. Helps both vector grid layers (one polygon per cell)
+        # and any dataset that's been needlessly split into adjacent slivers.
+        # Per-area attribute values are preserved; non-touching features
+        # stay separate.
+        self.dissolve_check = QCheckBox("Dissolve adjacent polygons (recommended)")
+        self.dissolve_check.setChecked(bool(self.settings["import_dissolve_grid_cells"]))
+        opt_row.addWidget(self.dissolve_check)
+
         opt_row.addStretch()
         layout.addLayout(opt_row)
 
@@ -916,6 +927,7 @@ class AssetManagerWindow(QMainWindow):
             cfg = _ensure_cfg()
             cfg["DEFAULT"]["import_validate_geometries"] = "true" if self.validate_check.isChecked() else "false"
             cfg["DEFAULT"]["import_simplify_geometries"] = "true" if self.simplify_check.isChecked() else "false"
+            cfg["DEFAULT"]["import_dissolve_grid_cells"]  = "true" if self.dissolve_check.isChecked()  else "false"
         except Exception:
             pass
 
@@ -988,6 +1000,107 @@ class AssetManagerWindow(QMainWindow):
             return geom.buffer(0)
         except Exception:
             return geom
+
+    def _dissolve_by_attributes(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
+        """Merge polygons that share identical non-geometry attribute values
+        and are touching. Splits the dissolved multipart back into single-part
+        polygons so non-touching features stay separate. Preserves all
+        attribute values per area.
+
+        Stages logged: "checking dissolve potential" -> "dissolving" -> result.
+        Per-layer (n_in, n_out, status) is appended to self._import_dissolve_stats
+        for the final import summary.
+        """
+        # Ensure stats list exists even if caller didn't reset it.
+        if not hasattr(self, "_import_dissolve_stats"):
+            self._import_dissolve_stats: list[tuple[str, int, int, str]] = []
+
+        if gdf is None or gdf.empty or "geometry" not in gdf.columns:
+            return gdf
+        if not self.dissolve_check.isChecked():
+            return gdf
+        if len(gdf) < 2:
+            return gdf
+        attr_cols = [c for c in gdf.columns if c != gdf.geometry.name]
+        if not attr_cols:
+            return gdf
+
+        n_in = len(gdf)
+        col_word = "column" if len(attr_cols) == 1 else "columns"
+        self._log(
+            f"{label}: checking dissolve potential on {n_in:,} polygons "
+            f"(by {len(attr_cols)} attribute {col_word})..."
+        )
+
+        try:
+            # Coerce attribute columns to a hashable string form so groupby
+            # works regardless of source dtype quirks (datetimes, decimals,
+            # mixed object columns from heterogeneous shapefiles).
+            work = gdf.copy()
+            for c in attr_cols:
+                try:
+                    work[c] = work[c].astype("string")
+                except Exception:
+                    work[c] = work[c].astype(str)
+
+            # Pre-validate geometries: dissolve's underlying unary_union is
+            # sensitive to invalid rings (e.g. ChimpanzeeCombined.shp produced
+            # an IllegalArgumentException because LinearRings weren't closed).
+            # Always validate before dissolve regardless of the user's
+            # "Validate geometries" checkbox - this is dissolve's own
+            # defensive layer, not a user-visible quality control.
+            try:
+                work["geometry"] = work.geometry.apply(self._validate_geometry)
+                work = work[work.geometry.notna()]
+                work = work[~work.geometry.is_empty]
+            except Exception as v_exc:
+                self._log(f"{label}: geometry validation pass failed ({v_exc})", "WARN")
+            if work.empty:
+                self._log(
+                    f"{label}: all geometries invalid or empty after validation; "
+                    f"skipping dissolve, keeping original.", "WARN"
+                )
+                self._import_dissolve_stats.append((label, n_in, n_in, "invalid_input"))
+                return gdf
+
+            self._log(f"{label}: dissolving...")
+            t0 = time.time()
+            dissolved = work.dissolve(by=attr_cols, as_index=False)
+            exploded = dissolved.explode(index_parts=False, ignore_index=True)
+            n_out = len(exploded)
+            dt = time.time() - t0
+
+            # Sanity check: dissolve should never reduce non-empty input to
+            # zero. If it does, something went wrong (likely a validity issue
+            # the buffer(0) / make_valid pass couldn't repair). Fall back to
+            # the original to avoid downstream code crashing on an empty GDF
+            # (e.g. box(*gdf.total_bounds) -> LinearRing error).
+            if n_out == 0:
+                self._log(
+                    f"{label}: dissolve produced 0 polygons from {n_in:,} input "
+                    f"({dt:.1f}s) - likely a geometry validity issue the "
+                    f"validator could not repair. Keeping original.", "WARN"
+                )
+                self._import_dissolve_stats.append((label, n_in, n_in, "produced_empty"))
+                return gdf
+
+            if n_out < n_in:
+                pct = 100.0 * (n_in - n_out) / n_in
+                self._log(
+                    f"{label}: dissolved {n_in:,} -> {n_out:,} polygons "
+                    f"(-{n_in - n_out:,}, {pct:.1f}% reduction, {dt:.1f}s)"
+                )
+            else:
+                self._log(
+                    f"{label}: dissolve found nothing to merge "
+                    f"({n_in:,} polygons unchanged, {dt:.1f}s)"
+                )
+            self._import_dissolve_stats.append((label, n_in, n_out, "ok"))
+            return exploded
+        except Exception as exc:
+            self._log(f"{label}: dissolve failed ({exc}) - keeping original", "WARN")
+            self._import_dissolve_stats.append((label, n_in, n_in, "failed"))
+            return gdf
 
     def _apply_quality_controls(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
         if gdf is None or gdf.empty or "geometry" not in gdf.columns:
@@ -1067,6 +1180,7 @@ class AssetManagerWindow(QMainWindow):
                     if gdf.empty:
                         continue
                     gdf = self._apply_quality_controls(gdf, f"Assets:{fp.name}:{layer}")
+                    gdf = self._dissolve_by_attributes(gdf, f"Assets:{fp.name}:{layer}")
                     bbox_polygon = box(*gdf.total_bounds)
                     count = len(gdf)
                     asset_groups.append({
@@ -1102,6 +1216,7 @@ class AssetManagerWindow(QMainWindow):
                 if gdf.empty:
                     continue
                 gdf = self._apply_quality_controls(gdf, f"Assets:{fp.name}")
+                gdf = self._dissolve_by_attributes(gdf, f"Assets:{fp.name}")
                 layer = fp.stem
                 bbox_polygon = box(*gdf.total_bounds)
                 count = len(gdf)
@@ -1143,15 +1258,46 @@ class AssetManagerWindow(QMainWindow):
     def _run_import_asset(self):
         self._update_progress(0)
         self._log("Step [Assets] STARTED")
+        # Reset per-run dissolve stats so the summary at the end is for this
+        # import only (not accumulated across multiple runs in the same window).
+        self._import_dissolve_stats = []
         try:
             asset_objects, asset_groups = self._import_spatial_data_asset()
             self._save_parquet("tbl_asset_object", asset_objects)
             self._save_parquet("tbl_asset_group", asset_groups)
+            self._log_import_summary(asset_objects, asset_groups)
             self._log("Step [Assets] COMPLETED")
         except Exception as exc:
             self._log(f"Step [Assets] FAILED: {exc}", "ERROR")
         finally:
             self._update_progress(100)
+
+    def _log_import_summary(self, asset_objects, asset_groups) -> None:
+        """Final, totalised report after all layers have been imported."""
+        n_groups = len(asset_groups) if asset_groups is not None else 0
+        n_final  = len(asset_objects) if asset_objects is not None else 0
+        sep = "-" * 60
+        self._log(sep)
+        self._log(f"Import summary: {n_groups} layer(s) imported -> {n_final:,} total polygons.")
+        stats = getattr(self, "_import_dissolve_stats", []) or []
+        if not stats:
+            self._log("  (Dissolve disabled or no eligible layers.)")
+            self._log(sep)
+            return
+        total_in  = sum(s[1] for s in stats)
+        total_out = sum(s[2] for s in stats)
+        n_reduced = total_in - total_out
+        pct = (100.0 * n_reduced / total_in) if total_in else 0.0
+        n_layers_changed = sum(1 for s in stats if s[2] < s[1] and s[3] == "ok")
+        n_layers_skipped = sum(1 for s in stats if s[3] != "ok")
+        self._log(f"  Polygons before dissolve: {total_in:>12,d}")
+        self._log(f"  Removed by dissolve:      {n_reduced:>12,d}  ({pct:.1f}% of input)")
+        self._log(f"  Polygons after dissolve:  {total_out:>12,d}")
+        msg = f"  Layers reduced: {n_layers_changed} of {len(stats)}"
+        if n_layers_skipped:
+            msg += f"  (skipped {n_layers_skipped} due to issues - see WARN lines above)"
+        self._log(msg)
+        self._log(sep)
 
     def _start_import(self):
         if self._import_running:
