@@ -709,6 +709,41 @@ def ensure_devtools_not_in_dist() -> None:
         log(f"[WARN] Removing unexpected 'devtools/' from dist: {devtools_in_dist}")
         shutil.rmtree(devtools_in_dist, ignore_errors=True)
 
+
+# Developer-facing notes that must never end up in the distribution. Matched
+# case-insensitively. Add new entries here as the dev-notes set grows.
+DEVELOPER_ONLY_FILES = (
+    "CLAUDE.md",
+    "cooperation.md",
+    "instructions.md",
+    "learning.md",
+)
+
+
+def strip_developer_only_files() -> None:
+    """Remove developer-only markdown notes from the distribution tree.
+
+    Scans FINAL_DIST recursively so files are stripped wherever they end up
+    (next to the exe, inside `docs/`, inside helper bundles, etc.). Match is
+    case-insensitive so "Claude.md" / "CLAUDE.md" both get caught. Logs each
+    file removed so the build output makes the intent visible.
+    """
+    if not FINAL_DIST.exists():
+        return
+    targets = {name.lower() for name in DEVELOPER_ONLY_FILES}
+    removed = 0
+    for path in FINAL_DIST.rglob("*"):
+        if path.is_file() and path.name.lower() in targets:
+            try:
+                path.unlink()
+                log(f"[strip] Removed developer-only file: "
+                    f"{path.relative_to(FINAL_DIST)}")
+                removed += 1
+            except Exception as exc:
+                log(f"[WARN] Could not remove {path}: {exc}")
+    if removed:
+        log(f"[strip] Total developer-only files removed: {removed}")
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -789,6 +824,7 @@ def main() -> None:
     copy_resources()
     write_build_metadata()
     ensure_devtools_not_in_dist()
+    strip_developer_only_files()
 
     exe_path = FINAL_DIST / f"{APP_NAME}.exe"
     if BUILD_MAIN:
