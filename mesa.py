@@ -1059,6 +1059,23 @@ def _windows_friendly_release() -> str:
     return release
 
 
+def _friendly_platform_string() -> str:
+    """A human-readable platform string. Windows 11 is named as such even
+    though `platform.platform()` says "Windows-10-..." (kernel-level name).
+    Falls back to `platform.platform()` on anything we don't special-case.
+    macOS/Apple Silicon naming should be added by the host that runs there;
+    see cooperation.md."""
+    sys_name = platform.system()
+    if sys_name == "Windows":
+        rel = _windows_friendly_release()
+        try:
+            build = platform.version().split(".")[-1]
+        except Exception:
+            build = ""
+        return f"Windows {rel}" + (f" build {build}" if build else "")
+    return platform.platform()
+
+
 def _collect_system_capabilities() -> dict:
     now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     try:
@@ -1078,7 +1095,7 @@ def _collect_system_capabilities() -> dict:
         "os_name": platform.system(),
         "os_release": _windows_friendly_release(),
         "os_version": platform.version(),
-        "platform": platform.platform(),
+        "platform": _friendly_platform_string(),
         "machine": platform.machine(),
         "processor": platform.processor(),
         "cpu_count_logical": os.cpu_count() or None,
@@ -1752,25 +1769,20 @@ class _BannerWidget(QFrame):
         text_y = (r.height() - fm.height()) // 2 + fm.ascent()
         p.drawText(20, text_y, "MESA tool")
 
-        # Version right
+        # Version right. Single line: "<version> Build <timestamp>" when
+        # packaged with a build stamp, else just "<version>".
         version_text = mesa_version_display or "unknown"
-        p.setFont(QFont("Segoe UI", 9, italic=True))
-        fm2 = p.fontMetrics()
-        vw = fm2.horizontalAdvance(version_text)
-        ver_x = r.width() - vw - 20
         if packaged_build_timestamp:
-            # Two-line: version + build stamp
-            ver_y = (r.height() // 2) - 2
-            p.drawText(ver_x, ver_y, version_text)
-            p.setPen(QColor("#6a5533"))
-            p.setFont(QFont("Segoe UI", 8))
-            fm3 = p.fontMetrics()
-            build_text = "Build " + packaged_build_timestamp
-            bw = fm3.horizontalAdvance(build_text)
-            p.drawText(r.width() - bw - 20, ver_y + fm3.height() + 1, build_text)
+            display = f"{version_text} Build {packaged_build_timestamp}"
         else:
-            ver_y = (r.height() - fm2.height()) // 2 + fm2.ascent()
-            p.drawText(ver_x, ver_y, version_text)
+            display = version_text
+        p.setPen(QColor("#6a5533"))
+        p.setFont(QFont("Segoe UI", 8))
+        fm2 = p.fontMetrics()
+        vw = fm2.horizontalAdvance(display)
+        ver_x = r.width() - vw - 20
+        ver_y = (r.height() - fm2.height()) // 2 + fm2.ascent()
+        p.drawText(ver_x, ver_y, display)
 
         p.end()
 
@@ -4006,9 +4018,14 @@ class MesaMainWindow(QMainWindow):
 
         self._tabs.addTab(tab, "About")
 
-        # Populate system info
+        # Populate system info. The parquet snapshot is written async by
+        # _ensure_system_capabilities_snapshot, so on first launch the file
+        # may not exist yet when this tab is built. Fall back to live
+        # collection so the panel is never empty.
         try:
             row = _read_system_capabilities_latest_row()
+            if not row:
+                row = _collect_system_capabilities()
             txt = _format_system_capabilities_for_about(row)
         except Exception:
             txt = "Unable to read system profile."
