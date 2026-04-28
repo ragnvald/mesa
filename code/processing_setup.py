@@ -701,6 +701,34 @@ def save_all_to_excel(gdf, excel_path: str):
 def _apply_vulnerability_from_df(df_x):
     global gdf_asset_group
     if df_x is None or df_x.empty: return
+
+    # Tolerant column name matching: only `importance` and `susceptibility`
+    # are loaded from Excel - everything else (sensitivity, code, description)
+    # is recalculated by sanitize_vulnerability below. We accept the canonical
+    # names plus simple case/whitespace variants so a hand-edited workbook
+    # with "Importance " or "Susceptibility" still resolves.
+    df_x = df_x.copy()
+    canonical_targets = {
+        'id': 'id',
+        'name_original': 'name_original',
+        'importance': 'importance',
+        'susceptibility': 'susceptibility',
+    }
+    rename_map = {}
+    for orig in list(df_x.columns):
+        norm = str(orig).strip().lower().replace(' ', '_')
+        if norm in canonical_targets and norm != orig:
+            rename_map[orig] = canonical_targets[norm]
+    if rename_map:
+        df_x.rename(columns=rename_map, inplace=True)
+
+    # Drop everything outside the canonical four; the rest is recomputed.
+    keep_cols = [c for c in canonical_targets.values() if c in df_x.columns]
+    if not any(c in keep_cols for c in ('importance', 'susceptibility')):
+        log_to_file("Excel load: neither 'importance' nor 'susceptibility' column found; skipping.")
+        return
+    df_x = df_x[keep_cols]
+
     for col in ['importance','susceptibility']:
         if col in df_x.columns:
             s = pd.to_numeric(df_x[col], errors='coerce').round().astype('Int64')
@@ -724,8 +752,26 @@ def _apply_vulnerability_from_df(df_x):
 def load_all_from_excel(excel_path: str):
     try:
         x = pd.read_excel(excel_path, sheet_name=None)
-        if 'vulnerability' in x: _apply_vulnerability_from_df(x['vulnerability'])
+        # Tolerant sheet-name lookup: accept the canonical name or simple
+        # case variants ("Vulnerability", "vulnerability ", etc.). If only
+        # one sheet exists, just use it.
+        sheet_df = None
+        norm_to_orig = {str(k).strip().lower(): k for k in x.keys()}
+        if 'vulnerability' in norm_to_orig:
+            sheet_df = x[norm_to_orig['vulnerability']]
+        elif len(x) == 1:
+            sheet_df = next(iter(x.values()))
+        if sheet_df is not None:
+            _apply_vulnerability_from_df(sheet_df)
         refresh_vulnerability_grid_from_df()
+        # Persist to parquet immediately. Without this, the pipeline run
+        # after an Excel load reads stale susceptibility/importance from
+        # disk, which on a 35-row workbook produced an all-E result for one
+        # user because the load only updated in-memory state.
+        try:
+            save_asset_group_to_parquet(gdf_asset_group, original_working_directory)
+        except Exception as exc:
+            log_to_file(f"Excel load: failed to persist asset group parquet: {exc}")
         _set_status_message(f"Loaded Excel workbook: {excel_path}")
     except Exception as e:
         log_to_file(f"Excel load failed: {e}")
@@ -753,16 +799,47 @@ def calculate_sensitivity(entry_importance, entry_susceptibility, index, entries
         log_to_file(f"Input Error: {e}")
 
 def refresh_vulnerability_grid_from_df():
-    for entry in entries_vuln:
-        name_original = entry['name'].text()
-        mask = (gdf_asset_group['name_original'] == name_original)
-        if mask.any():
-            idx = gdf_asset_group[mask].index[0]
-            entry['importance'].setText(str(int(gdf_asset_group.at[idx, 'importance'])))
-            entry['susceptibility'].setText(str(int(gdf_asset_group.at[idx, 'susceptibility'])))
-            entry['sensitivity'].setText(str(int(gdf_asset_group.at[idx, 'sensitivity'])))
-            entry['sensitivity_code'].setText(str(gdf_asset_group.at[idx, 'sensitivity_code']))
-            entry['sensitivity_description'].setText(str(gdf_asset_group.at[idx, 'sensitivity_description']))
+    # Block the table's itemChanged signal while we rewrite all six cells per
+    # row. Without this guard, setting importance first triggers the live
+    # recalc handler, which reads the still-old susceptibility and writes
+    # both back into gdf - clobbering the freshly loaded Excel values
+    # because sus hasn't been refreshed yet on the same row.
+    table = None
+    if entries_vuln:
+        try:
+            table = entries_vuln[0]['name'].tableWidget()
+        except Exception:
+            table = None
+    prev_blocked = False
+    if table is not None:
+        prev_blocked = table.signalsBlocked()
+        table.blockSignals(True)
+    try:
+        for entry in entries_vuln:
+            name_original = entry['name'].text()
+            mask = (gdf_asset_group['name_original'] == name_original)
+            if mask.any():
+                idx = gdf_asset_group[mask].index[0]
+                imp_val = int(gdf_asset_group.at[idx, 'importance'])
+                sus_val = int(gdf_asset_group.at[idx, 'susceptibility'])
+                sens_val = int(gdf_asset_group.at[idx, 'sensitivity'])
+                entry['importance'].setText(str(imp_val))
+                entry['susceptibility'].setText(str(sus_val))
+                entry['sensitivity'].setText(str(sens_val))
+                entry['sensitivity_code'].setText(str(gdf_asset_group.at[idx, 'sensitivity_code']))
+                entry['sensitivity_description'].setText(str(gdf_asset_group.at[idx, 'sensitivity_description']))
+                # Refresh numeric sort keys on the items we just rewrote so
+                # that clicking a numeric column header sorts by value, not
+                # by the lexicographic display string.
+                try:
+                    entry['importance'].setData(Qt.UserRole, imp_val)
+                    entry['susceptibility'].setData(Qt.UserRole, sus_val)
+                    entry['sensitivity'].setData(Qt.UserRole, sens_val)
+                except Exception:
+                    pass
+    finally:
+        if table is not None:
+            table.blockSignals(prev_blocked)
 
 def update_all_vuln_rows(entries_list, gdf):
     """Sync all UI entry values back into dataframe before saving."""
