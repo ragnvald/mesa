@@ -1060,11 +1060,14 @@ def _windows_friendly_release() -> str:
 
 
 def _friendly_platform_string() -> str:
-    """A human-readable platform string. Windows 11 is named as such even
-    though `platform.platform()` says "Windows-10-..." (kernel-level name).
-    Falls back to `platform.platform()` on anything we don't special-case.
-    macOS/Apple Silicon naming should be added by the host that runs there;
-    see cooperation.md."""
+    """A human-readable platform string.
+
+    Windows 11 is named as such even though `platform.platform()` says
+    "Windows-10-..." (kernel-level name). On macOS we render the user-
+    facing release ("15.4") and arch family ("Apple Silicon" / "Intel")
+    instead of `macOS-15.4-arm64-arm-64bit`. Falls back to
+    `platform.platform()` on anything we don't special-case.
+    """
     sys_name = platform.system()
     if sys_name == "Windows":
         rel = _windows_friendly_release()
@@ -1073,6 +1076,22 @@ def _friendly_platform_string() -> str:
         except Exception:
             build = ""
         return f"Windows {rel}" + (f" build {build}" if build else "")
+    if sys_name == "Darwin":
+        try:
+            release, _versioninfo, machine = platform.mac_ver()
+        except Exception:
+            release, machine = "", ""
+        if not machine:
+            try:
+                machine = platform.machine()
+            except Exception:
+                machine = ""
+        base = f"macOS {release}" if release else "macOS"
+        if machine == "arm64":
+            return f"{base} (Apple Silicon)"
+        if machine == "x86_64":
+            return f"{base} (Intel)"
+        return f"{base} ({machine})" if machine else base
     return platform.platform()
 
 
