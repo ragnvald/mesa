@@ -13,10 +13,21 @@ opts into the tuning by leaving 0 / "auto" / blank.
 The function logs a single [auto-tune] block summarising every decision and
 its rationale, so the operator can audit what was picked without grepping
 through scattered log lines.
+
+Intentionally NOT auto-tuned here:
+- flatten_large_partition_mb is a partition-shape threshold (boundary
+  between the small-phase and large-phase pools), anchored to 50 MB
+  because it reflects parquet partition structure, not hardware. Static.
+- mosaic_coverage_union_batch / mosaic_line_union_max_partials are
+  currently emitted by mesa.py's Evaluate pass; planned migration into
+  this module via a geocode_manage call site (see cooperation.md
+  "Mosaic union batching" and learning.md "Mosaic union reduction is
+  the silent long-tail" for context).
 """
 from __future__ import annotations
 
 import configparser
+import platform
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -39,7 +50,8 @@ _LogFn = Callable[[str], None]
 # ---------------------------------------------------------------------------
 
 def _probe_hardware() -> dict:
-    """Hardware fingerprint: total RAM, currently-available RAM, CPU count.
+    """Hardware fingerprint: total RAM, currently-available RAM, CPU count,
+    plus platform identifiers needed for memory-budget branching.
 
     Returns conservative fallbacks if psutil is unavailable - we'd rather
     under-tune than OOM.
@@ -55,11 +67,70 @@ def _probe_hardware() -> dict:
             ram_avail_gb = float(vm.available) / (1024 ** 3)
         except Exception:
             pass
+    os_name = platform.system().lower()
+    machine = platform.machine().lower()
+    is_apple_silicon = (os_name == "darwin") and machine.startswith("arm")
     return {
         "cpu_count": cpu_count,
         "ram_total_gb": ram_total_gb,
         "ram_avail_gb": ram_avail_gb,
+        "os_name": os_name,
+        "machine": machine,
+        "is_apple_silicon": is_apple_silicon,
     }
+
+
+def _platform_label(hw: dict) -> str:
+    if hw["is_apple_silicon"]:
+        return "Apple Silicon"
+    return f"{hw['os_name'].capitalize()} / {hw['machine']}"
+
+
+def _mem_target(cfg: configparser.ConfigParser, hw: dict) -> float:
+    """Resolve mem_target_frac with the agreed precedence:
+      1) explicit positive float in config.ini  → use as-is (Evaluate writes
+         platform-aware values into config, this picks them up unchanged)
+      2) platform-aware default                 → 0.70 on Apple Silicon
+                                                  (psutil's "available" stays
+                                                  optimistic on unified memory
+                                                  until the OS pages, so we
+                                                  need a tighter ceiling),
+                                                  0.85 elsewhere (discrete
+                                                  RAM behaves linearly).
+
+    These defaults match what mesa.py's _recommended_processing_tuning emits
+    so a fresh-clone runtime (no Evaluate run) gets the same effective
+    budget as a post-Evaluate runtime.
+    """
+    raw = cfg["DEFAULT"].get("mem_target_frac", "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if 0.3 <= v <= 0.95:
+                return v
+        except Exception:
+            pass
+    return 0.70 if hw["is_apple_silicon"] else 0.85
+
+
+def _flatten_per_worker_gb(cfg: configparser.ConfigParser, hw: dict) -> tuple[float, str]:
+    """Resolve the per-flatten-worker memory estimate. Reads the explicit
+    flatten_approx_gb_per_worker config key when set, else falls back to
+    intersect's per-worker estimate × 3 (flatten holds whole partitions
+    rather than bounded chunks). Returns (value, source) for logging."""
+    raw = cfg["DEFAULT"].get("flatten_approx_gb_per_worker", "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return max(2.0, v), "flatten_approx_gb_per_worker"
+        except Exception:
+            pass
+    try:
+        per_intersect_gb = float(cfg["DEFAULT"].get("approx_gb_per_worker", "4.0"))
+    except Exception:
+        per_intersect_gb = 4.0
+    return max(2.0, per_intersect_gb * 3.0), "approx_gb_per_worker × 3 (fallback)"
 
 
 def _parquet_dir(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
@@ -151,11 +222,7 @@ def _derive_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, 
         per_worker_gb = float(cfg["DEFAULT"].get("approx_gb_per_worker", "4.0"))
     except Exception:
         per_worker_gb = 4.0
-    try:
-        mem_target = float(cfg["DEFAULT"].get("mem_target_frac", "0.7"))
-    except Exception:
-        mem_target = 0.7
-    mem_target = max(0.3, min(0.95, mem_target))
+    mem_target = _mem_target(cfg, hw)
     by_ram = max(1, int((avail_gb * mem_target) / max(1.0, per_worker_gb)))
     n = max(1, min(by_ram, cpu_cap))
     reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
@@ -176,24 +243,19 @@ def _derive_flatten_huge_partition_mb(hw: dict) -> tuple[int, str]:
 
 
 def _derive_flatten_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, str]:
-    """Large-flatten worker count: per-worker peak is ~3× intersect's, so
-    budget is much tighter. Cap to half of CPU count as well so we don't
+    """Large-flatten worker count. Per-worker memory comes from the explicit
+    flatten_approx_gb_per_worker config key when set, else falls back to
+    intersect's per-worker estimate × 3 (flatten holds whole partitions
+    rather than bounded chunks). Cap to half of CPU count so we don't
     starve the OS during long pandas groupby/merge passes."""
     avail_gb = hw["ram_avail_gb"]
-    try:
-        per_intersect_gb = float(cfg["DEFAULT"].get("approx_gb_per_worker", "4.0"))
-    except Exception:
-        per_intersect_gb = 4.0
-    flatten_per_worker_gb = max(2.0, per_intersect_gb * 3.0)
-    try:
-        mem_target = float(cfg["DEFAULT"].get("mem_target_frac", "0.7"))
-    except Exception:
-        mem_target = 0.7
+    flatten_per_worker_gb, src = _flatten_per_worker_gb(cfg, hw)
+    mem_target = _mem_target(cfg, hw)
     by_ram = max(1, int((avail_gb * mem_target) / flatten_per_worker_gb))
     by_cpu = max(1, hw["cpu_count"] // 2)
     n = max(1, min(by_ram, by_cpu))
     reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
-              f"{flatten_per_worker_gb:.1f} GB per-flatten-worker = {by_ram}, "
+              f"{flatten_per_worker_gb:.1f} GB per-flatten-worker [{src}] = {by_ram}, "
               f"capped to CPU/2 = {by_cpu}")
     return n, reason
 
@@ -202,19 +264,29 @@ def _derive_flatten_small_max_workers(hw: dict, cfg: configparser.ConfigParser) 
     """Small-flatten: per-worker peak ~1/4 of large, so we can saturate
     cores without RAM headache."""
     avail_gb = hw["ram_avail_gb"]
-    try:
-        per_intersect_gb = float(cfg["DEFAULT"].get("approx_gb_per_worker", "4.0"))
-    except Exception:
-        per_intersect_gb = 4.0
-    flatten_small_gb = max(1.0, (per_intersect_gb * 3.0) / 4.0)
-    try:
-        mem_target = float(cfg["DEFAULT"].get("mem_target_frac", "0.7"))
-    except Exception:
-        mem_target = 0.7
+    flatten_per_worker_gb, _src = _flatten_per_worker_gb(cfg, hw)
+    flatten_small_gb = max(1.0, flatten_per_worker_gb / 4.0)
+    mem_target = _mem_target(cfg, hw)
     by_ram = max(1, int((avail_gb * mem_target) / flatten_small_gb))
     n = max(1, min(by_ram, hw["cpu_count"]))
     reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
               f"{flatten_small_gb:.1f} GB per-small-worker = {by_ram}, "
+              f"capped to CPU={hw['cpu_count']}")
+    return n, reason
+
+
+def _derive_backfill_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, str]:
+    """Backfill is I/O-bound and pandas-merge-light. Each worker holds one
+    partition and reads area_map from a scratch parquet (not pickled).
+    Per-worker RSS stays small (1-2 GB observed), so we can run with broad
+    parallelism limited only by CPU count."""
+    avail_gb = hw["ram_avail_gb"]
+    backfill_per_worker_gb = 1.5
+    mem_target = _mem_target(cfg, hw)
+    by_ram = max(1, int((avail_gb * mem_target) / backfill_per_worker_gb))
+    n = max(1, min(by_ram, hw["cpu_count"]))
+    reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
+              f"{backfill_per_worker_gb:.1f} GB per-backfill-worker = {by_ram}, "
               f"capped to CPU={hw['cpu_count']}")
     return n, reason
 
@@ -228,10 +300,7 @@ def _derive_tiles_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple
         per_tile_gb = float(cfg["DEFAULT"].get("tiles_approx_gb_per_worker", "3.0"))
     except Exception:
         per_tile_gb = 3.0
-    try:
-        mem_target = float(cfg["DEFAULT"].get("mem_target_frac", "0.7"))
-    except Exception:
-        mem_target = 0.7
+    mem_target = _mem_target(cfg, hw)
     by_ram = max(1, int((avail_gb * mem_target) / max(0.5, per_tile_gb)))
     n = max(2, min(by_ram, hw["cpu_count"], 8))   # tiles also has spawn overhead
     reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
@@ -285,9 +354,13 @@ def auto_tune_in_place(
     _apply_int("flatten_max_workers",         lambda: _derive_flatten_max_workers(hw, cfg))
     _apply_int("flatten_small_max_workers",   lambda: _derive_flatten_small_max_workers(hw, cfg))
     _apply_int("tiles_max_workers",           lambda: _derive_tiles_max_workers(hw, cfg))
+    _apply_int("backfill_max_workers",        lambda: _derive_backfill_max_workers(hw, cfg))
 
     # Single coherent log block so the operator can audit at a glance.
+    mt = _mem_target(cfg, hw)
     log("[auto-tune] " + "-" * 60)
+    log(f"[auto-tune] Platform:  {_platform_label(hw)}  "
+        f"(mem_target_frac {mt:.2f})")
     log(f"[auto-tune] Hardware:  RAM total {hw['ram_total_gb']:.1f} GB, "
         f"avail {hw['ram_avail_gb']:.1f} GB, CPU {hw['cpu_count']}")
     if data["asset_rows"] or data["geocode_rows"] or data["flat_rows"]:
