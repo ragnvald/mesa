@@ -1124,6 +1124,23 @@ class AssetManagerWindow(QMainWindow):
             f"({len(uniform_cols)} uniform {cw(len(uniform_cols))}, "
             f"{len(diverging_cols)} diverging {cw(len(diverging_cols))})..."
         )
+
+        # No uniform attribute means no honest classifier to merge by. Skip
+        # dissolve and keep originals. See learning.md "Dissolve must not
+        # synthesise a constant key when no uniform column exists" - the
+        # synthetic-constant fallback collapsed raster layers (Wetlands,
+        # CRENVU, Land Condition) into mega-multipolygons, which after
+        # explode produced a handful of huge connected-component polygons,
+        # which starved basic_mosaic of boundary information and produced
+        # one 43,021 km^2 mosaic face (35% of project area) on April-28.
+        if not uniform_cols:
+            self._log(
+                f"{label}: no uniform attribute column to key on; skipping "
+                f"dissolve, keeping {n_in:,} original polygons.", "INFO"
+            )
+            self._import_dissolve_stats.append((label, n_in, n_in, "no_uniform_key"))
+            return gdf
+
         if diverging_cols:
             sample = ", ".join(diverging_cols[:3])
             if len(diverging_cols) > 3:
@@ -1170,16 +1187,11 @@ class AssetManagerWindow(QMainWindow):
 
             self._log(f"{label}: dissolving...")
             t0 = time.time()
-            # If at least one uniform column survived, dissolve by it (every
-            # row shares the same value, so it's a single group → one merged
-            # multipart polygon). If everything was diverging, fall back to
-            # a synthetic constant key so the dissolve still groups all rows.
-            if uniform_cols:
-                dissolved = work.dissolve(by=uniform_cols, as_index=False)
-            else:
-                work["__dissolve_all"] = 1
-                dissolved = work.dissolve(by="__dissolve_all", as_index=False)
-                dissolved = dissolved.drop(columns=["__dissolve_all"], errors="ignore")
+            # uniform_cols is non-empty here (the no-uniform path returned
+            # original gdf above). All rows share the same value for these,
+            # so the dissolve produces one group → one merged multipart
+            # polygon → explode splits non-touching components back out.
+            dissolved = work.dissolve(by=uniform_cols, as_index=False)
             exploded = dissolved.explode(index_parts=False, ignore_index=True)
             n_out = len(exploded)
             dt = time.time() - t0

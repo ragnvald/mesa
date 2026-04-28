@@ -453,3 +453,42 @@ When a problem is solved, add a short entry here with:
   - Keys default to existing repo values when missing; small RAM tiers (≤16 GB) keep the prior 500/16 defaults so memory-constrained hosts see no change. Larger hosts opt in via Evaluate → Commit.
 - Follow-up planned:
   - Per `cooperation.md` exchange (2026-04-28), the mosaic batching keys are placed in Evaluate as a temporary measure to unblock the 7-hour stall. Apple Silicon Claude takes a follow-up commit to migrate them into `auto_tune.py` with a `geocode_manage` call site, so all runtime worker auto-sizing lives in one place. When that lands, this section should be updated to reference `auto_tune` as the source of truth and the Evaluate emissions become a fallback or get removed.
+
+## Dissolve must not synthesise a constant key when no uniform column exists (2026-04-28)
+
+- Rule:
+  - In `code/asset_manage.py` `_dissolve_by_attributes`, when partitioning attribute columns into uniform vs diverging produces an *empty* uniform set, **skip the dissolve and return the original gdf**. Do not fall back to a synthetic constant key. Constant-key dissolve groups every polygon in the layer together, and after `explode()` the result is one polygon per connected geometric component — i.e. the layer reduced to its natural extent. That destroys the boundary information `basic_mosaic` needs to subdivide its faces, and where multiple such layers overlap continuously, the mosaic produces one mega-face spanning huge fractions of the project area.
+- Why:
+  - April-28 incident: re-imported assets with smart-key dissolve. At import time, `tbl_asset_object` rows have no per-group classifying attributes — importance / susceptibility live in `tbl_asset_group`, set by `processing_setup` *after* import. So the smart-key partition saw every column as diverging (cell IDs / FIDs / per-pixel measurements) → `uniform_cols` empty → fell back to synthetic constant for layers like Wetlands_AGEMP (2.6 M cells), CRENVU_X (~321 k), Land Condition_X (~550 k). Each of those layers collapsed to a few big connected-region polygons covering the layer's natural geographic extent.
+  - Measured damage in `tbl_flat`:
+
+    | Metric | Pre-incident run | Post-incident run |
+    |---|---:|---:|
+    | basic_mosaic cells | 9,671,688 | 3,900,125 (-60 %) |
+    | Median cell area | 223 m² | 1,000 m² (4.5×) |
+    | Max cell area | 1,993 km² (one outlier) | 43,021 km² (21×) |
+    | Cells > 1,000 km² | 0 | 4 cells = 47.7 % of project |
+    | Code A (sens=25) share | 25.4 % | 72.0 % |
+
+  - The 43,021 km² mega-face had 22 distinct asset groups overlapping it geometrically; `tbl_stacked` confirmed 1,123 individual asset polygons attributing to it. Surface_water (imp=5, sus=5) and CRENVU_21-31 (imp=5, sus=5) both correctly contributed sens=25 → `sensitivity_max = 25` was mechanically correct given the inputs. The bug was upstream: the layer dissolves stripped boundary detail that `basic_mosaic` needed to subdivide that 43 k km² region into smaller faces.
+- How to apply:
+  - The new behaviour: if `uniform_cols` is empty, skip dissolve, log `no uniform attribute column to key on; skipping dissolve, keeping N original polygons`, append `(label, n_in, n_in, "no_uniform_key")` to the per-import stats so the final import summary reflects how many layers were skipped vs really merged.
+  - Layers with at least one column that has the same value on every row (e.g. one-class-per-file land-cover datasets where the file's `class_name` column is uniform) still dissolve cleanly.
+  - Tradeoff acknowledged: pure raster grids without a classifier keep their per-cell granularity and produce the visual moire the smart-key dissolve was originally added to fix. Moire is *local visual noise*; the mega-face was a *quantitative* error propagating max-sensitivity across 35 % of the project area. Moire is the better failure mode.
+- Non-regression guarantee:
+  - The skip path fires only when *every* attribute column has cardinality > 1 (i.e. nothing to honestly key by). Layers with at least one uniform column behave exactly as in the smart-key implementation.
+  - The "Dissolve adjacent polygons (recommended)" import checkbox stays default-on; it just becomes a no-op for layers without a classifying attribute, which is the safe default.
+
+## Wiki note: data preparation guidance (pending — to fold into the user-facing guide)
+
+When the wiki guide is rebuilt, capture this as a "Preparing your data" chapter. Operator-facing language:
+
+- **Ecological / organic asset polygons work best.** Wetland outlines, settlement footprints, river polygons, protected-area boundaries, atlas pages — anything where the polygon shape carries real geographic information. `basic_mosaic` subdivides on those boundaries, so each mosaic face represents a meaningful "what overlaps here" region.
+- **Gridded / raster-derived asset layers are the failure mode.** Every-pixel-is-a-polygon datasets — typically the result of someone running `raster_to_polygon` on a classification raster — cause two distinct problems in MESA:
+  1. **Per-cell visual moire**: `sensitivity_max` paints each individual cell, and the source grid pattern shows up in the mosaic visualisation. Local cosmetic problem.
+  2. **Mosaic-face collapse if the cells form large continuous coverage AND the layer has no honest classifier column**: the import-time dissolve has no way to distinguish "real per-cell variation" from "noise per-cell IDs". Either you get moire (no dissolve) or mega-faces that propagate max-sensitivity across huge regions (constant-key dissolve — the April-28 regression). After this commit, the mega-face path is closed; the moire one is the deliberate fallback.
+- **Operator recommendations:**
+  - **Vectorise-and-classify before import.** Group adjacent same-value raster cells into polygons at the data-prep stage (in QGIS: `r.to.vect`, then `Dissolve` keyed on the value). The result is a layer with N polygons (one per class region) and a meaningful classifying column the dissolve can honestly key on.
+  - **One file per sensitivity bin** is the simpler workaround when full vectorisation is impractical. MESA already supports this (e.g. `SpeciesRichness2010_0-5.shp` / `_6-10.shp` / `_11-15.shp` etc.) — each file's importance/susceptibility is set per asset group in `processing_setup`, so within a file the attributes are uniform and the dissolve has something to key on.
+  - **Any layer with millions of polygons at sub-100 m resolution** should be considered a data-prep candidate. If the user can't reduce the polygon count, expect moire visual cost, but at least no quantitative bleed.
+- **Dissolve checkbox semantics** (for the UI doc): "Dissolve adjacent polygons (recommended)" means *merge polygons that share an honest classifying attribute*. Layers with no such attribute are skipped (kept as-is), with a log line stating that. This is correct conservative behaviour, not a missing feature.
