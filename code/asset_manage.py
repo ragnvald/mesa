@@ -1001,15 +1001,85 @@ class AssetManagerWindow(QMainWindow):
         except Exception:
             return geom
 
-    def _dissolve_by_attributes(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
-        """Merge polygons that share identical non-geometry attribute values
-        and are touching. Splits the dissolved multipart back into single-part
-        polygons so non-touching features stay separate. Preserves all
-        attribute values per area.
+    def _buffer_nonpolygon_assets(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
+        """Buffer Point/MultiPoint and LineString/MultiLineString features
+        into polygons using config.ini's default_point_buffer_m and
+        default_line_buffer_m. Polygons pass through untouched.
 
-        Stages logged: "checking dissolve potential" -> "dissolving" -> result.
-        Per-layer (n_in, n_out, status) is appended to self._import_dissolve_stats
-        for the final import summary.
+        Why this exists: the intersect stage joins assets against geocode
+        polygons. A raw Point has zero area so its intersection with any
+        polygon contributes nothing to tbl_stacked - the asset becomes
+        invisible in tbl_flat. Buffering at import means tbl_asset_object
+        stores polygons everywhere; geocode_manage's own buffering pass is
+        type-aware (skips polygons) so this doesn't double-buffer.
+
+        Buffering is done in EPSG:3857 (Web Mercator) so the metres value
+        means metres, then projected back to working_epsg.
+        """
+        if gdf is None or gdf.empty or "geometry" not in gdf.columns:
+            return gdf
+
+        # Read buffer distances from config (matches geocode_manage's keys).
+        cfg = _ensure_cfg()
+        try:
+            point_buf_m = float(cfg["DEFAULT"].get("default_point_buffer_m", "30"))
+        except Exception:
+            point_buf_m = 30.0
+        try:
+            line_buf_m = float(cfg["DEFAULT"].get("default_line_buffer_m", "30"))
+        except Exception:
+            line_buf_m = 30.0
+
+        try:
+            gtypes = gdf.geometry.geom_type
+        except Exception:
+            return gdf
+        is_point = gtypes.isin(["Point", "MultiPoint"])
+        is_line  = gtypes.isin(["LineString", "MultiLineString"])
+        n_pt = int(is_point.sum())
+        n_ln = int(is_line.sum())
+        if n_pt == 0 and n_ln == 0:
+            return gdf
+
+        self._log(
+            f"{label}: buffering {n_pt:,} point(s) and {n_ln:,} line(s) "
+            f"to polygons (point={point_buf_m:g} m, line={line_buf_m:g} m)"
+        )
+
+        try:
+            original_crs = gdf.crs
+            metric = gdf.to_crs(3857) if original_crs is not None else gdf
+            m_types = metric.geometry.geom_type
+            m_pt = m_types.isin(["Point", "MultiPoint"])
+            m_ln = m_types.isin(["LineString", "MultiLineString"])
+
+            new_geom = metric.geometry.copy()
+            if m_pt.any():
+                new_geom.loc[m_pt] = metric.geometry.loc[m_pt].buffer(max(0.0, point_buf_m))
+            if m_ln.any():
+                new_geom.loc[m_ln] = metric.geometry.loc[m_ln].buffer(max(0.0, line_buf_m))
+
+            metric = metric.set_geometry(new_geom)
+            out = metric.to_crs(original_crs) if original_crs is not None else metric
+            return out
+        except Exception as exc:
+            self._log(f"{label}: buffer failed ({exc}) - keeping originals", "WARN")
+            return gdf
+
+    def _dissolve_by_attributes(self, gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
+        """Merge polygons within an asset group, dropping per-row "noise"
+        attribute columns first so a real merge actually happens.
+
+        Strategy: split the input columns into UNIFORM (same value across all
+        rows in this layer - real classifiers worth keeping) and DIVERGING
+        (every row has its own value - cell IDs, FIDs, per-pixel measurements,
+        etc.). Diverging columns are dropped from the working frame so the
+        dissolve isn't trivially blocked by a primary-key column. Uniform
+        columns survive into the output unchanged.
+
+        Stages logged: "checking dissolve potential" -> blanking diverging
+        columns -> "dissolving" -> result line. Per-layer
+        (n_in, n_out, status) appended to self._import_dissolve_stats.
         """
         # Ensure stats list exists even if caller didn't reset it.
         if not hasattr(self, "_import_dissolve_stats"):
@@ -1026,18 +1096,53 @@ class AssetManagerWindow(QMainWindow):
             return gdf
 
         n_in = len(gdf)
-        col_word = "column" if len(attr_cols) == 1 else "columns"
+
+        # Partition columns into uniform vs diverging. A column is "uniform"
+        # if all rows share the same value (one nunique() value, NaN counted
+        # as a value via dropna=False). Anything else is "diverging" and
+        # treated as per-row noise that would block the dissolve - e.g. the
+        # F117 / F118 / ... cell-ID column that defeated dissolve on
+        # SpeciesRichness2010 and the CRENVU layers in the April-27 import.
+        uniform_cols: list[str] = []
+        diverging_cols: list[str] = []
+        for c in attr_cols:
+            try:
+                n_unique = int(gdf[c].nunique(dropna=False))
+            except Exception:
+                # If we can't measure cardinality, treat as diverging (safer:
+                # drops the column from the dissolve key and from the output).
+                diverging_cols.append(c)
+                continue
+            if n_unique <= 1:
+                uniform_cols.append(c)
+            else:
+                diverging_cols.append(c)
+
+        cw = lambda n: "column" if n == 1 else "columns"
         self._log(
             f"{label}: checking dissolve potential on {n_in:,} polygons "
-            f"(by {len(attr_cols)} attribute {col_word})..."
+            f"({len(uniform_cols)} uniform {cw(len(uniform_cols))}, "
+            f"{len(diverging_cols)} diverging {cw(len(diverging_cols))})..."
         )
+        if diverging_cols:
+            sample = ", ".join(diverging_cols[:3])
+            if len(diverging_cols) > 3:
+                sample += f", ... +{len(diverging_cols) - 3} more"
+            self._log(
+                f"{label}: dropping diverging {cw(len(diverging_cols))} "
+                f"from dissolve key and output: {sample}"
+            )
 
         try:
-            # Coerce attribute columns to a hashable string form so groupby
-            # works regardless of source dtype quirks (datetimes, decimals,
-            # mixed object columns from heterogeneous shapefiles).
-            work = gdf.copy()
-            for c in attr_cols:
+            # Drop diverging columns - they're per-row noise that prevents
+            # merging. tbl_asset_object stores attributes as a serialised
+            # string, so dropping them just trims that string; the geometry
+            # and the meaningful per-group attributes are preserved.
+            work = gdf.drop(columns=diverging_cols, errors="ignore").copy()
+
+            # Coerce remaining (uniform) attribute columns to string form so
+            # groupby works regardless of source dtype quirks.
+            for c in uniform_cols:
                 try:
                     work[c] = work[c].astype("string")
                 except Exception:
@@ -1065,7 +1170,16 @@ class AssetManagerWindow(QMainWindow):
 
             self._log(f"{label}: dissolving...")
             t0 = time.time()
-            dissolved = work.dissolve(by=attr_cols, as_index=False)
+            # If at least one uniform column survived, dissolve by it (every
+            # row shares the same value, so it's a single group → one merged
+            # multipart polygon). If everything was diverging, fall back to
+            # a synthetic constant key so the dissolve still groups all rows.
+            if uniform_cols:
+                dissolved = work.dissolve(by=uniform_cols, as_index=False)
+            else:
+                work["__dissolve_all"] = 1
+                dissolved = work.dissolve(by="__dissolve_all", as_index=False)
+                dissolved = dissolved.drop(columns=["__dissolve_all"], errors="ignore")
             exploded = dissolved.explode(index_parts=False, ignore_index=True)
             n_out = len(exploded)
             dt = time.time() - t0
@@ -1180,6 +1294,7 @@ class AssetManagerWindow(QMainWindow):
                     if gdf.empty:
                         continue
                     gdf = self._apply_quality_controls(gdf, f"Assets:{fp.name}:{layer}")
+                    gdf = self._buffer_nonpolygon_assets(gdf, f"Assets:{fp.name}:{layer}")
                     gdf = self._dissolve_by_attributes(gdf, f"Assets:{fp.name}:{layer}")
                     bbox_polygon = box(*gdf.total_bounds)
                     count = len(gdf)
@@ -1216,6 +1331,7 @@ class AssetManagerWindow(QMainWindow):
                 if gdf.empty:
                     continue
                 gdf = self._apply_quality_controls(gdf, f"Assets:{fp.name}")
+                gdf = self._buffer_nonpolygon_assets(gdf, f"Assets:{fp.name}")
                 gdf = self._dissolve_by_attributes(gdf, f"Assets:{fp.name}")
                 layer = fp.stem
                 bbox_polygon = box(*gdf.total_bounds)
