@@ -2936,22 +2936,9 @@ class MesaMainWindow(QMainWindow):
         else:
             flatten_gb = 14.0
 
-        # Large-partition flatten cap: unified memory squeezes tighter, so keep
-        # 2 on Apple Silicon regardless of RAM; Windows/Linux can relax slightly
-        # on big-RAM hosts because the 30% headroom is not also absorbing the GPU.
-        if is_apple_silicon:
-            flatten_large_cap = 2 if ram_total <= 96 else 3
-        else:
-            if ram_total <= 32:
-                flatten_large_cap = 2
-            elif ram_total <= 96:
-                flatten_large_cap = 3
-            else:
-                flatten_large_cap = 4
-
-        # Small-partition, backfill, and tiles caps stay on auto (0) because
-        # their per-worker RAM is small enough that the auto RAM-budget path
-        # naturally scales with the machine.
+        # All five worker caps that auto_tune.py manages at runtime are emitted
+        # as "0" here so auto_tune is the unambiguous runtime authority.
+        # See cooperation.md "Authority split" (2026-04-28).
 
         # Mosaic boundary extraction (basic_mosaic). Each worker holds a
         # bounded asset/grid slice and ~1.5 GB peak; CPU-bound, not RAM-bound.
@@ -2973,6 +2960,32 @@ class MesaMainWindow(QMainWindow):
             mosaic_chunk_size = 500
         else:
             mosaic_chunk_size = 1000
+
+        # Coverage / line union batching. The "Reducing coverage" stage runs
+        # GEOS unary_union pairwise — single-threaded and memory-bandwidth
+        # sensitive. Bigger batches (= bigger but fewer unions) and a higher
+        # partials ceiling (= fewer intermediate reduction rounds) cut total
+        # time substantially on hosts with ample RAM. Apple Silicon stays a
+        # touch tighter because unified memory is shared with the GPU.
+        # See learning.md "Mosaic union reduction is the silent long-tail".
+        if is_apple_silicon:
+            if ram_total <= 16:
+                mosaic_cov_batch, mosaic_line_partials = 500, 16
+            elif ram_total <= 32:
+                mosaic_cov_batch, mosaic_line_partials = 1000, 16
+            elif ram_total <= 64:
+                mosaic_cov_batch, mosaic_line_partials = 1500, 24
+            else:
+                mosaic_cov_batch, mosaic_line_partials = 2000, 32
+        else:
+            if ram_total <= 16:
+                mosaic_cov_batch, mosaic_line_partials = 500, 16
+            elif ram_total <= 32:
+                mosaic_cov_batch, mosaic_line_partials = 1000, 24
+            elif ram_total <= 64:
+                mosaic_cov_batch, mosaic_line_partials = 2000, 32
+            else:
+                mosaic_cov_batch, mosaic_line_partials = 4000, 64
         recommendations = {
             "max_workers": "0",
             "auto_workers_min": "1",
@@ -2988,8 +3001,11 @@ class MesaMainWindow(QMainWindow):
             "asset_soft_limit": str(int(asset_soft_limit)),
             "chunk_size": str(int(chunk_size)),
             "cell_size": str(int(cell_size)),
-            # Per-stage caps (see processing_internal.flatten_tbl_stacked)
-            "flatten_max_workers": str(flatten_large_cap),
+            # Per-stage caps. The five keys auto_tune.py manages at runtime
+            # (max_workers, flatten_max_workers, flatten_small_max_workers,
+            # flatten_huge_partition_mb, tiles_max_workers) are emitted as "0"
+            # so auto_tune is the unambiguous runtime authority.
+            "flatten_max_workers": "0",
             "flatten_small_max_workers": "0",
             "flatten_approx_gb_per_worker": f"{flatten_gb:.1f}",
             "flatten_large_partition_mb": "50",
@@ -3000,6 +3016,8 @@ class MesaMainWindow(QMainWindow):
             "mosaic_auto_worker_fraction": f"{mosaic_fraction:.2f}",
             "mosaic_auto_worker_max": str(mosaic_max),
             "mosaic_extract_chunk_size": str(mosaic_chunk_size),
+            "mosaic_coverage_union_batch": str(mosaic_cov_batch),
+            "mosaic_line_union_max_partials": str(mosaic_line_partials),
         }
 
         if is_apple_silicon:
@@ -3010,25 +3028,30 @@ class MesaMainWindow(QMainWindow):
                 f"Stage 2 worker cap {worker_cap} sized from performance cores, "
                 f"leaving headroom for OS/GPU. mem_target_frac={mem_target_frac:.2f}, "
                 f"approx_gb_per_worker={approx_gb_per_worker:.1f}. "
-                f"Per-stage caps: flatten-large={flatten_large_cap} (tight due to unified memory), "
-                f"flatten-small/backfill/tiles=auto so small and I/O-bound phases can "
-                f"saturate P-cores. flatten_approx_gb_per_worker={flatten_gb:.1f} "
+                f"Per-stage worker counts (max_workers / flatten_max / "
+                f"flatten_small / tiles) are delegated to auto_tune at "
+                f"runtime. flatten_approx_gb_per_worker={flatten_gb:.1f} "
                 f"scales the auto RAM budget for the skewed partition tail. "
                 f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max}, "
-                f"chunk_size={mosaic_chunk_size} (capped to leave GPU/WindowServer headroom)."
+                f"chunk_size={mosaic_chunk_size} (capped to leave GPU/WindowServer headroom). "
+                f"Union batching: coverage_batch={mosaic_cov_batch}, "
+                f"line_partials={mosaic_line_partials} (smaller than non-Apple to keep peak "
+                f"merge cost off unified memory)."
             )
         else:
             mosaic_max_label = "unbounded" if mosaic_max == 0 else str(mosaic_max)
             rationale = (
                 f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
                 f"Stage 2 cap {worker_cap}, mem_target_frac={mem_target_frac:.2f}. "
-                f"Per-stage caps: flatten-large={flatten_large_cap} (conservative to avoid "
-                f"pandas ballooning on the largest partitions), "
-                f"flatten-small/backfill/tiles=auto (scale to CPU bound by RAM budget). "
-                f"flatten_approx_gb_per_worker={flatten_gb:.1f}, "
+                f"Per-stage worker counts (max_workers / flatten_max / "
+                f"flatten_small / tiles) are delegated to auto_tune at "
+                f"runtime. flatten_approx_gb_per_worker={flatten_gb:.1f}, "
                 f"tiles_approx_gb_per_worker=3.0. "
                 f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max_label}, "
-                f"chunk_size={mosaic_chunk_size}."
+                f"chunk_size={mosaic_chunk_size}. "
+                f"Union batching: coverage_batch={mosaic_cov_batch}, "
+                f"line_partials={mosaic_line_partials} (larger batches/partials cut "
+                f"GEOS unary_union reduction time on hosts with ample RAM)."
             )
         return recommendations, rationale
 

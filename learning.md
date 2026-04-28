@@ -434,3 +434,22 @@ When a problem is solved, add a short entry here with:
   - For mosaic specifically: Apple Silicon gets `fraction=0.65, max=10` (max=12 above 96 GB) because unified memory limits how much extraction parallelism is safe. Non-Apple gets `fraction=0.75, max=0` (unbounded; per-worker 1.5 GB RAM budget naturally caps it). `mosaic_extract_chunk_size` ladders 1000/500/250 by core count to improve load balance as worker count grows.
 - Non-regression guarantee:
   - The change is additive: existing keys keep their values, three new keys appear in the Evaluate table. Users who never click Commit see no change. The repo-default `config.ini` is unchanged in this commit; first-run users on either platform should run Evaluate → Commit to get host-appropriate values. Future tuning passes for new config families should follow this pattern.
+
+## Mosaic union reduction is the silent long-tail (2026-04-27)
+
+- Rule:
+  - "Reducing coverage" / "Reducing edges(final)" log lines that stretch for hours indicate `mosaic_coverage_union_batch` and `mosaic_line_union_max_partials` are too low for the host. GEOS `unary_union` is single-threaded and memory-bandwidth sensitive; many small batches produce many small unions, which then require many pairwise reduction rounds — each of which is another serial `unary_union` call. Bigger batches and a higher partials ceiling collapse the total work into fewer-but-bigger unions, which on hosts with ample RAM is dramatically faster end-to-end.
+  - When the heartbeat goes silent for tens of minutes during reduction, the process is *not* hung — it is inside a single very-large `unary_union([a, b])` call that won't emit progress until it returns. Confirm liveness via `Get-Process` (CPU climbing) before considering a kill.
+- Why:
+  - On a Windows 16-core / 127 GB host with the M4-tight repo defaults (`mosaic_coverage_union_batch=500`, `mosaic_line_union_max_partials=16`), a single basic_mosaic run on a moderate dataset spent ~7 hours in the streaming "Reducing coverage" intermediate-reduction loop alone, then another 2+ hours in `edges(final)` round 1 with one merge stuck inside `unary_union` for 2 hours without a heartbeat. The bottleneck is per-merge cost in GEOS, which on Windows runs noticeably slower than on Apple Silicon at equivalent core counts because Apple's high single-core throughput plus shared-memory bandwidth fits the workload well.
+  - `_recommended_processing_tuning` was extended in this same commit chain to emit two new keys per host:
+    - Apple Silicon RAM tiers: 500/16, 1000/16, 1500/24, 2000/32 (≤16 / ≤32 / ≤64 / >64 GB).
+    - Non-Apple RAM tiers: 500/16, 1000/24, 2000/32, 4000/64.
+  - Apple Silicon stays a touch tighter because unified memory peaks during a single big `unary_union` call must not crowd the GPU/WindowServer.
+- How to apply:
+  - When a user reports slow mosaic on Windows or large-RAM Linux: check `config.ini` for `mosaic_coverage_union_batch` and `mosaic_line_union_max_partials` at low values (500/16). Run Evaluate → Commit to apply host-appropriate values.
+  - Last-resort escape hatch for an extreme dataset: `mosaic_coverage_union = false` skips the whole coverage-reduction stage and falls back to STRtree for face filtering. Trade-off: slower per-face filtering, but no hours-long single-threaded merge tail.
+- Non-regression guarantee:
+  - Keys default to existing repo values when missing; small RAM tiers (≤16 GB) keep the prior 500/16 defaults so memory-constrained hosts see no change. Larger hosts opt in via Evaluate → Commit.
+- Follow-up planned:
+  - Per `cooperation.md` exchange (2026-04-28), the mosaic batching keys are placed in Evaluate as a temporary measure to unblock the 7-hour stall. Apple Silicon Claude takes a follow-up commit to migrate them into `auto_tune.py` with a `geocode_manage` call site, so all runtime worker auto-sizing lives in one place. When that lands, this section should be updated to reference `auto_tune` as the source of truth and the Evaluate emissions become a fallback or get removed.
