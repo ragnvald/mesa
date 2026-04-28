@@ -3456,6 +3456,20 @@ def run_processing_pipeline(config_file: Path,
             log_to_gui(log_widget,
                        f"[parent-cleanup] skipped: {exc}")
 
+        # Auto-tune: derive worker counts and partition thresholds from
+        # current hardware + data fingerprint. Mutates cfg in-place; only
+        # fills in keys the user left at 0 / missing. Explicit overrides
+        # in config.ini win.
+        try:
+            from auto_tune import auto_tune_in_place
+            auto_tune_in_place(
+                cfg,
+                base_dir(),
+                log_fn=lambda s: log_to_gui(log_widget, s),
+            )
+        except Exception as exc:
+            log_to_gui(log_widget, f"[auto-tune] skipped: {exc}")
+
         working_epsg = str(cfg["DEFAULT"].get("workingprojection_epsg","4326")).strip()
         raw_max_workers = str(cfg["DEFAULT"].get("max_workers", "")).strip()
         max_workers = cfg_get_int(cfg, "max_workers", 0)
