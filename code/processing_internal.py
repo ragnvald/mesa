@@ -487,6 +487,78 @@ def _panic_cfg(cfg: "configparser.ConfigParser | None" = None) -> tuple[int, int
     return pct, grace
 
 
+def _release_stale_parent_state():
+    """Drop module-level globals held by sibling in-process helpers
+    (asset_manage, geocode_manage, processing_setup, ...) that ran earlier
+    in the same MESA process.
+
+    Why this exists: mesa.py launches every helper in-process via lazy
+    imports. After "Import assets", "Build mosaic", and "Tune processing"
+    each leave their loaded DataFrames in module-level globals, the parent
+    enters intersect with 20-30 GB of stale state. The auto-resolver in
+    process_tbl_stacked then sees inflated parent RSS and caps to 1 worker
+    even on a 64 GB host. Clearing those globals + a few gc passes
+    typically frees 10-20 GB and restores 3-4 worker parallelism.
+
+    Returns (rss_before_gb, rss_after_gb) for logging, or None if psutil
+    is unavailable. Hard-coded target list so we don't reach into helper
+    internals we shouldn't touch.
+    """
+    rss_before = None
+    if psutil is not None:
+        try:
+            rss_before = psutil.Process().memory_info().rss / (1024 ** 3)
+        except Exception:
+            pass
+
+    targets: dict[str, list[str]] = {
+        "processing_setup": [
+            "gdf_asset_group", "entries_vuln", "index_weight_vars",
+            "root", "status_message_var", "classification",
+            "valid_input_values",
+        ],
+        "geocode_manage":   ["_gui_window"],
+        "atlas_manage":     ["_gui_window"],
+        "line_manage":      ["_gui_window"],
+        "analysis_setup":   ["_gui_window"],
+    }
+    for mod_name, attrs in targets.items():
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        for attr in attrs:
+            try:
+                if not hasattr(mod, attr):
+                    continue
+                cur = getattr(mod, attr)
+                if isinstance(cur, list):
+                    setattr(mod, attr, [])
+                elif isinstance(cur, dict):
+                    setattr(mod, attr, {})
+                else:
+                    setattr(mod, attr, None)
+            except Exception:
+                pass
+
+    # Three passes - geopandas/shapely objects often live in reference
+    # cycles that need more than one round of collection.
+    for _ in range(3):
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
+    rss_after = None
+    if psutil is not None:
+        try:
+            rss_after = psutil.Process().memory_info().rss / (1024 ** 3)
+        except Exception:
+            pass
+    if rss_before is None or rss_after is None:
+        return None
+    return rss_before, rss_after
+
+
 def _start_lifetime_panic_watchdog(panic_pct: int = 90, grace_s: int = 5):
     """Process-wide sentinel that hard-exits the parent if RAM pressure stays
     above panic_pct for grace_s seconds. Complements the per-pool watchdog
@@ -3364,6 +3436,39 @@ def run_processing_pipeline(config_file: Path,
         except Exception:
             lp_grace = 5
         lifetime_panic_stop = _start_lifetime_panic_watchdog(lp_pct, lp_grace)
+
+        # Release globals left behind by sibling in-process helpers
+        # (asset_manage, geocode_manage, processing_setup, ...). Without
+        # this the parent enters intersect with 20-30 GB of stale state
+        # and the worker auto-resolver caps to 1.
+        try:
+            res = _release_stale_parent_state()
+            if res is not None:
+                rss_b, rss_a = res
+                freed = rss_b - rss_a
+                log_to_gui(
+                    log_widget,
+                    f"[parent-cleanup] released stale helper state: "
+                    f"RSS {rss_b:.2f} GB -> {rss_a:.2f} GB "
+                    f"(freed {freed:.2f} GB)"
+                )
+        except Exception as exc:
+            log_to_gui(log_widget,
+                       f"[parent-cleanup] skipped: {exc}")
+
+        # Auto-tune: derive worker counts and partition thresholds from
+        # current hardware + data fingerprint. Mutates cfg in-place; only
+        # fills in keys the user left at 0 / missing. Explicit overrides
+        # in config.ini win.
+        try:
+            from auto_tune import auto_tune_in_place
+            auto_tune_in_place(
+                cfg,
+                base_dir(),
+                log_fn=lambda s: log_to_gui(log_widget, s),
+            )
+        except Exception as exc:
+            log_to_gui(log_widget, f"[auto-tune] skipped: {exc}")
 
         working_epsg = str(cfg["DEFAULT"].get("workingprojection_epsg","4326")).strip()
         raw_max_workers = str(cfg["DEFAULT"].get("max_workers", "")).strip()
