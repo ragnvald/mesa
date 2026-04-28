@@ -479,9 +479,9 @@ When a problem is solved, add a short entry here with:
   - The skip path fires only when *every* attribute column has cardinality > 1 (i.e. nothing to honestly key by). Layers with at least one uniform column behave exactly as in the smart-key implementation.
   - The "Dissolve adjacent polygons (recommended)" import checkbox stays default-on; it just becomes a no-op for layers without a classifying attribute, which is the safe default.
 
-## Wiki note: data preparation guidance (pending — to fold into the user-facing guide)
+## Wiki note: data preparation guidance (folded into wiki Data page on 2026-04-28)
 
-When the wiki guide is rebuilt, capture this as a "Preparing your data" chapter. Operator-facing language:
+This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 2026-04-28 as the "Preparing your data" section, with the dissolve incident summarised in "Gridded / raster-derived asset layers are the failure mode". The original operator-facing language is preserved here so future maintainers can reconcile the two if either drifts:
 
 - **Ecological / organic asset polygons work best.** Wetland outlines, settlement footprints, river polygons, protected-area boundaries, atlas pages — anything where the polygon shape carries real geographic information. `basic_mosaic` subdivides on those boundaries, so each mosaic face represents a meaningful "what overlaps here" region.
 - **Gridded / raster-derived asset layers are the failure mode.** Every-pixel-is-a-polygon datasets — typically the result of someone running `raster_to_polygon` on a classification raster — cause two distinct problems in MESA:
