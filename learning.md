@@ -505,3 +505,31 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
   - Same rule will apply to the planned `geocode_manage` mosaic call site for the eventual mosaic-batching auto_tune migration.
 - Non-regression guarantee:
   - The `cfg` parameter on `flatten_tbl_stacked` defaults to `None`. When `None`, the old disk-read fallback runs, so direct callers (e.g. `run_flatten_only.py` if it ever returns) keep working. The fix only takes effect when the pipeline driver explicitly passes the auto-tuned cfg.
+
+## Each materially-costly pipeline stage gets its own run flag + UI checkbox + standalone function (2026-04-29)
+
+- Rule:
+  - When a step inside the data-processing pipeline has wall-time on the order of minutes-to-hours (rather than seconds), it must be exposed as an *independent* stage:
+    1. Standalone top-level function in `processing_internal.py` (e.g. `flatten_tbl_stacked`, `backfill_tbl_stacked`).
+    2. Soft-validating: if a required input is missing on disk, log a clear skip line and return — do not raise.
+    3. `run_X` boolean flag plumbed through `run_processing_pipeline` → `run_headless` → `run_data_process` → `ProcessPlan` → `run_selected`.
+    4. Per-stage CLI flag `--no-X`.
+    5. Sub-checkbox in the Advanced-mode `ProcessRunnerWindow` cascade so the user can rerun just that step.
+  - Stage labels in the run log get split sub-numbers (`[Stage 3a] Flatten`, `[Stage 3b] Backfill`) so the operator sees them as distinct steps without breaking the existing "stages 1-4" mental model.
+- Why:
+  - April-29 incident: backfill (area_m2 enrichment of `tbl_stacked` from `tbl_flat`) was inlined inside `flatten_tbl_stacked` as "9. Parallel Backfill". Three real costs of inlining surfaced together:
+    1. **Hidden wall-time.** Backfill ran ~31 h single-threaded on the user's project before the user even realised it was a separate logical phase from flatten. From the operator's perspective flatten just "took 31 hours" — the cost lived in code that didn't have its own log banner.
+    2. **Hidden cfg propagation bug.** `flatten_tbl_stacked` re-read `config.ini` from disk, missing `auto_tune_in_place`'s in-memory mutations. The bug was discoverable only by digging into why backfill — *inside* flatten — was at 1 worker when auto-tune said 16. As a separate stage with its own log banner the disconnect would have been obvious immediately.
+    3. **No independent rerun path.** Operator wanted to run only Tiles after killing the slow backfill (Tiles only needs `tbl_flat`, which was already on disk). Couldn't, because the only way to "skip backfill" was to skip flatten entirely, which would have skipped writing `tbl_flat`. Forced the choice between waiting 31 h or redoing 14+ h of intersect+flatten just to get to Tiles.
+  - Splitting Backfill out into its own stage solved all three at once.
+- How to apply:
+  - When introducing a new heavy step (e.g. the planned `geocode_manage` mosaic auto-tune call site, or anything else that crosses the minutes-of-wall-time threshold), don't inline it inside an existing stage's function. Give it its own:
+    - top-level function with `(config_file, *, cfg=None)` signature,
+    - log banner `[Stage Nx] <stage name>: <one-line summary>`,
+    - `run_X` flag with default `True`,
+    - CLI `--no-X` flag,
+    - Advanced-mode checkbox, with the master "Process" cascade including it.
+  - Soft validation is mandatory: missing-input → log + return, never raise. The whole point of independent stages is independent rerunnability, which depends on stages being safe to start from cold.
+  - The Advanced-mode UI grouping rule: data sub-stages (everything that touches `tbl_*` files) goes in the left grid column; post-data stages (Tiles / Lines / Analysis — things that consume the data tables) go in the right column. Prep / Intersect / Flatten / Backfill currently fill the left column; future data-side stages slot in there.
+- Non-regression guarantee:
+  - All `run_X` flags default to `True`, so a caller that doesn't know about the new flags still gets the full pipeline. The Backfill split is a pure refactor of behaviour the previous flatten function already had — same code, same outputs, just gated by its own checkbox.
