@@ -41,8 +41,10 @@ PROJECT_ROOT = DEVTOOLS_DIR.parent                   # ...\mesa
 CODE_DIR = PROJECT_ROOT / "code"                     # ...\mesa\code
 PARENT_DIR = PROJECT_ROOT.parent                     # ...\wingide
 
-BUILD_FOLDER_ROOT = PARENT_DIR / "build"
-DIST_FOLDER_ROOT  = PARENT_DIR / "dist"
+# Build/dist roots live at the root of the D drive (outside d:\code) so that
+# repo-tree tooling and IDE indexers don't see large generated artifacts.
+BUILD_FOLDER_ROOT = Path("D:/build")
+DIST_FOLDER_ROOT  = Path("D:/dist")
 FINAL_DIST        = DIST_FOLDER_ROOT / "mesa"
 TOOLS_DIST        = FINAL_DIST / "tools"
 
@@ -107,7 +109,7 @@ def resolve_app_icon() -> Path | None:
 def cleanup_local_tmp_dirs() -> None:
     """Remove leftover root-level tmp folders from ad-hoc PyInstaller runs.
 
-    The official build uses D:/code/build and D:/code/dist. This cleanup targets
+    The official build uses D:/build and D:/dist. This cleanup targets
     only repo-root directories named like `.tmpbuild*` and `.tmpdist*`.
     """
 
