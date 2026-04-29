@@ -2726,7 +2726,22 @@ def _backfill_worker(args):
         return 0
 
 def flatten_tbl_stacked(config_file: Path, working_epsg: str,
-                        *, cleanup_slivers: bool = True):
+                        *, cleanup_slivers: bool = True,
+                        cfg: configparser.ConfigParser | None = None):
+    """Flatten tbl_stacked into tbl_flat, then backfill area_m2 to stacked.
+
+    cfg: pass the *already-auto-tuned* cfg object from
+    run_processing_pipeline so that auto_tune_in_place's in-memory
+    mutations (max_workers, flatten_max_workers, flatten_huge_partition_mb,
+    flatten_small_max_workers, tiles_max_workers, backfill_max_workers)
+    are honoured. If omitted, the function falls back to re-reading
+    config.ini from disk - which misses the auto-tune values, since
+    auto_tune writes only into memory. The disk-fallback path is the
+    pre-fix behaviour and the source of the April-29 single-worker
+    backfill (auto-tune said 16, the disk-read cfg had backfill_max_workers
+    = 0, the resolver fell into RAM-budget math against tight late-pipeline
+    memory and produced 1).
+    """
     log_to_gui(log_widget, "Building presentation table (tbl_flat)…")
 
     # 1. Identify input files
@@ -2762,10 +2777,16 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
 
     # 2. Prepare config/maps
     ranges_map, desc_map, _ = read_class_ranges(config_file)
-    try:
-        cfg_local = read_config(config_file)
-    except Exception:
-        cfg_local = configparser.ConfigParser()
+    if cfg is not None:
+        # Use the auto-tuned in-memory cfg from the caller so flatten /
+        # flatten-large / flatten-small / backfill all see the values
+        # auto_tune_in_place wrote at pipeline start.
+        cfg_local = cfg
+    else:
+        try:
+            cfg_local = read_config(config_file)
+        except Exception:
+            cfg_local = configparser.ConfigParser()
     index_weights = _load_index_weight_settings(cfg_local)
 
     # 2b. Pre-flight memory check - refuse to start under existing pressure.
@@ -3522,7 +3543,8 @@ def run_processing_pipeline(config_file: Path,
             else:
                 log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
                 flatten_tbl_stacked(config_file, working_epsg,
-                                    cleanup_slivers=cleanup_slivers); update_progress(95)
+                                    cleanup_slivers=cleanup_slivers,
+                                    cfg=cfg); update_progress(95)
         else:
             log_to_gui(log_widget, "[Stage 3/4] Skipped (Flatten unchecked).")
 
