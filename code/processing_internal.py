@@ -3309,98 +3309,9 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
     except Exception as e:
         log_to_gui(log_widget, f"Area stats computation failed: {e}")
 
-    # 9. Parallel Backfill
-    try:
-        log_to_gui(log_widget, "Backfilling area_m2 to tbl_stacked partitions…")
-        # If tbl_flat contains multiple polygon parts per code (optional MultiPolygon split),
-        # sum the per-part areas back to a single area_m2 per code.
-        area_map = tbl_flat[["code", "area_m2"]].dropna().copy()
-        try:
-            area_map["code"] = area_map["code"].astype(str)
-        except Exception:
-            pass
-        try:
-            area_map["area_m2"] = pd.to_numeric(area_map["area_m2"], errors="coerce")
-        except Exception:
-            pass
-        area_map = area_map.groupby("code", as_index=False)["area_m2"].sum()
-        try:
-            area_map["area_m2"] = area_map["area_m2"].round().astype("Int64")
-        except Exception:
-            pass
-        area_map['code'] = area_map['code'].astype(str)
-        
-        if files:
-            touched = 0
-            # Backfill is I/O-heavy but pandas-merge-light: each worker holds
-            # one partition + one area_map lookup and writes back. Per-worker
-            # RAM is ~1-2 GB, so it can run with far more parallelism than
-            # flatten without risking OOM. Resolve its worker count
-            # independently from flatten_max_workers.
-            try:
-                backfill_override = cfg_get_int(cfg_local, "backfill_max_workers", 0)
-            except Exception:
-                backfill_override = 0
-            try:
-                backfill_workers = _resolve_phase_workers(
-                    backfill_override, 2.0, len(files), "backfill")
-            except NameError:
-                # Defensive fallback if called before the flatten block runs.
-                backfill_workers = max(1, min(cpu_cap, len(files),
-                                              backfill_override or max_workers or 2))
-
-            # Persist area_map to a small parquet and pass its path to workers
-            # instead of pickling the whole DataFrame across every spawn
-            # boundary. This cuts driver-process RSS dramatically on large
-            # runs where tbl_flat / area_map can be several GB.
-            area_map_path = gpq_dir() / "__area_map.parquet"
-            try:
-                area_map.to_parquet(area_map_path, index=False)
-                worker_area_arg = area_map_path
-            except Exception as e:
-                log_to_gui(log_widget,
-                           f"Could not persist area_map to disk; falling back "
-                           f"to in-memory pickle: {e}")
-                worker_area_arg = area_map
-                area_map_path = None
-
-            log_to_gui(log_widget,
-                       f"Backfill: {len(files)} partitions using {backfill_workers} workers…")
-            if _mp_allowed() and backfill_workers > 1:
-                bf_pct, bf_grace = _panic_cfg(cfg_local)
-                pstate, pstop, pthread = _start_panic_watchdog("backfill", bf_pct, bf_grace)
-                try:
-                    with multiprocessing.get_context("spawn").Pool(backfill_workers) as pool:
-                        pstate["pool"] = pool
-                        args = [(f, worker_area_arg) for f in files]
-                        try:
-                            for count in pool.imap_unordered(_backfill_worker, args):
-                                if pstate["triggered"]:
-                                    raise RuntimeError(
-                                        f"backfill aborted by memory panic watchdog "
-                                        f"(>{bf_pct}% RAM for >={bf_grace}s)"
-                                    )
-                                touched += count
-                        finally:
-                            pstate["pool"] = None
-                finally:
-                    pstop.set()
-                    try: pthread.join(timeout=1.5)
-                    except Exception: pass
-            else:
-                for f in files:
-                    touched += _backfill_worker((f, worker_area_arg))
-
-            # Clean up the scratch file once workers are done.
-            if area_map_path is not None:
-                try:
-                    area_map_path.unlink()
-                except Exception:
-                    pass
-
-            log_to_gui(log_widget, f"Backfilled area_m2 to {len(files)} parts ({touched:,} rows).")
-    except Exception as e:
-        log_to_gui(log_widget, f"Backfill failed: {e}")
+    # Backfill is now its own pipeline stage (backfill_tbl_stacked).
+    # Run it after flatten finishes, gated by the run_backfill flag in
+    # run_processing_pipeline.
 
     update_progress(90)
     try:
@@ -3423,6 +3334,150 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
         pass
 
 
+def backfill_tbl_stacked(config_file: Path,
+                          *, cfg: configparser.ConfigParser | None = None) -> None:
+    """Backfill area_m2 from tbl_flat into every tbl_stacked partition.
+
+    Standalone stage (was previously inlined inside flatten_tbl_stacked).
+    Reads tbl_flat from disk to derive area_map, persists it to a scratch
+    parquet, then runs a worker pool across the tbl_stacked partitions.
+
+    Soft validation: if tbl_flat or tbl_stacked is missing, logs a clear
+    skip message and returns without raising.
+
+    cfg: pass the auto-tuned cfg from run_processing_pipeline so
+    backfill_max_workers is honoured (otherwise see learning.md
+    "auto_tune mutations must reach flatten / backfill").
+    """
+    log_to_gui(log_widget, "Backfilling area_m2 to tbl_stacked partitions…")
+
+    if cfg is not None:
+        cfg_local = cfg
+    else:
+        try:
+            cfg_local = read_config(config_file)
+        except Exception:
+            cfg_local = configparser.ConfigParser()
+
+    # Locate inputs.
+    flat_path = gpq_dir() / "tbl_flat.parquet"
+    if not flat_path.exists():
+        log_to_gui(log_widget,
+                   "[backfill] Skipped: tbl_flat.parquet missing. Run Flatten first.")
+        return
+    ds_dir = _dataset_dir("tbl_stacked")
+    if ds_dir.exists():
+        files = sorted(p for p in ds_dir.glob("*.parquet"))
+    else:
+        single = gpq_dir() / "tbl_stacked.parquet"
+        files = [single] if single.exists() else []
+    if not files:
+        log_to_gui(log_widget,
+                   "[backfill] Skipped: no tbl_stacked partitions on disk. "
+                   "Run Intersect first.")
+        return
+
+    # Build area_map from tbl_flat. If flatten emitted multiple polygon
+    # parts per code (MultiPolygon-split mode), sum their areas back to a
+    # single area_m2 per code.
+    try:
+        flat_df = pd.read_parquet(flat_path, columns=["code", "area_m2"])
+    except Exception as e:
+        log_to_gui(log_widget, f"[backfill] Failed to read tbl_flat: {e}")
+        return
+    area_map = flat_df.dropna(subset=["code"]).copy()
+    try:
+        area_map["code"] = area_map["code"].astype(str)
+    except Exception:
+        pass
+    try:
+        area_map["area_m2"] = pd.to_numeric(area_map["area_m2"], errors="coerce")
+    except Exception:
+        pass
+    area_map = area_map.groupby("code", as_index=False)["area_m2"].sum()
+    try:
+        area_map["area_m2"] = area_map["area_m2"].round().astype("Int64")
+    except Exception:
+        pass
+    area_map["code"] = area_map["code"].astype(str)
+
+    # Resolve worker count. With cfg auto-tuned, backfill_max_workers
+    # comes from auto_tune.py's _derive_backfill_max_workers (~16 on a
+    # roomy host). Without cfg, falls back to a small default so we
+    # don't accidentally over-allocate when called directly.
+    try:
+        backfill_workers = cfg_get_int(cfg_local, "backfill_max_workers", 0)
+    except Exception:
+        backfill_workers = 0
+    try:
+        cpu_cap = max(1, multiprocessing.cpu_count())
+    except Exception:
+        cpu_cap = 1
+    if backfill_workers <= 0:
+        try:
+            max_workers_cfg = cfg_get_int(cfg_local, "max_workers", 0)
+        except Exception:
+            max_workers_cfg = 0
+        backfill_workers = max(1, min(cpu_cap, len(files),
+                                      max_workers_cfg or 2))
+    backfill_workers = max(1, min(backfill_workers, cpu_cap, len(files)))
+
+    # Persist area_map to a small parquet so workers don't pickle the
+    # whole DataFrame across every spawn boundary.
+    area_map_path = gpq_dir() / "__area_map.parquet"
+    try:
+        area_map.to_parquet(area_map_path, index=False)
+        worker_area_arg = area_map_path
+    except Exception as e:
+        log_to_gui(log_widget,
+                   f"[backfill] Could not persist area_map to disk; "
+                   f"falling back to in-memory pickle: {e}")
+        worker_area_arg = area_map
+        area_map_path = None
+
+    log_to_gui(log_widget,
+               f"Backfill: {len(files)} partitions using {backfill_workers} workers…")
+
+    touched = 0
+    try:
+        if _mp_allowed() and backfill_workers > 1:
+            bf_pct, bf_grace = _panic_cfg(cfg_local)
+            pstate, pstop, pthread = _start_panic_watchdog("backfill", bf_pct, bf_grace)
+            try:
+                with multiprocessing.get_context("spawn").Pool(backfill_workers) as pool:
+                    pstate["pool"] = pool
+                    args = [(f, worker_area_arg) for f in files]
+                    try:
+                        for count in pool.imap_unordered(_backfill_worker, args):
+                            if pstate["triggered"]:
+                                raise RuntimeError(
+                                    f"backfill aborted by memory panic watchdog "
+                                    f"(>{bf_pct}% RAM for >={bf_grace}s)"
+                                )
+                            touched += count
+                    finally:
+                        pstate["pool"] = None
+            finally:
+                pstop.set()
+                try: pthread.join(timeout=1.5)
+                except Exception: pass
+        else:
+            for f in files:
+                touched += _backfill_worker((f, worker_area_arg))
+    except Exception as e:
+        log_to_gui(log_widget, f"[backfill] Failed: {e}")
+        return
+    finally:
+        if area_map_path is not None:
+            try:
+                area_map_path.unlink()
+            except Exception:
+                pass
+
+    log_to_gui(log_widget,
+               f"Backfilled area_m2 to {len(files)} parts ({touched:,} rows).")
+
+
 # ----------------------------
 # Top-level process
 # ----------------------------
@@ -3431,6 +3486,7 @@ def run_processing_pipeline(config_file: Path,
                             run_prep: bool = True,
                             run_intersect: bool = True,
                             run_flatten: bool = True,
+                            run_backfill: bool = True,
                             cleanup_slivers: bool = True):
     """Stages can be skipped independently. Soft validation: each stage that
     depends on a previous output checks the artifact on disk and skips with a
@@ -3538,20 +3594,27 @@ def run_processing_pipeline(config_file: Path,
             n_parts = len(list(ds_dir.glob("*.parquet"))) if ds_dir.exists() else 0
             if n_parts == 0:
                 log_to_gui(log_widget,
-                           "[Stage 3/4] Skipped: tbl_stacked has 0 parts on disk. "
+                           "[Stage 3a] Flatten skipped: tbl_stacked has 0 parts on disk. "
                            "Run Intersect first (or rerun with Intersect checked).")
             else:
-                log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
+                log_to_gui(log_widget, "[Stage 3a] Flattening outputs, computing stats, and refreshing status…")
                 flatten_tbl_stacked(config_file, working_epsg,
                                     cleanup_slivers=cleanup_slivers,
-                                    cfg=cfg); update_progress(95)
+                                    cfg=cfg); update_progress(92)
         else:
-            log_to_gui(log_widget, "[Stage 3/4] Skipped (Flatten unchecked).")
+            log_to_gui(log_widget, "[Stage 3a] Flatten skipped (unchecked).")
+
+        if run_backfill:
+            log_to_gui(log_widget, "[Stage 3b] Backfilling area_m2 to tbl_stacked partitions…")
+            backfill_tbl_stacked(config_file, cfg=cfg)
+            update_progress(95)
+        else:
+            log_to_gui(log_widget, "[Stage 3b] Backfill skipped (unchecked).")
 
         # __mosaic_faces_tmp is produced by geocode_manage.py's polygonize
         # step; the mosaic path does not clean it itself. Only sweep when we
         # actually ran a stage that may have produced these scratches.
-        if run_prep or run_intersect or run_flatten:
+        if run_prep or run_intersect or run_flatten or run_backfill:
             for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out", "__mosaic_faces_tmp"]:
                 _rm_rf(_dataset_dir(temp_dir))
 
@@ -4292,6 +4355,7 @@ def run_headless(original_working_directory_arg: str | None = None,
                  run_prep: bool = True,
                  run_intersect: bool = True,
                  run_flatten: bool = True,
+                 run_backfill: bool = True,
                  cleanup_slivers: bool = True) -> None:
     """Entry point for headless processing (callable from other modules).
 
@@ -4352,6 +4416,7 @@ def run_headless(original_working_directory_arg: str | None = None,
                                 run_prep=run_prep,
                                 run_intersect=run_intersect,
                                 run_flatten=run_flatten,
+                                run_backfill=run_backfill,
                                 cleanup_slivers=cleanup_slivers)
     finally:
         _external_log_fn = None
