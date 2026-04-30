@@ -457,7 +457,7 @@ def get_status(geoparquet_dir):
             log_to_logfile(f"Error evaluating setup status on tbl_asset_group: {e}")
 
         if assets_ok:
-            return "+", "Set up ok. Feel free to adjust it. Remember to rerun after adjustments."
+            return "+", "Setup OK. Rerun after adjustments."
 
         parts = []
         if missing_cols_msg:
@@ -497,9 +497,9 @@ def get_status(geoparquet_dir):
 
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if flat_original_count is not None else "-",
-                      "Processing completed. You may choose to Show maps or open the QGIS-project file in the qgis-folder."
+                      "Processing complete. Use Show maps or open the QGIS project."
                       if flat_original_count is not None else
-                      "Processing incomplete. Press the \nProcess area-button.",
+                      "Processing incomplete. Press Process area.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
 
         atlas_count = read_table_and_count('tbl_atlas')
@@ -2181,22 +2181,11 @@ class MesaMainWindow(QMainWindow):
         timeline_layout.setSpacing(6)
 
         self._timeline_entries = []
-        TIMELINE_COLORS = {
-            "success": "#4d7c0f",
-            "info":    "#9b7c3d",
-            "warning": "#b45309",
-            "secondary": "#9a8a6e",
-        }
         for _ in range(6):
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
             row_layout.setContentsMargins(0, 2, 0, 2)
             row_layout.setSpacing(6)
-
-            color_bar = QFrame()
-            color_bar.setFixedSize(8, 20)
-            color_bar.setStyleSheet(f"background: {TIMELINE_COLORS['success']}; border-radius: 3px;")
-            row_layout.addWidget(color_bar)
 
             title_lbl = QLabel("Event")
             title_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2215,7 +2204,7 @@ class MesaMainWindow(QMainWindow):
             row_layout.addWidget(time_lbl)
 
             timeline_layout.addWidget(row_widget)
-            self._timeline_entries.append((color_bar, title_lbl, dur_lbl, time_lbl))
+            self._timeline_entries.append((title_lbl, dur_lbl, time_lbl))
 
         timeline_layout.addStretch()
         top_row.addWidget(timeline_group, stretch=1)
@@ -2419,11 +2408,13 @@ class MesaMainWindow(QMainWindow):
             ],
         )[0]
 
-        seconds["Newest report export"] = self._scan_last_run_from_log(
+        report_secs, report_end = self._scan_last_run_from_log(
             log_path,
             start_markers=["Report mode selected:"],
             end_markers_primary=["Word report created:", "ERROR during report generation:"],
-        )[0]
+        )
+        seconds["Newest report export"] = report_secs
+        times["Newest report export"] = report_end.strftime("%Y-%m-%d %H:%M") if report_end else "--"
 
         durations = {k: self._fmt_duration(v) for k, v in seconds.items()}
         cache.update({"mtime": mtime, "seconds": seconds, "durations": durations, "times": times})
@@ -2496,31 +2487,31 @@ class MesaMainWindow(QMainWindow):
         return config['DEFAULT'].get('last_report_export', '--')
 
     def _update_timeline(self):
-        TIMELINE_COLORS = {
-            "success":   "#4d7c0f",
-            "info":      "#9b7c3d",
-            "warning":   "#b45309",
-            "secondary": "#9a8a6e",
-        }
         durations = dict(self._recent_activity_durations())
         durations["Time to calculate stats on this page"] = self._fmt_stats_runtime(
             self._status_calc_runtime.get("seconds"))
         times = self._log_duration_cache.get("times", {})
 
+        # Prefer file mtime for the "Newest report export" stamp (it tracks the
+        # actual artefact on disk). When the report writes to a path outside
+        # original_working_directory the file scan returns "--" — fall back to
+        # the timestamp parsed from log.txt so the column stays informative.
+        report_ts = self._latest_report_timestamp()
+        if not report_ts or report_ts == "--":
+            report_ts = times.get("Newest report export", "--")
+
         events = [
-            ("Assets", self._last_asset_import_timestamp(), "success"),
-            ("Build basic_mosaic", times.get("Build basic_mosaic", "--"), "info"),
-            ("Processing", self._last_flat_timestamp(), "info"),
-            ("Line processing", self._last_line_processing_timestamp(), "warning"),
-            ("Newest report export", self._latest_report_timestamp(), "secondary"),
-            ("Time to calculate stats on this page", "", "secondary"),
+            ("Assets", self._last_asset_import_timestamp()),
+            ("Build basic_mosaic", times.get("Build basic_mosaic", "--")),
+            ("Processing", self._last_flat_timestamp()),
+            ("Line processing", self._last_line_processing_timestamp()),
+            ("Newest report export", report_ts),
+            ("Time to calculate stats on this page", ""),
         ]
-        for idx, (title, timestamp, style_key) in enumerate(events):
+        for idx, (title, timestamp) in enumerate(events):
             if idx >= len(self._timeline_entries):
                 break
-            color_bar, title_lbl, dur_lbl, time_lbl = self._timeline_entries[idx]
-            color = TIMELINE_COLORS.get(style_key, "#9ca3af")
-            color_bar.setStyleSheet(f"background: {color}; border-radius: 3px;")
+            title_lbl, dur_lbl, time_lbl = self._timeline_entries[idx]
             title_lbl.setText(title)
             dur_lbl.setText(durations.get(title, "--"))
             time_lbl.setText(timestamp)
