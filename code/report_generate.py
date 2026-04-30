@@ -1101,6 +1101,12 @@ class ReportEngine:
             title_raw = tile_row.get('title_user') or tile_row.get('name_gis') or safe_tile
             tile_id = tile_row.get('name_gis') or safe_tile
             heading = f"Atlas tile: {title_raw}" if str(title_raw) == str(tile_id) else f"Atlas tile: {title_raw} ({tile_id})"
+            # Force each atlas tile sub-chapter onto its own page so the
+            # heading, description, and map stay together. Atlas tiles use
+            # the 'image' kind (not 'image_map'), so the automatic
+            # page-break-before-heading logic in compile_docx does not fire
+            # for them — emit the page break explicitly here.
+            pages.append(('new_page', None))
             pages.append(('heading(3)', heading))
             info_parts = []
             if isinstance(tile_row.get('description'), str) and tile_row.get('description').strip():
@@ -1118,8 +1124,9 @@ class ReportEngine:
             if has_entries:
                 pages.append(('spacer', 1))
             else:
-                pages.pop()  # remove heading
                 pages.pop()  # remove text
+                pages.pop()  # remove heading
+                pages.pop()  # remove new_page
 
             if set_progress_callback:
                 set_progress_callback(idx+1, max(1, atlas_total))
