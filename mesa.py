@@ -835,12 +835,19 @@ def _safe_zip_member_names(names: list[str]) -> list[str]:
         safe.append("/".join(parts))
     return safe
 
-def create_backup_archive(base_dir: str, destination_folder: str) -> str:
+def create_backup_archive(base_dir: str, destination_path: str) -> str:
+    """Create a backup zip at destination_path.
+
+    destination_path is the full zip path the caller wants the file written
+    to; ``.zip`` is appended if no suffix is present, and parent directories
+    are created as needed.
+    """
     base = Path(base_dir)
-    dest = Path(destination_folder)
-    dest.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    zip_path = dest / f"mesa_backup_{ts}.zip"
+    dest = Path(destination_path)
+    if not dest.suffix:
+        dest = dest.with_suffix(".zip")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    zip_path = dest
     config_path = base / "config.ini"
     input_dir = base / "input"
     output_dir = base / "output"
@@ -3328,7 +3335,7 @@ class MesaMainWindow(QMainWindow):
             self._tune_status_label.setText("Restore previous tuning failed")
             QMessageBox.critical(self, "Restore tuning failed", f"Could not restore tuned values:\n{exc}")
 
-    # ---- Tab 5: Manage MESA data ----
+    # ---- Tab 5: Manage data ----
     def _build_manage_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -3408,15 +3415,24 @@ class MesaMainWindow(QMainWindow):
         layout.addWidget(clear_group)
 
         layout.addStretch()
-        self._tabs.addTab(tab, "Manage MESA data")
+        self._tabs.addTab(tab, "Manage data")
 
     def _do_backup(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Choose backup destination folder",
-            original_working_directory,
+        # Suggest a timestamped filename but let the user revise both folder
+        # and name in a single Save-As dialog.
+        ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        default_name = f"mesa_backup_{ts}.zip"
+        default_path = os.path.join(original_working_directory, default_name)
+        chosen_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save backup as",
+            default_path,
+            "ZIP files (*.zip);;All files (*.*)",
         )
-        if not folder:
+        if not chosen_path:
             return
+        if not chosen_path.lower().endswith(".zip"):
+            chosen_path += ".zip"
 
         # Show progress dialog (backup can be slow for large projects)
         progress = QProgressDialog("Creating backup archive...", None, 0, 0, self)
@@ -3430,7 +3446,7 @@ class MesaMainWindow(QMainWindow):
         result_path = None
         error_msg = None
         try:
-            result_path = create_backup_archive(original_working_directory, folder)
+            result_path = create_backup_archive(original_working_directory, chosen_path)
         except Exception as e:
             error_msg = str(e)
 
