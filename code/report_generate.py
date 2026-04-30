@@ -1236,6 +1236,18 @@ class ReportEngine:
                 pages.append(('text', f"Map of <b>{title}</b> rendered from the basic_mosaic MBTiles overlay."))
             if okm and _file_ok(map_png):
                 pages.append(('image_map', (f"{title} – map", map_png)))
+                # Legend strip below the map. Filename includes "_legend" so
+                # compile_docx routes it through the legend-width branch.
+                legend_png = self.make_path("index", _safe_name(col), "legend")
+                legend_kind = "importance" if col == "index_importance" else "sensitivity"
+                legend_caption = f"Index value 0–100 (relative within {basic_name})"
+                if _build_index_legend_png(
+                    legend_png,
+                    kind=legend_kind,
+                    cfg_path=self.config_path,
+                    caption=legend_caption,
+                ):
+                    pages.append(('image', (f"{title} – legend", legend_png)))
             else:
                 pages.append(('text', f"Could not render map: {note_m or 'unknown error'}"))
             pages.append(('new_page', None))
@@ -3149,6 +3161,95 @@ def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
     plt.savefig(output_path, bbox_inches='tight', dpi=110)
     plt.close(fig)
 
+def _build_index_legend_png(
+    output_path: str,
+    *,
+    kind: str,
+    cfg_path: str | Path,
+    caption: str = "",
+) -> bool:
+    """Render a horizontal colour-bar legend matching the MBTiles index ramp.
+
+    kind: "importance" -> green ramp (matches importance_max).
+          "sensitivity" / "owa" -> A->E warm ramp (red..yellow), low to high.
+
+    The gradient is rebuilt from the same source as
+    code/tiles_create_raster.py so the legend stays in sync with the actual
+    map colours when the config palette is edited.
+    """
+    try:
+        from tiles_create_raster import (
+            INDEX_GRADIENT_STEPS,
+            IMPORTANCE_MAX_HEX,
+            build_importance_max_palette,
+            build_index_gradient_from_palette,
+            hex_to_rgba,
+            read_sensitivity_palette_from_config,
+        )
+    except Exception as exc:
+        try:
+            print(f"[report] legend builder: cannot import gradient helpers: {exc}", flush=True)
+        except Exception:
+            pass
+        return False
+
+    try:
+        if str(kind).lower() == "importance":
+            gradient = build_index_gradient_from_palette(
+                build_importance_max_palette(alpha=1.0),
+                steps=INDEX_GRADIENT_STEPS,
+                order=[1, 2, 3, 4, 5],
+                fallback=hex_to_rgba(IMPORTANCE_MAX_HEX[1], 1.0),
+            )
+        else:
+            gradient = build_index_gradient_from_palette(
+                read_sensitivity_palette_from_config(Path(cfg_path), alpha=1.0),
+                steps=INDEX_GRADIENT_STEPS,
+            )
+
+        rgb = np.array(
+            [[c[0] / 255.0, c[1] / 255.0, c[2] / 255.0] for c in gradient],
+            dtype=float,
+        )
+        bar = rgb.reshape(1, -1, 3)
+
+        # Render at 13 cm wide x ~1.4 cm tall so it sits as a thin strip below
+        # the 13 cm-wide map without dominating the page.
+        fig_w_in = 13.0 / 2.54
+        fig_h_in = 1.4 / 2.54
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=200)
+        ax.imshow(bar, aspect="auto", extent=(0.0, 100.0, 0.0, 1.0))
+        ax.set_yticks([])
+        ax.set_xticks([0, 25, 50, 75, 100])
+        ax.set_xticklabels([
+            "0\n(no overlap)",
+            "25",
+            "50",
+            "75",
+            "100\n(highest)",
+        ])
+        ax.tick_params(axis="x", labelsize=6, length=2, pad=1)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        if caption:
+            ax.set_xlabel(caption, fontsize=7)
+
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.32)
+        fig.savefig(output_path, bbox_inches="tight", dpi=200)
+        plt.close(fig)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    except Exception as exc:
+        try:
+            print(f"[report] legend builder failed: {exc}", flush=True)
+        except Exception:
+            pass
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+        return False
+
+
 def create_index_area_distribution_chart(flat_df: gpd.GeoDataFrame,
                                         index_col: str,
                                         output_path: str,
@@ -3597,6 +3698,11 @@ def _clean_docx_text(txt: str) -> str:
     s = re.sub(r"</?b>", "", s)
     s = re.sub(r"</?i>", "", s)
     s = re.sub(r"</?code>", "", s)
+    # HTML entities like &ldquo; were leaking through into the rendered DOCX
+    # because we strip tags but never decode entities. Decode after tag removal
+    # so any &amp;, &ldquo;, &rdquo;, &hellip;, etc. become their Unicode form.
+    import html as _html
+    s = _html.unescape(s)
     return s
 
 def compile_docx(output_docx: str, order_list: list):
@@ -3630,8 +3736,11 @@ def compile_docx(output_docx: str, order_list: list):
     # at 10 cm tall, which forced their explanatory text onto a separate page.
     # Shrink them to a panel size so heading + intro paragraphs + map fit on one
     # page together. Width is independent of MAX_IMAGE_WIDTH_CM for this kind.
-    MAX_OVERVIEW_MAP_WIDTH_CM = 11.0
-    MAX_OVERVIEW_MAP_HEIGHT_CM = 8.0
+    MAX_OVERVIEW_MAP_WIDTH_CM = 13.0
+    MAX_OVERVIEW_MAP_HEIGHT_CM = 9.5
+    # Index legends are emitted right after the map and should align visually
+    # with it, so they share the overview width.
+    MAX_LEGEND_WIDTH_CM = MAX_OVERVIEW_MAP_WIDTH_CM
 
     def _is_line_map_image(title: str | None, path: str | None) -> bool:
         if not path:
@@ -3728,6 +3837,9 @@ def compile_docx(output_docx: str, order_list: list):
 
     def _is_atlas_image(path: str) -> bool:
         return 'atlas' in os.path.basename(path).lower()
+
+    def _is_legend_image(path: str) -> bool:
+        return '_legend' in os.path.basename(path).lower()
 
     def _needs_osm_attribution(path: str) -> bool:
         return _is_map_image(path) or _is_atlas_image(path)
@@ -3838,6 +3950,9 @@ def compile_docx(output_docx: str, order_list: list):
                     # Ribbons: fixed height (keep consistent visual size)
                     if kind == "image_ribbon":
                         doc.add_picture(path, width=Cm(width_cm), height=Cm(float(RIBBON_CM_HEIGHT)))
+                    # Index-map legend strip: align width with the map above it.
+                    elif _is_legend_image(path):
+                        doc.add_picture(path, width=Cm(float(MAX_LEGEND_WIDTH_CM)))
                     # Atlas: clamp height to keep pages readable
                     elif _is_atlas_image(path):
                         with PILImage.open(path) as im:
