@@ -2460,7 +2460,11 @@ def _add_map_decorations(ax,
         # Inset overview (if available)
         if add_inset and inset_axes is not None:
             try:
-                iax = inset_axes(ax, width="28%", height="28%", loc='upper left', borderpad=0.8)
+                # Atlas tile maps (identified by the context-tiles parameter) use
+                # a smaller inset so it doesn't cover too much of the tile content;
+                # other map types keep the larger overview at 28%.
+                inset_size = "18%" if inset_context_tiles_3857 is not None else "28%"
+                iax = inset_axes(ax, width=inset_size, height=inset_size, loc='upper left', borderpad=0.8)
                 try:
                     iax.set_zorder(20)
                 except Exception:
