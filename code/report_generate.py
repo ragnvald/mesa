@@ -3618,7 +3618,11 @@ def compile_docx(output_docx: str, order_list: list):
         pass
 
     MAX_IMAGE_WIDTH_CM = 16.0
-    MAX_ATLAS_HEIGHT_CM = 18.0
+    # Atlas tiles previously rendered up to 12 x 18 cm (full A4 page minus
+    # margins) and forced their heading + description onto a separate page.
+    # Cap the height so heading + intro text + tile fit on one page; width
+    # is still scaled by ATLAS_DOC_WIDTH_SCALE * MAX_IMAGE_WIDTH_CM.
+    MAX_ATLAS_HEIGHT_CM = 12.0
     # Line maps are inserted together with distribution + ribbon.
     # Allow a taller cap now that we use a single combined map (segments + context inset).
     MAX_LINE_MAP_HEIGHT_CM = 14.0
@@ -4322,7 +4326,7 @@ def generate_report(base_dir: str,
                         overlay_alpha=0.65,
                         flat_cells_gdf=flat_cells,
                     ):
-                        order_list.append(('image', ("Area overview (basemap + sensitivity)", minimap_path)))
+                        order_list.append(('image_map', ("Area overview (basemap + sensitivity)", minimap_path)))
                     else:
                         order_list.append(('text', "(Area map unavailable: missing analysis polygons and/or basemap/mbtiles.)"))
 
@@ -4387,7 +4391,7 @@ def generate_report(base_dir: str,
                             overlay_alpha=0.65,
                             flat_cells_gdf=left_cells,
                         ):
-                            order_list.append(('image', (f"Area map – {left_title}", left_map)))
+                            order_list.append(('image_map', (f"Area map – {left_title}", left_map)))
 
                         left_assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, left_polys)
                         if left_assets_tbl:
@@ -4403,7 +4407,7 @@ def generate_report(base_dir: str,
                             overlay_alpha=0.65,
                             flat_cells_gdf=right_cells,
                         ):
-                            order_list.append(('image', (f"Area map – {right_title}", right_map)))
+                            order_list.append(('image_map', (f"Area map – {right_title}", right_map)))
 
                         right_assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, right_polys)
                         if right_assets_tbl:
