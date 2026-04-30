@@ -359,6 +359,17 @@ class AtlasManagerWindow(QMainWindow):
     # Create / Import tab
     # ------------------------------------------------------------------
     def _build_create_tab(self, layout):
+        # Status banner: makes it explicit that an atlas already exists (and that
+        # Create/Import will replace it). Updated by _refresh_create_status().
+        self.create_status_label = QLabel("")
+        self.create_status_label.setWordWrap(True)
+        self.create_status_label.setStyleSheet(
+            "QLabel { background: #f3ecda; border: 1px solid #c9b88a; "
+            "color: #4a3a1f; padding: 6px 10px; border-radius: 4px; "
+            "font-size: 9pt; }"
+        )
+        layout.addWidget(self.create_status_label)
+
         options_group = QGroupBox("Tile generation options")
         options_layout = QGridLayout(options_group)
         options_layout.setHorizontalSpacing(10)
@@ -437,17 +448,24 @@ class AtlasManagerWindow(QMainWindow):
         progress_row.addWidget(self.progress_bar)
         layout.addLayout(progress_row)
 
-        # Action buttons
+        # Action buttons. Create / Import / Delete all go through UI-thread
+        # confirmation helpers (_on_*_clicked) that warn before overwriting an
+        # existing atlas, since both Create and Import replace tbl_atlas.parquet
+        # outright rather than appending.
         btn_row = QHBoxLayout()
         create_btn = QPushButton("Create")
         create_btn.setProperty("role", "primary")
-        create_btn.clicked.connect(lambda: self._spawn(self._run_create))
+        create_btn.clicked.connect(self._on_create_clicked)
         btn_row.addWidget(create_btn)
 
         import_btn = QPushButton("Import")
         import_btn.setProperty("role", "primary")
-        import_btn.clicked.connect(lambda: self._spawn(self._run_import_action))
+        import_btn.clicked.connect(self._on_import_clicked)
         btn_row.addWidget(import_btn)
+
+        delete_btn = QPushButton("Delete current atlas")
+        delete_btn.clicked.connect(self._on_delete_clicked)
+        btn_row.addWidget(delete_btn)
 
         refresh_btn = QPushButton("Refresh editor")
         refresh_btn.clicked.connect(self._refresh_edit_data)
@@ -828,6 +846,7 @@ class AtlasManagerWindow(QMainWindow):
             self.edit_state_label.setText("No atlas data. Create or import atlas first.")
             self.summary_label.setText(f"Atlas file: {path} | pages: 0")
             self._refresh_map()
+            self._refresh_create_status()
             return
 
         try:
@@ -854,6 +873,102 @@ class AtlasManagerWindow(QMainWindow):
             self.edit_state_label.setText("Failed to load atlas data.")
             self.summary_label.setText(f"Atlas file: {path} | pages: 0")
             self._refresh_map()
+        self._refresh_create_status()
+
+    def _refresh_create_status(self):
+        """Update the Create/Import tab banner with current atlas-file state."""
+        label = getattr(self, "create_status_label", None)
+        if label is None:
+            return
+        path = self._atlas_path(for_write=False)
+        try:
+            tile_count = len(self.df) if self.df is not None else 0
+        except Exception:
+            tile_count = 0
+        if not path.exists() or tile_count == 0:
+            label.setText(
+                "No atlas tiles yet. Use <b>Create</b> to generate a new set from the "
+                "study-area extent, or <b>Import</b> to load polygons from a shapefile / "
+                "geopackage / parquet file."
+            )
+            return
+        try:
+            mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime)
+            mtime_str = mtime.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            mtime_str = "unknown date"
+        label.setText(
+            f"Current atlas: <b>{tile_count}</b> tile(s), last modified <b>{mtime_str}</b>. "
+            "Running <b>Create</b> or <b>Import</b> will replace this entire set; "
+            "use <b>Delete current atlas</b> if you want to clear it without immediately "
+            "generating a new one."
+        )
+
+    def _confirm_overwrite(self, action_label: str) -> bool:
+        """Return True if there is no existing atlas, or if the user confirmed overwrite."""
+        path = self._atlas_path(for_write=False)
+        if not path.exists():
+            return True
+        try:
+            tile_count = len(self.df) if self.df is not None else 0
+        except Exception:
+            tile_count = 0
+        msg = (
+            f"An atlas with <b>{tile_count}</b> tile(s) already exists.<br><br>"
+            f"Running <b>{action_label}</b> will replace the entire current atlas; "
+            "any custom titles, descriptions, or image references on existing tiles "
+            "will be lost.<br><br>Continue?"
+        )
+        reply = QMessageBox.question(
+            self,
+            f"Replace existing atlas?",
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def _on_create_clicked(self):
+        if not self._confirm_overwrite("Create"):
+            return
+        self._spawn(self._run_create)
+
+    def _on_import_clicked(self):
+        if not self._confirm_overwrite("Import"):
+            return
+        self._spawn(self._run_import_action)
+
+    def _on_delete_clicked(self):
+        path = self._atlas_path(for_write=False)
+        if not path.exists():
+            QMessageBox.information(
+                self,
+                "No atlas to delete",
+                "There is no atlas file to delete.",
+            )
+            return
+        try:
+            tile_count = len(self.df) if self.df is not None else 0
+        except Exception:
+            tile_count = 0
+        reply = QMessageBox.question(
+            self,
+            "Delete current atlas?",
+            f"Delete the current atlas ({tile_count} tile(s))?<br><br>"
+            "This removes <code>tbl_atlas.parquet</code> from disk. The action "
+            "cannot be undone, but you can always create or import a new set.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            path.unlink()
+            self._log_to_gui(f"Deleted atlas GeoParquet: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete failed", f"Could not delete atlas:\n{exc}")
+            return
+        self._refresh_edit_data()
 
     def _clear_form(self):
         self.lbl_name_gis.setText("")
