@@ -4508,9 +4508,8 @@ class ReportGeneratorWindow(QMainWindow):
         progress_var.setTextVisible(True)
         progress_var.setFormat("%p%")
         progress_var.setAlignment(Qt.AlignCenter)
-        progress_var.setFixedWidth(300)
-        pframe.addWidget(progress_var)
-        pframe.addStretch()
+        progress_var.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        pframe.addWidget(progress_var, stretch=1)
         main_layout.addLayout(pframe)
 
         # --- Report options group ---
