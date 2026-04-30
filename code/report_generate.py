@@ -1063,12 +1063,39 @@ class ReportEngine:
                 ('new_page', None),
             ]
 
+        # Reproject every atlas tile once so each per-tile inset can show
+        # the rest of the grid as faint context lines around the highlighted
+        # current tile.
+        all_tiles_3857: gpd.GeoDataFrame | None = None
+        try:
+            tiles_gdf = gpd.GeoDataFrame(
+                {"geometry": atlas_df["geometry"].values},
+                geometry="geometry",
+                crs=atlas_crs,
+            )
+            all_tiles_3857 = _safe_to_3857(tiles_gdf)
+            if all_tiles_3857 is None or all_tiles_3857.empty:
+                all_tiles_3857 = None
+        except Exception as exc:
+            write_to_log(f"Could not prepare atlas context tiles for inset: {exc}", self.base_dir)
+            all_tiles_3857 = None
+
         atlas_total = len(atlas_df)
         for idx, tile_row in atlas_df.iterrows():
             safe_tile = _safe_name(tile_row.get('name_gis') or f"atlas_{idx+1}")
             sens_png = self.make_path("atlas", safe_tile, "sens")
 
-            ok_sens = draw_atlas_map(tile_row, atlas_crs, polys_for_atlas, self.palette, self.desc, sens_png, bounds, base_dir=self.base_dir)
+            ok_sens = draw_atlas_map(
+                tile_row,
+                atlas_crs,
+                polys_for_atlas,
+                self.palette,
+                self.desc,
+                sens_png,
+                bounds,
+                base_dir=self.base_dir,
+                all_tiles_3857=all_tiles_3857,
+            )
 
             has_entries = False
             title_raw = tile_row.get('title_user') or tile_row.get('name_gis') or safe_tile
@@ -2364,8 +2391,16 @@ def _style_inset_box(fig, inset_ax,
 def _add_map_decorations(ax,
                          extent_3857: tuple[float, float, float, float],
                          base_dir: str | None = None,
-                         add_inset: bool = True):
-    """Add north arrow (top-right), scale bar (bottom-left) and optional inset overview."""
+                         add_inset: bool = True,
+                         inset_context_tiles_3857: gpd.GeoDataFrame | None = None):
+    """Add north arrow (top-right), scale bar (bottom-left) and optional inset overview.
+
+    inset_context_tiles_3857: optional collection of polygons (already in
+    EPSG:3857) to draw inside the inset as weak context lines, plotted
+    behind the highlighted current-extent rectangle. Used by the atlas
+    tile maps so each tile inset shows where the current tile sits in
+    relation to the rest of the atlas grid.
+    """
     try:
         west_x, east_x, south_y, north_y = extent_3857
         width_m = float(east_x - west_x)
@@ -2446,6 +2481,20 @@ def _add_map_decorations(ax,
                 iax.set_xlim(west_x - pad_ix, east_x + pad_ix)
                 iax.set_ylim(south_y - pad_iy, north_y + pad_iy)
                 _plot_basemap(iax, crs_epsg=3857, base_dir=base_dir)
+                # Draw the rest of the atlas grid as weak context lines so the
+                # reader can see how the highlighted tile sits relative to the
+                # other tiles, not just the basemap.
+                if inset_context_tiles_3857 is not None and not inset_context_tiles_3857.empty:
+                    try:
+                        inset_context_tiles_3857.boundary.plot(
+                            ax=iax,
+                            color="#555555",
+                            linewidth=0.4,
+                            alpha=0.55,
+                            zorder=40,
+                        )
+                    except Exception:
+                        pass
                 rect = Rectangle((west_x, south_y), width_m, height_m,
                                  fill=False, edgecolor=PRIMARY_HEX, linewidth=1.6, alpha=0.95, zorder=50)
                 iax.add_patch(rect)
@@ -2691,7 +2740,8 @@ def draw_atlas_map(tile_row: pd.Series,
                    desc: dict,
                    out_path: str,
                    global_bounds_3857=None,
-                   base_dir: str | None = None) -> bool:
+                   base_dir: str | None = None,
+                   all_tiles_3857: gpd.GeoDataFrame | None = None) -> bool:
     """
     Render a single atlas tile sensitivity map using shared cartography.
     """
@@ -2762,7 +2812,13 @@ def draw_atlas_map(tile_row: pd.Series,
         try:
             minx, maxx = ax.get_xlim()
             miny, maxy = ax.get_ylim()
-            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=True)
+            _add_map_decorations(
+                ax,
+                (minx, maxx, miny, maxy),
+                base_dir=base_dir,
+                add_inset=True,
+                inset_context_tiles_3857=all_tiles_3857,
+            )
         except Exception:
             pass
 
