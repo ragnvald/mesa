@@ -1642,21 +1642,34 @@ class ProcessRunnerWindow(QMainWindow):
         grid = QGridLayout(grid_widget)
         grid.setContentsMargins(10, 0, 10, 0)
 
-        # Headers for the LEFT stage column (data sub-stages).
-        grid.addWidget(QLabel("Process"), 0, 0)
-        grid.addWidget(QLabel("Status"), 0, 1)
-
         # Two-column layout:
         #   Left column (cols 0-1): data sub-stages (Prep / Intersect / Flatten / Backfill)
         #   Right column (cols 3-4): post-data stages (Tiles / Lines / Analysis)
-        #   Col 2: visual gap.
+        #   Col 2: visual gap, with a directional arrow on the header row.
+        # Row 0 is a directional banner replacing the old generic
+        # "Process / Status" headers — it tells the operator that geometry
+        # stages live on the left and parameter-driven downstream stages live
+        # on the right, so they can pick a sensible re-run point after a
+        # parameter-only change.
+        left_hdr = QLabel("Geometry stages — rerun when inputs change")
+        left_hdr.setWordWrap(True)
+        left_hdr.setStyleSheet("font-weight: bold; color: #6a5533; padding-bottom: 4px;")
+        grid.addWidget(left_hdr, 0, 0, 1, 2)
+
+        arrow_hdr = QLabel("→")
+        arrow_hdr.setAlignment(Qt.AlignCenter)
+        arrow_hdr.setStyleSheet("color: #6a5533; font-size: 14pt; font-weight: bold;")
+        grid.addWidget(arrow_hdr, 0, 2)
+
+        right_hdr = QLabel("Downstream stages — rerun for parameter changes")
+        right_hdr.setWordWrap(True)
+        right_hdr.setStyleSheet("font-weight: bold; color: #6a5533; padding-bottom: 4px;")
+        grid.addWidget(right_hdr, 0, 3, 1, 2)
+
         # Master "Process" checkbox + flatten options live in row 1 spanning
         # the whole grid.
 
-        # Headers (mirrored on both sides).
-        grid.addWidget(QLabel("Process"), 0, 3)
-        grid.addWidget(QLabel("Status"), 0, 4)
-        grid.setColumnMinimumWidth(2, 24)
+        grid.setColumnMinimumWidth(2, 32)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(4, 1)
 
