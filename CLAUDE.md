@@ -31,3 +31,10 @@ Append, do not rewrite history. Mark a previous entry as superseded inline if a 
 
 - The processing pipeline (`code/processing_internal.py`) has been bitten more than once by parent-process memory blow-ups in the gaps *between* worker pools. Per-pool watchdogs, per-stage worker caps, and pre-flight checks all only run inside `Pool(...)` blocks - parent-side reads/merges between pools are unguarded. There is now a process-lifetime sentinel (`_start_lifetime_panic_watchdog`) as a backstop, but it costs the entire run's progress when it fires; do not rely on it to catch sloppy parent-side allocations. Before adding any read in the parent, check whether it materialises a known-large dataset (`tbl_stacked`, `tbl_flat`). See learning.md "Parent-side memory in the pipeline".
 - `read_parquet_or_empty()` materialises the entire dataset including geometries. Read its docstring before calling it on anything other than small, known-bounded tables.
+
+## Documentation in `docs/`
+
+- `docs/MESA_User_Guide.docx` is an end-user Word manual compiled from the `mesa.wiki` repository (Home, What's new, Quickstart, User-interface, Data, Method, Indexes, QGIS, Definitions, Advanced, Troubleshooting). It targets analysts/operators, not developers. When the wiki content changes substantially, regenerate the guide so the two stay in sync.
+- The guide was generated using docx-js. The build script lives in the Cowork session output folder (`build_user_guide.js`) — not yet checked in. If a future session needs to rebuild it, recreate the script from the wiki content rather than searching for the old session artefact.
+- Source-of-truth ordering: `mesa.wiki` is canonical; `docs/MESA_User_Guide.docx` is a derived artefact. Do not edit the .docx by hand and expect the wiki to follow.
+- `docs/technical_docs.docx` is a separate, older developer-focused doc and should not be confused with the user guide.
