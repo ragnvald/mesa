@@ -2255,6 +2255,628 @@ class GeoNodePublishWindow(QMainWindow):
 
 
 # =====================================================================
+# Tune-processing window (popup launched from Config tab)
+# =====================================================================
+class TuneProcessingWindow(QMainWindow):
+    """Standalone window for previewing and committing CPU/RAM-derived
+    processing tuning values into config.ini.
+
+    Used to be a top-level "Tune processing" tab. Extracted to a popup
+    launched from a button on the Config tab, so casual users do not
+    stumble into mutating worker counts and memory budgets without intent.
+    The widget tree, the tuning evaluation/commit/restore logic, and all
+    self._tune_* attributes are unchanged — only the container moved
+    from a tab QWidget to a top-level QMainWindow.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Tune processing")
+        self.resize(900, 640)
+        self.setMinimumSize(700, 500)
+        try:
+            ico = Path(original_working_directory) / "system_resources" / "mesa.ico"
+            if ico.exists():
+                self.setWindowIcon(QIcon(str(ico)))
+        except Exception:
+            pass
+        self._build_ui()
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # Top: intro + buttons side by side
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+
+        intro_col = QVBoxLayout()
+        intro_col.setSpacing(4)
+        intro = QLabel(
+            "Automatically tune processing settings based on this computer's CPU and RAM.\n"
+            "This updates selected keys in [DEFAULT] in config.ini."
+        )
+        intro.setWordWrap(True)
+        intro_col.addWidget(intro)
+
+        self._tune_status_label = QLabel(
+            "Ready. Press Evaluate to compare current and advised settings."
+        )
+        self._tune_status_label.setProperty("role", "muted")
+        self._tune_status_label.setWordWrap(True)
+        intro_col.addWidget(self._tune_status_label)
+        intro_col.addStretch()
+        top_row.addLayout(intro_col, stretch=1)
+
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(6)
+
+        eval_btn = QPushButton("Evaluate")
+        eval_btn.setProperty("role", "primary")
+        eval_btn.setFixedWidth(180)
+        eval_btn.clicked.connect(self._evaluate_processing_tuning)
+        btn_col.addWidget(eval_btn)
+
+        self._commit_tune_btn = QPushButton("Commit changes")
+        self._commit_tune_btn.setProperty("role", "success")
+        self._commit_tune_btn.setFixedWidth(180)
+        self._commit_tune_btn.setEnabled(False)
+        self._commit_tune_btn.clicked.connect(self._commit_processing_tuning)
+        btn_col.addWidget(self._commit_tune_btn)
+
+        restore_btn = QPushButton("Restore previous tuning")
+        restore_btn.setFixedWidth(180)
+        restore_btn.clicked.connect(self._restore_previous_tuning)
+        btn_col.addWidget(restore_btn)
+
+        btn_col.addStretch()
+        top_row.addLayout(btn_col)
+        layout.addLayout(top_row)
+
+        # Comparison table
+        compare_group = QGroupBox("Current vs advised settings")
+        compare_layout = QVBoxLayout(compare_group)
+        compare_layout.setContentsMargins(10, 16, 10, 10)
+
+        hdr_row = QHBoxLayout()
+        hdr_l = QLabel("Current settings")
+        hdr_l.setProperty("role", "muted")
+        hdr_r = QLabel("Advised settings")
+        hdr_r.setProperty("role", "muted")
+        hdr_row.addWidget(hdr_l)
+        hdr_row.addWidget(hdr_r)
+        compare_layout.addLayout(hdr_row)
+
+        self._tune_table = QTableWidget(0, 4)
+        self._tune_table.setHorizontalHeaderLabels(["Key", "Current", "Advised", "Suggested"])
+        self._tune_table.horizontalHeader().setStretchLastSection(True)
+        self._tune_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._tune_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._tune_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._tune_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._tune_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._tune_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._tune_table.setAlternatingRowColors(True)
+        self._tune_table.verticalHeader().setVisible(False)
+        compare_layout.addWidget(self._tune_table)
+        layout.addWidget(compare_group, stretch=1)
+
+        # Explanation text
+        self._tune_text = QPlainTextEdit()
+        self._tune_text.setReadOnly(True)
+        self._tune_text.setMaximumHeight(120)
+        layout.addWidget(self._tune_text)
+
+
+        # Exit button matching the standard tan palette used by other windows.
+        exit_row = QHBoxLayout()
+        exit_row.addStretch()
+        exit_btn = QPushButton("Exit")
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setStyleSheet("""
+            QPushButton#CornerExitButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621;
+                padding: 6px 18px;
+            }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
+        """)
+        exit_btn.clicked.connect(self.close)
+        exit_row.addWidget(exit_btn)
+        layout.addLayout(exit_row)
+
+        # Internal state
+        self._pending_tune_values: dict[str, str] = {}
+        self._pending_before_values: dict[str, str] = {}
+        self._pending_eval_rationale = ""
+        self._tune_backup_path = os.path.join(PROJECT_BASE, "output", "processing_tuning_backup.json")
+
+
+    # ------------------------------------------------------------------
+    # Tune processing: logic
+    # ------------------------------------------------------------------
+    def _recommended_processing_tuning(self, cap_row: dict):
+        try:
+            logical = int(float(cap_row.get("cpu_count_logical") or 0))
+        except Exception:
+            logical = int(os.cpu_count() or 4)
+        logical = max(1, logical)
+
+        try:
+            ram_total = float(cap_row.get("ram_total_gb") or 0.0)
+        except Exception:
+            ram_total = 0.0
+        if ram_total <= 0:
+            ram_total = 16.0
+
+        os_name = str(cap_row.get("os_name") or platform.system()).strip().lower()
+        machine = str(cap_row.get("machine") or platform.machine()).strip().lower()
+        is_apple_silicon = (os_name == "darwin") and machine.startswith("arm")
+
+        # On Apple Silicon, read the performance-core count so the worker cap
+        # reflects P-cores rather than counting slower E-cores as equals.
+        p_cores = None
+        if is_apple_silicon:
+            try:
+                res = subprocess.run(
+                    ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if res.returncode == 0:
+                    val = int((res.stdout or "").strip() or 0)
+                    if val > 0:
+                        p_cores = val
+            except Exception:
+                p_cores = None
+
+        if is_apple_silicon:
+            base = p_cores if p_cores else logical
+            worker_cap = max(2, min(base - 2, base))
+            worker_cap = min(worker_cap, 16)
+        else:
+            if logical <= 4:
+                worker_cap = 2
+            elif logical <= 8:
+                worker_cap = 4
+            elif logical <= 12:
+                worker_cap = 6
+            elif logical <= 16:
+                worker_cap = 8
+            elif logical <= 24:
+                worker_cap = 10
+            else:
+                worker_cap = 12
+
+        if ram_total <= 12:
+            approx_gb_per_worker = 2.5
+            geocode_soft_limit = 180
+            asset_soft_limit = 30000
+            target_geocodes = 1800
+            chunk_size = 10000
+            cell_size = 7000
+        elif ram_total <= 24:
+            approx_gb_per_worker = 3.5
+            geocode_soft_limit = 260
+            asset_soft_limit = 45000
+            target_geocodes = 2600
+            chunk_size = 14000
+            cell_size = 8000
+        elif ram_total <= 48:
+            approx_gb_per_worker = 4.5
+            geocode_soft_limit = 340
+            asset_soft_limit = 70000
+            target_geocodes = 3400
+            chunk_size = 18000
+            cell_size = 9000
+        else:
+            approx_gb_per_worker = 6.0
+            geocode_soft_limit = 420
+            asset_soft_limit = 100000
+            target_geocodes = 4200
+            chunk_size = 22000
+            cell_size = 10000
+
+        # Apple Silicon has unified memory (GPU + CPU share RAM) and a more
+        # memory-efficient runtime, so shrink per-worker footprint and reserve
+        # more headroom for the GPU/WindowServer.
+        if is_apple_silicon:
+            approx_gb_per_worker = max(2.5, approx_gb_per_worker - 2.0)
+            mem_target_frac = 0.70
+        else:
+            mem_target_frac = 0.85
+
+        # Per-stage caps. These are independent from the Stage 2 CPU cap so
+        # that a memory-skewed stage (flatten large-partition phase) does not
+        # drag every other stage down to its conservative limit.
+        #
+        # Scale flatten_approx_gb_per_worker by RAM tier so the auto RAM-budget
+        # math gives a reasonable worker count on smaller hosts too.
+        if ram_total <= 16:
+            flatten_gb = 5.0
+        elif ram_total <= 32:
+            flatten_gb = 8.0
+        elif ram_total <= 64:
+            flatten_gb = 12.0
+        else:
+            flatten_gb = 14.0
+
+        # All five worker caps that auto_tune.py manages at runtime are emitted
+        # as "0" here so auto_tune is the unambiguous runtime authority.
+        # See cooperation.md "Authority split" (2026-04-28).
+
+        # Mosaic boundary extraction (basic_mosaic). Each worker holds a
+        # bounded asset/grid slice and ~1.5 GB peak; CPU-bound, not RAM-bound.
+        # Apple Silicon gets a tighter fraction and an explicit cap because
+        # unified memory is shared with GPU/WindowServer; Windows/Linux let
+        # the cpu*fraction product drive worker count (max=0 = unbounded,
+        # still capped by per-worker RAM budget).
+        if is_apple_silicon:
+            mosaic_fraction = 0.65
+            mosaic_max = 10 if ram_total <= 96 else 12
+        else:
+            mosaic_fraction = 0.75
+            mosaic_max = 0
+        # Smaller chunks improve load balancing on hosts with many workers;
+        # the overhead is negligible above ~250.
+        if logical >= 16:
+            mosaic_chunk_size = 250
+        elif logical >= 8:
+            mosaic_chunk_size = 500
+        else:
+            mosaic_chunk_size = 1000
+
+        # Coverage / line union batching. The "Reducing coverage" stage runs
+        # GEOS unary_union pairwise — single-threaded and memory-bandwidth
+        # sensitive. Bigger batches (= bigger but fewer unions) and a higher
+        # partials ceiling (= fewer intermediate reduction rounds) cut total
+        # time substantially on hosts with ample RAM. Apple Silicon stays a
+        # touch tighter because unified memory is shared with the GPU.
+        # See learning.md "Mosaic union reduction is the silent long-tail".
+        if is_apple_silicon:
+            if ram_total <= 16:
+                mosaic_cov_batch, mosaic_line_partials = 500, 16
+            elif ram_total <= 32:
+                mosaic_cov_batch, mosaic_line_partials = 1000, 16
+            elif ram_total <= 64:
+                mosaic_cov_batch, mosaic_line_partials = 1500, 24
+            else:
+                mosaic_cov_batch, mosaic_line_partials = 2000, 32
+        else:
+            if ram_total <= 16:
+                mosaic_cov_batch, mosaic_line_partials = 500, 16
+            elif ram_total <= 32:
+                mosaic_cov_batch, mosaic_line_partials = 1000, 24
+            elif ram_total <= 64:
+                mosaic_cov_batch, mosaic_line_partials = 2000, 32
+            else:
+                mosaic_cov_batch, mosaic_line_partials = 4000, 64
+        recommendations = {
+            "max_workers": "0",
+            "auto_workers_min": "1",
+            "auto_workers_max": str(worker_cap),
+            "approx_gb_per_worker": f"{approx_gb_per_worker:.1f}",
+            "mem_target_frac": f"{mem_target_frac:.2f}",
+            "target_geocodes_per_chunk": str(int(target_geocodes)),
+            "chunk_backlog_multiplier": "3.5",
+            "chunk_cells_min": "2",
+            "chunk_cells_max": "72",
+            "chunk_overshoot_factor": "1.15",
+            "geocode_soft_limit": str(int(geocode_soft_limit)),
+            "asset_soft_limit": str(int(asset_soft_limit)),
+            "chunk_size": str(int(chunk_size)),
+            "cell_size": str(int(cell_size)),
+            # Per-stage caps. The five keys auto_tune.py manages at runtime
+            # (max_workers, flatten_max_workers, flatten_small_max_workers,
+            # flatten_huge_partition_mb, tiles_max_workers) are emitted as "0"
+            # so auto_tune is the unambiguous runtime authority.
+            "flatten_max_workers": "0",
+            "flatten_small_max_workers": "0",
+            "flatten_approx_gb_per_worker": f"{flatten_gb:.1f}",
+            "flatten_large_partition_mb": "50",
+            "backfill_max_workers": "0",
+            "tiles_max_workers": "0",
+            "tiles_approx_gb_per_worker": "3.0",
+            # Mosaic (basic_mosaic boundary extraction)
+            "mosaic_auto_worker_fraction": f"{mosaic_fraction:.2f}",
+            "mosaic_auto_worker_max": str(mosaic_max),
+            "mosaic_extract_chunk_size": str(mosaic_chunk_size),
+            "mosaic_coverage_union_batch": str(mosaic_cov_batch),
+            "mosaic_line_union_max_partials": str(mosaic_line_partials),
+        }
+
+        if is_apple_silicon:
+            p_note = f", P-cores: {p_cores}" if p_cores else ""
+            rationale = (
+                f"Detected Apple Silicon. Logical CPU: {logical}{p_note}. "
+                f"RAM: {ram_total:.1f} GB (unified with GPU). "
+                f"Stage 2 worker cap {worker_cap} sized from performance cores, "
+                f"leaving headroom for OS/GPU. mem_target_frac={mem_target_frac:.2f}, "
+                f"approx_gb_per_worker={approx_gb_per_worker:.1f}. "
+                f"Per-stage worker counts (max_workers / flatten_max / "
+                f"flatten_small / tiles) are delegated to auto_tune at "
+                f"runtime. flatten_approx_gb_per_worker={flatten_gb:.1f} "
+                f"scales the auto RAM budget for the skewed partition tail. "
+                f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max}, "
+                f"chunk_size={mosaic_chunk_size} (capped to leave GPU/WindowServer headroom). "
+                f"Union batching: coverage_batch={mosaic_cov_batch}, "
+                f"line_partials={mosaic_line_partials} (smaller than non-Apple to keep peak "
+                f"merge cost off unified memory)."
+            )
+        else:
+            mosaic_max_label = "unbounded" if mosaic_max == 0 else str(mosaic_max)
+            rationale = (
+                f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
+                f"Stage 2 cap {worker_cap}, mem_target_frac={mem_target_frac:.2f}. "
+                f"Per-stage worker counts (max_workers / flatten_max / "
+                f"flatten_small / tiles) are delegated to auto_tune at "
+                f"runtime. flatten_approx_gb_per_worker={flatten_gb:.1f}, "
+                f"tiles_approx_gb_per_worker=3.0. "
+                f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max_label}, "
+                f"chunk_size={mosaic_chunk_size}. "
+                f"Union batching: coverage_batch={mosaic_cov_batch}, "
+                f"line_partials={mosaic_line_partials} (larger batches/partials cut "
+                f"GEOS unary_union reduction time on hosts with ample RAM)."
+            )
+        return recommendations, rationale
+
+    def _update_default_keys_preserve_comments(self, path, updates):
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        lines = text.splitlines(keepends=True)
+        newline = "\n"
+        for line in lines:
+            if line.endswith("\r\n"):
+                newline = "\r\n"
+                break
+        default_start = None
+        default_end = None
+        for i, line in enumerate(lines):
+            if line.strip().lower() == "[default]":
+                default_start = i
+                break
+        if default_start is None:
+            lines = ["[DEFAULT]" + newline, newline] + lines
+            default_start = 0
+        for i in range(default_start + 1, len(lines)):
+            s = lines[i].strip()
+            if s.startswith("[") and s.endswith("]"):
+                default_end = i
+                break
+        if default_end is None:
+            default_end = len(lines)
+        found = set()
+        for idx in range(default_start + 1, default_end):
+            line = lines[idx]
+            for key, val in updates.items():
+                pat = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)(.*?)(\s*(?:[;#].*)?)$", re.IGNORECASE)
+                m = pat.match(line.rstrip("\r\n"))
+                if not m:
+                    continue
+                lines[idx] = f"{m.group(1)}{val}{m.group(3)}{newline}"
+                found.add(key)
+                break
+        missing = [k for k in updates.keys() if k not in found]
+        if missing:
+            insert_at = default_end
+            if insert_at > 0 and lines[insert_at - 1].strip() != "":
+                lines.insert(insert_at, newline)
+                insert_at += 1
+            for key in missing:
+                lines.insert(insert_at, f"{key:<30} = {updates[key]}{newline}")
+                insert_at += 1
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+            f.writelines(lines)
+        os.replace(tmp_path, path)
+
+    def _write_tune_backup(self, previous_values, applied_values):
+        os.makedirs(os.path.dirname(self._tune_backup_path), exist_ok=True)
+        payload = {
+            "created_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "config_path": config_file,
+            "keys": sorted(list(applied_values.keys())),
+            "previous_values": previous_values,
+            "applied_values": applied_values,
+        }
+        tmp_path = self._tune_backup_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, self._tune_backup_path)
+
+    def _read_tune_backup(self):
+        if not os.path.exists(self._tune_backup_path):
+            return None
+        try:
+            with open(self._tune_backup_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_int_like(value):
+        try:
+            return f"{int(float(value)):,}"
+        except Exception:
+            return str(value)
+
+    def _populate_tune_table(self, current_values, advised_values):
+        self._tune_table.setRowCount(0)
+        suggested_count = 0
+        for key in sorted(advised_values.keys()):
+            old_val = str(current_values.get(key, "(missing)")).strip() or "(empty)"
+            new_val = str(advised_values.get(key, "")).strip() or "(empty)"
+            changed = old_val != new_val
+            if changed:
+                suggested_count += 1
+            row = self._tune_table.rowCount()
+            self._tune_table.insertRow(row)
+            self._tune_table.setItem(row, 0, QTableWidgetItem(key))
+            self._tune_table.setItem(row, 1, QTableWidgetItem(old_val))
+            self._tune_table.setItem(row, 2, QTableWidgetItem(new_val))
+            self._tune_table.setItem(row, 3, QTableWidgetItem("Yes" if changed else "No"))
+            if changed:
+                highlight = QColor("#f6efdf")
+                for col in range(4):
+                    self._tune_table.item(row, col).setBackground(highlight)
+        return suggested_count
+
+    def _evaluate_processing_tuning(self):
+        try:
+            detected = _collect_system_capabilities() or {}
+            tuning, rationale = self._recommended_processing_tuning(detected)
+
+            cfg_before = read_config(config_file)
+            before_default = cfg_before["DEFAULT"] if "DEFAULT" in cfg_before else {}
+            current_values = {key: str(before_default.get(key, "(missing)")).strip() for key in tuning.keys()}
+
+            self._pending_tune_values = {k: str(v) for k, v in tuning.items()}
+            self._pending_before_values = {k: str(before_default.get(k, "")).strip() for k in tuning.keys()}
+            self._pending_eval_rationale = rationale
+
+            suggested_count = self._populate_tune_table(current_values, tuning)
+            self._commit_tune_btn.setEnabled(suggested_count > 0)
+
+            summary_lines = [
+                "Evaluation completed.",
+                rationale,
+                f"Suggested changes: {suggested_count}",
+                "Press Commit changes to apply the advised values to config.ini.",
+                f"Config file: {config_file}",
+            ]
+            if suggested_count == 0:
+                summary_lines.append("No changes suggested; config.ini already matches advised values.")
+            self._tune_text.setPlainText("\n".join(summary_lines))
+
+            if suggested_count > 0:
+                self._tune_status_label.setText("Evaluation complete. Review highlighted rows, then Commit changes.")
+            else:
+                self._tune_status_label.setText("Evaluation complete. No changes needed.")
+            log_to_logfile("Processing tuning evaluated from Tune processing tab")
+        except Exception as exc:
+            self._commit_tune_btn.setEnabled(False)
+            self._tune_status_label.setText("Processing tuning evaluation failed")
+            QMessageBox.critical(self, "Evaluate failed", f"Could not evaluate tuning:\n{exc}")
+
+    def _commit_processing_tuning(self):
+        if not self._pending_tune_values:
+            QMessageBox.information(self, "Commit changes", "Run Evaluate first to generate advised settings.")
+            return
+        confirmed = QMessageBox.question(
+            self, "Commit processing tuning",
+            "Apply the advised processing settings to config.ini?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+        try:
+            self._update_default_keys_preserve_comments(config_file, self._pending_tune_values)
+            self._write_tune_backup(dict(self._pending_before_values), dict(self._pending_tune_values))
+
+            global config
+            config = read_config(config_file)
+            try:
+                self._load_config_editor()
+            except Exception:
+                pass
+
+            changed_lines = []
+            for key, new_val in self._pending_tune_values.items():
+                old_val = str(self._pending_before_values.get(key, "(missing)")).strip() or "(empty)"
+                if old_val != str(new_val):
+                    if key in ("chunk_size", "cell_size", "target_geocodes_per_chunk",
+                               "geocode_soft_limit", "asset_soft_limit", "auto_workers_max"):
+                        old_disp = self._format_int_like(old_val) if old_val != "(missing)" else old_val
+                        new_disp = self._format_int_like(new_val)
+                    else:
+                        old_disp = old_val
+                        new_disp = str(new_val)
+                    changed_lines.append(f"- {key}: {old_disp} -> {new_disp}")
+            if not changed_lines:
+                changed_lines.append("- No effective changes (values were already tuned).")
+
+            summary = "\n".join([
+                "Tune processing committed.",
+                self._pending_eval_rationale,
+                "Applied keys:",
+                *changed_lines,
+                f"Backup saved: {self._tune_backup_path}",
+                f"Config file: {config_file}",
+            ])
+            self._tune_text.setPlainText(summary)
+            self._commit_tune_btn.setEnabled(False)
+            self._tune_status_label.setText("Processing tuning committed and saved to config.ini")
+            log_to_logfile("Processing tuning committed from Tune processing tab")
+        except Exception as exc:
+            self._tune_status_label.setText("Commit processing tuning failed")
+            QMessageBox.critical(self, "Commit failed", f"Could not apply advised tuning:\n{exc}")
+
+    def _restore_previous_tuning(self):
+        backup = self._read_tune_backup()
+        if not backup:
+            QMessageBox.information(self, "Restore tuning", "No previous tuning backup was found.")
+            return
+        prev = backup.get("previous_values") if isinstance(backup, dict) else None
+        if not isinstance(prev, dict) or not prev:
+            QMessageBox.information(self, "Restore tuning", "Backup exists but does not contain restore values.")
+            return
+        confirmed = QMessageBox.question(
+            self, "Restore previous tuning",
+            "Restore the previously saved values for tuned processing keys in config.ini?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+        try:
+            cfg_before = read_config(config_file)
+            before_default = cfg_before["DEFAULT"] if "DEFAULT" in cfg_before else {}
+            restore_updates = {str(k): str(v) for k, v in prev.items()}
+            self._update_default_keys_preserve_comments(config_file, restore_updates)
+
+            global config
+            config = read_config(config_file)
+            try:
+                self._load_config_editor()
+            except Exception:
+                pass
+
+            changed_lines = []
+            for key, restored_val in restore_updates.items():
+                old_val = str(before_default.get(key, "(missing)")).strip()
+                if old_val != str(restored_val):
+                    if key in ("chunk_size", "cell_size", "target_geocodes_per_chunk",
+                               "geocode_soft_limit", "asset_soft_limit", "auto_workers_max"):
+                        old_disp = self._format_int_like(old_val) if old_val != "(missing)" else old_val
+                        new_disp = self._format_int_like(restored_val) if str(restored_val).strip() else "(empty)"
+                    else:
+                        old_disp = old_val
+                        new_disp = str(restored_val).strip() if str(restored_val).strip() else "(empty)"
+                    changed_lines.append(f"- {key}: {old_disp} -> {new_disp}")
+            if not changed_lines:
+                changed_lines.append("- No effective changes (config already matched backup values).")
+
+            created_at = str(backup.get("created_at", "--"))
+            summary = "\n".join([
+                "Restore previous tuning completed.",
+                f"Backup timestamp: {created_at}",
+                "Restored keys:",
+                *changed_lines,
+                f"Config file: {config_file}",
+            ])
+            self._tune_text.setPlainText(summary)
+            self._tune_status_label.setText("Previous tuning values restored")
+            log_to_logfile("Processing tuning restored from Tune processing tab")
+        except Exception as exc:
+            self._tune_status_label.setText("Restore previous tuning failed")
+            QMessageBox.critical(self, "Restore tuning failed", f"Could not restore tuned values:\n{exc}")
+
+
+
+# =====================================================================
 # Main Window
 # =====================================================================
 class MesaMainWindow(QMainWindow):
@@ -2336,7 +2958,6 @@ class MesaMainWindow(QMainWindow):
 
         self._build_workflows_tab()
         self._build_status_tab()
-        self._build_tune_tab()
         self._build_manage_tab()
         self._build_config_tab()
         self._build_about_tab()
@@ -3143,6 +3764,18 @@ class MesaMainWindow(QMainWindow):
         layout.addWidget(self._config_editor, stretch=1)
 
         btn_row = QHBoxLayout()
+        # Tune processing lives behind a deliberate click rather than as its
+        # own top-level tab — the worker / RAM / batch settings it mutates
+        # should not be encountered casually while looking at the regular
+        # config editor.
+        tune_btn = QPushButton("Tune processing…")
+        tune_btn.setToolTip(
+            "Open a popup that compares current processing settings against "
+            "values derived from this computer's CPU and RAM, and lets you "
+            "commit the recommended values to config.ini."
+        )
+        tune_btn.clicked.connect(self._open_tune_processing)
+        btn_row.addWidget(tune_btn)
         btn_row.addStretch()
         reload_btn = QPushButton("Reload")
         reload_btn.clicked.connect(self._load_config_editor)
@@ -3175,579 +3808,16 @@ class MesaMainWindow(QMainWindow):
             self._config_status_label.setText(f"Error saving config: {e}")
             log_to_logfile(f"Config save error: {e}")
 
-    # ---- Tab 4: Tune processing ----
-    def _build_tune_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-
-        # Top: intro + buttons side by side
-        top_row = QHBoxLayout()
-        top_row.setSpacing(12)
-
-        intro_col = QVBoxLayout()
-        intro_col.setSpacing(4)
-        intro = QLabel(
-            "Automatically tune processing settings based on this computer's CPU and RAM.\n"
-            "This updates selected keys in [DEFAULT] in config.ini."
-        )
-        intro.setWordWrap(True)
-        intro_col.addWidget(intro)
-
-        self._tune_status_label = QLabel(
-            "Ready. Press Evaluate to compare current and advised settings."
-        )
-        self._tune_status_label.setProperty("role", "muted")
-        self._tune_status_label.setWordWrap(True)
-        intro_col.addWidget(self._tune_status_label)
-        intro_col.addStretch()
-        top_row.addLayout(intro_col, stretch=1)
-
-        btn_col = QVBoxLayout()
-        btn_col.setSpacing(6)
-
-        eval_btn = QPushButton("Evaluate")
-        eval_btn.setProperty("role", "primary")
-        eval_btn.setFixedWidth(180)
-        eval_btn.clicked.connect(self._evaluate_processing_tuning)
-        btn_col.addWidget(eval_btn)
-
-        self._commit_tune_btn = QPushButton("Commit changes")
-        self._commit_tune_btn.setProperty("role", "success")
-        self._commit_tune_btn.setFixedWidth(180)
-        self._commit_tune_btn.setEnabled(False)
-        self._commit_tune_btn.clicked.connect(self._commit_processing_tuning)
-        btn_col.addWidget(self._commit_tune_btn)
-
-        restore_btn = QPushButton("Restore previous tuning")
-        restore_btn.setFixedWidth(180)
-        restore_btn.clicked.connect(self._restore_previous_tuning)
-        btn_col.addWidget(restore_btn)
-
-        btn_col.addStretch()
-        top_row.addLayout(btn_col)
-        layout.addLayout(top_row)
-
-        # Comparison table
-        compare_group = QGroupBox("Current vs advised settings")
-        compare_layout = QVBoxLayout(compare_group)
-        compare_layout.setContentsMargins(10, 16, 10, 10)
-
-        hdr_row = QHBoxLayout()
-        hdr_l = QLabel("Current settings")
-        hdr_l.setProperty("role", "muted")
-        hdr_r = QLabel("Advised settings")
-        hdr_r.setProperty("role", "muted")
-        hdr_row.addWidget(hdr_l)
-        hdr_row.addWidget(hdr_r)
-        compare_layout.addLayout(hdr_row)
-
-        self._tune_table = QTableWidget(0, 4)
-        self._tune_table.setHorizontalHeaderLabels(["Key", "Current", "Advised", "Suggested"])
-        self._tune_table.horizontalHeader().setStretchLastSection(True)
-        self._tune_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self._tune_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self._tune_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self._tune_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self._tune_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._tune_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._tune_table.setAlternatingRowColors(True)
-        self._tune_table.verticalHeader().setVisible(False)
-        compare_layout.addWidget(self._tune_table)
-        layout.addWidget(compare_group, stretch=1)
-
-        # Explanation text
-        self._tune_text = QPlainTextEdit()
-        self._tune_text.setReadOnly(True)
-        self._tune_text.setMaximumHeight(120)
-        layout.addWidget(self._tune_text)
-
-        # Internal state
-        self._pending_tune_values: dict[str, str] = {}
-        self._pending_before_values: dict[str, str] = {}
-        self._pending_eval_rationale = ""
-        self._tune_backup_path = os.path.join(PROJECT_BASE, "output", "processing_tuning_backup.json")
-
-        self._tabs.addTab(tab, "Tune processing")
-
-    # ------------------------------------------------------------------
-    # Tune processing: logic
-    # ------------------------------------------------------------------
-    def _recommended_processing_tuning(self, cap_row: dict):
-        try:
-            logical = int(float(cap_row.get("cpu_count_logical") or 0))
-        except Exception:
-            logical = int(os.cpu_count() or 4)
-        logical = max(1, logical)
-
-        try:
-            ram_total = float(cap_row.get("ram_total_gb") or 0.0)
-        except Exception:
-            ram_total = 0.0
-        if ram_total <= 0:
-            ram_total = 16.0
-
-        os_name = str(cap_row.get("os_name") or platform.system()).strip().lower()
-        machine = str(cap_row.get("machine") or platform.machine()).strip().lower()
-        is_apple_silicon = (os_name == "darwin") and machine.startswith("arm")
-
-        # On Apple Silicon, read the performance-core count so the worker cap
-        # reflects P-cores rather than counting slower E-cores as equals.
-        p_cores = None
-        if is_apple_silicon:
-            try:
-                res = subprocess.run(
-                    ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
-                    capture_output=True, text=True, timeout=2,
-                )
-                if res.returncode == 0:
-                    val = int((res.stdout or "").strip() or 0)
-                    if val > 0:
-                        p_cores = val
-            except Exception:
-                p_cores = None
-
-        if is_apple_silicon:
-            base = p_cores if p_cores else logical
-            worker_cap = max(2, min(base - 2, base))
-            worker_cap = min(worker_cap, 16)
-        else:
-            if logical <= 4:
-                worker_cap = 2
-            elif logical <= 8:
-                worker_cap = 4
-            elif logical <= 12:
-                worker_cap = 6
-            elif logical <= 16:
-                worker_cap = 8
-            elif logical <= 24:
-                worker_cap = 10
-            else:
-                worker_cap = 12
-
-        if ram_total <= 12:
-            approx_gb_per_worker = 2.5
-            geocode_soft_limit = 180
-            asset_soft_limit = 30000
-            target_geocodes = 1800
-            chunk_size = 10000
-            cell_size = 7000
-        elif ram_total <= 24:
-            approx_gb_per_worker = 3.5
-            geocode_soft_limit = 260
-            asset_soft_limit = 45000
-            target_geocodes = 2600
-            chunk_size = 14000
-            cell_size = 8000
-        elif ram_total <= 48:
-            approx_gb_per_worker = 4.5
-            geocode_soft_limit = 340
-            asset_soft_limit = 70000
-            target_geocodes = 3400
-            chunk_size = 18000
-            cell_size = 9000
-        else:
-            approx_gb_per_worker = 6.0
-            geocode_soft_limit = 420
-            asset_soft_limit = 100000
-            target_geocodes = 4200
-            chunk_size = 22000
-            cell_size = 10000
-
-        # Apple Silicon has unified memory (GPU + CPU share RAM) and a more
-        # memory-efficient runtime, so shrink per-worker footprint and reserve
-        # more headroom for the GPU/WindowServer.
-        if is_apple_silicon:
-            approx_gb_per_worker = max(2.5, approx_gb_per_worker - 2.0)
-            mem_target_frac = 0.70
-        else:
-            mem_target_frac = 0.85
-
-        # Per-stage caps. These are independent from the Stage 2 CPU cap so
-        # that a memory-skewed stage (flatten large-partition phase) does not
-        # drag every other stage down to its conservative limit.
-        #
-        # Scale flatten_approx_gb_per_worker by RAM tier so the auto RAM-budget
-        # math gives a reasonable worker count on smaller hosts too.
-        if ram_total <= 16:
-            flatten_gb = 5.0
-        elif ram_total <= 32:
-            flatten_gb = 8.0
-        elif ram_total <= 64:
-            flatten_gb = 12.0
-        else:
-            flatten_gb = 14.0
-
-        # All five worker caps that auto_tune.py manages at runtime are emitted
-        # as "0" here so auto_tune is the unambiguous runtime authority.
-        # See cooperation.md "Authority split" (2026-04-28).
-
-        # Mosaic boundary extraction (basic_mosaic). Each worker holds a
-        # bounded asset/grid slice and ~1.5 GB peak; CPU-bound, not RAM-bound.
-        # Apple Silicon gets a tighter fraction and an explicit cap because
-        # unified memory is shared with GPU/WindowServer; Windows/Linux let
-        # the cpu*fraction product drive worker count (max=0 = unbounded,
-        # still capped by per-worker RAM budget).
-        if is_apple_silicon:
-            mosaic_fraction = 0.65
-            mosaic_max = 10 if ram_total <= 96 else 12
-        else:
-            mosaic_fraction = 0.75
-            mosaic_max = 0
-        # Smaller chunks improve load balancing on hosts with many workers;
-        # the overhead is negligible above ~250.
-        if logical >= 16:
-            mosaic_chunk_size = 250
-        elif logical >= 8:
-            mosaic_chunk_size = 500
-        else:
-            mosaic_chunk_size = 1000
-
-        # Coverage / line union batching. The "Reducing coverage" stage runs
-        # GEOS unary_union pairwise — single-threaded and memory-bandwidth
-        # sensitive. Bigger batches (= bigger but fewer unions) and a higher
-        # partials ceiling (= fewer intermediate reduction rounds) cut total
-        # time substantially on hosts with ample RAM. Apple Silicon stays a
-        # touch tighter because unified memory is shared with the GPU.
-        # See learning.md "Mosaic union reduction is the silent long-tail".
-        if is_apple_silicon:
-            if ram_total <= 16:
-                mosaic_cov_batch, mosaic_line_partials = 500, 16
-            elif ram_total <= 32:
-                mosaic_cov_batch, mosaic_line_partials = 1000, 16
-            elif ram_total <= 64:
-                mosaic_cov_batch, mosaic_line_partials = 1500, 24
-            else:
-                mosaic_cov_batch, mosaic_line_partials = 2000, 32
-        else:
-            if ram_total <= 16:
-                mosaic_cov_batch, mosaic_line_partials = 500, 16
-            elif ram_total <= 32:
-                mosaic_cov_batch, mosaic_line_partials = 1000, 24
-            elif ram_total <= 64:
-                mosaic_cov_batch, mosaic_line_partials = 2000, 32
-            else:
-                mosaic_cov_batch, mosaic_line_partials = 4000, 64
-        recommendations = {
-            "max_workers": "0",
-            "auto_workers_min": "1",
-            "auto_workers_max": str(worker_cap),
-            "approx_gb_per_worker": f"{approx_gb_per_worker:.1f}",
-            "mem_target_frac": f"{mem_target_frac:.2f}",
-            "target_geocodes_per_chunk": str(int(target_geocodes)),
-            "chunk_backlog_multiplier": "3.5",
-            "chunk_cells_min": "2",
-            "chunk_cells_max": "72",
-            "chunk_overshoot_factor": "1.15",
-            "geocode_soft_limit": str(int(geocode_soft_limit)),
-            "asset_soft_limit": str(int(asset_soft_limit)),
-            "chunk_size": str(int(chunk_size)),
-            "cell_size": str(int(cell_size)),
-            # Per-stage caps. The five keys auto_tune.py manages at runtime
-            # (max_workers, flatten_max_workers, flatten_small_max_workers,
-            # flatten_huge_partition_mb, tiles_max_workers) are emitted as "0"
-            # so auto_tune is the unambiguous runtime authority.
-            "flatten_max_workers": "0",
-            "flatten_small_max_workers": "0",
-            "flatten_approx_gb_per_worker": f"{flatten_gb:.1f}",
-            "flatten_large_partition_mb": "50",
-            "backfill_max_workers": "0",
-            "tiles_max_workers": "0",
-            "tiles_approx_gb_per_worker": "3.0",
-            # Mosaic (basic_mosaic boundary extraction)
-            "mosaic_auto_worker_fraction": f"{mosaic_fraction:.2f}",
-            "mosaic_auto_worker_max": str(mosaic_max),
-            "mosaic_extract_chunk_size": str(mosaic_chunk_size),
-            "mosaic_coverage_union_batch": str(mosaic_cov_batch),
-            "mosaic_line_union_max_partials": str(mosaic_line_partials),
-        }
-
-        if is_apple_silicon:
-            p_note = f", P-cores: {p_cores}" if p_cores else ""
-            rationale = (
-                f"Detected Apple Silicon. Logical CPU: {logical}{p_note}. "
-                f"RAM: {ram_total:.1f} GB (unified with GPU). "
-                f"Stage 2 worker cap {worker_cap} sized from performance cores, "
-                f"leaving headroom for OS/GPU. mem_target_frac={mem_target_frac:.2f}, "
-                f"approx_gb_per_worker={approx_gb_per_worker:.1f}. "
-                f"Per-stage worker counts (max_workers / flatten_max / "
-                f"flatten_small / tiles) are delegated to auto_tune at "
-                f"runtime. flatten_approx_gb_per_worker={flatten_gb:.1f} "
-                f"scales the auto RAM budget for the skewed partition tail. "
-                f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max}, "
-                f"chunk_size={mosaic_chunk_size} (capped to leave GPU/WindowServer headroom). "
-                f"Union batching: coverage_batch={mosaic_cov_batch}, "
-                f"line_partials={mosaic_line_partials} (smaller than non-Apple to keep peak "
-                f"merge cost off unified memory)."
-            )
-        else:
-            mosaic_max_label = "unbounded" if mosaic_max == 0 else str(mosaic_max)
-            rationale = (
-                f"Detected logical CPU: {logical}. Detected RAM: {ram_total:.1f} GB. "
-                f"Stage 2 cap {worker_cap}, mem_target_frac={mem_target_frac:.2f}. "
-                f"Per-stage worker counts (max_workers / flatten_max / "
-                f"flatten_small / tiles) are delegated to auto_tune at "
-                f"runtime. flatten_approx_gb_per_worker={flatten_gb:.1f}, "
-                f"tiles_approx_gb_per_worker=3.0. "
-                f"Mosaic: fraction={mosaic_fraction:.2f}, max={mosaic_max_label}, "
-                f"chunk_size={mosaic_chunk_size}. "
-                f"Union batching: coverage_batch={mosaic_cov_batch}, "
-                f"line_partials={mosaic_line_partials} (larger batches/partials cut "
-                f"GEOS unary_union reduction time on hosts with ample RAM)."
-            )
-        return recommendations, rationale
-
-    def _update_default_keys_preserve_comments(self, path, updates):
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-        lines = text.splitlines(keepends=True)
-        newline = "\n"
-        for line in lines:
-            if line.endswith("\r\n"):
-                newline = "\r\n"
-                break
-        default_start = None
-        default_end = None
-        for i, line in enumerate(lines):
-            if line.strip().lower() == "[default]":
-                default_start = i
-                break
-        if default_start is None:
-            lines = ["[DEFAULT]" + newline, newline] + lines
-            default_start = 0
-        for i in range(default_start + 1, len(lines)):
-            s = lines[i].strip()
-            if s.startswith("[") and s.endswith("]"):
-                default_end = i
-                break
-        if default_end is None:
-            default_end = len(lines)
-        found = set()
-        for idx in range(default_start + 1, default_end):
-            line = lines[idx]
-            for key, val in updates.items():
-                pat = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)(.*?)(\s*(?:[;#].*)?)$", re.IGNORECASE)
-                m = pat.match(line.rstrip("\r\n"))
-                if not m:
-                    continue
-                lines[idx] = f"{m.group(1)}{val}{m.group(3)}{newline}"
-                found.add(key)
-                break
-        missing = [k for k in updates.keys() if k not in found]
-        if missing:
-            insert_at = default_end
-            if insert_at > 0 and lines[insert_at - 1].strip() != "":
-                lines.insert(insert_at, newline)
-                insert_at += 1
-            for key in missing:
-                lines.insert(insert_at, f"{key:<30} = {updates[key]}{newline}")
-                insert_at += 1
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
-            f.writelines(lines)
-        os.replace(tmp_path, path)
-
-    def _write_tune_backup(self, previous_values, applied_values):
-        os.makedirs(os.path.dirname(self._tune_backup_path), exist_ok=True)
-        payload = {
-            "created_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-            "config_path": config_file,
-            "keys": sorted(list(applied_values.keys())),
-            "previous_values": previous_values,
-            "applied_values": applied_values,
-        }
-        tmp_path = self._tune_backup_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, self._tune_backup_path)
-
-    def _read_tune_backup(self):
-        if not os.path.exists(self._tune_backup_path):
-            return None
-        try:
-            with open(self._tune_backup_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _format_int_like(value):
-        try:
-            return f"{int(float(value)):,}"
-        except Exception:
-            return str(value)
-
-    def _populate_tune_table(self, current_values, advised_values):
-        self._tune_table.setRowCount(0)
-        suggested_count = 0
-        for key in sorted(advised_values.keys()):
-            old_val = str(current_values.get(key, "(missing)")).strip() or "(empty)"
-            new_val = str(advised_values.get(key, "")).strip() or "(empty)"
-            changed = old_val != new_val
-            if changed:
-                suggested_count += 1
-            row = self._tune_table.rowCount()
-            self._tune_table.insertRow(row)
-            self._tune_table.setItem(row, 0, QTableWidgetItem(key))
-            self._tune_table.setItem(row, 1, QTableWidgetItem(old_val))
-            self._tune_table.setItem(row, 2, QTableWidgetItem(new_val))
-            self._tune_table.setItem(row, 3, QTableWidgetItem("Yes" if changed else "No"))
-            if changed:
-                highlight = QColor("#f6efdf")
-                for col in range(4):
-                    self._tune_table.item(row, col).setBackground(highlight)
-        return suggested_count
-
-    def _evaluate_processing_tuning(self):
-        try:
-            detected = _collect_system_capabilities() or {}
-            tuning, rationale = self._recommended_processing_tuning(detected)
-
-            cfg_before = read_config(config_file)
-            before_default = cfg_before["DEFAULT"] if "DEFAULT" in cfg_before else {}
-            current_values = {key: str(before_default.get(key, "(missing)")).strip() for key in tuning.keys()}
-
-            self._pending_tune_values = {k: str(v) for k, v in tuning.items()}
-            self._pending_before_values = {k: str(before_default.get(k, "")).strip() for k in tuning.keys()}
-            self._pending_eval_rationale = rationale
-
-            suggested_count = self._populate_tune_table(current_values, tuning)
-            self._commit_tune_btn.setEnabled(suggested_count > 0)
-
-            summary_lines = [
-                "Evaluation completed.",
-                rationale,
-                f"Suggested changes: {suggested_count}",
-                "Press Commit changes to apply the advised values to config.ini.",
-                f"Config file: {config_file}",
-            ]
-            if suggested_count == 0:
-                summary_lines.append("No changes suggested; config.ini already matches advised values.")
-            self._tune_text.setPlainText("\n".join(summary_lines))
-
-            if suggested_count > 0:
-                self._tune_status_label.setText("Evaluation complete. Review highlighted rows, then Commit changes.")
-            else:
-                self._tune_status_label.setText("Evaluation complete. No changes needed.")
-            log_to_logfile("Processing tuning evaluated from Tune processing tab")
-        except Exception as exc:
-            self._commit_tune_btn.setEnabled(False)
-            self._tune_status_label.setText("Processing tuning evaluation failed")
-            QMessageBox.critical(self, "Evaluate failed", f"Could not evaluate tuning:\n{exc}")
-
-    def _commit_processing_tuning(self):
-        if not self._pending_tune_values:
-            QMessageBox.information(self, "Commit changes", "Run Evaluate first to generate advised settings.")
-            return
-        confirmed = QMessageBox.question(
-            self, "Commit processing tuning",
-            "Apply the advised processing settings to config.ini?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirmed != QMessageBox.Yes:
-            return
-        try:
-            self._update_default_keys_preserve_comments(config_file, self._pending_tune_values)
-            self._write_tune_backup(dict(self._pending_before_values), dict(self._pending_tune_values))
-
-            global config
-            config = read_config(config_file)
-            try:
-                self._load_config_editor()
-            except Exception:
-                pass
-
-            changed_lines = []
-            for key, new_val in self._pending_tune_values.items():
-                old_val = str(self._pending_before_values.get(key, "(missing)")).strip() or "(empty)"
-                if old_val != str(new_val):
-                    if key in ("chunk_size", "cell_size", "target_geocodes_per_chunk",
-                               "geocode_soft_limit", "asset_soft_limit", "auto_workers_max"):
-                        old_disp = self._format_int_like(old_val) if old_val != "(missing)" else old_val
-                        new_disp = self._format_int_like(new_val)
-                    else:
-                        old_disp = old_val
-                        new_disp = str(new_val)
-                    changed_lines.append(f"- {key}: {old_disp} -> {new_disp}")
-            if not changed_lines:
-                changed_lines.append("- No effective changes (values were already tuned).")
-
-            summary = "\n".join([
-                "Tune processing committed.",
-                self._pending_eval_rationale,
-                "Applied keys:",
-                *changed_lines,
-                f"Backup saved: {self._tune_backup_path}",
-                f"Config file: {config_file}",
-            ])
-            self._tune_text.setPlainText(summary)
-            self._commit_tune_btn.setEnabled(False)
-            self._tune_status_label.setText("Processing tuning committed and saved to config.ini")
-            log_to_logfile("Processing tuning committed from Tune processing tab")
-        except Exception as exc:
-            self._tune_status_label.setText("Commit processing tuning failed")
-            QMessageBox.critical(self, "Commit failed", f"Could not apply advised tuning:\n{exc}")
-
-    def _restore_previous_tuning(self):
-        backup = self._read_tune_backup()
-        if not backup:
-            QMessageBox.information(self, "Restore tuning", "No previous tuning backup was found.")
-            return
-        prev = backup.get("previous_values") if isinstance(backup, dict) else None
-        if not isinstance(prev, dict) or not prev:
-            QMessageBox.information(self, "Restore tuning", "Backup exists but does not contain restore values.")
-            return
-        confirmed = QMessageBox.question(
-            self, "Restore previous tuning",
-            "Restore the previously saved values for tuned processing keys in config.ini?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirmed != QMessageBox.Yes:
-            return
-        try:
-            cfg_before = read_config(config_file)
-            before_default = cfg_before["DEFAULT"] if "DEFAULT" in cfg_before else {}
-            restore_updates = {str(k): str(v) for k, v in prev.items()}
-            self._update_default_keys_preserve_comments(config_file, restore_updates)
-
-            global config
-            config = read_config(config_file)
-            try:
-                self._load_config_editor()
-            except Exception:
-                pass
-
-            changed_lines = []
-            for key, restored_val in restore_updates.items():
-                old_val = str(before_default.get(key, "(missing)")).strip()
-                if old_val != str(restored_val):
-                    if key in ("chunk_size", "cell_size", "target_geocodes_per_chunk",
-                               "geocode_soft_limit", "asset_soft_limit", "auto_workers_max"):
-                        old_disp = self._format_int_like(old_val) if old_val != "(missing)" else old_val
-                        new_disp = self._format_int_like(restored_val) if str(restored_val).strip() else "(empty)"
-                    else:
-                        old_disp = old_val
-                        new_disp = str(restored_val).strip() if str(restored_val).strip() else "(empty)"
-                    changed_lines.append(f"- {key}: {old_disp} -> {new_disp}")
-            if not changed_lines:
-                changed_lines.append("- No effective changes (config already matched backup values).")
-
-            created_at = str(backup.get("created_at", "--"))
-            summary = "\n".join([
-                "Restore previous tuning completed.",
-                f"Backup timestamp: {created_at}",
-                "Restored keys:",
-                *changed_lines,
-                f"Config file: {config_file}",
-            ])
-            self._tune_text.setPlainText(summary)
-            self._tune_status_label.setText("Previous tuning values restored")
-            log_to_logfile("Processing tuning restored from Tune processing tab")
-        except Exception as exc:
-            self._tune_status_label.setText("Restore previous tuning failed")
-            QMessageBox.critical(self, "Restore tuning failed", f"Could not restore tuned values:\n{exc}")
+    def _open_tune_processing(self):
+        """Show the standalone Tune processing window (lazily constructed)."""
+        win = getattr(self, "_tune_window", None)
+        if win is None:
+            self._tune_window = TuneProcessingWindow(self)
+            self._tune_window.setAttribute(Qt.WA_DeleteOnClose, False)
+            win = self._tune_window
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     # ---- Tab 5: Manage data ----
     def _build_manage_tab(self):
@@ -3828,20 +3898,37 @@ class MesaMainWindow(QMainWindow):
 
         layout.addWidget(clear_group)
 
-        # GeoNode publishing — kept low-profile (single button, no group box)
-        # because it's a niche operator action that doesn't deserve the same
-        # visual weight as Backup or Clear output.
-        geonode_row = QHBoxLayout()
-        geonode_row.setSpacing(8)
-        geonode_btn = QPushButton("Publish to GeoNode…")
-        geonode_btn.setFixedWidth(180)
+        # --- Publish to GeoNode section ---
+        geonode_group = QGroupBox("Publish to GeoNode")
+        geonode_layout = QVBoxLayout(geonode_group)
+        geonode_layout.setSpacing(8)
+
+        geonode_intro = QLabel(
+            "Push selected MESA layers to a GeoNode server so they can be "
+            "browsed, styled, and combined with other layers in a shared "
+            "spatial data infrastructure. The popup lets you point at a "
+            "GeoNode instance, save credentials, choose which layers to "
+            "publish (sensitivity geocode layers and supporting tables), "
+            "and optionally bundle them into a single GeoNode Map.\n\n"
+            "Existing layers with the same name are detected before upload "
+            "so you can either replace or skip them per layer; partial runs "
+            "and cancellation are supported. Use this when you want to "
+            "share the analysis output beyond the local project folder."
+        )
+        geonode_intro.setWordWrap(True)
+        geonode_intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        geonode_layout.addWidget(geonode_intro)
+
+        geonode_btn_row = QHBoxLayout()
+        geonode_btn = QPushButton("Publish")
+        geonode_btn.setProperty("role", "primary")
+        geonode_btn.setFixedWidth(160)
         geonode_btn.clicked.connect(self._open_geonode_publisher)
-        geonode_row.addWidget(geonode_btn)
-        geonode_hint = QLabel("Open the GeoNode publish window in a popup.")
-        geonode_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
-        geonode_row.addWidget(geonode_hint)
-        geonode_row.addStretch()
-        layout.addLayout(geonode_row)
+        geonode_btn_row.addWidget(geonode_btn)
+        geonode_btn_row.addStretch()
+        geonode_layout.addLayout(geonode_btn_row)
+
+        layout.addWidget(geonode_group)
 
         layout.addStretch()
         self._tabs.addTab(tab, "Manage data")
