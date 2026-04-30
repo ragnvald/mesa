@@ -268,6 +268,21 @@ def read_config(path: Path) -> configparser.ConfigParser:
     cfg["DEFAULT"].setdefault("parquet_folder", "output/geoparquet")
     return cfg
 
+
+def _mesa_version_label(cfg: configparser.ConfigParser | None = None) -> str:
+    try:
+        current_cfg = cfg or _ensure_cfg()
+        default = current_cfg["DEFAULT"] if "DEFAULT" in current_cfg else {}
+        for option in ("mesa_version", "version"):
+            value = default.get(option)  # type: ignore[union-attr]
+            if value:
+                cleaned = str(value).strip().replace(" ", "_")
+                if cleaned:
+                    return cleaned
+    except Exception:
+        pass
+    return "dev"
+
 def _strip_inline_comments(s: str) -> str:
     if s is None:
         return ""
@@ -3820,14 +3835,22 @@ def _map_process_entry(status_path_str: str):
     tile_url = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"  # fallback
     try:
         from mesa_osm_tiles import start_osm_tile_proxy, build_osm_user_agent, choose_cache_dir
-        ua = build_osm_user_agent("MESA-Minimap")
+        ua = build_osm_user_agent("MESA-Minimap", _mesa_version_label())
         _osm_proxy = start_osm_tile_proxy(
             user_agent=ua,
-            cache_dir=choose_cache_dir("mesa_minimap_tiles"),
+            cache_dir=choose_cache_dir(
+                [
+                    output_dir() / "cache" / "osm_tiles",
+                    base_dir() / "logs" / "osm_tiles",
+                ],
+                fallback_name="mesa_minimap_tiles",
+            ),
+            log=lambda msg: log_to_gui(None, f"[Minimap] {msg}"),
+            thread_name="mesa-minimap-osm-tile-proxy",
         )
         tile_url = f"{_osm_proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
-    except Exception:
-        pass  # fall back to direct URL (may be blocked by OSM)
+    except Exception as exc:
+        log_to_gui(None, f"[Minimap] Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
 
     html = MAP_HTML.replace("__TILE_URL__", tile_url)
 

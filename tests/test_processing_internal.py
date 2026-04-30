@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import configparser
 from pathlib import Path
 
 import geopandas as gpd
@@ -24,6 +25,13 @@ def _class_ranges() -> dict[str, range]:
         "D": range(6, 11),
         "E": range(1, 6),
     }
+
+
+def test_mesa_version_label_sanitizes_config_values() -> None:
+    cfg = configparser.ConfigParser()
+    cfg["DEFAULT"] = {"mesa_version": "5.0 beta"}
+
+    assert pi._mesa_version_label(cfg) == "5.0_beta"
 
 
 def test_regular_grid_fast_path_matches_legacy_join_for_single_cell_geometries() -> None:
