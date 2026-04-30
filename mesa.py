@@ -1921,10 +1921,10 @@ class MesaMainWindow(QMainWindow):
 
         self._build_workflows_tab()
         self._build_status_tab()
-        self._build_config_tab()
         self._build_tune_tab()
         self._build_manage_tab()
         self._build_geonode_tab()
+        self._build_config_tab()
         self._build_about_tab()
 
     # ---- Tab 1: Workflows ----
