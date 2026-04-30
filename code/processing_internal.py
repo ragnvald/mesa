@@ -4612,7 +4612,16 @@ class ProcessingInternalWindow(QMainWindow):
         btn_layout.addWidget(btn_process)
 
         btn_exit = QPushButton("Exit")
-        btn_exit.setProperty("class", "warning")
+        btn_exit.setObjectName("CornerExitButton")
+        btn_exit.setStyleSheet("""
+            QPushButton#CornerExitButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621;
+                padding: 6px 18px;
+            }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
+        """)
         btn_exit.clicked.connect(self.close)
         btn_layout.addWidget(btn_exit)
         btn_layout.addStretch()

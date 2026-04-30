@@ -4962,7 +4962,16 @@ class ReportGeneratorWindow(QMainWindow):
         bottom_row.addWidget(link_var)
         bottom_row.addStretch()
         exit_btn = QPushButton("Exit")
-        exit_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: #000; padding: 6px 16px; font-weight: bold; }")
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setStyleSheet("""
+            QPushButton#CornerExitButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621;
+                padding: 6px 18px;
+            }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
+        """)
         exit_btn.clicked.connect(self.close)
         bottom_row.addWidget(exit_btn)
         main_layout.addLayout(bottom_row)

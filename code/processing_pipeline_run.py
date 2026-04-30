@@ -1800,6 +1800,16 @@ class ProcessRunnerWindow(QMainWindow):
         self._process_btn = QPushButton("Process")
         self._map_btn = QPushButton("Progress map")
         exit_btn = QPushButton("Exit")
+        exit_btn.setObjectName("CornerExitButton")
+        exit_btn.setStyleSheet("""
+            QPushButton#CornerExitButton {
+                background: #eadfc8; border: 1px solid #b79f73;
+                border-radius: 4px; color: #453621;
+                padding: 6px 18px;
+            }
+            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
+            QPushButton#CornerExitButton:pressed { background: #d4c094; }
+        """)
 
         btn_row.addWidget(self._process_btn)
         btn_row.addWidget(self._map_btn)
