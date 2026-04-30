@@ -934,18 +934,49 @@ class ReportEngine:
             mb_root = os.path.join(self.base_dir, "output", "mbtiles")
 
             # Other maps (non-index): these should come before the index sections in the report.
+            # Each tuple: (mbtiles suffix, heading title, output slug, per-map intro text).
+            # The intro text explains what each per-cell aggregation means and how to read it,
+            # since the maps share a basemap and look superficially similar otherwise.
             layers = [
-                ("sensitivity_max", "Sensitive areas (A–E)", "sensitivity"),
-                ("importance_max", "Importance (max)", "importance_max"),
-                ("groupstotal", "Asset groups total", "groupstotal"),
-                ("assetstotal", "Assets total", "assetstotal"),
+                (
+                    "sensitivity_max", "Sensitive areas (A–E)", "sensitivity",
+                    "For each geocode cell, this map shows the <b>highest sensitivity class</b> (A–E) found "
+                    "among all assets overlapping the cell. It is a worst-case view: a single A-rated asset "
+                    "is enough to colour the cell as A, even if many lower-rated assets also overlap. The "
+                    "polygon-fallback variant (used when raster tiles are missing) shows the same data drawn "
+                    "as analysis polygons rather than rasterised tiles.",
+                ),
+                (
+                    "importance_max", "Importance (max)", "importance_max",
+                    "Per-cell <b>highest importance value</b> among overlapping assets. Use this to spot "
+                    "where the most important features are, regardless of how many lower-importance assets "
+                    "share the cell. Compare against the Importance index (later section) to see how much "
+                    "of the picture is driven by a few standout assets versus broad accumulation.",
+                ),
+                (
+                    "groupstotal", "Asset groups total", "groupstotal",
+                    "Per-cell <b>count of distinct asset groups</b> overlapping the cell. High values "
+                    "indicate cells where many different kinds of features coincide (a multi-themed "
+                    "hotspot), regardless of how many individual asset objects are involved.",
+                ),
+                (
+                    "assetstotal", "Assets total", "assetstotal",
+                    "Per-cell <b>count of asset objects</b> overlapping the cell. Reads as a density map: "
+                    "high values mean many assets are stacked here. Compared with &ldquo;Asset groups total&rdquo;, "
+                    "this map is sensitive to the sheer number of objects, not the diversity of groups.",
+                ),
             ]
 
             pages.append(('heading(2)', f"Other maps: {gname}"))
-            pages.append(('text', "Rendered from MBTiles with basemap (basic_mosaic only)."))
+            pages.append(('text',
+                "Per-cell summary maps for the <b>basic_mosaic</b> grouping, rendered from MBTiles with a "
+                "basemap underlay. Each map shows a different aggregation of the assets that overlap each "
+                "geocode cell — the <b>worst-case</b> sensitivity class, the highest <b>importance</b> "
+                "value, and counts of overlapping <b>asset groups</b> and <b>asset objects</b>. They are "
+                "complementary views of the same input data; read them together rather than in isolation."))
             pages.append(('rule', None))
 
-            for suffix, title, slug in layers:
+            for suffix, title, slug, intro in layers:
                 mb_path = os.path.join(mb_root, f"{safe}_{suffix}.mbtiles")
                 out_png = self.make_path("geocode", safe, slug)
                 ok = False
@@ -957,7 +988,7 @@ class ReportEngine:
 
                 if ok and _file_ok(out_png):
                     pages.append(('heading(3)', title))
-                    pages.append(('text', "Two-line max intro: MBTiles overlay on basemap."))
+                    pages.append(('text', intro))
                     pages.append(('image_map', (title, out_png)))
                     pages.append(('new_page', None))
                 else:
@@ -967,7 +998,9 @@ class ReportEngine:
                         ok_poly = draw_group_map_sensitivity(sub, gname, self.palette, self.desc, out_png, fixed_bounds_3857, base_dir=self.base_dir)
                         if ok_poly and _file_ok(out_png):
                             pages.append(('heading(3)', title))
-                            pages.append(('text', "Two-line max intro: polygons on basemap."))
+                            pages.append(('text',
+                                f"{intro} <i>Raster tiles for this layer were unavailable, so the same "
+                                "data has been redrawn from the analysis polygons.</i>"))
                             pages.append(('image_map', (title, out_png)))
                             pages.append(('new_page', None))
                             continue
@@ -1049,7 +1082,10 @@ class ReportEngine:
             pages.append(('text', " ".join(info_parts)))
 
             if ok_sens and _file_ok(sens_png):
-                pages.append(('text', "Sensitivity (A–E palette)."))
+                pages.append(('text',
+                    "Cells coloured by sensitivity class (A–E palette), clipped to this tile. The "
+                    "small inset shows where the tile sits inside the study area; the main image is "
+                    "the same data the &ldquo;Other maps&rdquo; section shows zoomed out for the full extent."))
                 pages.append(('image', ("Sensitivity atlas map", sens_png)))
                 has_entries = True
             if has_entries:
@@ -1084,11 +1120,75 @@ class ReportEngine:
         if not available:
             return pages
 
+        # Per-index narrative shown above each map. Each entry contains:
+        #   stats_lead -> one-sentence "what this index is", prepended to the stats page.
+        #   map_intro  -> paragraph(s) shown above the map, explaining meaning, scale,
+        #                 and how to read the colours. Grounded in the computation in
+        #                 code/processing_internal.py:_compute_index_scores_from_stacked
+        #                 and :_compute_index_owa_from_counts.
+        index_descriptions = {
+            "index_importance": {
+                "stats_lead":
+                    "The <b>Importance index</b> aggregates the <i>importance</i> attribute of every asset "
+                    "that overlaps each geocode cell into a single 0–100 score per cell.",
+                "map_intro": (
+                    "The <b>Importance index</b> highlights where assets that have been rated as <b>important</b> "
+                    "concentrate on the map. For each geocode cell, the importance values of all overlapping "
+                    "assets are combined with the configured importance weights, summed, and rescaled to a "
+                    "<b>0–100</b> range within the current <b>{basic}</b> grouping (the most-loaded cell becomes 100; "
+                    "cells with no important assets stay at 0).",
+                    "Read the colour ramp as a <b>relative</b> measure: darker / higher cells are the hotspots of "
+                    "important features inside this study area, not absolute importance scores. Use this map to "
+                    "spot clusters of high-value features (e.g. conservation targets, high-value infrastructure) "
+                    "and to compare the spatial reach of importance against sensitivity and OWA on the next pages.",
+                ),
+            },
+            "index_sensitivity": {
+                "stats_lead":
+                    "The <b>Sensitivity index</b> aggregates the <i>sensitivity</i> attribute of every asset "
+                    "that overlaps each geocode cell into a single 0–100 score per cell.",
+                "map_intro": (
+                    "The <b>Sensitivity index</b> shows where features that are <b>vulnerable to pressure or change</b> "
+                    "concentrate on the map. The sensitivity values of all assets overlapping a cell are combined "
+                    "with the configured sensitivity weights, summed, and rescaled to a <b>0–100</b> range within the "
+                    "current <b>{basic}</b> grouping.",
+                    "High values flag cells where disturbance or new activity is most likely to cause harm; low "
+                    "values are areas with little sensitive content overlapping. Like the importance map, the scale "
+                    "is <b>relative</b> to this study area — a 100 means &ldquo;the most sensitive cell here&rdquo;, not an "
+                    "absolute sensitivity rating. Use this map to target survey and mitigation effort and to screen "
+                    "plans against the most vulnerable cells.",
+                ),
+            },
+            "index_owa": {
+                "stats_lead":
+                    "The <b>OWA index</b> (Ordered Weighted Average, precautionary form) ranks each cell on a 0–100 "
+                    "scale by giving more weight to its highest-sensitivity overlaps than to its many low ones.",
+                "map_intro": (
+                    "The <b>OWA index</b> is a <b>precautionary</b> companion to the Sensitivity index. Instead of "
+                    "averaging asset sensitivities, it counts how many assets in each sensitivity class overlap a "
+                    "cell, then ranks cells <b>lexicographically</b> from the highest sensitivity class downwards. A "
+                    "single very-sensitive touch therefore outranks many mildly-sensitive touches. The ranks are "
+                    "rescaled to <b>0–100</b> within the current <b>{basic}</b> grouping; cells with no overlapping "
+                    "sensitive assets remain at 0.",
+                    "Read this map as the answer to &ldquo;<i>where would the worst case be worst?</i>&rdquo; Compared with the "
+                    "Sensitivity map, OWA tends to push isolated high-sensitivity hits up the ranking and is the "
+                    "more conservative choice when any extreme-sensitivity overlap should dominate the result. Use "
+                    "it for precautionary screening and red-flag mapping.",
+                ),
+            },
+        }
+
         mb_root = os.path.join(self.base_dir, "output", "mbtiles")
         safe_basic = _safe_name(basic_name)
 
         total = len(available)
         for i, (col, title, mb_suffix) in enumerate(available, start=1):
+            descr = index_descriptions.get(col, {})
+            stats_lead = descr.get("stats_lead", "")
+            map_intro_paragraphs = descr.get("map_intro", ())
+            if isinstance(map_intro_paragraphs, str):
+                map_intro_paragraphs = (map_intro_paragraphs,)
+
             out_png = self.make_path("index", _safe_name(col), "distribution")
             ok, note = create_index_area_distribution_chart(
                 flat_df,
@@ -1098,12 +1198,15 @@ class ReportEngine:
                 base_dir=self.base_dir,
             )
             if ok and _file_ok(out_png):
+                stats_text = (
+                    (f"{stats_lead} " if stats_lead else "") +
+                    f"The chart below is computed from <b>tbl_flat</b> for geocode group <b>{basic_name}</b> only. "
+                    "Bars show total polygon area (km²) per index value. "
+                    "The line shows the number of categories per index value (A–E if available; otherwise the number of cells)."
+                )
                 pages += [
                     ('heading(2)', f"{title} – statistics"),
-                    ('text',
-                     f"Computed from <b>tbl_flat</b> for geocode group <b>{basic_name}</b> only. "
-                     "Bars show total polygon area (km²) per index value. "
-                     "Line shows number of categories per index value (A–E if available; otherwise number of cells)."),
+                    ('text', stats_text),
                     ('image', (f"{title} – area distribution", out_png)),
                     ('new_page', None),
                 ]
@@ -1126,7 +1229,11 @@ class ReportEngine:
                 note_m = f"Missing MBTiles: {os.path.basename(mb_path)}"
 
             pages.append(('heading(2)', f"{title} – map"))
-            pages.append(('text', "Two-line max intro: MBTiles overlay on basemap."))
+            if map_intro_paragraphs:
+                for paragraph in map_intro_paragraphs:
+                    pages.append(('text', paragraph.format(basic=basic_name)))
+            else:
+                pages.append(('text', f"Map of <b>{title}</b> rendered from the basic_mosaic MBTiles overlay."))
             if okm and _file_ok(map_png):
                 pages.append(('image_map', (f"{title} – map", map_png)))
             else:
@@ -1181,7 +1288,12 @@ class ReportEngine:
 
         if ok_map and _file_ok(overview_map):
             pages.append(('heading(3)', "All lines – overview map"))
-            pages.append(('text', "All line segments colored by <b>maximum sensitivity</b> (A–E palette)."))
+            pages.append(('text',
+                "All line segments shown together, coloured by the <b>highest sensitivity class</b> "
+                "(A–E) found at any point along the segment. This is a worst-case overview: a segment "
+                "is drawn red (A) if it touches even one A-rated cell, regardless of how short that "
+                "stretch is. Use this map to scan the network for hot stretches before drilling into "
+                "individual lines on the following pages."))
             pages.append(('image_map', ("Lines overview (max sensitivity)", overview_map)))
 
         if _file_ok(dist_png):
@@ -1339,10 +1451,14 @@ class ReportEngine:
 
             first_page = [
                 ('heading(2)', f"Line: {ln_visible}"),
-                ('text', f"This section summarizes sensitivity along the line <b>{ln_visible}</b> "
-                         f"(total length <b>{length_km:.2f} km</b>, segments: <b>{len(segment_records)}</b>). "
-                         "Below: segments map colored by sensitivity values with a context inset, "
-                         "followed by the distribution and a ribbon (maximum sensitivity).")
+                ('text',
+                    f"This section summarises sensitivity along <b>{ln_visible}</b> "
+                    f"(total length <b>{length_km:.2f} km</b>, split into <b>{len(segment_records)}</b> segments). "
+                    "Each segment is rated by the sensitivity classes of the cells it crosses; the "
+                    "<b>maximum</b> class is the worst class encountered along the segment, and is the "
+                    "right view when even a brief touch on a sensitive cell matters. The context inset "
+                    "shows where this line sits inside the wider study area, and the ribbon below the "
+                    "distribution lays the line out flat from start to end so peaks are easy to locate."),
             ]
             if ok_max and _file_ok(seg_map_max):
                 first_page.append(('image', ("Segments colored by maximum sensitivity (with context inset)", seg_map_max)))
@@ -1353,7 +1469,12 @@ class ReportEngine:
 
             second_page = [
                 ('heading(2)', f"Line: {ln_visible} (continued)"),
-                ('text', "Minimum sensitivity map, distribution, and ribbon.")
+                ('text',
+                    "Same line, this time rated by the <b>minimum sensitivity class</b> per segment — the "
+                    "best (least sensitive) class encountered along the segment. The minimum view is the "
+                    "right one when you need to know whether a segment ever passes through robust ground "
+                    "at all; comparing it side-by-side with the maximum view from the previous page tells "
+                    "you whether high sensitivity is everywhere on the line or only in pockets."),
             ]
             if ok_min and _file_ok(seg_map_min):
                 second_page.append(('image', ("Segments colored by minimum sensitivity (with context inset)", seg_map_min)))
@@ -3501,7 +3622,12 @@ def compile_docx(output_docx: str, order_list: list):
     # Line maps are inserted together with distribution + ribbon.
     # Allow a taller cap now that we use a single combined map (segments + context inset).
     MAX_LINE_MAP_HEIGHT_CM = 14.0
-    MAX_OVERVIEW_MAP_HEIGHT_CM = 10.0
+    # Overview / index / "other maps" area maps used to fill the full text width
+    # at 10 cm tall, which forced their explanatory text onto a separate page.
+    # Shrink them to a panel size so heading + intro paragraphs + map fit on one
+    # page together. Width is independent of MAX_IMAGE_WIDTH_CM for this kind.
+    MAX_OVERVIEW_MAP_WIDTH_CM = 11.0
+    MAX_OVERVIEW_MAP_HEIGHT_CM = 8.0
 
     def _is_line_map_image(title: str | None, path: str | None) -> bool:
         if not path:
@@ -3729,11 +3855,13 @@ def compile_docx(output_docx: str, order_list: list):
                             target_width_cm=width_cm,
                             max_height_cm=float(MAX_LINE_MAP_HEIGHT_CM),
                         )
-                    # Overview maps: keep wide but avoid extreme height
+                    # Overview / area maps: rendered as a panel so heading + intro
+                    # paragraphs share the page with the map rather than getting
+                    # pushed onto a separate page by a full-width image.
                     elif kind == "image_map":
                         _docx_add_picture_with_height_clamp(
                             path,
-                            target_width_cm=width_cm,
+                            target_width_cm=float(MAX_OVERVIEW_MAP_WIDTH_CM),
                             max_height_cm=float(MAX_OVERVIEW_MAP_HEIGHT_CM),
                         )
                     else:
@@ -4151,11 +4279,21 @@ def generate_report(base_dir: str,
         if include_assets:
             order_list.extend([
                 ('heading(2)', "Assets – overview"),
-                ('text', "Asset objects by group (count and area, where applicable)."),
+                ('text',
+                    "This section inventories the <b>input</b> data that drives the rest of the report: "
+                    "the asset objects loaded into MESA, broken down by their asset group. The first "
+                    "table lists the groups with object counts and (where geometry is available) total "
+                    "polygon area; the second table summarises how those objects are distributed across "
+                    "the sensitivity classes A–E. These two tables together describe what is in the "
+                    "stack before any of the per-cell aggregations on the following pages are computed."),
                 ('text', assets_area_note),
                 ('table', object_stats_xlsx),
                 ('spacer', 1),
-                ('text', "Asset groups – sensitivity distribution (count of objects) and number of active groups (distinct groups with ≥1 object)."),
+                ('text',
+                    "<b>Asset groups – sensitivity distribution.</b> For each group, the count of "
+                    "objects per sensitivity class (A–E) plus the number of <i>active</i> groups "
+                    "(groups containing at least one object). Use this to confirm that the inputs "
+                    "match expectations before reading the maps."),
                 ('table', ag_stats_xlsx),
                 ('new_page', None),
             ])
@@ -4332,8 +4470,12 @@ def generate_report(base_dir: str,
             order_list.extend([
                 ('heading(2)', "Other maps"),
                 ('text',
-                 "Maps in this section are rendered for <b>basic_mosaic</b> only (other geocodes are omitted). "
-                 "Rendered from MBTiles (raster) with a basemap background."),
+                 "These maps describe the asset stack itself, before any composite index is computed. "
+                 "For each <b>basic_mosaic</b> cell they show the worst-case sensitivity class, the "
+                 "highest importance value, and counts of overlapping asset groups and asset objects. "
+                 "Other geocode groupings are deliberately omitted to keep the basemap consistent. "
+                 "Treat this section as the &ldquo;raw inputs&rdquo; view; the index sections later in the report "
+                 "build on the same data."),
             ])
 
             if geocode_intro_table is not None:
@@ -4345,7 +4487,19 @@ def generate_report(base_dir: str,
         if include_index_statistics:
             order_list.extend([
                 ('heading(2)', "Index statistics"),
-                ('text', "One page per index based on <b>basic_mosaic</b> values from <b>tbl_flat</b>. Each index includes its map page."),
+                ('text',
+                    "MESA produces three composite per-cell indices that condense the asset stack into "
+                    "a single 0–100 score. The <b>Importance index</b> answers &ldquo;where are the most "
+                    "valuable features?&rdquo;, the <b>Sensitivity index</b> answers &ldquo;where is the most that "
+                    "could be harmed?&rdquo;, and the <b>OWA index</b> is a precautionary variant that lets a "
+                    "single very-sensitive overlap dominate the result. All three are scaled relative to "
+                    "the current study area (most-loaded cell = 100), so the colour ramps are comparable "
+                    "<i>within</i> the report but not across different runs."),
+                ('text',
+                    "Each index gets a statistics page (area distribution chart) followed by its map. "
+                    "Read the three together: an area where Importance and Sensitivity are both high is "
+                    "a high-stakes hotspot; an area where only OWA is elevated tells you a single rare "
+                    "but extreme overlap is driving the signal."),
             ])
 
         if index_pages:
@@ -4357,24 +4511,37 @@ def generate_report(base_dir: str,
         # Insert line overview immediately before the Atlas section.
         if include_lines_and_segments and pages_lines_overview:
             order_list.append(('heading(2)', "Line overview"))
-            order_list.append(('text', "A short summary across all lines: overview map, distribution, and per-line totals."))
+            order_list.append(('text',
+                "A bird's-eye view of every line analysed in this report. The overview map colours all "
+                "segments by their <b>maximum</b> sensitivity class, the distribution chart shows how "
+                "much segment length sits in each class, and the per-line table breaks the same totals "
+                "down by individual line. Use this section to compare lines against each other before "
+                "drilling into any single line in the next section."))
             order_list.append(('rule', None))
             order_list.extend(pages_lines_overview)
 
         # Place line details immediately after the line overview.
         if include_lines_and_segments and pages_lines:
             order_list.append(('heading(2)', "Lines and segments"))
-            order_list.append(('text', "Images contain only cartography—no embedded titles. "
-                                       "Ribbons are fixed to 0.6 cm high and the full text width. "
-                                       "Distance markers are written as text before each ribbon."))
+            order_list.append(('text',
+                "One pair of pages per line: a maximum-sensitivity view followed by a minimum-sensitivity "
+                "view. Each page shows a segments map (with a context inset placing the line in the wider "
+                "study area), a sensitivity distribution chart, and a horizontal <b>ribbon</b> that lays "
+                "the line out flat from start to end so peaks are easy to locate against distance markers. "
+                "Read maximum and minimum together: if both are high, sensitivity is uniformly elevated; "
+                "if they diverge, the line passes through both robust and sensitive ground."))
             order_list.append(('rule', None))
             order_list.append(('new_page', None))
             order_list.extend(pages_lines)
 
         if atlas_pages:
             order_list.append(('heading(2)', "Atlas maps"))
-            atlas_intro = ("Each atlas tile focuses on a subset of the study area. "
-                           "An inset map indicates where the tile sits relative to the full extent.")
+            atlas_intro = (
+                "Atlas tiles split the study area into named sub-areas — typically prepared in advance so "
+                "that each tile covers a manageable extent at usable detail. Every tile gets its own page "
+                "with a sensitivity map (A–E palette) and a small inset locating the tile inside the full "
+                "study area. Use this section when you need to see local detail that the study-area-wide "
+                "maps necessarily smooth over.")
             order_list.append(('text', atlas_intro))
             order_list.extend(atlas_pages)
 
