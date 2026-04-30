@@ -1645,43 +1645,26 @@ class ProcessRunnerWindow(QMainWindow):
         # Two-column layout:
         #   Left column (cols 0-1): data sub-stages (Prep / Intersect / Flatten / Backfill)
         #   Right column (cols 3-4): post-data stages (Tiles / Lines / Analysis)
-        #   Col 2: visual gap, with a directional arrow on the header row.
-        # Row 0 is a directional banner replacing the old generic
-        # "Process / Status" headers — it tells the operator that geometry
-        # stages live on the left and parameter-driven downstream stages live
-        # on the right, so they can pick a sensible re-run point after a
-        # parameter-only change.
-        left_hdr = QLabel("Geometry stages — rerun when inputs change")
-        left_hdr.setWordWrap(True)
-        left_hdr.setStyleSheet("font-weight: bold; color: #6a5533; padding-bottom: 4px;")
-        grid.addWidget(left_hdr, 0, 0, 1, 2)
-
-        arrow_hdr = QLabel("→")
-        arrow_hdr.setAlignment(Qt.AlignCenter)
-        arrow_hdr.setStyleSheet("color: #6a5533; font-size: 14pt; font-weight: bold;")
-        grid.addWidget(arrow_hdr, 0, 2)
-
-        right_hdr = QLabel("Downstream stages — rerun for parameter changes")
-        right_hdr.setWordWrap(True)
-        right_hdr.setStyleSheet("font-weight: bold; color: #6a5533; padding-bottom: 4px;")
-        grid.addWidget(right_hdr, 0, 3, 1, 2)
-
-        # Master "Process" checkbox + flatten options live in row 1 spanning
-        # the whole grid.
-
-        grid.setColumnMinimumWidth(2, 32)
+        #   Col 2: visual gap.
+        # Stage labels are prefixed "1." .. "7." so the operator can see at a
+        # glance which stage runs first and can pick a sensible re-run cutoff
+        # after a parameter-only change (start at "3. Flatten").
+        grid.setColumnMinimumWidth(2, 24)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(4, 1)
 
-        # Row 1: master "Process" checkbox (cascades to data sub-stages + tiles).
+        # Row 0: master "Process" checkbox (cascades to data sub-stages + tiles).
+        # Status cells stay empty when a stage is ready (the enabled checkbox
+        # is signal enough); when something blocks the stage we show the
+        # reason instead, so the column only fills up with words worth reading.
         self._cb_data_master = QCheckBox("Process (prep + intersect + flatten + backfill + tiles)")
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
-        grid.addWidget(self._cb_data_master, 1, 0, 1, 2)
-        master_status = "Ready" if avail_data.available else (
+        grid.addWidget(self._cb_data_master, 0, 0, 1, 2)
+        master_status = "" if avail_data.available else (
             "; ".join(avail_data.reasons) if avail_data.reasons else "Missing inputs")
-        grid.addWidget(QLabel(master_status), 1, 3, 1, 2)
+        grid.addWidget(QLabel(master_status), 0, 3, 1, 2)
 
         # Flatten options stacked vertically below the master row, spanning
         # the whole grid so they sit clearly under the master.
@@ -1697,32 +1680,42 @@ class ProcessRunnerWindow(QMainWindow):
         opts_host = QWidget()
         opts_host.setLayout(opts_col)
 
-        # Left column: data sub-stages.
-        def _mk_sub(row, text, default_checked):
+        # Left column: data sub-stages. The status column shows a short
+        # purpose hint when the stage is ready (so the operator can see at a
+        # glance which stages are pure geometry and which carry parameter
+        # values), and the missing-inputs reason when it isn't.
+        def _mk_sub(row, text, default_checked, ready_hint):
             cb = QCheckBox("    " + text)  # indent for visual hierarchy
             cb.setEnabled(avail_data.available)
             cb.setChecked(default_checked and avail_data.available)
             grid.addWidget(cb, row, 0)
-            grid.addWidget(QLabel("Ready" if avail_data.available else "Missing inputs"),
-                           row, 1)
+            status = ready_hint if avail_data.available else "Missing inputs"
+            grid.addWidget(QLabel(status), row, 1)
             return cb
 
-        self._cb_prep      = _mk_sub(2, "Prep (workspace, status)", avail_data.available)
-        self._cb_intersect = _mk_sub(3, "Intersect (build tbl_stacked)", avail_data.available)
-        self._cb_flatten   = _mk_sub(4, "Flatten (build tbl_flat)", avail_data.available)
-        self._cb_backfill  = _mk_sub(5, "Backfill (area_m2 → tbl_stacked)",
-                                     avail_data.available)
+        self._cb_prep      = _mk_sub(1, "1. Prep (workspace, status)",
+                                     avail_data.available,
+                                     "Geometry stage")
+        self._cb_intersect = _mk_sub(2, "2. Intersect (build tbl_stacked)",
+                                     avail_data.available,
+                                     "Geometry stage")
+        self._cb_flatten   = _mk_sub(3, "3. Flatten (build tbl_flat)",
+                                     avail_data.available,
+                                     "Parameter cutoff — start here after parameter changes")
+        self._cb_backfill  = _mk_sub(4, "4. Backfill (area_m2 → tbl_stacked)",
+                                     avail_data.available,
+                                     "Geometry stage")
 
         # Right column: post-data stages. Custom helper because _mk_row
         # writes to col 0/1 and we want col 3/4.
-        def _mk_row_right(row, text, checked, avail, status_override=None):
+        def _mk_row_right(row, text, checked, avail, ready_hint, status_override=None):
             cb = QCheckBox(text)
             cb.setChecked(checked and avail.available)
             grid.addWidget(cb, row, 3)
             if status_override is not None:
                 status = status_override
             else:
-                status = "Ready" if avail.available else (
+                status = ready_hint if avail.available else (
                     "; ".join(avail.reasons) if avail.reasons else "Missing inputs")
             lbl = QLabel(status)
             grid.addWidget(lbl, row, 4)
@@ -1732,12 +1725,16 @@ class ProcessRunnerWindow(QMainWindow):
             return cb
 
         tiles_status = "Run Flatten (or full data) first" if not tiles_flat_exists else None
-        self._cb_tiles    = _mk_row_right(2, "Tiles processing (MBTiles)",
-                                          tiles_default, avail_tiles, tiles_status)
-        self._cb_lines    = _mk_row_right(3, "Lines processing (segments)",
-                                          avail_lines.available, avail_lines)
-        self._cb_analysis = _mk_row_right(4, "Analysis processing (study areas)",
-                                          avail_analysis.available, avail_analysis)
+        self._cb_tiles    = _mk_row_right(1, "5. Tiles processing (MBTiles)",
+                                          tiles_default, avail_tiles,
+                                          "Re-renders from tbl_flat",
+                                          tiles_status)
+        self._cb_lines    = _mk_row_right(2, "6. Lines processing (segments)",
+                                          avail_lines.available, avail_lines,
+                                          "Re-aggregates from tbl_flat")
+        self._cb_analysis = _mk_row_right(3, "7. Analysis processing (study areas)",
+                                          avail_analysis.available, avail_analysis,
+                                          "Consumes tbl_flat")
 
         # Options under the grid (spans all columns) so they're clearly the
         # flatten / data options, not specific to either stage column.
