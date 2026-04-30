@@ -1657,7 +1657,7 @@ class ProcessRunnerWindow(QMainWindow):
         # Status cells stay empty when a stage is ready (the enabled checkbox
         # is signal enough); when something blocks the stage we show the
         # reason instead, so the column only fills up with words worth reading.
-        self._cb_data_master = QCheckBox("Process (prep + intersect + flatten + backfill + tiles)")
+        self._cb_data_master = QCheckBox("Process (1. Prep → 5. Tiles)")
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
