@@ -1299,21 +1299,10 @@ mesa_version = config['DEFAULT'].get('mesa_version', 'MESA 5')
 
 
 def _format_display_version(version: str) -> str:
-    v = (version or "").strip() or "MESA"
-    try:
-        if getattr(sys, "frozen", False):
-            return v
-        sha = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=PROJECT_BASE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if sha:
-            return f"{v} (dev {sha})"
-    except Exception:
-        pass
-    return v
+    # Display the configured version string verbatim. The previous build
+    # appended "(dev <sha>)" when running from a git checkout, but the
+    # commit hash is internal noise for end users and analysts.
+    return (version or "").strip() or "MESA"
 
 
 def _read_packaged_build_info() -> dict:
