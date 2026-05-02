@@ -973,16 +973,17 @@ class _NumericTableItem(QTableWidgetItem):
 
 class SetupWindow(QMainWindow):
 
-    def __init__(self, base_dir: str):
+    def __init__(self, base_dir: str, start_tab: str = "sensitivity"):
         super().__init__()
         self._base_dir = base_dir
+        self._start_tab = (start_tab or "sensitivity").lower()
         self._build_ui()
 
     # ------------------------------------------------------------------
     def _build_ui(self):
         self.setWindowTitle("MESA - Processing setup")
-        self.resize(960, 620)
-        self.setMinimumSize(740, 440)
+        self.resize(960, 780)
+        self.setMinimumSize(740, 540)
 
         try:
             icon_path = resource_path(Path("system_resources") / "mesa.ico")
@@ -1011,6 +1012,12 @@ class SetupWindow(QMainWindow):
         self._view_indexes = QWidget()
         self._build_indexes_view(self._view_indexes)
         self._tabs.addTab(self._view_indexes, "Index weights")
+
+        # Honour the requested start tab. Accepts "sensitivity" (default) or
+        # "indexes" / "weights" / "index_weights" — used by devtools to capture
+        # the Index weights tab without manual clicks.
+        if self._start_tab in {"indexes", "weights", "index_weights"}:
+            self._tabs.setCurrentIndex(1)
 
         # --- Right corner: data-management buttons + Exit ---
         _corner_css = """
@@ -1447,7 +1454,7 @@ class SetupWindow(QMainWindow):
 # -------------------------------
 # In-process entry point (called by mesa.py via lazy import)
 # -------------------------------
-def run(base_dir: str, master=None) -> None:
+def run(base_dir: str, master=None, start_tab: str = "sensitivity") -> None:
     """Launch the processing setup GUI in-process.
 
     mesa.py calls this instead of spawning a subprocess.
@@ -1514,7 +1521,7 @@ def run(base_dir: str, master=None) -> None:
         apply_shared_stylesheet(app)
         own_app = True
 
-    window = SetupWindow(original_working_directory)
+    window = SetupWindow(original_working_directory, start_tab=start_tab)
     window.show()
     root = window
 
@@ -1529,5 +1536,8 @@ def run(base_dir: str, master=None) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MESA - Processing setup')
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+    parser.add_argument('--start-tab', default='sensitivity',
+                        choices=['sensitivity', 'indexes', 'weights', 'index_weights'],
+                        help='Which tab to focus when the window opens (default: sensitivity)')
     args = parser.parse_args()
-    run(args.original_working_directory)
+    run(args.original_working_directory, start_tab=args.start_tab)

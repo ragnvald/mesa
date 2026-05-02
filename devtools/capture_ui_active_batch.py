@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import os
 import subprocess
 import time
 from ctypes import wintypes
@@ -47,6 +48,23 @@ class HelperCapture:
     key: str
     args: list[str]
     title_hint: str
+    wait_seconds: float
+
+
+@dataclass(frozen=True)
+class PopupCapture:
+    """A popup launched from inside mesa.py via the MESA_DEVTOOLS_POPUP env hook.
+
+    Driven by setting MESA_DEVTOOLS_POPUP=<env_value> when launching mesa.py;
+    the launcher then opens the named popup automatically once the main
+    window has rendered. We find the popup window by title_hint (which must
+    be specific enough to not also match the launcher's "MESA 5" title) and
+    capture only that popup.
+    """
+
+    env_value: str
+    title_hint: str
+    out_filename: str
     wait_seconds: float
 
 
@@ -237,6 +255,43 @@ def find_app_window(root_pid: int, title_hint: str, timeout: float = 300.0):
     return None, None
 
 
+def find_popup_window(root_pid: int, title_hint: str, timeout: float = 60.0,
+                       min_w: int = 300, min_h: int = 200):
+    """Like find_app_window but stricter: the title hint MUST match.
+
+    Popups live inside the launcher's process tree, so a hint-only or
+    pid-only match would also accept the main launcher window. This
+    variant requires the title to contain the hint substring AND the
+    window to be in the process tree, which uniquely identifies the
+    popup.
+    """
+    deadline = time.time() + timeout
+    hint = title_hint.lower().strip()
+    while time.time() < deadline:
+        pids = process_tree_pids(root_pid)
+        cands = []
+        for hwnd, pid, title in enum_windows():
+            if pid not in pids:
+                continue
+            if hint not in title.lower():
+                continue
+            try:
+                left, top, right, bottom = window_bounds(hwnd)
+            except Exception:
+                continue
+            w = right - left
+            h = bottom - top
+            if w < min_w or h < min_h:
+                continue
+            cands.append((w * h, hwnd, title))
+        if cands:
+            cands.sort(reverse=True)
+            _area, hwnd, title = cands[0]
+            return hwnd, title
+        time.sleep(0.4)
+    return None, None
+
+
 def capture_hwnd(hwnd: int, out_path: Path) -> str:
     left, top, right, bottom = window_bounds(hwnd)
     if right <= left or bottom <= top:
@@ -274,9 +329,20 @@ def send_ctrl_tab(reverse: bool = False) -> None:
 
 
 def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
+    # Tab order and filenames must match what User-interface.md references.
+    # Current launcher (mesa.py): Workflows / Status / Manage data / Config / About.
+    # Title hint matches mesa_version_display, default "MESA 5" from config.ini.
+    desktop_tabs = [
+        ("ui_workflows.png", "Workflows"),
+        ("ui_status.png", "Status"),
+        ("ui_manage.png", "Manage data"),
+        ("ui_config.png", "Config"),
+        ("ui_about.png", "About"),
+    ]
+
     proc = subprocess.Popen([str(py), "mesa.py"], cwd=repo)
     try:
-        hwnd, title = find_app_window(proc.pid, "5.0 beta", timeout=300.0)
+        hwnd, title = find_app_window(proc.pid, "mesa 5", timeout=300.0)
         if hwnd is None:
             print("FAIL mesa_desktop: window not found")
             return
@@ -284,34 +350,62 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         print("Waiting 45s for mesa desktop render...")
         time.sleep(45)
 
-        base_path = wiki_images / "ui_mesa_desktop.png"
-        first_hash = capture_hwnd(hwnd, base_path)
-        print(f"OK   mesa_desktop: {title} -> {base_path.name}")
+        first_filename, first_label = desktop_tabs[0]
+        base_path = wiki_images / first_filename
+        capture_hwnd(hwnd, base_path)
+        print(f"OK   mesa_desktop ({first_label}): {title} -> {base_path.name}")
 
         # Focus the notebook area once, then cycle tabs with Ctrl+Tab.
         click_client(hwnd, 120, 135)
         time.sleep(0.2)
 
-        tab_files = [
-            "ui_mesa_desktop_tab2.png",  # Status
-            "ui_mesa_desktop_tab3.png",  # Config
-            "ui_mesa_desktop_tab4.png",  # Tune processing
-            "ui_mesa_desktop_tab5.png",  # Manage MESA data
-            "ui_mesa_desktop_tab6.png",  # About
-        ]
-
-        for filename in tab_files:
+        for filename, label in desktop_tabs[1:]:
             ensure_on_screen(hwnd)
             send_ctrl_tab(reverse=False)
             time.sleep(1.2)
             out_path = wiki_images / filename
             capture_hwnd(hwnd, out_path)
-            print(f"OK   mesa_desktop tab -> {filename}")
+            print(f"OK   mesa_desktop ({label}) -> {filename}")
 
         # Return to first tab for predictable end-state before cleanup.
-        for _ in tab_files:
+        for _ in desktop_tabs[1:]:
             send_ctrl_tab(reverse=True)
             time.sleep(0.08)
+    finally:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+
+
+def capture_popup(popup: PopupCapture, repo: Path, py: Path, wiki_images: Path) -> bool:
+    """Launch mesa.py with the devtools env hook and capture the named popup."""
+    env = os.environ.copy()
+    env["MESA_DEVTOOLS_POPUP"] = popup.env_value
+    proc = subprocess.Popen([str(py), "mesa.py"], cwd=repo, env=env)
+    try:
+        # First wait for the launcher to render and the env hook to fire.
+        print(f"Waiting {int(popup.wait_seconds)}s for {popup.env_value} popup to appear...")
+        time.sleep(popup.wait_seconds)
+        hwnd, title = find_popup_window(proc.pid, popup.title_hint, timeout=60.0)
+        if hwnd is None:
+            print(f"FAIL popup_{popup.env_value}: window matching '{popup.title_hint}' not found")
+            return False
+        try:
+            ensure_on_screen(hwnd)
+        except Exception as exc:
+            print(f"WARN popup_{popup.env_value}: window placement failed: {exc}")
+        out_path = wiki_images / popup.out_filename
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                ensure_on_screen(hwnd)
+                capture_hwnd(hwnd, out_path)
+                print(f"OK   popup_{popup.env_value}: {title} -> {out_path.name}")
+                return True
+            except Exception as exc:
+                last_error = exc
+                print(f"WARN popup_{popup.env_value}: capture attempt {attempt} failed: {exc}")
+                time.sleep(1.0)
+        print(f"FAIL popup_{popup.env_value}: {last_error}")
+        return False
     finally:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
 
@@ -382,6 +476,8 @@ def main() -> None:
     parser.add_argument("--repo", default="", help="Path to mesa repo (default: inferred from script location)")
     parser.add_argument("--wiki-images", default="", help="Path to mesa.wiki/images (default: auto-detected)")
     parser.add_argument("--skip-desktop", action="store_true", help="Skip desktop tab captures")
+    parser.add_argument("--skip-helpers", action="store_true", help="Skip standalone helper captures")
+    parser.add_argument("--skip-popups", action="store_true", help="Skip launcher popup captures")
     parser.add_argument("--helpers", default="", help="Comma-separated helper keys to capture (default: all)")
     args = parser.parse_args()
 
@@ -406,6 +502,7 @@ def main() -> None:
         HelperCapture("geocode_create", ["code/geocode_manage.py", "--start-tab", "h3", "--original_working_directory", str(repo)], "geocode manage", 35.0),
         HelperCapture("asset_manage", ["code/asset_manage.py", "--original_working_directory", str(repo)], "asset", 35.0),
         HelperCapture("processing_setup", ["code/processing_setup.py", "--original_working_directory", str(repo)], "setup", 40.0),
+        HelperCapture("processing_setup_indexes", ["code/processing_setup.py", "--start-tab", "indexes", "--original_working_directory", str(repo)], "setup", 40.0),
         HelperCapture("processing_pipeline_run", ["code/processing_pipeline_run.py", "--original_working_directory", str(repo)], "process all", 40.0),
         HelperCapture("atlas_manage", ["code/atlas_manage.py", "--original_working_directory", str(repo)], "atlas", 35.0),
         HelperCapture("map_overview", ["code/map_overview.py"], "maps overview", 50.0),
@@ -426,10 +523,24 @@ def main() -> None:
         helpers = [helper for helper in helpers if helper.key.lower() in helper_filter]
 
     failures: list[str] = []
-    for helper in helpers:
-        ok = capture_helper(helper, repo, py, wiki_images)
-        if not ok:
-            failures.append(helper.key)
+    if not args.skip_helpers:
+        for helper in helpers:
+            ok = capture_helper(helper, repo, py, wiki_images)
+            if not ok:
+                failures.append(helper.key)
+
+    # Popup captures live inside the launcher and are driven via the
+    # MESA_DEVTOOLS_POPUP env hook in mesa.py's __main__ block.
+    popups = [
+        PopupCapture("tune", "tune processing", "ui_tune_processing_popup.png", 35.0),
+        PopupCapture("geonode", "publish to geonode", "ui_geonode_publish_popup.png", 35.0),
+    ]
+
+    if not args.skip_popups:
+        for popup in popups:
+            ok = capture_popup(popup, repo, py, wiki_images)
+            if not ok:
+                failures.append(f"popup_{popup.env_value}")
 
     if failures:
         raise SystemExit(f"Capture failures: {', '.join(failures)}")
