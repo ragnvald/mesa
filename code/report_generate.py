@@ -1201,7 +1201,7 @@ class ReportEngine:
                     "The <b>Sensitivity index</b> shows where features that are <b>vulnerable to pressure or change</b> "
                     "concentrate on the map. For each geocode cell, MESA performs three steps: "
                     "<b>(1) count</b> overlaps per sensitivity-product value (importance × susceptibility, in "
-                    "{1, 2, 3, …, 25}), "
+                    "{{1, 2, 3, …, 25}}), "
                     "<b>(2) weight</b> those counts using <code>index_sensitivity_weights</code> from <b>Parameters</b> "
                     "and sum to a raw score, and "
                     "<b>(3) rank</b> the cell against all others in the current <b>{basic}</b> grouping by rescaling "
