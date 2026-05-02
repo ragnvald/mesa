@@ -5126,11 +5126,13 @@ class ReportGeneratorWindow(QMainWindow):
         analysis_grid.setColumnStretch(1, 1)
         action_layout.addWidget(analysis_group)
 
-        # Create report button + hint label
+        # Create report button + hint label. Use the shared "primary" role
+        # (gold-on-parchment) defined in ASSET_STYLESHEET, the same treatment
+        # applied to Import / Build / Generate buttons across MESA, instead
+        # of the bright Bootstrap green this dialog used to carry.
         btn_row = QHBoxLayout()
         create_btn = QPushButton("Create report")
-        create_btn.setObjectName("CreateReportBtn")
-        create_btn.setStyleSheet("QPushButton#CreateReportBtn { background-color: #28a745; color: white; padding: 6px 16px; font-weight: bold; }")
+        create_btn.setProperty("role", "primary")
         btn_row.addWidget(create_btn)
         hint_label = QLabel("The report will include only the selected sections.")
         btn_row.addWidget(hint_label)
