@@ -3575,6 +3575,11 @@ def fetch_asset_group_statistics(asset_group_df: gpd.GeoDataFrame, asset_object_
         'asset_objects':'Number of Asset Objects'
     }).sort_values('Sensitivity Code')
 
+    # Column order is read by the docx renderer straight from the DataFrame, so
+    # match the empty-stub schema (Code, Description, Active asset groups,
+    # Number of Asset Objects).
+    out = out[['Sensitivity Code', 'Sensitivity Description',
+               'Active asset groups', 'Number of Asset Objects']]
     return out
 
 def format_area(row):
@@ -3764,6 +3769,7 @@ def calculate_group_statistics(asset_object_df: gpd.GeoDataFrame, asset_group_df
         'sensitivity_code':'Code',
         'sensitivity_description':'Description',
         'geometry_type':'Type',
+        'total_area':'Total area',
         'object_count':'# objects'
     }).sort_values('Code')
     return stats
@@ -3772,6 +3778,65 @@ def export_to_excel(df, fp):
     if not fp.lower().endswith('.xlsx'):
         fp += '.xlsx'
     df.to_excel(fp, index=False)
+
+
+def build_geocode_overview_table(parquet_dir: str) -> list | None:
+    """Return a list-of-rows (header + body) summarising every geocode group.
+
+    One row per geocode group (basic_mosaic, H3_R6, ..., custom grids) with
+    object count drawn from tbl_geocode_object.parquet. Friendly title and
+    description come from tbl_geocode_group.parquet when available. Returns
+    None when neither source file is available, so callers can skip the
+    section cleanly.
+    """
+    group_pq  = os.path.join(parquet_dir, "tbl_geocode_group.parquet")
+    object_pq = os.path.join(parquet_dir, "tbl_geocode_object.parquet")
+
+    counts = {}
+    try:
+        if os.path.exists(object_pq):
+            try:
+                gdf = gpd.read_parquet(object_pq)
+            except Exception:
+                gdf = pd.read_parquet(object_pq)
+            if gdf is not None and not gdf.empty and 'name_gis_geocodegroup' in gdf.columns:
+                series = gdf.groupby('name_gis_geocodegroup').size()
+                counts = {str(k): int(v) for k, v in series.items()}
+    except Exception:
+        counts = {}
+
+    meta_rows = []
+    try:
+        if os.path.exists(group_pq):
+            try:
+                meta = pd.read_parquet(group_pq)
+            except Exception:
+                meta = None
+            if meta is not None and not meta.empty:
+                cols = set(meta.columns)
+                for _, r in meta.iterrows():
+                    name = str(r.get('name_gis_geocodegroup', '')).strip()
+                    if not name:
+                        continue
+                    title = str(r.get('title_user', '')).strip() if 'title_user' in cols else ''
+                    description = str(r.get('description', '')).strip() if 'description' in cols else ''
+                    meta_rows.append((name, title, description))
+    except Exception:
+        meta_rows = []
+
+    seen = {name for name, _t, _d in meta_rows}
+    for name in counts.keys():
+        if name not in seen:
+            meta_rows.append((name, '', ''))
+
+    if not meta_rows:
+        return None
+
+    meta_rows.sort(key=lambda t: (0 if t[0].lower() == 'basic_mosaic' else 1, t[0]))
+    rows = [["Geocode group", "Title", "Description", "# objects"]]
+    for name, title, description in meta_rows:
+        rows.append([name, title, description, counts.get(name, 0)])
+    return rows
 
 def fetch_lines_and_segments(parquet_dir: str):
     lines_pq    = os.path.join(parquet_dir, "tbl_lines.parquet")
@@ -3889,8 +3954,13 @@ def compile_docx(output_docx: str, order_list: list):
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
     def add_rule():
-        run = doc.add_paragraph().add_run("―" * 40)
-        run.font.size = Pt(9)
+        # Earlier iterations of the template used a row of "―" characters as a
+        # visual separator between sections. The current template is laid out
+        # with proper headings, page breaks, and Word's natural paragraph
+        # spacing, so the rule reads as a stray artefact. Existing
+        # ('rule', None) entries in order_list are kept for backwards
+        # compatibility but render as nothing.
+        return
 
     def add_table(data):
         if not data:
@@ -4281,7 +4351,17 @@ def generate_report(base_dir: str,
             except Exception:
                 asset_objects_df = gpd.GeoDataFrame()
             try:
-                asset_groups_df = gpd.read_parquet(asset_group_pq) if os.path.exists(asset_group_pq) else gpd.GeoDataFrame()
+                # tbl_asset_group is metadata-only and does not carry geo metadata,
+                # so geopandas's read_parquet raises "Missing geo metadata".
+                # Fall back to plain pandas; downstream code only consumes columns,
+                # never geometry, on this table.
+                if os.path.exists(asset_group_pq):
+                    try:
+                        asset_groups_df = gpd.read_parquet(asset_group_pq)
+                    except Exception:
+                        asset_groups_df = pd.read_parquet(asset_group_pq)
+                else:
+                    asset_groups_df = gpd.GeoDataFrame()
             except Exception:
                 asset_groups_df = gpd.GeoDataFrame()
             set_progress(10, "Loaded asset tables.")
@@ -4525,6 +4605,60 @@ def generate_report(base_dir: str,
                 ('table', ag_stats_xlsx),
                 ('new_page', None),
             ])
+
+            # Geocodes – overview: one row per geocode group with object count.
+            # Sourced from tbl_geocode_group (metadata) and tbl_geocode_object
+            # (geometry rows), so it is independent of whether tbl_flat has
+            # been loaded for this particular report run.
+            geocode_overview_rows = build_geocode_overview_table(gpq_dir)
+            if geocode_overview_rows is not None:
+                order_list.extend([
+                    ('heading(2)', "Geocodes – overview"),
+                    ('text',
+                        "<b>What is a geocode in MESA?</b> A <i>geocode group</i> is a set of "
+                        "non-overlapping polygons that MESA uses as a common spatial reporting unit. "
+                        "Every analytical output in this report — sensitivity maxima, importance maxima, "
+                        "the three normalised indices, atlas tiles — is computed by overlaying assets "
+                        "onto these polygons and aggregating per cell. Different geocode groups give "
+                        "different views of the same input data: an asset-derived mosaic is shaped "
+                        "exactly to where features actually occur, while a regular hex grid lets you "
+                        "compare cell-for-cell across study areas at a fixed cell size."),
+                    ('text',
+                        "<b>basic_mosaic — the default reporting unit.</b> <code>basic_mosaic</code> is "
+                        "produced by MESA itself from the imported assets: their footprints are "
+                        "buffered, unioned, and then polygonised into the smallest set of "
+                        "non-overlapping atomic faces that still distinguish every overlap pattern. "
+                        "Every face represents an area where a specific combination of one or more "
+                        "asset objects is present, and areas with no assets are not part of the mosaic "
+                        "at all. The shape of basic_mosaic is therefore <i>data-driven</i>: a face is "
+                        "as large or small as the underlying asset boundaries demand. This makes it "
+                        "the most faithful representation of where assets actually occur, which is why "
+                        "it is the default basis for the &ldquo;Other maps&rdquo;, Index, and Atlas "
+                        "sections of this report."),
+                    ('text',
+                        "<b>H3 hexagon grids (H3_R6 … H3_R9).</b> These are standardised hierarchical "
+                        "hex tessellations from Uber's open H3 spec. R6 is the coarsest (cells "
+                        "≈36 km², about the size of a small district); each level halves the cell "
+                        "size, so R9 cells are ≈0.1 km². H3 grids are useful when you need consistent "
+                        "cell sizes across runs or when comparing study areas — a value at H3_R8 in "
+                        "one project is directly comparable to H3_R8 in another, regardless of the "
+                        "asset footprint. The fields used for ranking and weighting are identical to "
+                        "those on basic_mosaic, only aggregated to a different polygon set."),
+                    ('text',
+                        "<b>Custom geocode sets.</b> Any polygon dataset placed under "
+                        "<code>input/geocode/</code> and registered with MESA becomes a geocode group "
+                        "with the same machinery — administrative boundaries, statistical units, "
+                        "Quarter Degree Grid Cells, marine spatial planning blocks, and so on. "
+                        "Provided the polygons are non-overlapping and cover the assets, the rest of "
+                        "the report works without modification."),
+                    ('text',
+                        "The table below lists every group MESA knows about for this run, together "
+                        "with the number of geocode objects (cells) it contains. <code># objects</code> "
+                        "is the row count in <code>tbl_geocode_object.parquet</code> for that group "
+                        "— a higher value means more cells and therefore a finer spatial resolution."),
+                    ('table_data', ("Geocode groups and object counts", geocode_overview_rows)),
+                    ('new_page', None),
+                ])
 
         if include_analysis_presentation:
             write_to_log("Preparing analysis presentation section …", base_dir)
