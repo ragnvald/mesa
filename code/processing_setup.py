@@ -103,10 +103,49 @@ from PySide6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView,
 )
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QIcon, QPainter, QPen, QBrush, QColor
 from PySide6.QtCore import Qt, Signal, QObject
 
+import webbrowser
+
 from asset_manage import apply_shared_stylesheet
+
+
+WIKI_INDEX_URLS = {
+    "importance": "https://github.com/ragnvald/mesa/wiki/Indexes#importance-index-index_importance",
+    "sensitivity": "https://github.com/ragnvald/mesa/wiki/Indexes#sensitivity-index-index_sensitivity",
+    "owa":         "https://github.com/ragnvald/mesa/wiki/Indexes#owa-index-index_owa",
+}
+
+
+class _InfoCircleLabel(QLabel):
+    """Small painted circle with 'i' that opens a URL on click.
+
+    Mirrors the same widget used in mesa.py so the Parameters dialog has the
+    visual vocabulary as the main app's Status pane.
+    """
+
+    def __init__(self, url: str, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self.setFixedSize(20, 20)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Open detailed description in browser")
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor("#9b7c3d"), 1.5))
+        p.setBrush(QBrush(QColor("#faf6ee")))
+        p.drawEllipse(2, 2, 15, 15)
+        p.setPen(QColor("#715a36"))
+        p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        p.drawText(self.rect(), Qt.AlignCenter, "i")
+        p.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._url:
+            webbrowser.open(self._url)
 
 # -------------------------------
 # Path helpers
@@ -1039,10 +1078,11 @@ class SetupWindow(QMainWindow):
             "Importance index — Each asset layer has an importance value from 1 (low) to 5 (high). "
             "The weight assigned here determines how much each importance level contributes to the "
             "aggregated importance score. A higher weight increases the influence of that level.\n\n"
-            "Sensitivity index (OWA) — Sensitivity is the product of importance × susceptibility "
-            "(resulting in values like 1, 2, 3, …, 25). The Ordered Weighted Average (OWA) weights "
-            "here determine how overlapping sensitivity values are combined. This allows you to "
-            "emphasise either the highest or lowest sensitivity overlaps."
+            "Sensitivity index — Sensitivity is the product of importance × susceptibility "
+            "(resulting in values like 1, 2, 3, …, 25). The weight assigned to each product value "
+            "determines how much an overlap at that sensitivity level contributes to the aggregated "
+            "score. Defaults are flat because the product values already encode magnitude; raise "
+            "individual weights to over-emphasise particular sensitivity levels."
         )
         info_label = QLabel(info)
         info_label.setWordWrap(True)
@@ -1051,14 +1091,31 @@ class SetupWindow(QMainWindow):
 
         sections = [
             ("importance", "Importance index weights (1-5)", list(range(1, 6))),
-            ("sensitivity", "Sensitivity index (OWA)", SENSITIVITY_PRODUCT_VALUES),
+            ("sensitivity", "Sensitivity index weights (products 1-25)", SENSITIVITY_PRODUCT_VALUES),
         ]
         weight_widgets: dict[str, list] = {}
 
         for key, title, value_labels in sections:
             box = QGroupBox(title)
-            grid = QGridLayout(box)
-            grid.setSpacing(4)
+            box_outer = QHBoxLayout(box)
+            box_outer.setContentsMargins(8, 6, 8, 8)
+            box_outer.setSpacing(8)
+
+            # Left-column info icon linking to the wiki section for this index.
+            # Placed in a column rather than a top row so it doesn't add height
+            # and squeeze the weight entries vertically.
+            icon_col = QVBoxLayout()
+            icon_col.setContentsMargins(0, 0, 0, 0)
+            icon_col.setSpacing(0)
+            icon_col.addWidget(_InfoCircleLabel(WIKI_INDEX_URLS[key]), alignment=Qt.AlignTop)
+            icon_col.addStretch(1)
+            box_outer.addLayout(icon_col)
+
+            grid_holder = QWidget()
+            grid = QGridLayout(grid_holder)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(4)
+            grid.setVerticalSpacing(8)
 
             widgets_for_key: list = []
             current = index_weight_settings.get(key, INDEX_WEIGHT_DEFAULTS[key])
@@ -1081,16 +1138,74 @@ class SetupWindow(QMainWindow):
                 val_label = QLabel(str(v))
                 val_label.setAlignment(Qt.AlignCenter)
                 val_label.setFixedWidth(50)
+                val_label.setMinimumHeight(22)
                 grid.addWidget(val_label, r0, col)
 
                 entry = QLineEdit(str(current[idx_v] if idx_v < len(current) else 1))
                 entry.setFixedWidth(50)
+                entry.setMinimumHeight(26)
                 entry.setAlignment(Qt.AlignCenter)
                 grid.addWidget(entry, r0 + 1, col)
                 widgets_for_key.append(entry)
 
+            # Add a visible gutter between block rows when the values wrap to a
+            # second line — otherwise the previous block's entries butt up
+            # against the next block's value labels.
+            n_blocks = (len(value_labels) + per_line - 1) // per_line
+            for block_idx in range(1, n_blocks):
+                gutter_row = block_idx * 2
+                grid.setRowMinimumHeight(gutter_row, 30)
+
+            box_outer.addWidget(grid_holder, stretch=1)
             weight_widgets[key] = widgets_for_key
             layout.addWidget(box)
+
+        tuning_note = QLabel(
+            "<b>Tuning tips.</b> Weights act as multipliers, so only their <i>proportions</i> "
+            "matter for the 0&ndash;100 ranking. Common patterns: set a weight to <b>0</b> to "
+            "filter that level out entirely (e.g. importance class 1 = 0 hides low-value "
+            "overlaps when screening for hotspots); raise a single weight to <b>emphasise</b> "
+            "that level (e.g. boost sensitivity product 25 so cells with extreme overlaps rise "
+            "to the top); keep the row <b>flat</b> when the input class numbers already encode "
+            "magnitude (this is why sensitivity defaults flat — a product of 25 is already 25&times; "
+            "a product of 1). Changes only affect future processing runs, so you can experiment "
+            "freely and re-run to compare."
+        )
+        tuning_note.setWordWrap(True)
+        tuning_note.setTextFormat(Qt.RichText)
+        tuning_note.setStyleSheet(
+            "color: #5c4a2f; font-size: 9pt; padding: 8px 10px; "
+            "background-color: #f6efe1; border: 1px solid #d8c9a4; border-radius: 4px;"
+        )
+        layout.addWidget(tuning_note)
+
+        owa_row = QHBoxLayout()
+        owa_row.setContentsMargins(0, 0, 0, 0)
+        owa_row.setSpacing(8)
+
+        owa_icon_col = QVBoxLayout()
+        owa_icon_col.setContentsMargins(0, 0, 0, 0)
+        owa_icon_col.addWidget(_InfoCircleLabel(WIKI_INDEX_URLS["owa"]), alignment=Qt.AlignTop)
+        owa_icon_col.addStretch(1)
+        owa_row.addLayout(owa_icon_col)
+
+        owa_note = QLabel(
+            "<b>OWA index — no tunable input.</b> MESA also produces a third index, the OWA "
+            "(Ordered Weighted Average) index, alongside the two weighted ones above. It ranks "
+            "cells using a precautionary &ldquo;worst-first&rdquo; rule: a cell containing even one "
+            "overlap at sensitivity 25 outranks any cell with zero overlaps at 25, regardless of "
+            "the lower-sensitivity stack. There are no weights to set — the rule is fixed and "
+            "uses only the sensitivity counts already produced from the table above."
+        )
+        owa_note.setWordWrap(True)
+        owa_note.setTextFormat(Qt.RichText)
+        owa_note.setStyleSheet(
+            "color: #5c4a2f; font-size: 9pt; padding: 8px 10px; "
+            "background-color: #f6efe1; border: 1px solid #d8c9a4; border-radius: 4px;"
+        )
+        owa_row.addWidget(owa_note, stretch=1)
+
+        layout.addLayout(owa_row)
 
         index_weight_vars = weight_widgets
         layout.addStretch(1)

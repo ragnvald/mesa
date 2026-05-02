@@ -868,13 +868,13 @@ OVERLAY_LABELS = {
     "index_importance": "Importance index",
     "index_sensitivity": "Sensitivity index",
     "index_owa": "OWA index",
-    "groupstotal": "Groups total",
-    "assetstotal": "Assets total",
+    "groupstotal": "# asset groups",
+    "assetstotal": "# asset objects",
 }
 
 GENERAL_METRIC_FIELDS = [
-    ("Asset groups total", "asset_groups_total", None, None),
-    ("Assets overlap total", "assets_overlap_total", None, None),
+    ("# asset groups", "asset_groups_total", None, None),
+    ("# asset objects", "assets_overlap_total", None, None),
     ("Importance index", "index_importance", None, None),
     ("Sensitivity index", "index_sensitivity", None, None),
     ("OWA index", "index_owa", None, None),
@@ -886,11 +886,11 @@ OVERLAY_INFO_FIELDS = {
         ("Sensitivity max", "sensitivity_max", None, None),
         ("Sensitivity code", "sensitivity_code_max", None, None),
         ("Sensitivity description", "sensitivity_description_max", None, None),
-        ("Importance max", "importance_max", None, None),
+        ("Importance (max)", "importance_max", None, None),
         ("Susceptibility max", "susceptibility_max", None, None),
     ],
     "groupstotal": [ ("Asset group names", "asset_group_names", None, None) ],
-    "assetstotal": [ ("Assets overlap total", "assets_overlap_total", None, None) ],
+    "assetstotal": [ ("# asset objects", "assets_overlap_total", None, None) ],
     "importance_max": [ ("Importance (max)", "importance_max", None, None) ],
     "index_importance": [ ("Importance index", "index_importance", None, None) ],
     "index_sensitivity": [ ("Sensitivity index", "index_sensitivity", None, None) ],
@@ -1436,8 +1436,31 @@ HTML_TEMPLATE = r"""
   .leaflet-control-layers label { display:block; line-height: 1.35; }
   .inlineSel { margin:4px 0 6px 22px; }
   .inlineChecks { margin:0 0 6px 22px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+  .inlineChecks.collapsed { display:none; }
   .inlineChecks label { display:inline-flex; gap:6px; align-items:center; font-weight:500; }
   .inlineChecks label.disabled { opacity:0.5; pointer-events:none; }
+
+  /* Layers collapse toggle. Mirrors the parchment palette used in the Status pane. */
+  .layers-toggle {
+    display:inline-flex; align-items:center; gap:6px;
+    margin:4px 0 6px 22px; padding:2px 8px;
+    background:transparent; border:1px solid #d8c9a4; border-radius:4px;
+    cursor:pointer; font:600 11px/1.4 'Segoe UI', sans-serif; color:#5c4a2f;
+  }
+  .layers-toggle:hover { background:#f6efe1; }
+  .layers-toggle .caret { display:inline-block; transition:transform 0.15s; transform:rotate(0deg); }
+  .layers-toggle[aria-expanded="false"] .caret { transform:rotate(-90deg); }
+
+  /* Inline (i) info circle next to each layer name; visually mirrors _InfoCircleLabel in mesa.py */
+  .inline-info {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:16px; height:16px; margin-left:auto;
+    border:1.5px solid #9b7c3d; background:#faf6ee; color:#715a36;
+    border-radius:50%; font:700 9px/1 'Segoe UI', sans-serif;
+    text-decoration:none; cursor:pointer; flex-shrink:0;
+  }
+  .inline-info:hover { background:#f3eadc; }
+  .inlineChecks label { width:100%; }
 
   #chartBox { flex:1 1 auto; padding:8px 12px; position:relative; overflow:hidden; }
   #chart { position:absolute; top:8px; right:12px; bottom:8px; left:12px; display:block; }
@@ -1495,7 +1518,12 @@ HTML_TEMPLATE = r"""
     <div class="legend" id="legend"></div>
     <div id="infoText" class="info-block">
       <p>Use the <b>Geocode group</b> selector, then enable layers below it:
-      <b>Sensitive areas</b>, <b>Groups total</b>, or <b>Assets total</b>.</p>
+      <b>Sensitive areas</b>, <b># asset groups</b>, or <b># asset objects</b>.</p>
+      <p><b>Importance / Sensitivity index</b> &mdash; 0&ndash;100 ranking <i>within each geocode group</i>.
+      MESA <b>(1)</b> counts overlapping assets per class, <b>(2)</b> weights them using the values set in
+      <b>Parameters</b>, sums to a raw score, then <b>(3)</b> rescales so the highest-scoring cell in the
+      group becomes 100. <i>Example:</i> 3 class-5 assets at weight 50 &rarr; raw 150 &rarr; ranked against
+      the group max.</p>
       <p>The viewer prefers raster MBTiles in <code>output/mbtiles</code>. If missing, it falls back to GeoParquet.</p>
     </div>
     <div id="chartBox"><canvas id="chart"></canvas></div>
@@ -1794,7 +1822,7 @@ function loadGeocodeIntoGroup(cat, preserveView){
 function loadGroupstotalIntoGroup(cat, preserveView){
   var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_groupstotal_layer(cat).then(function(res){
-    if (!res.ok){ setError('Failed to load groups total: '+res.error); return; }
+    if (!res.ok){ setError('Failed to load # asset groups: '+res.error); return; }
     if (GROUPSTOTAL_GROUP) GROUPSTOTAL_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.groupstotal_url){
@@ -1824,7 +1852,7 @@ function loadGroupstotalIntoGroup(cat, preserveView){
 function loadAssetstotalIntoGroup(cat, preserveView){
   var prev=(preserveView && MAP)?{center:MAP.getCenter(), zoom:MAP.getZoom()}:null;
   window.pywebview.api.get_assetstotal_layer(cat).then(function(res){
-    if (!res.ok){ setError('Failed to load assets total: '+res.error); return; }
+    if (!res.ok){ setError('Failed to load # asset objects: '+res.error); return; }
     if (ASSETSTOTAL_GROUP) ASSETSTOTAL_GROUP.clearLayers();
 
     if (res.mbtiles && res.mbtiles.assetstotal_url){
@@ -2069,15 +2097,36 @@ function buildLayersControl(state){
     var hasImportanceMax = hasImportanceMaxTiles || hasImportanceMaxVector;
   var missingNotes = [];
 
+  // All layers (raw and normalised) are documented on the same wiki page,
+  // so users land in a single place that contrasts each pair (e.g. Sensitivity
+  // vs Sensitivity index).
+  var WIKI_LAYER_URLS = {
+    sens_max: 'https://github.com/ragnvald/mesa/wiki/Indexes#sensitivity-sensitivity_max',
+    sens_idx: 'https://github.com/ragnvald/mesa/wiki/Indexes#sensitivity-index-index_sensitivity',
+    owa_idx:  'https://github.com/ragnvald/mesa/wiki/Indexes#owa-index-index_owa',
+    imp_max:  'https://github.com/ragnvald/mesa/wiki/Indexes#importance-importance_max',
+    imp_idx:  'https://github.com/ragnvald/mesa/wiki/Indexes#importance-index-index_importance',
+    groups:   'https://github.com/ragnvald/mesa/wiki/Indexes#asset-groups-asset_groups_total',
+    objects:  'https://github.com/ragnvald/mesa/wiki/Indexes#asset-objects-assets_overlap_total'
+  };
+  function infoIcon(url){
+    // stopPropagation so a click on the icon does not toggle the parent label's checkbox
+    // or get swallowed by Leaflet's layer-control click handler.
+    return '<a class="inline-info" href="'+url+'" target="_blank" rel="noopener" title="Open detailed description in browser" onclick="event.stopPropagation();">i</a>';
+  }
+
   var folderLabel='Geocode group <div class="inlineSel"><select id="groupCatSel"></select></div>' +
-                  '<div class="inlineChecks">' +
-                  '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitivity</label>' +
-                  '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index</label>' +
-                  '<label><input type="checkbox" id="chkOwaIndex"> OWA index</label>' +
-                  '<label><input type="checkbox" id="chkImportanceMax"> Importance</label>' +
-                  '<label><input type="checkbox" id="chkImportanceIndex"> Importance index</label>' +
-                  '<label><input type="checkbox" id="chkGroupsTotal"> Groups total</label>' +
-                  '<label><input type="checkbox" id="chkAssetsTotal"> Assets total</label>' +
+                  '<button type="button" class="layers-toggle" id="layersToggle" aria-expanded="true">' +
+                    '<span class="caret">&#9662;</span> Layers' +
+                  '</button>' +
+                  '<div class="inlineChecks" id="inlineChecksList">' +
+                  '<label><input type="checkbox" id="chkGeoAreas" checked> Sensitivity'         + infoIcon(WIKI_LAYER_URLS.sens_max) + '</label>' +
+                  '<label><input type="checkbox" id="chkSensitivityIndex"> Sensitivity index'   + infoIcon(WIKI_LAYER_URLS.sens_idx) + '</label>' +
+                  '<label><input type="checkbox" id="chkOwaIndex"> OWA index'                   + infoIcon(WIKI_LAYER_URLS.owa_idx)  + '</label>' +
+                  '<label><input type="checkbox" id="chkImportanceMax"> Importance (max)'       + infoIcon(WIKI_LAYER_URLS.imp_max)  + '</label>' +
+                  '<label><input type="checkbox" id="chkImportanceIndex"> Importance index'     + infoIcon(WIKI_LAYER_URLS.imp_idx)  + '</label>' +
+                  '<label><input type="checkbox" id="chkGroupsTotal"> # asset groups'           + infoIcon(WIKI_LAYER_URLS.groups)   + '</label>' +
+                  '<label><input type="checkbox" id="chkAssetsTotal"> # asset objects'          + infoIcon(WIKI_LAYER_URLS.objects)  + '</label>' +
                   '</div>';
 
   function disableCheckbox(chk){
@@ -2129,6 +2178,21 @@ function buildLayersControl(state){
       }
     }
   } catch(e){ logErr('Layer reorder failed: ' + e); }
+
+  // Wire up the collapse toggle for the layer checklist. Defer to setTimeout so
+  // the folderLabel HTML rendered by Leaflet has been inserted into the DOM.
+  setTimeout(function(){
+    var btn = document.getElementById('layersToggle');
+    var lst = document.getElementById('inlineChecksList');
+    if (!btn || !lst) return;
+    btn.addEventListener('click', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      var expanded = btn.getAttribute('aria-expanded') !== 'false';
+      btn.setAttribute('aria-expanded', String(!expanded));
+      lst.classList.toggle('collapsed', expanded);
+    });
+  }, 0);
 
   BASE_SOURCES.osm.addTo(MAP);
   GEO_GROUP.addTo(MAP);

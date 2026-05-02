@@ -954,15 +954,15 @@ class ReportEngine:
                     "of the picture is driven by a few standout assets versus broad accumulation.",
                 ),
                 (
-                    "groupstotal", "Asset groups total", "groupstotal",
+                    "groupstotal", "# asset groups", "groupstotal",
                     "Per-cell <b>count of distinct asset groups</b> overlapping the cell. High values "
                     "indicate cells where many different kinds of features coincide (a multi-themed "
                     "hotspot), regardless of how many individual asset objects are involved.",
                 ),
                 (
-                    "assetstotal", "Assets total", "assetstotal",
+                    "assetstotal", "# asset objects", "assetstotal",
                     "Per-cell <b>count of asset objects</b> overlapping the cell. Reads as a density map: "
-                    "high values mean many assets are stacked here. Compared with &ldquo;Asset groups total&rdquo;, "
+                    "high values mean many assets are stacked here. Compared with &ldquo;# asset groups&rdquo;, "
                     "this map is sensitive to the sheer number of objects, not the diversity of groups.",
                 ),
             ]
@@ -1167,10 +1167,19 @@ class ReportEngine:
                     "that overlaps each geocode cell into a single 0–100 score per cell.",
                 "map_intro": (
                     "The <b>Importance index</b> highlights where assets that have been rated as <b>important</b> "
-                    "concentrate on the map. For each geocode cell, the importance values of all overlapping "
-                    "assets are combined with the configured importance weights, summed, and rescaled to a "
-                    "<b>0–100</b> range within the current <b>{basic}</b> grouping (the most-loaded cell becomes 100; "
-                    "cells with no important assets stay at 0).",
+                    "concentrate on the map. For each geocode cell, MESA performs three steps: "
+                    "<b>(1) count</b> overlapping assets per importance class, "
+                    "<b>(2) weight</b> those counts using <code>index_importance_weights</code> from <b>Parameters</b> "
+                    "(in <code>config.ini</code>) and sum to a raw score, and "
+                    "<b>(3) rank</b> the cell against all others in the current <b>{basic}</b> grouping by "
+                    "rescaling to <b>0–100</b> (the most-loaded cell becomes 100; cells with no important "
+                    "assets stay at 0).",
+                    "<i>Worked example.</i> Suppose a cell overlaps 3 assets rated importance class 5 and the "
+                    "configured weight for class 5 is 50. The cell&rsquo;s raw score is 3 &times; 50 = 150. If "
+                    "150 happens to be the largest raw score anywhere in the geocode group, the cell shows "
+                    "<b>100</b>; every other cell scales down in proportion to its own raw score. Real weights "
+                    "and class counts come from your configuration, so the index is a <b>transparent expression "
+                    "of stakeholder choices</b> rather than an objective measurement.",
                     "Read the colour ramp as a <b>relative</b> measure: darker / higher cells are the hotspots of "
                     "important features inside this study area, not absolute importance scores. Use this map to "
                     "spot clusters of high-value features (e.g. conservation targets, high-value infrastructure) "
