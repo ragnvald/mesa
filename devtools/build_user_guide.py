@@ -827,6 +827,18 @@ def build_blocks():
         ["xyz — usa o transferidor incorporado com cache persistente em output/tile_cache/.",
          "contextily — usa contextily se estiver instalado.",
          "auto — prefere contextily, com xyz como recurso."]))
+    add(P(
+        "First-run cost: the first report run on a new AOI (or after the cache has expired) must download every basemap tile the report touches from tile.openstreetmap.org. With each map covering several hundred tiles across multiple zoom levels, this can add minutes to tens of minutes to the run depending on report scope, network speed, and OSM tile-server response. Subsequent runs that touch the same area read from output/tile_cache/ and complete much faster. Tiles are cached for 30 days (TILE_CACHE_MAX_AGE_DAYS in code/report_generate.py); older tiles are re-fetched the next time they are needed. The cache is keyed by zoom/x/y, so entries are reusable across atlases and reports that overlap geographically.",
+        "Custo da primeira execução: a primeira geração de relatório numa nova AOI (ou após a cache ter expirado) tem de descarregar todos os azulejos do mapa-base que o relatório precisa, a partir de tile.openstreetmap.org. Como cada mapa cobre várias centenas de azulejos em vários níveis de zoom, isto pode acrescentar minutos a dezenas de minutos ao tempo de execução, conforme o âmbito do relatório, a velocidade da rede e a resposta do servidor de azulejos do OSM. Execuções subsequentes que toquem a mesma área leem de output/tile_cache/ e são muito mais rápidas. Os azulejos são guardados durante 30 dias (TILE_CACHE_MAX_AGE_DAYS em code/report_generate.py); azulejos mais antigos são novamente transferidos quando voltarem a ser necessários. A cache é indexada por zoom/x/y, pelo que as entradas são reutilizáveis entre atlas e relatórios que cobrem áreas sobrepostas."))
+    add(UL(
+        ["Run the report once on a representative AOI before a workshop or live demo so the cache is warm.",
+         "The cache is portable: copying output/tile_cache/ between machines or projects covering the same area skips the download phase entirely.",
+         "If you regenerate reports frequently and tile-server response is slow, prefer a single wide first run that covers the eventual report extent rather than running narrow then expanding.",
+         "Be respectful of the OpenStreetMap tile-server usage policy (https://operations.osmfoundation.org/policies/tiles/); the local cache is partly there for that reason."],
+        ["Execute o relatório uma vez numa AOI representativa antes de um workshop ou demonstração ao vivo para que a cache esteja preparada.",
+         "A cache é portátil: copiar output/tile_cache/ entre máquinas ou projectos que cobrem a mesma área evita totalmente a fase de descarga.",
+         "Se gerar relatórios com frequência e a resposta do servidor de azulejos for lenta, prefira uma primeira execução ampla que cubra a extensão final do relatório, em vez de começar com uma área pequena e ir alargando.",
+         "Respeite a política de utilização do servidor de azulejos do OpenStreetMap (https://operations.osmfoundation.org/policies/tiles/); a cache local existe parcialmente por essa razão."]))
     add(PB())
 
     # =========================================================================
