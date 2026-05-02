@@ -97,7 +97,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QScrollArea, QFrame, QSizePolicy,
     QMessageBox, QFileDialog, QHeaderView, QSplitter,
 )
-from PySide6.QtGui import QPixmap, QIcon, QFont, QColor, QPalette, QDesktopServices
+from PySide6.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QColor, QPalette, QDesktopServices
 from PySide6.QtCore import Qt, QTimer, QUrl, QSize
 
 import subprocess
@@ -2986,14 +2986,14 @@ class MesaMainWindow(QMainWindow):
                  "Import assets and edit asset groups in one tool."),
                 ("Geocodes", geocodes_grids,
                  "Create or refresh the hexagon/tile grids that support analysis."),
-                ("Lines", edit_lines,
-                 "Import and edit lines (transport, rivers, utilities, etc)."),
                 ("Atlas", make_atlas,
                  "Create/import atlas polygons and edit atlas page metadata in one tool."),
             ]),
             ("Configure (step 2)", "Tune parameters/study areas before running heavy jobs.", [
                 ("Parameters", edit_processing_setup,
                  "Adjust weights, thresholds and other processing rules."),
+                ("Lines", edit_lines,
+                 "Import and edit lines (transport, rivers, utilities, etc)."),
                 ("Analysis", open_data_analysis_setup,
                  "Define analysis groups and study area polygons."),
             ]),
@@ -3279,14 +3279,19 @@ class MesaMainWindow(QMainWindow):
             table.addWidget(hdr_r, 0, 1, Qt.AlignRight)
 
             cells = []
+            # Reserve room for up to two wrapped lines per row so labels like
+            # "Analysis (tbl_stacked)" don't get clipped when the column is narrow.
+            row_min_h = QFontMetrics(QFont("Segoe UI", 9)).height() * 2 + 4
             for i in range(num_rows):
                 k_lbl = QLabel("--")
                 k_lbl.setWordWrap(True)
+                k_lbl.setMinimumHeight(row_min_h)
                 v_lbl = QLabel("")
-                v_lbl.setAlignment(Qt.AlignRight)
+                v_lbl.setAlignment(Qt.AlignRight | Qt.AlignTop)
                 v_lbl.setFixedWidth(70)
-                table.addWidget(k_lbl, i + 1, 0, Qt.AlignLeft)
-                table.addWidget(v_lbl, i + 1, 1, Qt.AlignRight)
+                table.setRowMinimumHeight(i + 1, row_min_h)
+                table.addWidget(k_lbl, i + 1, 0, Qt.AlignLeft | Qt.AlignTop)
+                table.addWidget(v_lbl, i + 1, 1, Qt.AlignRight | Qt.AlignTop)
                 cells.append((k_lbl, v_lbl))
 
             group_layout.addLayout(table)
@@ -3733,8 +3738,8 @@ class MesaMainWindow(QMainWindow):
             stacked_count = _parquet_row_count(stacked_path) if stacked_path else None
             flat_count = _parquet_row_count(flat_path) if flat_path else None
             return [
-                ("Analysis layer objects", "--" if stacked_count is None else str(stacked_count)),
-                ("Presentation layer objects", "--" if flat_count is None else str(flat_count)),
+                ("Analysis (tbl_stacked)", "--" if stacked_count is None else str(stacked_count)),
+                ("Presentation (tbl_flat)", "--" if flat_count is None else str(flat_count)),
             ]
         except Exception as exc:
             return [("Unable to read results:", ""), (str(exc)[:160], "")]
@@ -4276,5 +4281,19 @@ QRadioButton::indicator:checked {{
 
     main_window = MesaMainWindow()
     main_window.show()
+
+    # Devtools hook: when MESA_DEVTOOLS_POPUP is set to a known popup key, open
+    # that popup automatically once the main window has rendered. Used by
+    # devtools/capture_ui_active_batch.py to capture popup-only screenshots
+    # without having to drive the UI via click coordinates.
+    _devtools_popup = os.environ.get("MESA_DEVTOOLS_POPUP", "").strip().lower()
+    if _devtools_popup:
+        _popup_dispatch = {
+            "tune": main_window._open_tune_processing,
+            "geonode": main_window._open_geonode_publisher,
+        }
+        _popup_call = _popup_dispatch.get(_devtools_popup)
+        if _popup_call is not None:
+            QTimer.singleShot(2000, _popup_call)
 
     sys.exit(app.exec())
