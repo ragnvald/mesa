@@ -940,30 +940,37 @@ class ReportEngine:
             layers = [
                 (
                     "sensitivity_max", "Sensitive areas (A–E)", "sensitivity",
-                    "For each geocode cell, this map shows the <b>highest sensitivity class</b> (A–E) found "
-                    "among all assets overlapping the cell. It is a worst-case view: a single A-rated asset "
-                    "is enough to colour the cell as A, even if many lower-rated assets also overlap. The "
-                    "polygon-fallback variant (used when raster tiles are missing) shows the same data drawn "
-                    "as analysis polygons rather than rasterised tiles.",
+                    "For each geocode cell, this map shows the <b>highest sensitivity class</b> (A–E, derived from "
+                    "the <code>sensitivity_max</code> field) found among all assets overlapping the cell. It is a "
+                    "worst-case view: a single A-rated asset is enough to colour the cell as A, even if many "
+                    "lower-rated assets also overlap. Pair this with the <b>Sensitivity index</b> later in the "
+                    "report — the max highlights the single highest class present, while the index reflects "
+                    "accumulated weighted overlap. The polygon-fallback variant (used when raster tiles are "
+                    "missing) shows the same data drawn as analysis polygons rather than rasterised tiles.",
                 ),
                 (
                     "importance_max", "Importance (max)", "importance_max",
-                    "Per-cell <b>highest importance value</b> among overlapping assets. Use this to spot "
-                    "where the most important features are, regardless of how many lower-importance assets "
-                    "share the cell. Compare against the Importance index (later section) to see how much "
-                    "of the picture is driven by a few standout assets versus broad accumulation.",
+                    "Per-cell <b>highest importance class</b> (typically 1–5, from <code>importance_max</code>) "
+                    "among overlapping assets. Use this to spot where the most important features are, regardless "
+                    "of how many lower-importance assets share the cell. Pair with the <b>Importance index</b> "
+                    "later in the report to distinguish a single standout asset (high max, low index) from broad "
+                    "accumulation (mid max, high index).",
                 ),
                 (
                     "groupstotal", "# asset groups", "groupstotal",
-                    "Per-cell <b>count of distinct asset groups</b> overlapping the cell. High values "
-                    "indicate cells where many different kinds of features coincide (a multi-themed "
-                    "hotspot), regardless of how many individual asset objects are involved.",
+                    "Per-cell <b>count of distinct asset groups</b> overlapping the cell (from "
+                    "<code>asset_groups_total</code>). This is a <b>diversity</b> indicator: high values indicate "
+                    "cells where many different kinds of features coincide (a multi-themed hotspot), independent "
+                    "of how many individual asset objects are involved. The names of the contributing groups are "
+                    "kept in <code>asset_group_names</code>.",
                 ),
                 (
                     "assetstotal", "# asset objects", "assetstotal",
-                    "Per-cell <b>count of asset objects</b> overlapping the cell. Reads as a density map: "
-                    "high values mean many assets are stacked here. Compared with &ldquo;# asset groups&rdquo;, "
-                    "this map is sensitive to the sheer number of objects, not the diversity of groups.",
+                    "Per-cell <b>count of asset objects</b> overlapping the cell (from "
+                    "<code>assets_overlap_total</code>). This is a <b>density</b> indicator: high values mean many "
+                    "individual features are stacked here, regardless of group diversity. Pair with "
+                    "<b>&ldquo;# asset groups&rdquo;</b> to distinguish &ldquo;lots of one thing&rdquo; (1 group, 50 objects) from "
+                    "&ldquo;diverse mix, but thin&rdquo; (5 groups, 5 objects).",
                 ),
             ]
 
@@ -1192,14 +1199,23 @@ class ReportEngine:
                     "that overlaps each geocode cell into a single 0–100 score per cell.",
                 "map_intro": (
                     "The <b>Sensitivity index</b> shows where features that are <b>vulnerable to pressure or change</b> "
-                    "concentrate on the map. The sensitivity values of all assets overlapping a cell are combined "
-                    "with the configured sensitivity weights, summed, and rescaled to a <b>0–100</b> range within the "
-                    "current <b>{basic}</b> grouping.",
-                    "High values flag cells where disturbance or new activity is most likely to cause harm; low "
-                    "values are areas with little sensitive content overlapping. Like the importance map, the scale "
-                    "is <b>relative</b> to this study area — a 100 means &ldquo;the most sensitive cell here&rdquo;, not an "
-                    "absolute sensitivity rating. Use this map to target survey and mitigation effort and to screen "
-                    "plans against the most vulnerable cells.",
+                    "concentrate on the map. For each geocode cell, MESA performs three steps: "
+                    "<b>(1) count</b> overlaps per sensitivity-product value (importance × susceptibility, in "
+                    "{1, 2, 3, …, 25}), "
+                    "<b>(2) weight</b> those counts using <code>index_sensitivity_weights</code> from <b>Parameters</b> "
+                    "and sum to a raw score, and "
+                    "<b>(3) rank</b> the cell against all others in the current <b>{basic}</b> grouping by rescaling "
+                    "to <b>0–100</b>.",
+                    "Defaults for the sensitivity weights are <b>flat</b> because the sensitivity-product values themselves "
+                    "already encode magnitude — a product of 25 is intrinsically 25× a product of 1. With flat defaults "
+                    "the index reduces to a weighted count of sensitive overlaps. Raise individual weights to "
+                    "over-emphasise particular sensitivity levels (e.g. push the weight on 25 to make cells with "
+                    "extreme overlaps rise sharply).",
+                    "Read the colour ramp as a <b>relative</b> measure: a 100 means &ldquo;the most sensitive cell here&rdquo;, "
+                    "not an absolute sensitivity rating. Use this map to target survey and mitigation effort and to "
+                    "screen plans against the most vulnerable cells. Pair it with <b>Sensitive areas (A–E)</b> earlier "
+                    "in the report — that map shows the single highest sensitivity class present in each cell, while "
+                    "this index reflects accumulated weighted overlap.",
                 ),
             },
             "index_owa": {
@@ -1208,13 +1224,17 @@ class ReportEngine:
                     "scale by giving more weight to its highest-sensitivity overlaps than to its many low ones.",
                 "map_intro": (
                     "The <b>OWA index</b> is a <b>precautionary</b> companion to the Sensitivity index. Instead of "
-                    "averaging asset sensitivities, it counts how many assets in each sensitivity class overlap a "
-                    "cell, then ranks cells <b>lexicographically</b> from the highest sensitivity class downwards. A "
-                    "single very-sensitive touch therefore outranks many mildly-sensitive touches. The ranks are "
-                    "rescaled to <b>0–100</b> within the current <b>{basic}</b> grouping; cells with no overlapping "
-                    "sensitive assets remain at 0.",
-                    "Read this map as the answer to &ldquo;<i>where would the worst case be worst?</i>&rdquo; Compared with the "
-                    "Sensitivity map, OWA tends to push isolated high-sensitivity hits up the ranking and is the "
+                    "summing weighted counts, it ranks cells <b>lexicographically</b> on their per-class count "
+                    "vector, examined from the highest sensitivity class downwards. The ranks are rescaled to "
+                    "<b>0–100</b> within the current <b>{basic}</b> grouping; cells with no overlapping sensitive "
+                    "assets remain at 0.",
+                    "<i>Worked example.</i> A cell containing even <b>one</b> overlap at sensitivity 25 outranks "
+                    "every cell that has zero overlaps at 25, regardless of how many lower-class overlaps the "
+                    "second cell has. Among cells that all have one overlap at 25, the next deciding criterion is "
+                    "the count at 24, then 23, and so on. The rule is fixed — there are no tunable weights for "
+                    "OWA — and uses only the sensitivity counts produced earlier in the pipeline.",
+                    "Read this map as the answer to &ldquo;<i>where would the worst case be worst?</i>&rdquo; Compared with "
+                    "the Sensitivity index, OWA pushes isolated high-sensitivity hits up the ranking and is the "
                     "more conservative choice when any extreme-sensitivity overlap should dominate the result. Use "
                     "it for precautionary screening and red-flag mapping.",
                 ),
@@ -4410,14 +4430,27 @@ def generate_report(base_dir: str,
             set_progress(55 if include_atlas_maps else 45)
 
         # ---- Index statistics (basic_mosaic only; each index includes its map page) ----
+        # Pick up where the per-geocode block actually ended so the bar moves
+        # monotonically forward. The previous block ends at one of four marks
+        # depending on whether atlas and other-maps ran:
+        #   atlas + other_maps : 75    atlas + no other_maps : 55
+        #   no atlas + other_maps : 68    no atlas + no other_maps : 45
+        if include_atlas_maps:
+            _index_start = 75 if include_other_maps else 55
+        else:
+            _index_start = 68 if include_other_maps else 45
+
         def _progress_indexes(done: int, total: int):
-            start = 45 if include_atlas_maps else 38
             # keep this light: just a small bump in the progress bar
-            set_progress(start + int(5 * done / max(1, total)), f"Rendering index charts ({done}/{total})")
+            set_progress(_index_start + int(5 * done / max(1, total)),
+                         f"Rendering index charts ({done}/{total})")
 
         index_pages = []
         if include_index_statistics and engine is not None:
             index_pages = engine.render_index_statistics(flat_df, cfg, _progress_indexes)
+            # Settle on a clear "indexes done" mark so the next leap to the
+            # compose phase starts from a known baseline.
+            set_progress(_index_start + 5, "Index charts completed.")
         else:
             write_to_log("Skipping index statistics section (not selected).", base_dir)
         # ---- Compose PDF ----
@@ -4683,13 +4716,17 @@ def generate_report(base_dir: str,
             order_list.extend([
                 ('heading(2)', "Index statistics"),
                 ('text',
-                    "MESA produces three composite per-cell indices that condense the asset stack into "
-                    "a single 0–100 score. The <b>Importance index</b> answers &ldquo;where are the most "
+                    "MESA produces three <b>normalised composite indices</b> that condense the asset stack into a "
+                    "single 0–100 score, sitting alongside the four <b>per-cell summary indicators</b> "
+                    "(Sensitive areas (A–E), Importance (max), # asset groups, # asset objects) shown on the "
+                    "preceding &ldquo;Other maps&rdquo; pages. The <b>Importance index</b> answers &ldquo;where are the most "
                     "valuable features?&rdquo;, the <b>Sensitivity index</b> answers &ldquo;where is the most that "
                     "could be harmed?&rdquo;, and the <b>OWA index</b> is a precautionary variant that lets a "
                     "single very-sensitive overlap dominate the result. All three are scaled relative to "
                     "the current study area (most-loaded cell = 100), so the colour ramps are comparable "
-                    "<i>within</i> the report but not across different runs."),
+                    "<i>within</i> the report but not across different runs. The indices reflect ranking; the "
+                    "supplementary indicators reflect raw maxima and counts — read them together to ground-truth "
+                    "what each index summarises."),
                 ('text',
                     "Each index gets a statistics page (area distribution chart) followed by its map. "
                     "Read the three together: an area where Importance and Sensitivity are both high is "
