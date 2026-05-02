@@ -2894,7 +2894,6 @@ class MesaMainWindow(QMainWindow):
         # Build UI
         self._build_header()
         self._build_tabs()
-        self._build_footer()
 
         # System capabilities snapshot (background thread)
         try:
@@ -4202,13 +4201,6 @@ class MesaMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Footer
     # ------------------------------------------------------------------
-    def _build_footer(self):
-        footer = QLabel(mesa_version_display or "MESA")
-        footer.setProperty("role", "footer")
-        footer.setContentsMargins(0, 4, 0, 4)
-        self._main_layout.addWidget(footer)
-
-
 # =====================================================================
 # Entry point
 # =====================================================================
