@@ -173,6 +173,10 @@ def clean_and_prepare() -> None:
         shutil.rmtree(BUILD_FOLDER_ROOT, ignore_errors=True)
 
     BUILD_FOLDER_ROOT.mkdir(parents=True, exist_ok=True)
+    # Pre-create the shared helper-specs directory so parallel PyInstaller
+    # subprocesses don't race on its creation (WinError 183 when two helpers
+    # call os.makedirs at the same time after a clean build).
+    (BUILD_FOLDER_ROOT / "helper_specs").mkdir(parents=True, exist_ok=True)
     FINAL_DIST.mkdir(parents=True, exist_ok=True)
     TOOLS_DIST.mkdir(parents=True, exist_ok=True)
 
