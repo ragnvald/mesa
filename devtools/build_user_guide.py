@@ -1215,15 +1215,39 @@ def _add_toc(doc, lang):
     h = doc.add_heading(title, level=1)
     h.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
+    # Word treats a TOC field as well-formed only when:
+    #   1. the begin fldChar carries w:dirty="true" (so Word knows the cached
+    #      result is stale and needs (re)building when the document opens or
+    #      the user presses F9), AND
+    #   2. there is a body run with at least a placeholder <w:t> between the
+    #      separate and end fldChars — without it Word silently refuses to
+    #      update the field.
+    # Both were missing from the previous renderer, which is why F9 did not
+    # engage in the generated docx.
     p = doc.add_paragraph()
     run = p.add_run()
+
     fld_char_begin = OxmlElement("w:fldChar")
     fld_char_begin.set(qn("w:fldCharType"), "begin")
+    fld_char_begin.set(qn("w:dirty"), "true")
+
     instr_text = OxmlElement("w:instrText")
     instr_text.set(qn("xml:space"), "preserve")
     instr_text.text = r'TOC \o "1-3" \h \z \u'
+
     fld_char_separate = OxmlElement("w:fldChar")
     fld_char_separate.set(qn("w:fldCharType"), "separate")
+
+    placeholder_t = OxmlElement("w:t")
+    placeholder_t.set(qn("xml:space"), "preserve")
+    placeholder_t.text = (
+        "Right-click here and choose Update Field (or press F9) "
+        "to build the table of contents."
+        if lang == "en" else
+        "Clique com o botão direito aqui e seleccione Actualizar Campo "
+        "(ou prima F9) para criar o índice."
+    )
+
     fld_char_end = OxmlElement("w:fldChar")
     fld_char_end.set(qn("w:fldCharType"), "end")
 
@@ -1231,17 +1255,13 @@ def _add_toc(doc, lang):
     r_element.append(fld_char_begin)
     r_element.append(instr_text)
     r_element.append(fld_char_separate)
+    r_element.append(placeholder_t)
     r_element.append(fld_char_end)
 
-    placeholder = doc.add_paragraph()
-    placeholder.add_run(
-        "(Right-click → Update Field in Microsoft Word to populate the table of contents.)"
-        if lang == "en" else
-        "(Clique com o botão direito → Actualizar Campo no Microsoft Word para preencher o índice.)"
-    ).italic = True
-
-    p = doc.add_paragraph()
-    p.add_run().add_break(WD_BREAK.PAGE)
+    # Page break after the TOC area so the first chapter starts on a fresh page
+    # whether or not the field has been refreshed yet.
+    pb = doc.add_paragraph()
+    pb.add_run().add_break(WD_BREAK.PAGE)
 
 
 def _set_orientation(section, landscape):
