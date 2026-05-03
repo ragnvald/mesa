@@ -96,6 +96,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QPlainTextEdit, QTableWidget,
     QTableWidgetItem, QScrollArea, QFrame, QSizePolicy,
     QMessageBox, QFileDialog, QHeaderView, QSplitter,
+    QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit,
 )
 from PySide6.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QColor, QPalette, QDesktopServices
 from PySide6.QtCore import Qt, QTimer, QUrl, QSize
@@ -3739,42 +3740,145 @@ class MesaMainWindow(QMainWindow):
         self._populate_two_col_table(self._analysis_cells, self._fetch_analysis_summary())
 
     # ---- Tab 3: Config ----
+    # User-editable settings shown on the Config tab. Grouped by column —
+    # each domain is one QGroupBox containing the relevant fields stacked
+    # vertically. Anything outside this list is a tuning / developer knob
+    # and stays behind the Tune processing popup or the "Open settings file
+    # (advanced)" button. Per-field tuple:
+    #   (key, label, kind, opts, help_text)
+    # kind: "int" | "float" | "choice"; opts carries min/max/step/decimals/choices.
+    _CONFIG_GROUPS = [
+        ("Buffers", [
+            ("default_line_buffer_m", "Default line buffer (m)", "int",
+             {"min": 0, "max": 10000, "step": 5},
+             "Lines without an area get this buffer when imported, so they still "
+             "contribute to processing."),
+            ("default_point_buffer_m", "Default point buffer (m)", "int",
+             {"min": 0, "max": 10000, "step": 5},
+             "Points without an area get this buffer when imported, so they still "
+             "contribute to processing."),
+        ]),
+        ("Tile zoom", [
+            ("tiles_minzoom", "Minimum zoom level", "int",
+             {"min": 0, "max": 22, "step": 1},
+             "Lowest zoom level rendered into the map tiles (smaller = more "
+             "zoomed out, fewer tiles)."),
+            ("tiles_maxzoom", "Maximum zoom level", "int",
+             {"min": 0, "max": 22, "step": 1},
+             "Highest zoom level rendered. Each extra level roughly quadruples "
+             "tile count, processing time, and disk size."),
+        ]),
+        ("Segments", [
+            ("segment_width", "Segment width (m)", "int",
+             {"min": 1, "max": 100000, "step": 50},
+             "Cross-line buffer used when intersecting segments with assets. "
+             "Wider = thicker corridor."),
+            ("segment_length", "Segment length (m)", "int",
+             {"min": 1, "max": 100000, "step": 50},
+             "How far apart cuts are made along the line. Shorter = more, "
+             "finer segments (and more processing)."),
+        ]),
+        ("Atlas", [
+            ("atlas_lon_size_km", "Longitude size (km)", "float",
+             {"min": 0.1, "max": 10000.0, "step": 1.0, "decimals": 2},
+             "Default east-west extent of one atlas page."),
+            ("atlas_lat_size_km", "Latitude size (km)", "float",
+             {"min": 0.1, "max": 10000.0, "step": 1.0, "decimals": 2},
+             "Default north-south extent of one atlas page."),
+            ("atlas_overlap_percent", "Page overlap (%)", "float",
+             {"min": 0.0, "max": 100.0, "step": 1.0, "decimals": 1},
+             "How much adjacent atlas pages overlap, so features near a page "
+             "edge are still visible on the neighbour."),
+        ]),
+    ]
+
     def _build_config_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        intro = QLabel("Edit config.ini directly. Changes are saved when you press Save.")
+        intro = QLabel(
+            "Common project defaults. Edit the values you need and press "
+            "<b>Save all</b> to apply them."
+        )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         self._config_status_label = QLabel("")
         self._config_status_label.setProperty("role", "muted")
+        self._config_status_label.setWordWrap(True)
         layout.addWidget(self._config_status_label)
 
-        self._config_editor = QPlainTextEdit()
-        self._config_editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-        layout.addWidget(self._config_editor, stretch=1)
+        # One QGroupBox per domain, side by side. Each box stacks its fields
+        # vertically; inputs sit at their natural width (left-aligned, no stretch).
+        cols_host = QWidget()
+        cols = QHBoxLayout(cols_host)
+        cols.setContentsMargins(0, 0, 0, 0)
+        cols.setSpacing(10)
 
+        self._config_widgets: dict = {}  # key -> (widget, kind, opts)
+        for group_title, fields in self._CONFIG_GROUPS:
+            box = QGroupBox(group_title)
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(10, 8, 10, 10)
+            box_layout.setSpacing(10)
+
+            for key, label, kind, opts, help_text in fields:
+                field_label = QLabel(label)
+                field_label.setStyleSheet("font-weight: 600;")
+                box_layout.addWidget(field_label)
+
+                widget = self._make_config_widget(kind, opts)
+                widget.setToolTip(help_text)
+                # Keep input widgets at their natural width — values here are
+                # rarely more than a few digits, so a 110 px cap reads cleanly
+                # without empty padding.
+                widget.setMaximumWidth(110)
+                widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+                box_layout.addWidget(widget, alignment=Qt.AlignLeft)
+
+                help_label = QLabel(help_text)
+                help_label.setWordWrap(True)
+                help_label.setProperty("role", "muted")
+                help_label.setStyleSheet("font-size: 11px;")
+                box_layout.addWidget(help_label)
+
+                self._config_widgets[key] = (widget, kind, opts)
+
+            box_layout.addStretch()
+            cols.addWidget(box)
+
+        layout.addWidget(cols_host)
+        layout.addStretch()
+
+        # Button row: Tune processing | Open settings file (advanced) | spacer | Reload | Save all
         btn_row = QHBoxLayout()
-        # Tune processing lives behind a deliberate click rather than as its
-        # own top-level tab — the worker / RAM / batch settings it mutates
-        # should not be encountered casually while looking at the regular
-        # config editor.
         tune_btn = QPushButton("Tune processing…")
         tune_btn.setToolTip(
-            "Open a popup that compares current processing settings against "
-            "values derived from this computer's CPU and RAM, and lets you "
-            "commit the recommended values to config.ini."
+            "Compare current processing settings against values derived from "
+            "this computer's CPU and RAM, and apply the recommended values."
         )
         tune_btn.clicked.connect(self._open_tune_processing)
         btn_row.addWidget(tune_btn)
+
+        open_btn = QPushButton("Open settings file (advanced)…")
+        open_btn.setToolTip(
+            "Open the underlying settings file in your operating system's "
+            "default text editor. Only needed for power users who want to "
+            "change a setting that is not exposed on this tab."
+        )
+        open_btn.clicked.connect(self._open_config_file_externally)
+        btn_row.addWidget(open_btn)
+
         btn_row.addStretch()
         reload_btn = QPushButton("Reload")
+        reload_btn.setToolTip("Discard unsaved edits and re-read the saved values.")
         reload_btn.clicked.connect(self._load_config_editor)
         btn_row.addWidget(reload_btn)
-        save_btn = QPushButton("Save")
+        save_btn = QPushButton("Save all")
         save_btn.setProperty("role", "success")
+        save_btn.setToolTip("Apply all edited values.")
         save_btn.clicked.connect(self._save_config_editor)
         btn_row.addWidget(save_btn)
         layout.addLayout(btn_row)
@@ -3782,24 +3886,92 @@ class MesaMainWindow(QMainWindow):
         self._tabs.addTab(tab, "Config")
         self._load_config_editor()
 
+    def _make_config_widget(self, kind, opts):
+        if kind == "int":
+            sb = QSpinBox()
+            sb.setRange(int(opts.get("min", 0)), int(opts.get("max", 1_000_000_000)))
+            if "step" in opts:
+                sb.setSingleStep(int(opts["step"]))
+            sb.setGroupSeparatorShown(True)
+            return sb
+        if kind == "float":
+            dsb = QDoubleSpinBox()
+            dsb.setRange(float(opts.get("min", 0.0)), float(opts.get("max", 1e9)))
+            dsb.setDecimals(int(opts.get("decimals", 2)))
+            if "step" in opts:
+                dsb.setSingleStep(float(opts["step"]))
+            return dsb
+        if kind == "choice":
+            cb = QComboBox()
+            cb.addItems([str(c) for c in opts.get("choices", [])])
+            return cb
+        # fallback: free-form text
+        return QLineEdit()
+
+    def _config_widget_value(self, widget, kind):
+        if kind == "int":
+            return str(int(widget.value()))
+        if kind == "float":
+            return str(float(widget.value()))
+        if kind == "choice":
+            return widget.currentText()
+        return widget.text()
+
+    def _config_widget_set(self, widget, kind, raw_value):
+        if raw_value is None:
+            return
+        s = str(raw_value).strip()
+        try:
+            if kind == "int":
+                widget.setValue(int(float(s)))
+            elif kind == "float":
+                widget.setValue(float(s))
+            elif kind == "choice":
+                idx = widget.findText(s)
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+                else:
+                    widget.addItem(s)
+                    widget.setCurrentText(s)
+            else:
+                widget.setText(s)
+        except (TypeError, ValueError):
+            # Out-of-range or unparseable value in config.ini — leave widget at
+            # its default and surface in the status line on next save.
+            pass
+
     def _load_config_editor(self):
         try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                self._config_editor.setPlainText(f.read())
-            self._config_status_label.setText(f"Loaded: {config_file}")
+            cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
+            cfg.read(config_file, encoding="utf-8")
+            for key, (widget, kind, _opts) in self._config_widgets.items():
+                if cfg.has_option("DEFAULT", key):
+                    self._config_widget_set(widget, kind, cfg.get("DEFAULT", key))
+            self._config_status_label.clear()
         except Exception as e:
-            self._config_status_label.setText(f"Error loading config: {e}")
+            self._config_status_label.setText(f"Could not load settings: {e}")
 
     def _save_config_editor(self):
         try:
-            text = self._config_editor.toPlainText()
-            with open(config_file, "w", encoding="utf-8") as f:
-                f.write(text)
-            self._config_status_label.setText(f"Saved: {config_file}")
-            log_to_logfile("Config saved from editor")
+            updates = {}
+            for key, (widget, kind, _opts) in self._config_widgets.items():
+                updates[key] = self._config_widget_value(widget, kind)
+            self._update_default_keys_preserve_comments(config_file, updates)
+            self._config_status_label.setText("All changes saved.")
+            log_to_logfile(f"Config tab saved {len(updates)} settings")
         except Exception as e:
-            self._config_status_label.setText(f"Error saving config: {e}")
+            self._config_status_label.setText(f"Could not save changes: {e}")
             log_to_logfile(f"Config save error: {e}")
+
+    def _open_config_file_externally(self):
+        try:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(config_file))
+            if not opened:
+                self._config_status_label.setText(
+                    f"Could not open {config_file} via the system default editor."
+                )
+        except Exception as e:
+            self._config_status_label.setText(f"Error opening config: {e}")
 
     def _open_tune_processing(self):
         """Show the standalone Tune processing window (lazily constructed)."""
