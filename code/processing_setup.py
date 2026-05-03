@@ -971,6 +971,61 @@ class _NumericTableItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
+class _EditableCellsTable(QTableWidget):
+    """QTableWidget that skips non-editable cells on Tab / Shift+Tab.
+
+    The Sensitivity tab has six columns but only Importance and Susceptibility
+    are user-editable. Default Qt navigation tabs through every cell, which is
+    a dead-end UX for keyboard users. moveCursor() is the right hook — it
+    fires for Tab/Shift+Tab whether or not a cell editor is open (the view
+    commits the editor first, then asks moveCursor where to go next), so we
+    return the index of the next editable cell directly.
+    """
+
+    def moveCursor(self, action, modifiers):
+        if action in (
+            QAbstractItemView.MoveNext,
+            QAbstractItemView.MovePrevious,
+        ):
+            idx = self._next_editable_index(forward=(action == QAbstractItemView.MoveNext))
+            if idx is not None:
+                return idx
+        return super().moveCursor(action, modifiers)
+
+    def _next_editable_index(self, forward):
+        rows = self.rowCount()
+        cols = self.columnCount()
+        if rows == 0 or cols == 0:
+            return None
+
+        cur = self.currentIndex()
+        r = cur.row() if cur.isValid() else -1
+        c = cur.column() if cur.isValid() else -1
+        if r < 0 or c < 0:
+            # No active cell yet — start just before the first / after the last
+            # so the first step lands on the right end.
+            if forward:
+                r, c = 0, -1
+            else:
+                r, c = rows - 1, cols
+        step = 1 if forward else -1
+
+        for _ in range(rows * cols):
+            c += step
+            if c >= cols:
+                c, r = 0, r + 1
+                if r >= rows:
+                    r = 0  # wrap to top
+            elif c < 0:
+                c, r = cols - 1, r - 1
+                if r < 0:
+                    r = rows - 1  # wrap to bottom
+            item = self.item(r, c)
+            if item is not None and (item.flags() & Qt.ItemIsEditable):
+                return self.model().index(r, c)
+        return None
+
+
 class SetupWindow(QMainWindow):
 
     def __init__(self, base_dir: str, start_tab: str = "sensitivity"):
@@ -1234,7 +1289,7 @@ class SetupWindow(QMainWindow):
         layout.addWidget(info)
 
         headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]
-        table = QTableWidget(0, len(headers), parent)
+        table = _EditableCellsTable(0, len(headers), parent)
         table.setHorizontalHeaderLabels(headers)
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
