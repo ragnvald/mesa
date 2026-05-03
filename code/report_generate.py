@@ -4565,7 +4565,11 @@ def generate_report(base_dir: str,
             contents_lines.append("- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)")
         contents_text = "<br/>".join(contents_lines)
 
-        about_path = os.path.join(base_dir, "docs", "report_about.md")
+        # Templates live under docs/templates/ from MESA 5.0.2+; fall back to
+        # docs/ for older project layouts where the file sat at the docs root.
+        about_path = os.path.join(base_dir, "docs", "templates", "report_about.md")
+        if not os.path.exists(about_path):
+            about_path = os.path.join(base_dir, "docs", "report_about.md")
         about_text = _urls_to_footnotes(_read_text_file(about_path)).strip() if os.path.exists(about_path) else ""
 
         # Build initial order_list up to About section
@@ -4574,7 +4578,7 @@ def generate_report(base_dir: str,
             ('text', f"Timestamp: {timestamp}"),
             ('spacer', 2),
             ('heading(2)', "About this report"),
-            ('text', about_text or "(About text missing: docs/report_about.md)"),
+            ('text', about_text or "(About text missing: docs/templates/report_about.md)"),
             ('rule', None),
             # Insert a Word TOC field after About section
             ('toc', None),
