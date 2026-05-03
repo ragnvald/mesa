@@ -1057,6 +1057,85 @@ def _set_cell_shading(cell, hex_color):
     tc_pr.append(shd)
 
 
+def _ol_fresh_num_id(doc):
+    """Return a freshly minted numId that restarts at 1 at level 0,
+    using the same abstract numbering as the document's 'List Number' style.
+
+    Without this, every paragraph styled "List Number" shares one numbering
+    instance and Word continues the counter across distinct OL blocks (so the
+    second list begins at 4 instead of 1).
+    """
+    try:
+        numbering = doc.part.numbering_part.element
+    except Exception:
+        return None
+
+    existing = numbering.findall(qn('w:num'))
+    next_id = (max((int(n.get(qn('w:numId'))) for n in existing), default=0)) + 1
+
+    abstract_num_id = None
+    try:
+        style = doc.styles['List Number']
+        style_pPr = style.element.find(qn('w:pPr'))
+        if style_pPr is not None:
+            numPr = style_pPr.find(qn('w:numPr'))
+            if numPr is not None:
+                numId_el = numPr.find(qn('w:numId'))
+                if numId_el is not None:
+                    src_num_id = numId_el.get(qn('w:val'))
+                    for n in existing:
+                        if n.get(qn('w:numId')) == src_num_id:
+                            abst = n.find(qn('w:abstractNumId'))
+                            if abst is not None:
+                                abstract_num_id = abst.get(qn('w:val'))
+                            break
+    except KeyError:
+        pass
+
+    if abstract_num_id is None:
+        for an in numbering.findall(qn('w:abstractNum')):
+            lvl = an.find(qn('w:lvl'))
+            if lvl is not None:
+                fmt = lvl.find(qn('w:numFmt'))
+                if fmt is not None and fmt.get(qn('w:val')) == 'decimal':
+                    abstract_num_id = an.get(qn('w:abstractNumId'))
+                    break
+    if abstract_num_id is None:
+        return None
+
+    new_num = OxmlElement('w:num')
+    new_num.set(qn('w:numId'), str(next_id))
+    abst_el = OxmlElement('w:abstractNumId')
+    abst_el.set(qn('w:val'), str(abstract_num_id))
+    new_num.append(abst_el)
+    lvl_override = OxmlElement('w:lvlOverride')
+    lvl_override.set(qn('w:ilvl'), '0')
+    start_override = OxmlElement('w:startOverride')
+    start_override.set(qn('w:val'), '1')
+    lvl_override.append(start_override)
+    new_num.append(lvl_override)
+    numbering.append(new_num)
+    return next_id
+
+
+def _add_ol_item(doc, text, num_id):
+    p = doc.add_paragraph(text, style='List Number')
+    if num_id is None:
+        return p
+    pPr = p._p.get_or_add_pPr()
+    for existing_numPr in pPr.findall(qn('w:numPr')):
+        pPr.remove(existing_numPr)
+    numPr = OxmlElement('w:numPr')
+    ilvl = OxmlElement('w:ilvl')
+    ilvl.set(qn('w:val'), '0')
+    numPr.append(ilvl)
+    numId_el = OxmlElement('w:numId')
+    numId_el.set(qn('w:val'), str(num_id))
+    numPr.append(numId_el)
+    pPr.append(numPr)
+    return p
+
+
 def _add_cover(doc, lang):
     if lang == "en":
         title = "MESA User Guide"
@@ -1212,8 +1291,9 @@ def render(blocks, lang, out_path):
 
         elif kind == "OL":
             _, content = block
+            ol_num_id = _ol_fresh_num_id(doc)
             for item in content[lang]:
-                doc.add_paragraph(item, style="List Number")
+                _add_ol_item(doc, item, ol_num_id)
 
         elif kind == "IMG":
             _, filename, caption, width_cm, want_landscape = block
