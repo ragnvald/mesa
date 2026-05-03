@@ -9,12 +9,26 @@ set "MESA_BUILD_CLEAN=1"
 set "MESA_HELPERS="
 set "MESA_HELPERS_SKIP="
 
+REM Default to 4-way parallel (5 helpers + main = 6 PyInstaller invocations).
+REM Override with the env var or with the "serial" / "parallel N" arg below.
+if not defined MESA_BUILD_PARALLEL set "MESA_BUILD_PARALLEL=4"
+
 REM Optional: pass "fast" to skip PyInstaller clean (faster rebuilds, less reliable if deps changed)
 if /I "%~1"=="fast" (
   set "MESA_BUILD_CLEAN=0"
 )
 
-echo [MESA] Full build enforced: MESA_BUILD_MAIN=1, MESA_BUILD_HELPERS=1, MESA_BUILD_CLEAN=%MESA_BUILD_CLEAN%
+REM Optional: pass "serial" to force sequential builds (safer on memory-tight hosts).
+if /I "%~1"=="serial" (
+  set "MESA_BUILD_PARALLEL=1"
+)
+
+REM Optional: pass "parallel N" to override the worker count.
+if /I "%~1"=="parallel" if not "%~2"=="" (
+  set "MESA_BUILD_PARALLEL=%~2"
+)
+
+echo [MESA] Full build enforced: MESA_BUILD_MAIN=1, MESA_BUILD_HELPERS=1, MESA_BUILD_CLEAN=%MESA_BUILD_CLEAN%, MESA_BUILD_PARALLEL=%MESA_BUILD_PARALLEL%
 
 REM Capture start time (FileTime ticks) to compute total duration later
 for /f %%I in ('powershell -NoLogo -Command "(Get-Date).ToFileTimeUtc()"') do set "START_TICKS=%%I"

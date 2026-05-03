@@ -5,7 +5,10 @@ import sys
 import os
 import json
 import shutil
+import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +61,23 @@ CLEAN_BUILD = os.environ.get("MESA_BUILD_CLEAN", "0").strip().lower() in {"1", "
 # Build toggles (defaults keep current behavior)
 BUILD_HELPERS = os.environ.get("MESA_BUILD_HELPERS", "1").strip().lower() not in {"0", "false", "no"}
 BUILD_MAIN = os.environ.get("MESA_BUILD_MAIN", "1").strip().lower() not in {"0", "false", "no"}
+
+# Parallelism: how many PyInstaller invocations may run concurrently.
+# Default 1 = sequential (existing behaviour, safe everywhere). Each parallel
+# PyInstaller analysis transiently holds the full module graph (~2 GB on the
+# GIS-heavy helpers), so the cap is the gating constraint on smaller hosts.
+# Recommended: 4 on 16-core / 64+ GB hosts; 2 on 8-core / 32 GB; 1 on
+# constrained machines or in CI.
+def _resolve_parallel() -> int:
+    raw = os.environ.get("MESA_BUILD_PARALLEL", "1").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        log(f"[NOTE] Invalid MESA_BUILD_PARALLEL='{raw}', falling back to 1")
+        return 1
+    return max(1, n)
+
+BUILD_PARALLEL = _resolve_parallel()
 
 # Helper dependency strategy:
 # - Default: per-helper detection to keep bundles smaller.
@@ -189,14 +209,33 @@ def ensure_pyinstaller() -> None:
         )
 
 def run_pyinstaller(args: list[str]) -> None:
-    # High recursion depth for deep dependency graphs
-    sys.setrecursionlimit(20000)
-    # Avoid picking up stray user-site packages (e.g., lingering CuPy)
-    os.environ.setdefault("PYTHONNOUSERSITE", "1")
-
-    from PyInstaller.__main__ import run
+    # Each invocation runs as its own subprocess. This is required for parallel
+    # builds (PyInstaller leaves global module state in the parent, so two
+    # in-process runs cannot safely overlap), and matches PyInstaller's
+    # documented "one process per build" model. The subprocess inherits stdio
+    # so users still see PyInstaller's progress in the build log.
+    #
+    # The '-c' launcher bumps the recursion limit before importing PyInstaller.
+    # MESA's import graph (PySide6 + pywebview + GIS stack) is deep enough that
+    # PyInstaller's analysis step blows past Python's default 1000-frame limit
+    # on some helpers (asset_map_view in particular).
+    env = os.environ.copy()
+    # Avoid picking up stray user-site packages (e.g., lingering CuPy).
+    env.setdefault("PYTHONNOUSERSITE", "1")
+    launcher = (
+        "import sys; "
+        "sys.setrecursionlimit(20000); "
+        "from PyInstaller.__main__ import run; "
+        "raise SystemExit(run() or 0)"
+    )
+    cmd = [sys.executable, "-c", launcher, *args]
     log("PyInstaller " + " ".join(args))
-    run(args)
+    completed = subprocess.run(cmd, env=env)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"PyInstaller failed (exit code {completed.returncode}). "
+            "See the lines above for the underlying error."
+        )
 
 def add_data_arg(src_path: Path, dest_name: str) -> list[str]:
     """Build a --add-data argument. On Windows, separator is ';'."""
@@ -770,8 +809,8 @@ def main() -> None:
     clean_and_prepare()
     ensure_pyinstaller()
 
+    helpers: list[str] = []
     if BUILD_HELPERS:
-        log("Building helper tools (onefile, per-tool dependency profiles)...")
         helpers = [
             # These 5 remain as standalone subprocess exes:
             # - tiles_create_raster : spawned internally by processing_pipeline_run
@@ -805,18 +844,53 @@ def main() -> None:
             skip = {p.strip() for p in skip_raw.split(",") if p.strip()}
             helpers = [h for h in helpers if h not in skip]
 
+    # Orchestrate helpers and main concurrently when MESA_BUILD_PARALLEL > 1.
+    # Each task is an independent PyInstaller subprocess with its own work
+    # folder; they share nothing on disk except the final dist tree, which
+    # is only touched by build_main (mesa.exe) and the helper outputs go to
+    # tools/. With parallel=1 this devolves to the previous sequential order
+    # (helpers first, then main).
+    log(f"BUILD_PARALLEL = {BUILD_PARALLEL}\n")
+    tasks: list[tuple[str, callable]] = []
+    if BUILD_HELPERS and helpers:
+        log("Building helper tools (onefile, per-tool dependency profiles)...")
         for h in helpers:
-            build_helper(h)
-        log("Helper tools built.\n")
-    else:
+            tasks.append((f"helper:{h}", lambda h=h: build_helper(h)))
+    elif not BUILD_HELPERS:
         log("[NOTE] Skipping helper tools (MESA_BUILD_HELPERS=0).\n")
 
     if BUILD_MAIN:
         log("Building main app (ONEDIR, lean)...")
-        build_main()
-        log("Main app built.\n")
+        tasks.append(("main:mesa", build_main))
     else:
         log("[NOTE] Skipping main app build (MESA_BUILD_MAIN=0).\n")
+
+    if tasks:
+        if BUILD_PARALLEL <= 1 or len(tasks) == 1:
+            for label, fn in tasks:
+                fn()
+        else:
+            workers = min(BUILD_PARALLEL, len(tasks))
+            log(f"Running {len(tasks)} build task(s) with {workers} worker(s) in parallel.")
+            errors: list[tuple[str, BaseException]] = []
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_label = {executor.submit(fn): label for label, fn in tasks}
+                for fut in as_completed(future_to_label):
+                    label = future_to_label[fut]
+                    try:
+                        fut.result()
+                    except BaseException as exc:  # noqa: BLE001 - propagate any failure
+                        errors.append((label, exc))
+                        log(f"[ERROR] Task '{label}' failed: {exc}")
+            if errors:
+                fail(
+                    "Parallel build had failures: "
+                    + ", ".join(label for label, _ in errors)
+                )
+        if BUILD_HELPERS and helpers:
+            log("Helper tools built.\n")
+        if BUILD_MAIN:
+            log("Main app built.\n")
 
     if BUILD_MAIN:
         log("Flattening main app into FINAL_DIST...")
