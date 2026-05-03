@@ -26,6 +26,7 @@ from urllib import request as urlrequest
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import mapping
+from mesa_shared import leaflet_bundle
 from mesa_osm_tiles import (
     OsmTileProxy,
     build_osm_user_agent,
@@ -1275,8 +1276,7 @@ HTML_TEMPLATE = r"""
 <meta charset="utf-8">
 <title>Asset Layers</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+__MESA_LEAFLET_HEAD__
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 <style>
   html, body { height:100%; margin:0; }
@@ -1359,6 +1359,7 @@ HTML_TEMPLATE = r"""
 </style>
 </head>
 <body>
+__MESA_LEAFLET_BODY_OPEN__
 <div class="wrap">
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
@@ -2646,7 +2647,13 @@ def run(base_dir: str) -> None:
 def main() -> None:
     global webview
     webview = _require_webview()
-    html_payload = HTML_TEMPLATE.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url())
+    bundle = leaflet_bundle(include_draw=False)
+    html_payload = (
+        HTML_TEMPLATE
+        .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
+        .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
+        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url())
+    )
     window = webview.create_window(
         title="Asset Layers",
         html=html_payload,

@@ -14,6 +14,7 @@ except Exception:
     STRtree = None
 from pyproj import Geod
 from pathlib import Path
+from mesa_shared import leaflet_bundle
 from mesa_constants import (
     TABLE_FLAT, TABLE_SEGMENT_FLAT, TABLE_SEGMENTS, TABLE_LINES, DEFAULT_CRS,
 )
@@ -1400,8 +1401,7 @@ HTML_TEMPLATE = r"""
 <meta charset="utf-8">
 <title>Maps Overview</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+__MESA_LEAFLET_HEAD__
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 <style>
@@ -1497,6 +1497,7 @@ HTML_TEMPLATE = r"""
   </style>
 </head>
 <body>
+__MESA_LEAFLET_BODY_OPEN__
 <div class="wrap">
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
@@ -2421,7 +2422,16 @@ document.addEventListener('DOMContentLoaded', function(){ if (window.pywebview &
 </html>
 """
 
-HTML = HTML_TEMPLATE
+def _render_html(base_dir=None) -> str:
+    bundle = leaflet_bundle(Path(base_dir) if base_dir else None, include_draw=False)
+    return (
+        HTML_TEMPLATE
+        .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
+        .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
+    )
+
+
+HTML = HTML_TEMPLATE  # populated by _render_html() at startup
 
 def run(base_dir: str) -> None:
     """In-process entry point called by mesa.py via lazy import."""
@@ -2432,6 +2442,8 @@ def run(base_dir: str) -> None:
         )
     # Load the UI from the same local origin as the tile endpoints.
     # This avoids WebView2 opaque-origin (about:blank) restrictions that can block loopback requests.
+    global HTML
+    HTML = _render_html(base_dir)
     _refresh_mbtiles_index()
     mbtiles_base_url = start_mbtiles_server()
     window = webview.create_window(
@@ -2453,6 +2465,7 @@ if __name__ == "__main__":
 
     # Load the UI from the same local origin as the tile endpoints.
     # This avoids WebView2 opaque-origin (about:blank) restrictions that can block loopback requests.
+    HTML = _render_html()
     _refresh_mbtiles_index()
     MBTILES_BASE_URL = start_mbtiles_server()
 

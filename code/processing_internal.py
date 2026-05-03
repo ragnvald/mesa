@@ -2740,6 +2740,73 @@ def _backfill_worker(args):
     except Exception:
         return 0
 
+def _estimate_flatten_peak_gb(files: list[Path],
+                              cfg: configparser.ConfigParser) -> tuple[float, str]:
+    """Estimate flatten's peak RAM use in GB from on-disk tbl_stacked size.
+
+    Model:
+      per_worker_peak_mb = max(min_floor_mb, k_amp * max(largest_part_mb,
+                                                         total_mb / workers))
+      workers_concurrent  = max(flatten_max_workers, flatten_small_max_workers)
+      peak_gb             = parent_overhead_gb + workers_concurrent
+                            * per_worker_peak_mb / 1024
+
+    The two flatten phases (huge / small) run sequentially, so the relevant
+    worker count for peak is the larger of the two pools. ``k_amp`` captures
+    the parquet -> in-memory geopandas amplification (~5-15x for
+    geometry-heavy data); we default to 10 to stay conservative without
+    blowing past reality. Floors and overhead are configurable via
+    ``flatten_preflight_*`` keys; defaults are tuned to match the auto-tune
+    estimates.
+
+    Returns ``(estimated_peak_gb, debug_string)``.
+    """
+    try:
+        sizes_mb = [float(p.stat().st_size) / (1024 ** 2) for p in files if p.exists()]
+    except Exception:
+        sizes_mb = []
+    total_mb = sum(sizes_mb)
+    largest_mb = max(sizes_mb) if sizes_mb else 0.0
+    n_parts = len(sizes_mb)
+
+    try:
+        flatten_workers = max(1, cfg_get_int(cfg, "flatten_max_workers", 1) or 1)
+    except Exception:
+        flatten_workers = 1
+    try:
+        small_workers = max(1, cfg_get_int(cfg, "flatten_small_max_workers", 1) or 1)
+    except Exception:
+        small_workers = 1
+    workers_concurrent = max(flatten_workers, small_workers)
+
+    try:
+        k_amp = max(1.0, cfg_get_float(
+            cfg, "flatten_preflight_amplification", 10.0))
+    except Exception:
+        k_amp = 10.0
+    try:
+        per_worker_floor_mb = max(64.0, cfg_get_float(
+            cfg, "flatten_preflight_per_worker_floor_mb", 500.0))
+    except Exception:
+        per_worker_floor_mb = 500.0
+    try:
+        parent_overhead_gb = max(0.0, cfg_get_float(
+            cfg, "flatten_preflight_parent_overhead_gb", 1.5))
+    except Exception:
+        parent_overhead_gb = 1.5
+
+    even_share_mb = (total_mb / workers_concurrent) if workers_concurrent else total_mb
+    per_worker_peak_mb = max(per_worker_floor_mb, k_amp * max(largest_mb, even_share_mb))
+    workers_peak_gb = workers_concurrent * per_worker_peak_mb / 1024.0
+    peak_gb = parent_overhead_gb + workers_peak_gb
+    debug = (
+        f"parts={n_parts}, total={total_mb:.1f} MB, largest={largest_mb:.1f} MB, "
+        f"workers_peak={workers_concurrent}, k_amp={k_amp:.1f}, "
+        f"per_worker={per_worker_peak_mb:.0f} MB, parent={parent_overhead_gb:.1f} GB"
+    )
+    return peak_gb, debug
+
+
 def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                         *, cleanup_slivers: bool = True,
                         cfg: configparser.ConfigParser | None = None):
@@ -2805,6 +2872,14 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
     index_weights = _load_index_weight_settings(cfg_local)
 
     # 2b. Pre-flight memory check - refuse to start under existing pressure.
+    # Two independent signals are evaluated; abort only if BOTH say no:
+    #   (a) Static gate: system-wide vm.percent above flatten_preflight_max_vm_percent.
+    #   (b) Dataset-aware gate: estimated flatten peak GB (from on-disk
+    #       tbl_stacked size + auto-tuned worker counts) exceeds available RAM
+    #       by more than the configured safety factor.
+    # The old single-signal check rejected small datasets on busy hosts that
+    # had plenty of absolute headroom. See learning.md "Flatten pre-flight
+    # should consider dataset size".
     try:
         preflight_max_pct = max(20, min(95, cfg_get_int(
             cfg_local, "flatten_preflight_max_vm_percent", 60)))
@@ -2815,21 +2890,38 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             cfg_local, "flatten_preflight_max_swap_gb", 5.0))
     except Exception:
         preflight_max_swap_gb = 5.0
+    try:
+        preflight_safety = max(1.0, cfg_get_float(
+            cfg_local, "flatten_preflight_avail_safety_factor", 1.25))
+    except Exception:
+        preflight_safety = 1.25
     if psutil is not None:
         try:
             vm = psutil.virtual_memory()
             sw = psutil.swap_memory()
             vm_pct = float(vm.percent)
             swap_gb = float(sw.used) / (1024 ** 3)
+            avail_gb = float(vm.available) / (1024 ** 3)
+            est_peak_gb, est_detail = _estimate_flatten_peak_gb(files, cfg_local)
+            need_gb = preflight_safety * est_peak_gb
             log_to_gui(
                 log_widget,
                 f"[flatten] pre-flight: vm.percent={vm_pct:.1f}% (limit {preflight_max_pct}%), "
-                f"swap_used={swap_gb:.1f} GB (limit {preflight_max_swap_gb:.1f} GB)"
+                f"swap_used={swap_gb:.1f} GB (limit {preflight_max_swap_gb:.1f} GB), "
+                f"avail={avail_gb:.1f} GB vs est_peak {est_peak_gb:.1f} GB × {preflight_safety:.2f}"
+                f" = need {need_gb:.1f} GB ({est_detail})"
             )
+
+            vm_pct_fail = vm_pct > preflight_max_pct
+            headroom_fail = avail_gb < need_gb
+
             reasons = []
-            if vm_pct > preflight_max_pct:
+            # vm.percent and headroom are dual gates: abort only if BOTH fail.
+            if vm_pct_fail and headroom_fail:
                 reasons.append(
-                    f"vm.percent {vm_pct:.1f}% > {preflight_max_pct}%"
+                    f"vm.percent {vm_pct:.1f}% > {preflight_max_pct}% AND "
+                    f"avail {avail_gb:.1f} GB < {preflight_safety:.2f} × est_peak "
+                    f"{est_peak_gb:.1f} GB = {need_gb:.1f} GB"
                 )
             if swap_gb > preflight_max_swap_gb:
                 reasons.append(
@@ -2842,7 +2934,10 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                     "Host is too memory-constrained to start flatten safely. "
                     "Wait for swap to drain (or restart the process), then "
                     "rerun via run_flatten_only.py to skip the intersect "
-                    "rebuild."
+                    "rebuild. To relax the gate on this host, raise "
+                    "flatten_preflight_avail_safety_factor (default 1.25) or "
+                    "flatten_preflight_max_vm_percent (default 60) in "
+                    "config.ini."
                 )
                 log_to_gui(log_widget, msg)
                 raise RuntimeError(msg)
@@ -3655,8 +3750,7 @@ MAP_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <title>Chunk minimap</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+__MESA_LEAFLET_HEAD__
 <style>
   html, body { height:100%; margin:0; }
   #map { height:100%; width:100%; }
@@ -3678,6 +3772,7 @@ MAP_HTML = r"""<!doctype html>
 </style>
 </head>
 <body>
+__MESA_LEAFLET_BODY_OPEN__
 <div id="map"></div>
 
 <!-- Stats line -->
@@ -3852,7 +3947,28 @@ def _map_process_entry(status_path_str: str):
     except Exception as exc:
         log_to_gui(None, f"[Minimap] Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
 
-    html = MAP_HTML.replace("__TILE_URL__", tile_url)
+    try:
+        from mesa_shared import leaflet_bundle
+        bundle = leaflet_bundle(base_dir(), include_draw=False)
+        head_block = bundle.head_block
+        body_open = bundle.body_open
+    except Exception as exc:
+        try:
+            log_to_gui(None, f"[Minimap] leaflet_bundle failed, falling back to CDN: {exc}")
+        except Exception:
+            pass
+        head_block = (
+            '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">'
+            '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
+        )
+        body_open = ""
+
+    html = (
+        MAP_HTML
+        .replace("__MESA_LEAFLET_HEAD__", head_block)
+        .replace("__MESA_LEAFLET_BODY_OPEN__", body_open)
+        .replace("__TILE_URL__", tile_url)
+    )
 
     class MapApi:
         def __init__(self, status_path: Path):

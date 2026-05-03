@@ -10,7 +10,7 @@ shared independently of the main UI.
 
 from __future__ import annotations
 
-from mesa_shared import find_base_dir as resolve_base_dir
+from mesa_shared import find_base_dir as resolve_base_dir, leaflet_bundle
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
     TABLE_ANALYSIS_GROUP as ANALYSIS_GROUP_TABLE,
@@ -1550,10 +1550,7 @@ HTML_TEMPLATE = """<!doctype html>
   <meta charset="utf-8">
   <title>MESA Analysis setup</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  __MESA_LEAFLET_HEAD__
   <style>
     html, body { height:100%; margin:0; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f8fafc; color:#1e293b; }
@@ -1584,6 +1581,7 @@ HTML_TEMPLATE = """<!doctype html>
   </style>
 </head>
 <body>
+__MESA_LEAFLET_BODY_OPEN__
 <div class="wrap">
   <div class="panel panel-left">
     <div>
@@ -2734,7 +2732,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     api = WebApi(base_dir, cfg)
 
     webview = _require_webview()
-    html_payload = HTML_TEMPLATE.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+    bundle = leaflet_bundle(base_dir, include_draw=True)
+    html_payload = (
+        HTML_TEMPLATE
+        .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
+        .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
+        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+    )
 
     window = webview.create_window(
         title="MESA Area Analysis",

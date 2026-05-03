@@ -27,7 +27,7 @@ DOCS = REPO / "docs"
 
 AUTHOR = "Ragnvald Larsen"
 AFFILIATION = "Norwegian Environment Agency"
-VERSION = "MESA 5.0"
+VERSION = "MESA 5.0.2"
 
 PT_MONTHS = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -803,10 +803,10 @@ def build_blocks():
 
     add(H(2, "10.3 Memory safety nets", "10.3 Redes de segurança de memória"))
     add(UL(
-        ["Pre-flight check before flatten — if RAM use is above flatten_preflight_max_vm_percent or pagefile/swap is above flatten_preflight_max_swap_gb, the stage refuses to start with a clear abort message.",
+        ["Pre-flight check before flatten — evaluates two signals and aborts only when both fail: system-wide RAM use above flatten_preflight_max_vm_percent AND available RAM below flatten_preflight_avail_safety_factor × estimated peak (estimated from on-disk tbl_stacked size and the auto-tuned worker counts). Pagefile/swap above flatten_preflight_max_swap_gb is still its own hard signal. Small datasets on busy desktops now go through; big datasets on starved hosts still abort cleanly.",
          "Per-pool panic watchdog (mem_panic_percent / mem_panic_grace_secs) — if RAM crosses the threshold past the grace period, the pool is terminated cleanly.",
          "Process-lifetime sentinel (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs) — last-resort backstop covering parent-side work between pools."],
-        ["Verificação prévia antes do flatten — se a RAM exceder flatten_preflight_max_vm_percent ou o swap exceder flatten_preflight_max_swap_gb, a fase recusa-se a iniciar com uma mensagem de aborto clara.",
+        ["Verificação prévia antes do flatten — avalia dois sinais e aborta apenas quando ambos falham: utilização global de RAM acima de flatten_preflight_max_vm_percent E memória disponível abaixo de flatten_preflight_avail_safety_factor × pico estimado (calculado a partir do tamanho em disco de tbl_stacked e do número de trabalhadores auto-ajustado). O swap acima de flatten_preflight_max_swap_gb continua a ser um sinal forte por si só. Conjuntos de dados pequenos em computadores ocupados passam agora a verificação; conjuntos grandes em computadores com pouca memória continuam a abortar limpamente.",
          "Vigilante de pânico por pool (mem_panic_percent / mem_panic_grace_secs) — se a RAM ultrapassar o limite além do período de tolerância, o pool é encerrado limpamente.",
          "Sentinela do tempo de vida do processo (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs) — rede de segurança final que cobre o trabalho do processo-pai entre pools."]))
 
@@ -858,6 +858,9 @@ def build_blocks():
     add(P(
         "If the map opens but shows no layers, the analysis map renders overlays from MBTiles under output/mbtiles/. If that folder is empty, run Workflows → Process with Area enabled and verify .mbtiles files exist.",
         "Se o mapa abrir mas não mostrar camadas, o mapa de análise usa MBTiles em output/mbtiles/. Se essa pasta estiver vazia, execute Fluxos de trabalho → Processar com Área activada e confirme que existem ficheiros .mbtiles."))
+    add(P(
+        "Offline behaviour (MESA 5.0.2 and later): map windows ship with the Leaflet library bundled locally, so they render even on hosts with no internet access or with corporate proxies that block public CDNs. When the WebView reports the host is offline, a thin orange banner appears at the top of the map with the text 'Offline – showing cached map tiles only. Pan to areas you have viewed online before.' OpenStreetMap basemap tiles continue to be served from MESA's on-disk tile cache (output/cache/osm_tiles), so areas previously viewed online remain available. Areas never visited online will appear as a grey grid until network access returns; the editor controls themselves work either way.",
+        "Comportamento sem ligação (MESA 5.0.2 e posterior): as janelas de mapa incluem a biblioteca Leaflet localmente, pelo que funcionam mesmo em computadores sem acesso à Internet ou com proxies empresariais que bloqueiem CDN públicos. Quando o WebView indica que o computador está offline, surge uma faixa laranja fina no topo do mapa com o texto 'Offline – showing cached map tiles only. Pan to areas you have viewed online before.' Os azulejos do mapa-base OpenStreetMap continuam a ser servidos a partir da cache local em output/cache/osm_tiles, pelo que áreas previamente vistas com ligação permanecem disponíveis. Áreas nunca visitadas online aparecerão como uma grelha cinzenta até voltar a haver rede; os controlos de edição em si funcionam em ambos os casos."))
 
     add(H(2, "11.3 'Nothing happens' when clicking a map button",
           "11.3 'Nada acontece' ao clicar num botão de mapa"))
@@ -878,8 +881,8 @@ def build_blocks():
     add(H(2, "11.5 Processing aborts at flatten with PRE-FLIGHT ABORT",
           "11.5 O processamento aborta no flatten com PRE-FLIGHT ABORT"))
     add(P(
-        "The flatten stage refuses to start if the host already looks too memory-pressured to finish safely. The log line names the threshold that tripped it (e.g. 'vm.percent 78.4% > 60%' or 'swap_used 7.3 GB > 5.0 GB'). Close other heavy applications, wait a minute for swap to drain, restart the MESA launcher, and rerun Process. If pre-flight keeps tripping on a host with plenty of free RAM, raise flatten_preflight_max_vm_percent and/or flatten_preflight_max_swap_gb in config.ini.",
-        "A fase flatten recusa-se a iniciar se o computador já estiver sob demasiada pressão de memória para terminar com segurança. A linha de registo identifica o limite que disparou (p. ex. 'vm.percent 78.4% > 60%' ou 'swap_used 7.3 GB > 5.0 GB'). Feche outras aplicações pesadas, aguarde um minuto para o swap baixar, reinicie o iniciador MESA e volte a executar Processar. Se o pre-flight continuar a disparar num computador com bastante RAM livre, aumente flatten_preflight_max_vm_percent e/ou flatten_preflight_max_swap_gb em config.ini."))
+        "The flatten stage refuses to start if the host already looks too memory-pressured to finish safely. As of MESA 5.0.2 the check evaluates two signals together — system-wide RAM use AND a dataset-aware headroom estimate — and aborts only when both fail. The swap-residue check is still a separate hard signal. The log line names the gate that tripped it, for example 'vm.percent 78.4% > 60% AND avail 6.2 GB < 1.25 × est_peak 8.0 GB = 10.0 GB' or 'swap_used 7.3 GB > 5.0 GB'. Close other heavy applications, wait a minute for swap to drain, restart the MESA launcher, and rerun Process. If pre-flight keeps tripping on a host with plenty of free RAM, raise flatten_preflight_avail_safety_factor (default 1.25) or flatten_preflight_max_vm_percent (default 60) in config.ini; the abort message itself names both knobs.",
+        "A fase flatten recusa-se a iniciar se o computador já estiver sob demasiada pressão de memória para terminar com segurança. A partir do MESA 5.0.2, a verificação avalia dois sinais em conjunto — utilização global de RAM E uma estimativa de margem que considera o tamanho do conjunto de dados — e só aborta quando ambos falham. O resíduo de swap continua a ser um sinal independente. A linha de registo identifica o critério que disparou, por exemplo 'vm.percent 78.4% > 60% AND avail 6.2 GB < 1.25 × est_peak 8.0 GB = 10.0 GB' ou 'swap_used 7.3 GB > 5.0 GB'. Feche outras aplicações pesadas, aguarde um minuto para o swap baixar, reinicie o iniciador MESA e volte a executar Processar. Se o pre-flight continuar a disparar num computador com bastante RAM livre, aumente flatten_preflight_avail_safety_factor (predefinição 1.25) ou flatten_preflight_max_vm_percent (predefinição 60) em config.ini; a própria mensagem de aborto refere os dois parâmetros."))
 
     add(H(2, "11.6 'Reducing coverage' looks stuck",
           "11.6 'Reducing coverage' parece encravado"))

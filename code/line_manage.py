@@ -14,6 +14,7 @@ import os, sys, uuid, threading, locale, configparser, argparse, warnings, time,
 from pathlib import Path
 from typing import Any, Dict, Optional
 from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP
+from mesa_shared import leaflet_bundle
 from mesa_osm_tiles import (
     OsmTileProxy,
     build_osm_user_agent,
@@ -825,10 +826,7 @@ HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <title>Edit Line (GeoParquet)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+__MESA_LEAFLET_HEAD__
 <style>
   html, body { height:100%; margin:0; }
   body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
@@ -860,6 +858,7 @@ HTML = r"""<!doctype html>
 </style>
 </head>
 <body>
+__MESA_LEAFLET_BODY_OPEN__
 <div class="wrap">
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
@@ -1398,7 +1397,13 @@ def run(base_dir: str) -> None:
     _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
     api = Api(resolved, cfg)
     webview = _require_webview()
-    html_payload = HTML.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(resolved, cfg))
+    bundle = leaflet_bundle(resolved, include_draw=True)
+    html_payload = (
+        HTML
+        .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
+        .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
+        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(resolved, cfg))
+    )
     window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
     try:
         webview.start(gui='edgechromium', debug=False)
@@ -1430,7 +1435,13 @@ def main():
     api = Api(base_dir, cfg)
     global webview
     webview = _require_webview()
-    html_payload = HTML.replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+    bundle = leaflet_bundle(base_dir, include_draw=True)
+    html_payload = (
+        HTML
+        .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
+        .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
+        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+    )
     window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
 
     try:
