@@ -300,6 +300,9 @@ def build_blocks():
          "Active o Processamento de linhas e/ou Análise quando esses dados estiverem preparados.",
          "Utilize o Mapa de progresso dentro do executor para ver um minimapa em tempo real em execuções mais longas.",
          "Utilize o alternador Normal / Avançado no topo do executor para expor os selectores por fase e a opção de limpeza de fragmentos."]))
+    add(P(
+        "After the first end-to-end run, every stage's output sits on disk and downstream stages can be re-run on their own. To explore parameter changes, switch the runner to Advanced and tick only the stages affected by your change. The full mapping from 'what I changed' to 'which stages I need to rerun' is in section 10.2 Iterative workflow.",
+        "Após a primeira execução completa, o resultado de cada fase fica em disco e as fases a jusante podem ser executadas isoladamente. Para explorar alterações de parâmetros, mude o executor para Avançado e seleccione apenas as fases afectadas pela sua alteração. O mapeamento completo entre 'o que alterei' e 'que fases preciso de reexecutar' está na secção 10.2 Fluxo iterativo."))
 
     add(H(2, "3.6 Reviewing results", "3.6 Rever os resultados"))
     add(P(
@@ -788,7 +791,150 @@ def build_blocks():
         "By default, MESA assumes the workspace folders (input/, output/, qgis/, config.ini) live next to mesa.py (source) or next to mesa.exe (packaged). If you want to keep the application code in one folder but your data workspace somewhere else, set the MESA_BASE_DIR environment variable to the workspace root before launching. When set, MESA reads config.ini and writes output/ under that folder.",
         "Por omissão, o MESA assume que as pastas do espaço de trabalho (input/, output/, qgis/, config.ini) estão junto a mesa.py (código-fonte) ou a mesa.exe (empacotado). Se quiser manter o código da aplicação numa pasta e os dados noutra, defina a variável de ambiente MESA_BASE_DIR para a raiz do espaço de trabalho antes de iniciar. Quando definida, o MESA lê config.ini e escreve output/ dentro dessa pasta."))
 
-    add(H(2, "10.2 Performance knobs (config.ini)", "10.2 Parâmetros de desempenho (config.ini)"))
+    add(H(2, "10.2 Iterative workflow: full run first, then re-run only what changed",
+          "10.2 Fluxo iterativo: primeiro a execução completa, depois reexecutar apenas o que mudou"))
+    add(P(
+        "The processing pipeline is a chain of stages, each reading the previous stage's parquet output from disk and writing its own. That on-disk hand-off is what makes selective re-runs possible — once a stage has finished, you can change parameters that only affect a downstream stage and rerun just that stage without redoing the heavy work upstream.",
+        "O pipeline de processamento é uma cadeia de fases, cada uma a ler o resultado parquet da fase anterior em disco e a escrever o seu próprio. Essa transferência em disco é o que torna possíveis as reexecuções selectivas — assim que uma fase termina, pode alterar parâmetros que só afectam uma fase a jusante e reexecutar apenas essa fase, sem repetir o trabalho pesado a montante."))
+    add(P(
+        "The intended workflow is therefore:",
+        "O fluxo de trabalho previsto é, portanto:"))
+    add(OL(
+        ["First time: run the entire pipeline end-to-end so every stage has a valid output.",
+         "Iterate: change the parameter you want to explore, then in the Process runner switch to Advanced, untick everything except the affected stage and the ones downstream from it, and rerun."],
+        ["Primeira vez: execute todo o pipeline de ponta a ponta para que cada fase tenha um resultado válido.",
+         "Iterar: altere o parâmetro que pretende explorar, depois no executor de Processamento mude para Avançado, desactive tudo excepto a fase afectada e as fases a jusante, e reexecute."]))
+    add(IMG("efficient_workflow.png",
+            "MESA pipeline scenarios — full run vs. selective re-runs. Each row is a scenario; bars show which stages run.",
+            "Cenários do pipeline MESA — execução completa vs. reexecuções selectivas. Cada linha é um cenário; as barras indicam que fases são executadas.",
+            width_cm=15.5))
+
+    add(H(2, "10.2.1 What each stage reads and writes",
+          "10.2.1 O que cada fase lê e escreve"))
+    add(TBL(
+        ["Stage", "Reads", "Writes", "Re-run cost"],
+        [
+            ["Prep", "input parquet metadata, asset/geocode counts", "workspace status files", "seconds"],
+            ["Intersect", "tbl_asset_object, tbl_geocode_object", "tbl_stacked/ (partitioned dataset)", "minutes to hours; the heaviest stage"],
+            ["Flatten", "tbl_stacked, sensitivity / index weights from config.ini", "tbl_flat.parquet", "seconds to minutes; scales with tbl_stacked size"],
+            ["Backfill", "tbl_flat, tbl_stacked", "per-cell area_m2 enriched into tbl_stacked", "minutes; mostly pandas merges"],
+            ["Tiles", "tbl_flat", "output/mbtiles/*.mbtiles", "minutes; depends on zoom range and bounding box"],
+            ["Lines", "line inputs, tbl_flat", "tbl_lines_buffered, tbl_segments, tbl_segment_flat", "seconds to minutes"],
+            ["Analysis", "tbl_flat, tbl_stacked, analysis polygons", "tbl_analysis_* outputs and JSON summaries", "seconds per study area"],
+        ],
+        ["Fase", "Lê", "Escreve", "Custo de reexecução"],
+        [
+            ["Prep", "metadados dos parquet de entrada, contagens de activos e geocódigos", "ficheiros de estado do espaço de trabalho", "segundos"],
+            ["Intersect", "tbl_asset_object, tbl_geocode_object", "tbl_stacked/ (conjunto particionado)", "minutos a horas; a fase mais pesada"],
+            ["Flatten", "tbl_stacked, pesos de sensibilidade/índice em config.ini", "tbl_flat.parquet", "segundos a minutos; escala com o tamanho de tbl_stacked"],
+            ["Backfill", "tbl_flat, tbl_stacked", "area_m2 por célula enriquecido em tbl_stacked", "minutos; sobretudo merges pandas"],
+            ["Tiles", "tbl_flat", "output/mbtiles/*.mbtiles", "minutos; depende do intervalo de zoom e da extensão"],
+            ["Lines", "linhas de entrada, tbl_flat", "tbl_lines_buffered, tbl_segments, tbl_segment_flat", "segundos a minutos"],
+            ["Analysis", "tbl_flat, tbl_stacked, polígonos de análise", "tabelas tbl_analysis_* e resumos JSON", "segundos por área de estudo"],
+        ]))
+    add(P(
+        "A stage's checkbox is greyed out when its required input is missing on disk. That is the safety net — the runner refuses to run Tiles without tbl_flat, refuses to run Backfill without tbl_stacked, and so on.",
+        "A caixa de selecção de uma fase fica desactivada quando o seu input obrigatório está em falta no disco. É essa a rede de segurança — o executor recusa-se a correr Tiles sem tbl_flat, recusa-se a correr Backfill sem tbl_stacked, e assim por diante."))
+
+    add(H(2, "10.2.2 Cookbook: what changed → which stage to re-run",
+          "10.2.2 Receituário: o que mudou → que fase reexecutar"))
+    add(P(
+        "The first column lists the parameter or input you changed; the second lists the minimum stage set you need to tick in Advanced mode. 'Plus downstream' means anything later in the pipeline that produces an output you still want refreshed (Tiles map, Analysis report, etc.).",
+        "A primeira coluna lista o parâmetro ou entrada que alterou; a segunda lista o conjunto mínimo de fases que precisa de seleccionar no modo Avançado. 'Mais a jusante' refere-se a qualquer fase posterior cujo resultado ainda queira actualizar (mapa de Tiles, relatório de Análise, etc.)."))
+    add(TBL(
+        ["If you changed…", "Re-run from…", "Notes"],
+        [
+            ["Sensitivity weights, importance weights, index weights (Parameters helper)",
+             "Flatten + Backfill (plus Tiles / Analysis)",
+             "Intersect output is unchanged; only tbl_flat recomputes. The cheapest meaningful iteration loop."],
+            ["Sliver cleanup toggle (flatten_sliver_min_area_m2, the runner checkbox)",
+             "Flatten + Backfill (plus Tiles / Analysis)",
+             "Sliver removal is part of flatten."],
+            ["tiles_minzoom / tiles_maxzoom",
+             "Tiles only",
+             "tbl_flat is unchanged; only MBTiles regenerate."],
+            ["Line buffer / segmentation parameters, line geometry edits",
+             "Lines only",
+             "Line outputs are independent of the geocode pipeline."],
+            ["Analysis polygons / study-area definitions",
+             "Analysis only",
+             "Reads existing tbl_flat and tbl_stacked."],
+            ["cell_size, chunk_size, geocode_soft_limit, asset_soft_limit",
+             "Intersect + Flatten + Backfill (plus downstream)",
+             "These shape tbl_stacked itself."],
+            ["Added a new H3 resolution or a new custom geocode group",
+             "Intersect + Flatten + Backfill (plus downstream)",
+             "New geocode IDs appear in tbl_stacked, so flatten and everything after must rerun."],
+            ["Re-imported assets (Workflows → Prepare data → Assets)",
+             "Intersect + Flatten + Backfill (plus downstream)",
+             "New asset rows in tbl_asset_object invalidate the existing intersection."],
+            ["Re-imported or regenerated geocodes",
+             "Intersect + Flatten + Backfill (plus downstream)",
+             "Same reason — tbl_geocode_object changed."],
+            ["Mosaic tuning (mosaic_coverage_union_batch, mosaic_line_union_max_partials, mosaic_coverage_union)",
+             "Re-publish basic_mosaic from Geocodes, then Intersect + Flatten + Backfill (plus downstream)",
+             "These tune the mosaic build. The mosaic is a geocode group, so changes propagate from intersect onwards."],
+            ["Worker counts (max_workers, flatten_*_workers, tiles_max_workers, backfill_max_workers)",
+             "Whatever stage is next",
+             "These don't change outputs, only how the next run executes. Override what you need, rerun the affected stage."],
+            ["report_basemap_mode, report-level layout / styling",
+             "Re-run Report engine (Workflows → Results)",
+             "Reports read existing parquet/MBTiles. Processing stages do not need to rerun."],
+        ],
+        ["Se alterou…", "Reexecute a partir de…", "Notas"],
+        [
+            ["Pesos de sensibilidade, pesos de importância, pesos de índice (auxiliar Parâmetros)",
+             "Flatten + Backfill (mais Tiles / Análise)",
+             "O resultado de Intersect não muda; apenas tbl_flat é recalculado. O ciclo de iteração mais barato."],
+            ["Limpeza de fragmentos (flatten_sliver_min_area_m2, caixa de selecção no executor)",
+             "Flatten + Backfill (mais Tiles / Análise)",
+             "A remoção de fragmentos faz parte do flatten."],
+            ["tiles_minzoom / tiles_maxzoom",
+             "Apenas Tiles",
+             "tbl_flat não muda; apenas os MBTiles são regenerados."],
+            ["Parâmetros de buffer / segmentação de linhas, edições de geometria",
+             "Apenas Lines",
+             "Os resultados de linhas são independentes do pipeline de geocódigos."],
+            ["Polígonos / definições de áreas de estudo",
+             "Apenas Analysis",
+             "Lê o tbl_flat e o tbl_stacked existentes."],
+            ["cell_size, chunk_size, geocode_soft_limit, asset_soft_limit",
+             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Estes parâmetros moldam o próprio tbl_stacked."],
+            ["Adicionou uma nova resolução H3 ou um novo grupo de geocódigos personalizado",
+             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Aparecem novos identificadores de geocódigo em tbl_stacked, pelo que flatten e tudo o que se segue tem de reexecutar."],
+            ["Reimportou activos (Fluxos de trabalho → Preparar dados → Activos)",
+             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Novas linhas de activos em tbl_asset_object invalidam a intersecção existente."],
+            ["Reimportou ou regenerou geocódigos",
+             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Pela mesma razão — tbl_geocode_object mudou."],
+            ["Afinação do mosaico (mosaic_coverage_union_batch, mosaic_line_union_max_partials, mosaic_coverage_union)",
+             "Republicar basic_mosaic em Geocodes, depois Intersect + Flatten + Backfill (mais a jusante)",
+             "Estes parâmetros afinam a construção do mosaico. O mosaico é um grupo de geocódigos, pelo que as alterações se propagam a partir do intersect."],
+            ["Número de processos de trabalho (max_workers, flatten_*_workers, tiles_max_workers, backfill_max_workers)",
+             "A fase seguinte que pretender executar",
+             "Não alteram resultados, apenas como a próxima execução decorre. Sobrescreva o que precisa e reexecute a fase afectada."],
+            ["report_basemap_mode, esquema / estilo do relatório",
+             "Reexecutar o Motor de relatórios (Fluxos de trabalho → Resultados)",
+             "Os relatórios lêem o parquet / MBTiles existentes. As fases de processamento não precisam de reexecutar."],
+        ]))
+
+    add(H(2, "10.2.3 Practical tips", "10.2.3 Sugestões práticas"))
+    add(UL(
+        ["Read the [auto-tune] block at the top of every run log to verify the runner picked the worker counts you expected. If you have just set flatten_max_workers = 4 in config.ini but the log shows flatten_max_workers = 1, auto-tune was constrained by available RAM — close other apps or raise mem_target_frac and rerun.",
+         "The pre-flight at the start of Flatten checks both system-wide RAM use and a dataset-aware peak estimate (see 10.4 Memory safety nets). It will let small datasets through on busy desktops; if it ever blocks you incorrectly, the abort message names the two operator knobs to relax.",
+         "Use Manage data → Create backup before exploratory parameter sweeps. Reverting is one click; figuring out what changed three iterations later is not.",
+         "The Status tab shows row counts for tbl_stacked and tbl_flat. If you tick 'Flatten only' and rerun, watch the tbl_flat row count change; tbl_stacked should stay the same.",
+         "For pure parameter sweeps (sensitivity / index weights only), tick just Flatten + Backfill. Tiles and Analysis can wait until you have settled on a parameter set worth rendering."],
+        ["Leia o bloco [auto-tune] no topo de cada registo de execução para confirmar que o executor escolheu o número de processos esperado. Se acabou de definir flatten_max_workers = 4 em config.ini mas o registo mostra flatten_max_workers = 1, o auto-tune foi limitado pela RAM disponível — feche outras aplicações ou aumente mem_target_frac e volte a executar.",
+         "A verificação prévia no início de Flatten avalia tanto a utilização global de RAM como uma estimativa do pico que tem em conta o tamanho dos dados (ver 10.4 Redes de segurança de memória). Permite passar conjuntos pequenos em computadores ocupados; se alguma vez bloquear incorrectamente, a mensagem de aborto identifica os dois parâmetros do operador a relaxar.",
+         "Utilize Gerir dados → Criar cópia de segurança antes de explorações de parâmetros. Reverter é um clique; descobrir três iterações depois o que mudou não.",
+         "A aba Estado mostra as contagens de linhas de tbl_stacked e tbl_flat. Se seleccionar apenas 'Flatten' e reexecutar, observe a variação na contagem de tbl_flat; tbl_stacked deve permanecer igual.",
+         "Para explorações puras de parâmetros (apenas pesos de sensibilidade/índice), seleccione apenas Flatten + Backfill. Tiles e Analysis podem esperar até ter um conjunto de parâmetros que valha a pena renderizar."]))
+
+    add(H(2, "10.3 Performance knobs (config.ini)", "10.3 Parâmetros de desempenho (config.ini)"))
     add(UL(
         ["chunk_size — processing chunk size for heavy spatial operations.",
          "max_workers, flatten_max_workers, flatten_small_max_workers, tiles_max_workers, backfill_max_workers — per-stage worker caps. Leave at 0 to let auto_tune decide; set a positive integer to override exactly.",
@@ -801,7 +947,7 @@ def build_blocks():
          "tiles_minzoom / tiles_maxzoom — intervalo de zoom dos MBTiles produzidos.",
          "mem_target_frac / approx_gb_per_worker — alvo de memória para o auto-ajuste."]))
 
-    add(H(2, "10.3 Memory safety nets", "10.3 Redes de segurança de memória"))
+    add(H(2, "10.4 Memory safety nets", "10.4 Redes de segurança de memória"))
     add(UL(
         ["Pre-flight check before flatten — evaluates two signals and aborts only when both fail: system-wide RAM use above flatten_preflight_max_vm_percent AND available RAM below flatten_preflight_avail_safety_factor × estimated peak (estimated from on-disk tbl_stacked size and the auto-tuned worker counts). Pagefile/swap above flatten_preflight_max_swap_gb is still its own hard signal. Small datasets on busy desktops now go through; big datasets on starved hosts still abort cleanly.",
          "Per-pool panic watchdog (mem_panic_percent / mem_panic_grace_secs) — if RAM crosses the threshold past the grace period, the pool is terminated cleanly.",
@@ -810,7 +956,7 @@ def build_blocks():
          "Vigilante de pânico por pool (mem_panic_percent / mem_panic_grace_secs) — se a RAM ultrapassar o limite além do período de tolerância, o pool é encerrado limpamente.",
          "Sentinela do tempo de vida do processo (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs) — rede de segurança final que cobre o trabalho do processo-pai entre pools."]))
 
-    add(H(2, "10.4 Mosaic union batching", "10.4 Lotes de união do mosaico"))
+    add(H(2, "10.5 Mosaic union batching", "10.5 Lotes de união do mosaico"))
     add(UL(
         ["mosaic_coverage_union_batch — bigger batches (~2000–4000 on 64+ GB hosts) produce fewer, larger intermediate unions.",
          "mosaic_line_union_max_partials — higher cap (32–64) means fewer reduction rounds.",
@@ -819,7 +965,7 @@ def build_blocks():
          "mosaic_line_union_max_partials — limite mais alto (32–64) reduz o número de rondas de redução.",
          "mosaic_coverage_union = false — saída de emergência que ignora completamente a fase de redução de cobertura e usa filtragem STRtree."]))
 
-    add(H(2, "10.5 Basemap and tile caching", "10.5 Mapas-base e cache de azulejos"))
+    add(H(2, "10.6 Basemap and tile caching", "10.6 Mapas-base e cache de azulejos"))
     add(UL(
         ["xyz — use the built-in downloader with persistent cache under output/tile_cache/.",
          "contextily — use contextily if installed.",
