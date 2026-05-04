@@ -1191,7 +1191,16 @@ def run_analysis_process(
             else:
                 existing = existing.iloc[0:0].copy()
 
-            combined = existing if new_gdf.empty else pd.concat([existing, new_gdf], ignore_index=True)
+            # Skip empty frames before concat: a freshly-built `existing` has
+            # all-NA columns (no rows), and pandas 3.x warns then changes dtype
+            # behaviour for that case.
+            parts = [df for df in (existing, new_gdf) if df is not None and not df.empty]
+            if not parts:
+                combined = existing
+            elif len(parts) == 1:
+                combined = parts[0].reset_index(drop=True).copy()
+            else:
+                combined = pd.concat(parts, ignore_index=True)
             if not isinstance(combined, gpd.GeoDataFrame):
                 combined = gpd.GeoDataFrame(combined, geometry="geometry", crs=new_gdf.crs)
             combined.to_parquet(path, index=False)

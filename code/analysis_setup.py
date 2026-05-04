@@ -812,7 +812,11 @@ class AnalysisStorage:
                 "updated_at": now,
                 "default_geocode": default_geocode or DEFAULT_ANALYSIS_GEOCODE,
             }
-            self._groups_df = pd.concat([self._groups_df, pd.DataFrame([entry])], ignore_index=True)
+            new_row = pd.DataFrame([entry])
+            self._groups_df = (
+                new_row if self._groups_df is None or self._groups_df.empty
+                else pd.concat([self._groups_df, new_row], ignore_index=True)
+            )
             self._active_group_id = new_id
             self._write_groups()
             return self._group_from_row(pd.Series(entry))
@@ -906,9 +910,10 @@ class AnalysisStorage:
             "geometry": geom_storage,
         }
         with self._lock:
-            self._polygons_gdf = pd.concat(
-                [self._polygons_gdf, gpd.GeoDataFrame([entry], geometry="geometry", crs=self._polygons_gdf.crs)],
-                ignore_index=True,
+            new_row = gpd.GeoDataFrame([entry], geometry="geometry", crs=self._polygons_gdf.crs)
+            self._polygons_gdf = (
+                new_row if self._polygons_gdf is None or self._polygons_gdf.empty
+                else pd.concat([self._polygons_gdf, new_row], ignore_index=True)
             )
             self._write_polygons()
         return self._record_from_row(pd.Series(entry))

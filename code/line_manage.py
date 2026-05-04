@@ -773,7 +773,11 @@ class Api:
                     "segment_length": pd.NA, "segment_width": pd.NA,
                     "description":"", "geometry": geom_s
                 }
-                self._gdf = pd.concat([self._gdf, gpd.GeoDataFrame([row], geometry="geometry", crs=self._gdf.crs)], ignore_index=True)
+                new_row = gpd.GeoDataFrame([row], geometry="geometry", crs=self._gdf.crs)
+                self._gdf = (
+                    new_row if self._gdf is None or self._gdf.empty
+                    else pd.concat([self._gdf, new_row], ignore_index=True)
+                )
 
                 g = gpd.GeoDataFrame([row], geometry="geometry", crs=self._gdf.crs)
                 g_ll = to_epsg4326(g)

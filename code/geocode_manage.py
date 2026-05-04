@@ -2038,8 +2038,11 @@ def _merge_and_write_geocodes(base_dir: Path,
     new_objects_gdf = new_objects_gdf.copy()
     new_objects_gdf["ref_geocodegroup"] = new_objects_gdf["name_gis_geocodegroup"].map(name_to_id)
 
-    groups_out = pd.concat([existing_g, new_groups_gdf], ignore_index=True)
-    objects_out = pd.concat([existing_o, new_objects_gdf], ignore_index=True)
+    # Filter empty frames so pandas 3.x's all-NA dtype change doesn't warn.
+    g_parts = [df for df in (existing_g, new_groups_gdf) if df is not None and not df.empty]
+    o_parts = [df for df in (existing_o, new_objects_gdf) if df is not None and not df.empty]
+    groups_out  = g_parts[0] if len(g_parts) == 1 else (pd.concat(g_parts, ignore_index=True) if g_parts else existing_g)
+    objects_out = o_parts[0] if len(o_parts) == 1 else (pd.concat(o_parts, ignore_index=True) if o_parts else existing_o)
 
     groups_out = ensure_wgs84(gpd.GeoDataFrame(groups_out, geometry="geometry"))
     objects_out = ensure_wgs84(gpd.GeoDataFrame(objects_out, geometry="geometry"))
