@@ -3752,11 +3752,13 @@ class MesaMainWindow(QMainWindow):
             ("default_line_buffer_m", "Default line buffer (m)", "int",
              {"min": 0, "max": 10000, "step": 5},
              "Lines without an area get this buffer when imported, so they still "
-             "contribute to processing."),
+             "contribute to processing. Applied to both sides, so 30 m yields a "
+             "60 m wide corridor."),
             ("default_point_buffer_m", "Default point buffer (m)", "int",
              {"min": 0, "max": 10000, "step": 5},
              "Points without an area get this buffer when imported, so they still "
-             "contribute to processing."),
+             "contribute to processing. Used as a radius, so 30 m yields a "
+             "60 m diameter circle."),
         ]),
         ("Tile zoom", [
             ("tiles_minzoom", "Minimum zoom level", "int",
@@ -3768,7 +3770,7 @@ class MesaMainWindow(QMainWindow):
              "Highest zoom level rendered. Each extra level roughly quadruples "
              "tile count, processing time, and disk size."),
         ]),
-        ("Segments", [
+        ("Lines", [
             ("segment_width", "Segment width (m)", "int",
              {"min": 1, "max": 100000, "step": 50},
              "Cross-line buffer used when intersecting segments with assets. "
