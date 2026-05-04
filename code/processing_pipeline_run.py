@@ -1560,8 +1560,8 @@ class ProcessRunnerWindow(QMainWindow):
         self._tail_state: dict[str, int] = {}
 
         self.setWindowTitle("MESA \u2013 Process all")
-        self.resize(900, 560)
-        self.setMinimumSize(700, 440)
+        self.resize(1100, 600)
+        self.setMinimumSize(900, 480)
 
         try:
             icon = _shared_window_icon(base_dir)
@@ -1582,9 +1582,12 @@ class ProcessRunnerWindow(QMainWindow):
         log_lay = QVBoxLayout(log_group)
         self._log_widget = QPlainTextEdit()
         self._log_widget.setReadOnly(True)
-        self._log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Cap log height so the per-stage checkbox grid below stays visible.
+        self._log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._log_widget.setMinimumHeight(90)
+        self._log_widget.setMaximumHeight(180)
         log_lay.addWidget(self._log_widget)
-        layout.addWidget(log_group, stretch=1)
+        layout.addWidget(log_group)
 
         # Progress bar row
         prog_row = QHBoxLayout()
@@ -1650,7 +1653,9 @@ class ProcessRunnerWindow(QMainWindow):
         # glance which stage runs first and can pick a sensible re-run cutoff
         # after a parameter-only change (start at "3. Flatten").
         grid.setColumnMinimumWidth(2, 24)
-        grid.setColumnStretch(1, 1)
+        # col 1 (left status) holds the long "Parameter cutoff…" hint, so give
+        # it more share than col 4 whose hints are all short ("Re-renders…").
+        grid.setColumnStretch(1, 2)
         grid.setColumnStretch(4, 1)
 
         # Row 0: master "Process" checkbox (cascades to data sub-stages + tiles).
@@ -1664,7 +1669,9 @@ class ProcessRunnerWindow(QMainWindow):
         grid.addWidget(self._cb_data_master, 0, 0, 1, 2)
         master_status = "" if avail_data.available else (
             "; ".join(avail_data.reasons) if avail_data.reasons else "Missing inputs")
-        grid.addWidget(QLabel(master_status), 0, 3, 1, 2)
+        master_status_lbl = QLabel(master_status)
+        master_status_lbl.setWordWrap(True)
+        grid.addWidget(master_status_lbl, 0, 3, 1, 2)
 
         # Flatten options stacked vertically below the master row, spanning
         # the whole grid so they sit clearly under the master.
@@ -1690,7 +1697,9 @@ class ProcessRunnerWindow(QMainWindow):
             cb.setChecked(default_checked and avail_data.available)
             grid.addWidget(cb, row, 0)
             status = ready_hint if avail_data.available else "Missing inputs"
-            grid.addWidget(QLabel(status), row, 1)
+            lbl = QLabel(status)
+            lbl.setWordWrap(True)
+            grid.addWidget(lbl, row, 1)
             return cb
 
         self._cb_prep      = _mk_sub(1, "1. Prep (workspace, status)",
@@ -1718,6 +1727,7 @@ class ProcessRunnerWindow(QMainWindow):
                 status = ready_hint if avail.available else (
                     "; ".join(avail.reasons) if avail.reasons else "Missing inputs")
             lbl = QLabel(status)
+            lbl.setWordWrap(True)
             grid.addWidget(lbl, row, 4)
             if not avail.available:
                 cb.setEnabled(False)
@@ -1825,6 +1835,9 @@ class ProcessRunnerWindow(QMainWindow):
         btn_row.addWidget(self._map_btn)
         btn_row.addStretch()
         btn_row.addWidget(exit_btn)
+        # Absorb leftover vertical space above the button row so the form
+        # sits compactly at the top once the log is capped at 180px.
+        layout.addStretch(1)
         layout.addLayout(btn_row)
 
         # Connect buttons
