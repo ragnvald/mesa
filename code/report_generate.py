@@ -1021,6 +1021,47 @@ class ReportEngine:
 
         return pages, intro_table, groups
 
+    def render_data_extent_overview(self) -> list:
+        """Load the dissolved data extent written by Stage 1 and render an
+        overview map. Returns an order_list fragment ready to splice into the
+        report; empty list if the parquet is missing or unreadable."""
+        extent_path = os.path.join(self.base_dir, "output", "geoparquet",
+                                   "tbl_data_extent.parquet")
+        if not os.path.exists(extent_path):
+            write_to_log(
+                "tbl_data_extent.parquet not found — re-run Stage 1 (Prep) to "
+                "regenerate. Skipping area overview map.",
+                self.base_dir,
+            )
+            return []
+        try:
+            extent_gdf = gpd.read_parquet(extent_path)
+        except Exception as exc:
+            write_to_log(f"Cannot read tbl_data_extent.parquet: {exc}", self.base_dir)
+            return []
+        png = self.make_path("data_extent", "overview")
+        if not draw_data_extent_overview_map(extent_gdf, png, base_dir=self.base_dir):
+            return []
+        if not _file_ok(png):
+            return []
+        try:
+            n_parts = sum(1 for _ in extent_gdf.geometry.iloc[0].geoms) \
+                if extent_gdf.geometry.iloc[0].geom_type == 'MultiPolygon' else 1
+        except Exception:
+            n_parts = 1
+        intro = (
+            "Outline of the project's data area, computed at processing-time as "
+            "the dissolved union of all input asset and geocode geometries. "
+            f"Shown as {n_parts} polygon{'s' if n_parts != 1 else ''}; disjoint "
+            "regions are preserved rather than collapsed into a single hull."
+        )
+        return [
+            ('heading(2)', "Area overview"),
+            ('text', intro),
+            ('image', ("Project data extent", png)),
+            ('rule', None),
+        ]
+
     def render_atlas_maps(self,
                           flat_df: gpd.GeoDataFrame,
                           atlas_df: gpd.GeoDataFrame,
@@ -2938,6 +2979,58 @@ def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
         plt.close('all')
         return False
 
+
+def draw_data_extent_overview_map(extent_gdf: gpd.GeoDataFrame,
+                                  out_path: str,
+                                  base_dir: str | None = None) -> bool:
+    """Render the project's overall data extent (precomputed in Stage 1 as
+    tbl_data_extent.parquet) on a basemap. Used at the top of the report so
+    a reader can see at a glance how big the AOI is and whether it has
+    disjoint regions."""
+    try:
+        if extent_gdf is None or extent_gdf.empty or 'geometry' not in extent_gdf.columns:
+            write_to_log("Data extent overview skipped (no geometry).", base_dir)
+            return False
+
+        extent_3857 = _safe_to_3857(extent_gdf[extent_gdf.geometry.notna()].copy())
+        if extent_3857.empty:
+            write_to_log("Data extent reprojection failed; skipping overview.", base_dir)
+            return False
+
+        bounds = _expand_bounds(extent_3857.total_bounds, pad_ratio=0.10)
+
+        fig_h_in = 10.0
+        fig_w_in = 10.0
+        dpi = _dpi_for_fig_height(fig_h_in)
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+        ax.set_axis_off()
+        ax.set_xlim(bounds[0], bounds[2])
+        ax.set_ylim(bounds[1], bounds[3])
+
+        _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
+
+        # Translucent fill so the basemap stays legible inside the AOI.
+        extent_3857.plot(ax=ax, facecolor=PRIMARY_HEX, edgecolor=PRIMARY_HEX,
+                         linewidth=1.5, alpha=0.22, zorder=10)
+        extent_3857.boundary.plot(ax=ax, edgecolor=PRIMARY_HEX,
+                                  linewidth=1.5, alpha=0.95, zorder=12)
+
+        try:
+            minx, maxx = ax.get_xlim()
+            miny, maxy = ax.get_ylim()
+            _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=False)
+        except Exception:
+            pass
+
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close(fig)
+        write_to_log(f"Data extent overview map saved: {out_path}", base_dir)
+        return True
+    except Exception as e:
+        write_to_log(f"Data extent overview map failed: {e}", base_dir)
+        plt.close('all')
+        return False
+
 # ---------------- Lines: context + segments map ----------------
 def _normalize_bounds_aspect(bounds: tuple[float, float, float, float],
                              *,
@@ -4587,6 +4680,19 @@ def generate_report(base_dir: str,
 
         # After all sections are added to order_list, insert the dynamic Contents page
         # (This requires a second pass after order_list is fully built, so patch the PDF builder to do this)
+
+        # Area overview: dissolved outline of all input data, computed in
+        # Stage 1 (Prep) and stored at output/geoparquet/tbl_data_extent.parquet.
+        # Slotted in here so readers see "where does this study cover" before
+        # the Assets / Geocodes inventory tables.
+        try:
+            extent_pages = engine.render_data_extent_overview()
+        except Exception as exc:
+            write_to_log(f"Area overview render failed: {exc}", base_dir)
+            extent_pages = []
+        if extent_pages:
+            order_list.extend(extent_pages)
+            order_list.append(('new_page', None))
 
         if include_assets:
             order_list.extend([

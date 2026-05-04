@@ -1112,6 +1112,63 @@ def cleanup_outputs():
     for d in ["tbl_stacked", "__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
         _rm_rf(_dataset_dir(d))
 
+
+def write_data_extent(working_epsg: int) -> None:
+    """Compute the dissolved outer outline of all input data and write it to
+    tbl_data_extent.parquet for the Report generator's area-overview map (and
+    any other consumer that wants a 'where does this project cover' polygon).
+    Preserves disjoint regions as MultiPolygon."""
+    geoms: list = []
+    for fname in ("tbl_asset_object.parquet", "tbl_geocode_object.parquet"):
+        path = gpq_dir() / fname
+        if not path.exists():
+            continue
+        try:
+            gdf = gpd.read_parquet(path)
+        except Exception as exc:
+            log_to_gui(log_widget, f"[Stage 1/4] Data extent: cannot read {fname}: {exc}")
+            continue
+        if gdf is None or gdf.empty or 'geometry' not in gdf.columns:
+            continue
+        try:
+            gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        except Exception:
+            pass
+        if gdf.empty:
+            continue
+        geoms.extend(list(gdf.geometry.values))
+
+    if not geoms:
+        log_to_gui(log_widget, "[Stage 1/4] Data extent: no input geometries found; skipping.")
+        return
+
+    try:
+        union = shapely.union_all(geoms)
+    except Exception as exc:
+        log_to_gui(log_widget,
+                   f"[Stage 1/4] Data extent: union_all failed ({exc}); falling back to bbox hull.")
+        try:
+            boxes = [box(*g.bounds) for g in geoms if g and g.bounds]
+            union = shapely.union_all(boxes)
+        except Exception as exc2:
+            log_to_gui(log_widget,
+                       f"[Stage 1/4] Data extent: bbox-hull fallback failed ({exc2}); skipping.")
+            return
+
+    if union is None or getattr(union, 'is_empty', True):
+        log_to_gui(log_widget, "[Stage 1/4] Data extent: dissolved geometry is empty; skipping.")
+        return
+
+    out = gpd.GeoDataFrame({'name': ['data_extent']}, geometry=[union], crs=working_epsg)
+    out_path = gpq_dir() / "tbl_data_extent.parquet"
+    out.to_parquet(out_path, index=False)
+    try:
+        n_polys = len(union.geoms) if union.geom_type == 'MultiPolygon' else 1
+    except Exception:
+        n_polys = 1
+    log_to_gui(log_widget,
+               f"[Stage 1/4] Data extent written: {n_polys} polygon(s) -> tbl_data_extent.parquet")
+
 # ----------------------------
 # Grid & chunking
 # ----------------------------
@@ -3721,6 +3778,7 @@ def run_processing_pipeline(config_file: Path,
             log_to_gui(log_widget, "[Stage 1/4] Preparing workspace and status files…")
             cleanup_outputs(); update_progress(5)
             _init_idle_status()
+            write_data_extent(working_epsg)
         else:
             log_to_gui(log_widget, "[Stage 1/4] Skipped (Prep unchecked).")
 
