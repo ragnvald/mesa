@@ -63,18 +63,22 @@ BUILD_HELPERS = os.environ.get("MESA_BUILD_HELPERS", "1").strip().lower() not in
 BUILD_MAIN = os.environ.get("MESA_BUILD_MAIN", "1").strip().lower() not in {"0", "false", "no"}
 
 # Parallelism: how many PyInstaller invocations may run concurrently.
-# Default 1 = sequential (existing behaviour, safe everywhere). Each parallel
-# PyInstaller analysis transiently holds the full module graph (~2 GB on the
-# GIS-heavy helpers), so the cap is the gating constraint on smaller hosts.
+# Each parallel PyInstaller analysis transiently holds the full module graph
+# (~2 GB on the GIS-heavy helpers), so RAM is usually the gating constraint.
 # Recommended: 4 on 16-core / 64+ GB hosts; 2 on 8-core / 32 GB; 1 on
-# constrained machines or in CI.
+# constrained machines or in CI. Default tuned for the primary dev box
+# (16 logical cores, 128 GB RAM); override with MESA_BUILD_PARALLEL=N
+# (e.g. =1 to fall back to sequential on a smaller host or in CI).
+_DEFAULT_PARALLEL = "4"
+
 def _resolve_parallel() -> int:
-    raw = os.environ.get("MESA_BUILD_PARALLEL", "1").strip()
+    raw = os.environ.get("MESA_BUILD_PARALLEL", _DEFAULT_PARALLEL).strip()
     try:
         n = int(raw)
     except ValueError:
-        log(f"[NOTE] Invalid MESA_BUILD_PARALLEL='{raw}', falling back to 1")
-        return 1
+        log(f"[NOTE] Invalid MESA_BUILD_PARALLEL='{raw}', "
+            f"falling back to {_DEFAULT_PARALLEL}")
+        return int(_DEFAULT_PARALLEL)
     return max(1, n)
 
 BUILD_PARALLEL = _resolve_parallel()
