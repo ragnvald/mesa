@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+import shapely
 from shapely.geometry import box
 
 # NEW: geodesic area + validity helpers
@@ -1621,6 +1622,34 @@ _POOL_TYPES  = None
 _ASSET_SOFT_LIMIT = 200_000
 _GEOCODE_SOFT_LIMIT = 160
 
+_BOUNDARY_ONLY_OVERLAP_MIN_M2 = 1.0
+
+
+def _drop_boundary_only_joins(res, asset_df):
+    # Drop sjoin rows whose (cell ∩ asset) overlap area is below
+    # _BOUNDARY_ONLY_OVERLAP_MIN_M2. predicate='intersects' is True for
+    # boundary-only contact, which on basic_mosaic — whose face boundaries
+    # *are* asset boundaries — pulls in every neighbour and inflates
+    # sensitivity_max with assets that don't actually cover the face. See
+    # learning.md "basic_mosaic boundary-bleed in sensitivity_max".
+    if res is None or res.empty or 'index_right' not in res.columns:
+        return res
+    try:
+        cell_geoms = res.geometry.values
+        asset_geoms = asset_df.geometry.loc[res['index_right'].values].values
+        inter = shapely.intersection(cell_geoms, asset_geoms)
+        crs = res.crs
+        if crs is not None and not crs.is_projected:
+            inter_areas = gpd.GeoSeries(inter, crs=crs).to_crs(3857).area.values
+        else:
+            inter_areas = shapely.area(inter)
+        keep = inter_areas >= _BOUNDARY_ONLY_OVERLAP_MIN_M2
+        return res.loc[keep].copy()
+    except Exception:
+        # Fall back to original behaviour rather than silently dropping rows.
+        return res
+
+
 def _intersect_pool_init(asset_df, geom_types, parts_dir, asset_soft_limit, geocode_soft_limit):
     global _POOL_ASSETS, _POOL_TYPES, _PARTS_DIR, _ASSET_SOFT_LIMIT, _GEOCODE_SOFT_LIMIT
     _POOL_ASSETS = asset_df
@@ -1667,6 +1696,8 @@ def _intersection_worker(args):
     def join_with_asset_subset(geocode_gdf, asset_df, predicate):
         try:
             res = gpd.sjoin(geocode_gdf, asset_df, how='inner', predicate=predicate)
+            if predicate == 'intersects':
+                res = _drop_boundary_only_joins(res, asset_df)
             res.drop(columns=[c for c in ['index_right','geometry_wkb','geometry_wkb_1','process'] if c in res.columns],
                      inplace=True, errors='ignore')
             try:
@@ -1747,6 +1778,8 @@ def _intersection_worker(args):
             predicate = 'contains' if gt == 'Point' else 'intersects'
             try:
                 res = gpd.sjoin(geocode_gdf, af, how='inner', predicate=predicate)
+                if predicate == 'intersects':
+                    res = _drop_boundary_only_joins(res, af)
                 res.drop(columns=[c for c in ['index_right','geometry_wkb','geometry_wkb_1','process'] if c in res.columns],
                          inplace=True, errors='ignore')
                 try:
