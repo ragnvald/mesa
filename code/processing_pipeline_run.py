@@ -30,7 +30,7 @@ from mesa_shared import find_base_dir as resolve_base_dir, read_config, parquet_
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QProgressBar,
-    QFrame, QSizePolicy, QRadioButton, QButtonGroup,
+    QFrame, QSizePolicy, QRadioButton, QButtonGroup, QMessageBox,
 )
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
@@ -170,6 +170,65 @@ def detect_analysis_processing(base_dir: Path, cfg: configparser.ConfigParser) -
     if missing:
         return ProcessAvailability(False, ["Missing: " + ", ".join(missing)])
 
+    return ProcessAvailability(True, [])
+
+
+def validate_setup_parameters(
+    base_dir: Path, cfg: configparser.ConfigParser,
+) -> ProcessAvailability:
+    # Pre-flight check before Stage 2 (Intersect). The internal pipeline guards
+    # against missing importance/susceptibility deep inside process_tbl_stacked
+    # — but by then Stage 1 has already run and the operator has watched the
+    # window for 5–10s with no idea anything is wrong. Catching it on the
+    # Process click means a clear "fix this first" dialog and zero wasted work.
+    import pandas as pd
+    import pyarrow.parquet as pq
+
+    gpq = parquet_dir(base_dir, cfg)
+    path = gpq / "tbl_asset_group.parquet"
+    if not path.exists():
+        return ProcessAvailability(
+            False,
+            ["tbl_asset_group.parquet is missing — import assets before processing."],
+        )
+
+    try:
+        schema_cols = pq.ParquetFile(path).schema.names
+    except Exception:
+        schema_cols = []
+    missing_cols = [c for c in ("importance", "susceptibility") if c not in schema_cols]
+    if missing_cols:
+        return ProcessAvailability(
+            False,
+            [
+                "Asset table is missing column(s): " + ", ".join(missing_cols) + ".",
+                "Open Parameters (Processing setup) and set Importance and "
+                "Susceptibility (1–5) for each asset layer, then try again.",
+            ],
+        )
+
+    try:
+        df = pd.read_parquet(path, columns=["importance", "susceptibility"])
+    except Exception as exc:
+        return ProcessAvailability(False, [f"Cannot read tbl_asset_group: {exc}"])
+
+    imp = pd.to_numeric(df.get("importance"), errors="coerce")
+    sus = pd.to_numeric(df.get("susceptibility"), errors="coerce")
+    valid = imp.between(1, 5) & sus.between(1, 5)
+    try:
+        valid_count = int(valid.sum())
+    except Exception:
+        valid_count = 0
+    if valid_count == 0:
+        return ProcessAvailability(
+            False,
+            [
+                "No asset layer has both Importance and Susceptibility set "
+                "to a valid value (1–5).",
+                "Open Parameters (Processing setup) to fill them in for each "
+                "layer, then try again.",
+            ],
+        )
     return ProcessAvailability(True, [])
 
 
@@ -1982,6 +2041,23 @@ class ProcessRunnerWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_process_click(self) -> None:
+        # Pre-flight: Stage 2 needs Importance and Susceptibility on at least
+        # one asset layer to compute sensitivity. Without this, the pipeline
+        # used to spend Stage 1 (Prep) seconds on data extent before failing
+        # — the operator now gets a clear fix-this-first dialog up front.
+        will_run_intersect = (
+            self._cb_intersect.isChecked() if self._rb_advanced.isChecked()
+            else self._avail_data.available
+        )
+        if will_run_intersect:
+            readiness = validate_setup_parameters(self._base_dir, self._cfg)
+            if not readiness.available:
+                QMessageBox.warning(
+                    self,
+                    "Cannot start processing",
+                    "\n\n".join(readiness.reasons),
+                )
+                return  # button stays enabled so the operator can retry
         self._process_btn.setEnabled(False)
         # Pause log-file tailing while the worker is running — the worker
         # sends lines directly via signals, and _log_line also writes to
