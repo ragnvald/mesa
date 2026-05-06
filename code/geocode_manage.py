@@ -2854,7 +2854,10 @@ class GeocodeManagerWindow(QMainWindow):
         self._signals.mosaic_line.connect(self._on_mosaic_line)
         self._signals.mosaic_finished.connect(self._update_mosaic_status)
 
-        self._active_log_tab = 0  # 0=mosaic, 1=h3, 2=import
+        # Active log target — set by the operation runners (_run_mosaic,
+        # _generate_h3, _run_import) so log_to_gui lines go to the right widget
+        # even if the user switches tabs while a job is in flight.
+        self._active_log_widget = None
 
         self.geocode_df = None
         self.edit_idx = 0
@@ -3178,20 +3181,24 @@ class GeocodeManagerWindow(QMainWindow):
     # Signal slots (UI-thread safe)
     # ------------------------------------------------------------------
     def _on_log_message(self, text: str):
-        tab = self.tabs.currentIndex()
-        if tab == 0:
-            self.mosaic_log.appendPlainText(text)
-        elif tab == 1:
-            self.h3_log.appendPlainText(text)
-        elif tab == 2:
-            self.import_log.appendPlainText(text)
-        else:
-            self.h3_log.appendPlainText(text)
+        target = self._active_log_widget
+        if target is None:
+            label = self.tabs.tabText(self.tabs.currentIndex()).lower()
+            if "mosaic" in label:
+                target = self.mosaic_log
+            elif "h3" in label:
+                target = self.h3_log
+            elif "import" in label:
+                target = self.import_log
+            else:
+                target = self.h3_log
+        target.appendPlainText(text)
 
     def _on_progress(self, value: float):
         self.progress_bar.setValue(int(value))
 
     def _on_task_finished(self):
+        self._active_log_widget = None
         self._refresh_group_list()
         self._refresh_edit_data()
 
@@ -3199,7 +3206,9 @@ class GeocodeManagerWindow(QMainWindow):
         self.mosaic_log.appendPlainText(text)
 
     def _on_tab_changed(self, index: int):
-        self._active_log_tab = index
+        # Tab changes during an in-flight job no longer affect log routing
+        # — _on_log_message uses _active_log_widget while a job runs.
+        return
 
     # ------------------------------------------------------------------
     # Mosaic
@@ -3212,6 +3221,7 @@ class GeocodeManagerWindow(QMainWindow):
         self.mosaic_status_label.setStyleSheet(f"font-weight: 600; color: {color}; min-width: 100px;")
 
     def _run_mosaic(self):
+        self._active_log_widget = self.mosaic_log
         self.mosaic_log.clear()
         self.mosaic_log.appendPlainText("--- Mosaic run started ---")
         try:
@@ -3304,6 +3314,7 @@ class GeocodeManagerWindow(QMainWindow):
         if not self._h3_levels:
             log_to_gui("No suggested levels to generate.", "WARN")
             return
+        self._active_log_widget = self.h3_log
         log_to_gui(f"[H3] Generate requested for levels: {self._h3_levels}", "INFO")
         levels = list(self._h3_levels)
         clear = self.h3_clear_check.isChecked()
@@ -3313,6 +3324,7 @@ class GeocodeManagerWindow(QMainWindow):
     # Import
     # ------------------------------------------------------------------
     def _run_import(self):
+        self._active_log_widget = self.import_log
         log_to_gui("[Import] Import requested.", "INFO")
         _run_in_thread(run_import_geocodes, self.base, self.cfg, on_done=True)
 
