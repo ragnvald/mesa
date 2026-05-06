@@ -3030,7 +3030,9 @@ class MesaMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     _log_duration_cache = {"mtime": None, "durations": {}, "seconds": {}, "times": {}}
     _status_calc_runtime = {"seconds": None}
-    _asset_area_cache = {"path": None, "mtime": None, "area_km2": None}
+    # Asset extent area is now precomputed by Stage 1 (Prep) into
+    # tbl_data_extent.parquet's area_km2 column, so no per-process cache is
+    # needed — reads are constant-time.
     _lines_length_cache = {"path": None, "mtime": None, "length_km": None}
 
     @staticmethod
@@ -3615,36 +3617,33 @@ class MesaMainWindow(QMainWindow):
         except Exception:
             return None
 
-    def _total_area_km2_from_asset_objects(self, asset_object_path):
-        if not asset_object_path or not os.path.exists(asset_object_path):
+    def _data_extent_area_km2(self):
+        # Read the precomputed dissolved-asset area written by Stage 1 (Prep).
+        # Cheap: one row, one float column, no geometry decoding. Returns None
+        # if processing has not yet run or the column is missing — the caller
+        # formats that as "--" so the operator can tell the number isn't ready.
+        path = _locate_geoparquet_file("tbl_data_extent")
+        if not path or not os.path.exists(path):
             return None
         try:
-            import geopandas as gpd
-            mtime = self._path_mtime(asset_object_path)
-            cache = self._asset_area_cache
-            if mtime and cache.get("path") == asset_object_path and cache.get("mtime") == mtime:
-                return cache.get("area_km2")
-            epsg = self._measurement_epsg()
-            gdf = gpd.read_parquet(asset_object_path, columns=["geometry"])
-            if epsg:
-                try:
-                    if gdf.crs is None:
-                        gdf = gdf.set_crs(epsg=epsg, allow_override=True)
-                    elif getattr(gdf.crs, "to_epsg", lambda: None)() != epsg:
-                        gdf = gdf.to_crs(epsg=epsg)
-                except Exception:
-                    pass
-            else:
-                try:
-                    gdf = gdf.to_crs(epsg=3857)
-                except Exception:
-                    pass
-            total_m2 = float(gdf.geometry.area.fillna(0).sum()) if not gdf.empty else 0.0
-            km2 = total_m2 / 1_000_000.0
-            cache.update({"path": asset_object_path, "mtime": mtime, "area_km2": km2})
-            return km2
+            available = pq.ParquetFile(path).schema.names
+        except Exception:
+            available = []
+        if "area_km2" not in available:
+            return None
+        try:
+            s = pd.read_parquet(path, columns=["area_km2"])["area_km2"]
         except Exception:
             return None
+        if s is None or s.empty:
+            return None
+        try:
+            val = float(s.iloc[0])
+        except Exception:
+            return None
+        if val != val:  # NaN guard
+            return None
+        return val
 
     def _total_length_km_from_lines(self, lines_path):
         if not lines_path or not os.path.exists(lines_path):
@@ -3691,12 +3690,11 @@ class MesaMainWindow(QMainWindow):
                     objects = int(s.fillna(0).sum())
             except Exception:
                 pass
-            asset_object_path = _locate_geoparquet_file("tbl_asset_object")
-            total_area_km2 = self._total_area_km2_from_asset_objects(asset_object_path)
+            total_area_km2 = self._data_extent_area_km2()
             return [
                 ("Layers", self._fmt_count(layers)),
                 ("Objects", self._fmt_count(objects)),
-                ("Area (km2)", self._fmt_km2(total_area_km2)),
+                ("Data extent (km2)", self._fmt_km2(total_area_km2)),
             ]
         except Exception as exc:
             return [("Unable to read assets:", ""), (str(exc)[:160], "")]

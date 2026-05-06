@@ -1114,32 +1114,33 @@ def cleanup_outputs():
 
 
 def write_data_extent(working_epsg: int) -> None:
-    """Compute the dissolved outer outline of all input data and write it to
-    tbl_data_extent.parquet for the Report generator's area-overview map (and
-    any other consumer that wants a 'where does this project cover' polygon).
+    """Compute the dissolved outer outline of the asset inputs and persist it
+    plus its area to tbl_data_extent.parquet. The result is the project's
+    coverage area: assets only, since geocode grids are derived as a frame
+    around the asset extent and would only inflate the polygon. Consumers
+    (Status tab, Report area-overview map) read the precomputed area_km2
+    column directly so they don't have to re-dissolve the asset table.
     Preserves disjoint regions as MultiPolygon."""
     geoms: list = []
-    for fname in ("tbl_asset_object.parquet", "tbl_geocode_object.parquet"):
-        path = gpq_dir() / fname
-        if not path.exists():
-            continue
-        try:
-            gdf = gpd.read_parquet(path)
-        except Exception as exc:
-            log_to_gui(log_widget, f"[Stage 1/4] Data extent: cannot read {fname}: {exc}")
-            continue
-        if gdf is None or gdf.empty or 'geometry' not in gdf.columns:
-            continue
+    path = gpq_dir() / "tbl_asset_object.parquet"
+    if not path.exists():
+        log_to_gui(log_widget, "[Stage 1/4] Data extent: tbl_asset_object missing; skipping.")
+        return
+    try:
+        gdf = gpd.read_parquet(path)
+    except Exception as exc:
+        log_to_gui(log_widget, f"[Stage 1/4] Data extent: cannot read tbl_asset_object: {exc}")
+        return
+    if gdf is not None and not gdf.empty and 'geometry' in gdf.columns:
         try:
             gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
         except Exception:
             pass
-        if gdf.empty:
-            continue
-        geoms.extend(list(gdf.geometry.values))
+        if not gdf.empty:
+            geoms.extend(list(gdf.geometry.values))
 
     if not geoms:
-        log_to_gui(log_widget, "[Stage 1/4] Data extent: no input geometries found; skipping.")
+        log_to_gui(log_widget, "[Stage 1/4] Data extent: no asset geometries found; skipping.")
         return
 
     try:
@@ -1159,15 +1160,30 @@ def write_data_extent(working_epsg: int) -> None:
         log_to_gui(log_widget, "[Stage 1/4] Data extent: dissolved geometry is empty; skipping.")
         return
 
-    out = gpd.GeoDataFrame({'name': ['data_extent']}, geometry=[union], crs=working_epsg)
+    # Geodesic (WGS84) area is CRS-independent and avoids surprises if
+    # working_epsg is geographic.
+    area_km2 = None
+    try:
+        union_wgs = gpd.GeoSeries([union], crs=working_epsg).to_crs("EPSG:4326").iloc[0]
+        area_km2 = float(_geodesic_area_m2(union_wgs)) / 1_000_000.0
+    except Exception as exc:
+        log_to_gui(log_widget,
+                   f"[Stage 1/4] Data extent: area computation failed ({exc}); writing geometry only.")
+
+    out = gpd.GeoDataFrame(
+        {'name': ['data_extent'], 'area_km2': [area_km2]},
+        geometry=[union],
+        crs=working_epsg,
+    )
     out_path = gpq_dir() / "tbl_data_extent.parquet"
     out.to_parquet(out_path, index=False)
     try:
         n_polys = len(union.geoms) if union.geom_type == 'MultiPolygon' else 1
     except Exception:
         n_polys = 1
+    area_str = f"{area_km2:,.1f} km²" if area_km2 is not None else "area unknown"
     log_to_gui(log_widget,
-               f"[Stage 1/4] Data extent written: {n_polys} polygon(s) -> tbl_data_extent.parquet")
+               f"[Stage 1/4] Data extent written: {n_polys} polygon(s), {area_str} -> tbl_data_extent.parquet")
 
 # ----------------------------
 # Grid & chunking
