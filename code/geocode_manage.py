@@ -1864,14 +1864,17 @@ def _bbox_polygon_from(thing) -> Optional[Polygon]:
     except Exception:
         return None
 
-def _load_existing_geocodes(base_dir: Path) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+def _load_existing_geocodes(
+    base_dir: Path,
+    load_objects: bool = True,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    # tbl_geocode_object can be multi-GB once geocoding has run; callers that
+    # only need the groups (admin/list views) should pass load_objects=False to
+    # avoid decoding the geometry column.
     geodir = gpq_dir(base_dir)
     pg = _existing_parquet_path(base_dir, "tbl_geocode_group")
     if pg is None:
         pg = geodir / TABLE_GEOCODE_GROUP
-    po = _existing_parquet_path(base_dir, "tbl_geocode_object")
-    if po is None:
-        po = geodir / TABLE_GEOCODE_OBJECT
     if pg.exists():
         try:
             g = gpd.read_parquet(pg)
@@ -1880,19 +1883,50 @@ def _load_existing_geocodes(base_dir: Path) -> tuple[gpd.GeoDataFrame, gpd.GeoDa
             g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
     else:
         g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-    if po.exists():
-        try:
-            o = gpd.read_parquet(po)
-            if o.crs is None: o.set_crs("EPSG:4326", inplace=True)
-        except Exception:
+
+    if load_objects:
+        po = _existing_parquet_path(base_dir, "tbl_geocode_object")
+        if po is None:
+            po = geodir / TABLE_GEOCODE_OBJECT
+        if po.exists():
+            try:
+                o = gpd.read_parquet(po)
+                if o.crs is None: o.set_crs("EPSG:4326", inplace=True)
+            except Exception:
+                o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+        else:
             o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+        o = ensure_wgs84(o)
     else:
         o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-    g = ensure_wgs84(g); o = ensure_wgs84(o)
+
+    g = ensure_wgs84(g)
     if "id" not in g.columns:
         log_to_gui("Existing geocode group table lacks 'id' — treating as empty.", "WARN")
         g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326"); o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
     return g, o
+
+
+def _load_geocode_object_counts(base_dir: Path) -> tuple[dict[int, int], int]:
+    # Cheap counts for admin views — reads only ref_geocodegroup, skipping the
+    # geometry column entirely. Returns (counts_by_group_id, total_rows).
+    po = _existing_parquet_path(base_dir, "tbl_geocode_object")
+    if po is None:
+        po = gpq_dir(base_dir) / TABLE_GEOCODE_OBJECT
+    if not po.exists():
+        return {}, 0
+    try:
+        df = pd.read_parquet(po, columns=["ref_geocodegroup"])
+    except Exception:
+        return {}, 0
+    total = len(df)
+    if "ref_geocodegroup" not in df.columns or total == 0:
+        return {}, total
+    try:
+        counts = df["ref_geocodegroup"].dropna().astype(int).value_counts()
+        return {int(k): int(v) for k, v in counts.items()}, total
+    except Exception:
+        return {}, total
 
 
 def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
@@ -1943,7 +1977,7 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
     )
 
 def _list_existing_h3_group_names(base_dir: Path) -> list[str]:
-    g, _ = _load_existing_geocodes(base_dir)
+    g, _ = _load_existing_geocodes(base_dir, load_objects=False)
     if g.empty or "name_gis_geocodegroup" not in g.columns:
         return []
     try:
@@ -3284,18 +3318,12 @@ class GeocodeManagerWindow(QMainWindow):
 
     def _refresh_group_list(self):
         try:
-            existing_g, existing_o = _load_existing_geocodes(self.base)
+            existing_g, _ = _load_existing_geocodes(self.base, load_objects=False)
         except Exception as exc:
             self.import_status_label.setText(f"Failed to load geocode groups: {exc}")
             return
 
-        obj_counts: dict[int, int] = {}
-        if not existing_o.empty and "ref_geocodegroup" in existing_o.columns:
-            try:
-                s = existing_o["ref_geocodegroup"].dropna().astype(int).value_counts()
-                obj_counts = {int(k): int(v) for k, v in s.items()}
-            except Exception:
-                pass
+        obj_counts, total_objects = _load_geocode_object_counts(self.base)
 
         self.group_tree.clear()
 
@@ -3324,7 +3352,7 @@ class GeocodeManagerWindow(QMainWindow):
             ])
             self.group_tree.addTopLevelItem(item)
 
-        self.import_status_label.setText(f"Groups: {len(existing_g)}  |  Total objects: {len(existing_o)}")
+        self.import_status_label.setText(f"Groups: {len(existing_g)}  |  Total objects: {total_objects}")
 
     def _delete_selected_groups(self):
         log_to_gui("[Import] Delete selected requested.", "INFO")
@@ -3372,7 +3400,7 @@ class GeocodeManagerWindow(QMainWindow):
     def _load_geocode_group_df(self):
         cols = ["id", "name", "name_gis_geocodegroup", "geocode_origin", "title_user", "description", "geometry"]
         try:
-            gdf, _ = _load_existing_geocodes(self.base)
+            gdf, _ = _load_existing_geocodes(self.base, load_objects=False)
             for c in cols:
                 if c not in gdf.columns:
                     gdf[c] = ""
