@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-analysis_present.py - Compare analysis groups side by side.
+analysis_present.py - Compare analysis areas side by side.
 
 This utility reads the GeoParquet outputs produced by analysis_setup.py /
-processing_pipeline_run.py and lets the user compare two analysis groups
+processing_pipeline_run.py and lets the user compare two analysis areas
 without opening the map interface.
 """
 
@@ -745,12 +745,12 @@ class AnalysisData:
         }
 
         if not group_id:
-            summary["message"] = "Select an analysis group."
+            summary["message"] = "Select an analysis area."
             return summary
 
         group_row = self.groups[self.groups["id"].astype(str) == str(group_id)]
         if group_row.empty:
-            summary["message"] = "Analysis group not found. Run analysis_setup.py first."
+            summary["message"] = "Analysis area not found. Run analysis_setup.py first."
             return summary
 
         summary["group_name"] = coalesce(group_row.iloc[0].get("name"), default=str(group_id))
@@ -869,7 +869,7 @@ class AnalysisData:
         }
 
         if not group_id:
-            summary["message"] = "Select an analysis group."
+            summary["message"] = "Select an analysis area."
             return summary
 
         if not self.has_stacked:
@@ -1091,13 +1091,13 @@ class AnalysisData:
 
     def status_message(self) -> str:
         if self.groups.empty:
-            return "No analysis groups available. Run analysis_setup.py to create them."
+            return "No analysis areas available. Run analysis_setup.py to create them."
         if not self.has_analysis:
             return (
                 "No analysis results detected. Run analysis_process.py "
                 "to populate tbl_analysis_flat.parquet and tbl_analysis_stacked.parquet."
             )
-        return f"Loaded {len(self.groups)} group(s). Select two groups to compare."
+        return f"Loaded {len(self.groups)} area(s). Select two areas to compare."
 
 
 # --------------------------------------------------------------------------- #
@@ -1578,7 +1578,7 @@ class SankeyDifferenceView(QFrame):
         right_total = sum(right_map.get(c, 0.0) for c in codes)
         scale_total = max(left_total, right_total)
         if scale_total <= 0:
-            self.ax.text(0.5, 0.5, "Select two groups with sensitivity totals.", ha="center", va="center", fontsize=10)
+            self.ax.text(0.5, 0.5, "Select two areas with sensitivity totals.", ha="center", va="center", fontsize=10)
             self.figure.tight_layout()
             self.canvas.draw_idle()
             return
@@ -1811,7 +1811,7 @@ class ComparisonWindow(QMainWindow):
         left = self.left_summary or {}
         right = self.right_summary or {}
         rows = [
-            {"Metric": "Group name", "Left": left.get("group_name", ""), "Right": right.get("group_name", "")},
+            {"Metric": "Area name", "Left": left.get("group_name", ""), "Right": right.get("group_name", "")},
             {"Metric": "Notes", "Left": left.get("group_notes", ""), "Right": right.get("group_notes", "")},
             {"Metric": "Configured polygons", "Left": left.get("configured_count", 0), "Right": right.get("configured_count", 0)},
             {"Metric": "Processed polygons", "Left": left.get("processed_count", 0), "Right": right.get("processed_count", 0)},
@@ -1837,7 +1837,7 @@ class ComparisonWindow(QMainWindow):
         left = self.left_stacked_summary or {}
         right = self.right_stacked_summary or {}
         rows = [
-            {"Metric": "Group name", "Left": left.get("group_id", self.left_summary.get("group_name", "")), "Right": right.get("group_id", self.right_summary.get("group_name", ""))},
+            {"Metric": "Area name", "Left": left.get("group_id", self.left_summary.get("group_name", "")), "Right": right.get("group_id", self.right_summary.get("group_name", ""))},
             {"Metric": "Polygons with overlaps", "Left": len(left.get("polygons", []) or []), "Right": len(right.get("polygons", []) or [])},
             {"Metric": "Total overlap area (km\u00b2)", "Left": _sum_polygons(left), "Right": _sum_polygons(right)},
             {"Metric": "Asset groups reported", "Left": _asset_count(left), "Right": _asset_count(right)},
@@ -1919,7 +1919,7 @@ class ComparisonWindow(QMainWindow):
 
     def _export_basic_report(self) -> None:
         if not (self._ensure_selection(self.left_summary) and self._ensure_selection(self.right_summary)):
-            QMessageBox.warning(self, "Export basic report", "Select two analysis groups first.")
+            QMessageBox.warning(self, "Export basic report", "Select two analysis areas first.")
             return
         try:
             sheets = {
@@ -1940,7 +1940,7 @@ class ComparisonWindow(QMainWindow):
 
     def _export_comprehensive_report(self) -> None:
         if not (self._ensure_selection(self.left_stacked_summary) and self._ensure_selection(self.right_stacked_summary)):
-            QMessageBox.warning(self, "Export comprehensive report", "Select groups that have comprehensive analysis results first.")
+            QMessageBox.warning(self, "Export comprehensive report", "Select areas that have comprehensive analysis results first.")
             return
         try:
             sheets = {
@@ -1972,7 +1972,7 @@ def run(base_dir: str, master=None) -> None:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare analysis groups side by side.")
+    parser = argparse.ArgumentParser(description="Compare analysis areas side by side.")
     parser.add_argument(
         "--original_working_directory",
         dest="owd",

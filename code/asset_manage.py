@@ -1314,7 +1314,10 @@ class AssetManagerWindow(QMainWindow):
                         "id": group_id,
                         "name_original": layer,
                         "name_gis_assetgroup": f"layer_{group_id:03d}",
-                        "title_fromuser": fp.stem,
+                        # Use the table/layer name, not the geopackage filename, so a
+                        # multi-layer .gpkg yields one asset group per table with a
+                        # distinct title — matches the .shp/.parquet branch below.
+                        "title_fromuser": layer,
                         "date_import": datetime.datetime.now(),
                         "geometry": bbox_polygon,
                         "total_asset_objects": int(count),

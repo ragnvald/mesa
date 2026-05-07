@@ -1597,6 +1597,10 @@ class _RunnerSignals(QObject):
     log_message = Signal(str)
     progress_update = Signal(float)
     task_finished = Signal()
+    # Emitted from the worker thread (via the pause observer) when the
+    # worker actually transitions in/out of the paused state. Used to swap
+    # the Pause button caption between "Pause" and "Continue".
+    pause_state_changed = Signal(bool)
 
 
 def _shared_window_icon(base_dir: Path) -> QIcon:
@@ -1886,6 +1890,8 @@ class ProcessRunnerWindow(QMainWindow):
         # Button row
         btn_row = QHBoxLayout()
         self._process_btn = QPushButton("Process")
+        self._pause_btn = QPushButton("Pause")
+        self._cancel_btn = QPushButton("Cancel")
         self._map_btn = QPushButton("Progress map")
         exit_btn = QPushButton("Exit")
         exit_btn.setObjectName("CornerExitButton")
@@ -1899,7 +1905,13 @@ class ProcessRunnerWindow(QMainWindow):
             QPushButton#CornerExitButton:pressed { background: #d4c094; }
         """)
 
+        # Pause and Cancel are disabled until a run is in progress.
+        self._pause_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(False)
+
         btn_row.addWidget(self._process_btn)
+        btn_row.addWidget(self._pause_btn)
+        btn_row.addWidget(self._cancel_btn)
         btn_row.addWidget(self._map_btn)
         btn_row.addStretch()
         btn_row.addWidget(exit_btn)
@@ -1910,6 +1922,8 @@ class ProcessRunnerWindow(QMainWindow):
 
         # Connect buttons
         self._process_btn.clicked.connect(self._on_process_click)
+        self._pause_btn.clicked.connect(self._on_pause_click)
+        self._cancel_btn.clicked.connect(self._on_cancel_click)
         self._map_btn.clicked.connect(self._open_progress_map)
         exit_btn.clicked.connect(self.close)
 
@@ -1934,6 +1948,7 @@ class ProcessRunnerWindow(QMainWindow):
         self._signals.log_message.connect(self._append_log)
         self._signals.progress_update.connect(self._set_progress)
         self._signals.task_finished.connect(self._on_task_finished)
+        self._signals.pause_state_changed.connect(self._on_pause_state_changed)
 
         # Log tail timer
         self._tail_timer = QTimer(self)
@@ -1968,6 +1983,10 @@ class ProcessRunnerWindow(QMainWindow):
 
     def _on_task_finished(self) -> None:
         self._process_btn.setEnabled(True)
+        self._pause_btn.setText("Pause")
+        self._pause_btn.setEnabled(False)
+        self._cancel_btn.setText("Cancel")
+        self._cancel_btn.setEnabled(False)
         # Resume log-file tailing; skip to current EOF so we don't replay
         # lines already shown via the worker's direct signal path.
         log_path = self._base_dir / "log.txt"
@@ -1977,6 +1996,55 @@ class ProcessRunnerWindow(QMainWindow):
         except Exception:
             pass
         self._tail_timer.start()
+
+    def _on_pause_click(self) -> None:
+        # Pause and Continue share one button. Caption tells us which action
+        # is intended next.
+        try:
+            import processing_internal as dpi
+        except Exception as exc:
+            self._append_log(f"{_ts()} - Pause unavailable: {exc}")
+            return
+        if self._pause_btn.text() == "Continue":
+            dpi.request_continue()
+            # The pause-state observer will flip the caption back to "Pause"
+            # once the worker actually resumes, but flip immediately for
+            # responsive feedback.
+            self._pause_btn.setText("Pause")
+            self._pause_btn.setEnabled(True)
+            self._append_log(f"{_ts()} - Continue requested.")
+        else:
+            dpi.request_pause()
+            # Stage code only honours the request at the next chunk boundary.
+            self._pause_btn.setText("Pausing…")
+            self._pause_btn.setEnabled(False)
+            self._append_log(f"{_ts()} - Pause requested. Will pause after the current chunk completes.")
+
+    def _on_cancel_click(self) -> None:
+        try:
+            import processing_internal as dpi
+        except Exception as exc:
+            self._append_log(f"{_ts()} - Cancel unavailable: {exc}")
+            return
+        dpi.request_cancel()
+        self._cancel_btn.setText("Cancelling…")
+        self._cancel_btn.setEnabled(False)
+        # If we were paused, the cancel also wakes the wait so the worker
+        # observes the cancel promptly. The Pause caption may have been
+        # "Continue" — disable it now since cancel takes priority.
+        self._pause_btn.setEnabled(False)
+        self._append_log(f"{_ts()} - Cancel requested. Will stop after the current chunk completes.")
+
+    def _on_pause_state_changed(self, paused: bool) -> None:
+        # Driven from the worker thread (via the pause observer in
+        # processing_internal). The signal marshals the call back to the
+        # GUI thread so we can safely touch widgets here.
+        if paused:
+            self._pause_btn.setText("Continue")
+            self._pause_btn.setEnabled(True)
+        else:
+            self._pause_btn.setText("Pause")
+            self._pause_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Log tailer
@@ -2059,6 +2127,16 @@ class ProcessRunnerWindow(QMainWindow):
                 )
                 return  # button stays enabled so the operator can retry
         self._process_btn.setEnabled(False)
+        # Reset pause/cancel state for the new run and enable the controls.
+        try:
+            import processing_internal as dpi
+            dpi.reset_run_state()
+        except Exception:
+            pass
+        self._pause_btn.setText("Pause")
+        self._pause_btn.setEnabled(True)
+        self._cancel_btn.setText("Cancel")
+        self._cancel_btn.setEnabled(True)
         # Pause log-file tailing while the worker is running — the worker
         # sends lines directly via signals, and _log_line also writes to
         # log.txt, so tailing would duplicate every line.
@@ -2101,10 +2179,37 @@ class ProcessRunnerWindow(QMainWindow):
             def progress_from_worker(v: float) -> None:
                 self._signals.progress_update.emit(v)
 
-            run_selected(self._base_dir, self._cfg, plan, log_from_worker, progress_from_worker)
-            self._signals.log_message.emit(f"{_ts()} - ALL SELECTED PROCESSING COMPLETED")
+            # Bridge the pause-state changes (raised from inside the worker
+            # thread by processing_internal._check_pause_or_cancel) to the
+            # GUI thread via a Qt signal so the Pause button caption can be
+            # updated safely.
+            try:
+                import processing_internal as dpi
+                pause_observer = lambda paused: self._signals.pause_state_changed.emit(bool(paused))
+                dpi.register_pause_observer(pause_observer)
+            except Exception:
+                dpi = None
+                pause_observer = None
+
+            try:
+                run_selected(self._base_dir, self._cfg, plan, log_from_worker, progress_from_worker)
+                self._signals.log_message.emit(f"{_ts()} - ALL SELECTED PROCESSING COMPLETED")
+            finally:
+                if dpi is not None and pause_observer is not None:
+                    try: dpi.unregister_pause_observer(pause_observer)
+                    except Exception: pass
         except Exception as e:
-            self._signals.log_message.emit(f"{_ts()} - ERROR: {e}")
+            # ProcessingCancelled is the operator-driven path; surface it as
+            # a clean cancellation message rather than an error.
+            try:
+                import processing_internal as dpi
+                cancelled_cls = getattr(dpi, "ProcessingCancelled", None)
+            except Exception:
+                cancelled_cls = None
+            if cancelled_cls is not None and isinstance(e, cancelled_cls):
+                self._signals.log_message.emit(f"{_ts()} - PROCESSING CANCELLED BY OPERATOR")
+            else:
+                self._signals.log_message.emit(f"{_ts()} - ERROR: {e}")
         finally:
             self._signals.task_finished.emit()
 

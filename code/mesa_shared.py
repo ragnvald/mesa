@@ -144,6 +144,28 @@ _IMAGE_MIME = {
 }
 
 
+def choose_primary_geocode(available_groups, *, prefer: str = "basic_mosaic") -> str:
+    """Pick the geocode group that downstream consumers should treat as the
+    project's primary analytical unit.
+
+    When `prefer` (default `basic_mosaic`) is in `available_groups`, return it.
+    Otherwise return the first sorted group name — sorted lexicographically,
+    which puts H3_R6 < H3_R7 < … < H3_R10 ahead of arbitrary imported set
+    names. That matches operator intuition that the coarsest-resolution H3
+    grid covers the most area and is the safest fallback when the
+    asset-shaped mosaic is absent.
+
+    Returns an empty string when `available_groups` is empty so callers can
+    short-circuit cleanly without raising.
+    """
+    if not available_groups:
+        return ""
+    groups = [str(g).strip() for g in available_groups if str(g).strip()]
+    if prefer and prefer in groups:
+        return prefer
+    return sorted(groups)[0] if groups else ""
+
+
 class LeafletBundle:
     """Inline-ready Leaflet + Leaflet-Draw assets, plus an offline banner.
 

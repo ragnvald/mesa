@@ -10,7 +10,7 @@ shared independently of the main UI.
 
 from __future__ import annotations
 
-from mesa_shared import find_base_dir as resolve_base_dir, leaflet_bundle
+from mesa_shared import find_base_dir as resolve_base_dir, leaflet_bundle, choose_primary_geocode
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
     TABLE_ANALYSIS_GROUP as ANALYSIS_GROUP_TABLE,
@@ -849,7 +849,7 @@ class AnalysisStorage:
         gid = self._resolve_group_id(identifier)
         with self._lock:
             if len(self._groups_df) <= 1:
-                raise ValueError("More than one group is required; cannot delete the last remaining group.")
+                raise ValueError("More than one area is required; cannot delete the last remaining area.")
             self._groups_df = self._groups_df[self._groups_df["id"] != gid].reset_index(drop=True)
             self._polygons_gdf = self._polygons_gdf[self._polygons_gdf["group_id"] != gid].reset_index(drop=True)
             remaining = self._groups_df["id"].astype(str)
@@ -1011,15 +1011,42 @@ class AnalysisPreviewProvider:
       self.working_epsg = 4326
     self.storage_epsg = storage_epsg or 4326
 
-    self.default_geocode = DEFAULT_ANALYSIS_GEOCODE
+    # Resolve the project's primary geocode group: prefer basic_mosaic,
+    # fall back to first available group (H3 grids, imported polygon sets)
+    # when basic_mosaic was skipped per the project geocode-strategy setting.
+    self.default_geocode = self._resolve_default_geocode() or DEFAULT_ANALYSIS_GEOCODE
     self.analysis_flat_path = analysis_flat_path(base_dir, cfg)
 
     self._canvas_cache: Dict[str, tuple[list[Dict[str, Any]], Optional[List[float]]]] = {}
     self.canvas_bounds: Optional[List[float]] = None
     self.asset_bounds: Optional[tuple[float, float, float, float]] = None
 
+  def _resolve_default_geocode(self) -> str:
+    try:
+      base = parquet_dir(self.base_dir, self.cfg)
+      group_path = Path(base) / "tbl_geocode_group.parquet"
+      if not group_path.exists():
+        return ""
+      df = pd.read_parquet(group_path, columns=["name_gis_geocodegroup"])
+      names = [str(v).strip() for v in df["name_gis_geocodegroup"].dropna().tolist() if str(v).strip()]
+      return choose_primary_geocode(names, prefer=DEFAULT_ANALYSIS_GEOCODE)
+    except Exception:
+      return ""
+
   def available_geocode_categories(self) -> List[str]:
-    return [DEFAULT_ANALYSIS_GEOCODE]
+    try:
+      base = parquet_dir(self.base_dir, self.cfg)
+      group_path = Path(base) / "tbl_geocode_group.parquet"
+      if group_path.exists():
+        df = pd.read_parquet(group_path, columns=["name_gis_geocodegroup"])
+        names = sorted({str(v).strip() for v in df["name_gis_geocodegroup"].dropna().tolist() if str(v).strip()})
+        if names:
+          return names
+    except Exception:
+      pass
+    # Last-resort fallback so the dropdown is never empty: the resolved
+    # default (or DEFAULT_ANALYSIS_GEOCODE) — same as the previous behaviour.
+    return [self.default_geocode or DEFAULT_ANALYSIS_GEOCODE]
 
   def analysis_preview_geojson(self, group_id: str, limit: int = 500) -> Dict[str, Any]:
     try:
@@ -1595,15 +1622,15 @@ __MESA_LEAFLET_BODY_OPEN__
     </div>
 
     <div>
-      <h2>Analysis groups</h2>
+      <h2>Analysis areas</h2>
       <div class="form-group">
-        <label for="groupSelect">Group</label>
+        <label for="groupSelect">Area</label>
         <select id="groupSelect"></select>
       </div>
       <div class="buttons">
-        <button id="newGroupBtn" title="Create a new analysis group">New group</button>
-        <button id="renameGroupBtn" title="Rename selected group" disabled>Rename</button>
-        <button id="deleteGroupBtn" title="Delete selected group" disabled>Delete</button>
+        <button id="newGroupBtn" title="Create a new analysis area">New area</button>
+        <button id="renameGroupBtn" title="Rename selected area" disabled>Rename</button>
+        <button id="deleteGroupBtn" title="Delete selected area" disabled>Delete</button>
       </div>
     </div>
 
@@ -1624,7 +1651,7 @@ __MESA_LEAFLET_BODY_OPEN__
 
   <div class="panel panel-right">
     <div>
-      <h2>This group</h2>
+      <h2>This area</h2>
       <div class="form-group">
         <label for="titleInput">Title</label>
         <input id="titleInput" type="text" placeholder="Area of interest">
@@ -2162,7 +2189,7 @@ function applyState(state){
     if(!fitted){ fitHomeBounds(); }
     statusText('Ready.');
   } else {
-    statusText('Ready - create a group to begin.');
+    statusText('Ready - create an area to begin.');
   }
 }
 
@@ -2326,7 +2353,7 @@ function ensureMap(){
   });
 
   MAP.on(L.Draw.Event.EDITSTOP, () => {
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a group to begin.');
+    statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
   });
 
   MAP.on(L.Draw.Event.DRAWSTOP, () => {
@@ -2390,7 +2417,7 @@ function toggleDrawButtons(enable){
   if(enteringDraw){
     statusText('Drawing mode: click on the map to sketch the polygon.');
   } else {
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a group to begin.');
+    statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
     updateActionButtons();
   }
 }
@@ -2472,7 +2499,7 @@ async function callPython(method, payload, handler){
     }
 
     if(method === 'bootstrap'){
-      statusText(GROUPS.length ? 'Ready.' : 'Ready - create a group to begin.');
+      statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
     } else {
       statusText('Ready.');
     }
@@ -2487,7 +2514,7 @@ const newPolygonBtn = document.getElementById('newBtn');
 if(newPolygonBtn){
   newPolygonBtn.addEventListener('click', () => {
     if(!GROUPS.length){
-      notifyError('Create or select an analysis group before drawing.');
+      notifyError('Create or select an analysis area before drawing.');
       return;
     }
     if(DRAW_MODE){
@@ -2537,7 +2564,7 @@ const importBtn = document.getElementById('importBtn');
 if(importBtn){
   importBtn.addEventListener('click', () => {
     if(!GROUPS.length){
-      notifyError('Create or select an analysis group before importing polygons.');
+      notifyError('Create or select an analysis area before importing polygons.');
       return;
     }
     callPython('import_file', {group_id: ACTIVE_GROUP_ID});
@@ -2585,8 +2612,8 @@ if(groupSelectEl){
 const newGroupBtn = document.getElementById('newGroupBtn');
 if(newGroupBtn){
   newGroupBtn.addEventListener('click', () => {
-    const suggested = `Group ${GROUPS.length + 1}`;
-    const name = prompt('Group name', suggested);
+    const suggested = `Area ${GROUPS.length + 1}`;
+    const name = prompt('Area name', suggested);
     if(name === null){ return; }
     const trimmed = name.trim();
     if(!trimmed){ return; }
@@ -2600,7 +2627,7 @@ if(renameGroupBtn){
   renameGroupBtn.addEventListener('click', () => {
     if(!ACTIVE_GROUP_ID){ return; }
     const current = GROUPS.find(g => g.id === ACTIVE_GROUP_ID);
-    const name = prompt('Rename group', current?.name || '');
+    const name = prompt('Rename area', current?.name || '');
     if(name === null){ return; }
     const trimmed = name.trim();
     if(!trimmed){ return; }
@@ -2612,7 +2639,7 @@ const deleteGroupBtn = document.getElementById('deleteGroupBtn');
 if(deleteGroupBtn){
   deleteGroupBtn.addEventListener('click', () => {
     if(!ACTIVE_GROUP_ID){ return; }
-    if(!confirm('Delete current group and its polygons?')){ return; }
+    if(!confirm('Delete current area and its polygons?')){ return; }
     callPython('delete_group', {group_id: ACTIVE_GROUP_ID});
   });
 }
@@ -2686,7 +2713,7 @@ function startBootstrap(){
 function loadCanvasLayer(category){
   const target = category || ACTIVE_GEOCODE;
   if(!target){
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a group to begin.');
+    statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
     return;
   }
   statusText('Loading background...');

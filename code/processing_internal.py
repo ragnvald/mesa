@@ -63,6 +63,111 @@ _GUI_LOG_TAILER_ACTIVE = False
 _external_log_fn = None  # type: Callable[[str], None] | None
 
 
+# ----------------------------
+# Pause / Cancel control
+# ----------------------------
+# Operator-driven pause and cancel for multi-pool stages. The events are
+# checked at chunk boundaries inside the pool result loops, so the currently
+# running chunk always finishes before the parent stops pulling new results.
+# Workers continue to drain whatever the pool's prefetch queue already holds,
+# then sit idle until pause is released or cancel is observed.
+_pause_event = threading.Event()
+_pause_event.set()  # set = running, clear = paused
+_cancel_event = threading.Event()  # set = cancel requested
+_pause_observers = []  # list[Callable[[bool], None]] — invoked on pause/resume
+
+
+class ProcessingCancelled(Exception):
+    """Raised inside stage loops when an operator-requested cancel is observed."""
+
+
+def request_pause() -> None:
+    """Request a pause at the next chunk boundary. Workers finish the current chunk."""
+    if _pause_event.is_set():
+        _pause_event.clear()
+
+
+def request_continue() -> None:
+    """Resume after a pause."""
+    _pause_event.set()
+
+
+def request_cancel() -> None:
+    """Request cancellation. Also unblocks any current pause-wait so the
+    cancellation is observed promptly at the next loop iteration."""
+    _cancel_event.set()
+    _pause_event.set()
+
+
+def reset_run_state() -> None:
+    """Reset to a clean 'running, not cancelled' state before a new run."""
+    _cancel_event.clear()
+    _pause_event.set()
+
+
+def is_paused() -> bool:
+    return not _pause_event.is_set()
+
+
+def is_cancelled() -> bool:
+    return _cancel_event.is_set()
+
+
+def register_pause_observer(callback) -> None:
+    """Register a callable invoked as callback(paused: bool) on pause/resume.
+    Used by the GUI to update Pause/Continue button captions."""
+    if callback not in _pause_observers:
+        _pause_observers.append(callback)
+
+
+def unregister_pause_observer(callback) -> None:
+    if callback in _pause_observers:
+        _pause_observers.remove(callback)
+
+
+def _notify_pause_observers(paused: bool) -> None:
+    for cb in list(_pause_observers):
+        try:
+            cb(paused)
+        except Exception:
+            pass
+
+
+def _check_pause_or_cancel(log_fn=None) -> None:
+    """Call from inside pool-result loops to honour operator pause/cancel.
+
+    - If cancel is set, raise ProcessingCancelled (stage code is expected to
+      let the exception unwind out of the pool's `with` block so the pool
+      terminates cleanly).
+    - If pause is requested, log once, wait for resume, log resume, return.
+      The currently-in-flight chunk has already completed before this check.
+    """
+    if _cancel_event.is_set():
+        raise ProcessingCancelled("processing cancelled by operator")
+    if not _pause_event.is_set():
+        msg = "Paused after current chunk. Click Continue to resume, or Cancel to abort."
+        if log_fn is not None:
+            try: log_fn(msg)
+            except Exception: pass
+        else:
+            log_to_gui(log_widget, msg)
+        _notify_pause_observers(True)
+        # Block until the operator clears the pause (or cancels, which sets it).
+        while not _pause_event.wait(timeout=0.5):
+            if _cancel_event.is_set():
+                _notify_pause_observers(False)
+                raise ProcessingCancelled("processing cancelled by operator")
+        _notify_pause_observers(False)
+        if _cancel_event.is_set():
+            raise ProcessingCancelled("processing cancelled by operator")
+        resume_msg = "Resumed."
+        if log_fn is not None:
+            try: log_fn(resume_msg)
+            except Exception: pass
+        else:
+            log_to_gui(log_widget, resume_msg)
+
+
 class _ProcessingSignals(QObject):
     """Thread-safe signals for updating the GUI from worker threads."""
     log_message = Signal(str)
@@ -1488,6 +1593,7 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
                       initializer=_grid_pool_init2,
                       initargs=(grid_gdf, str(tmp_out))) as pool:
             for out_path in pool.imap_unordered(_grid_worker, input_parts, chunksize=1):
+                _check_pause_or_cancel()
                 out_files.append(out_path)
                 done += 1
                 now = time.time()
@@ -3223,6 +3329,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                                     f"{label} aborted by memory panic watchdog "
                                     f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
                                 )
+                            _check_pause_or_cancel()
                             if res is not None:
                                 partials.append(res)
                     except Exception:
@@ -3670,6 +3777,7 @@ def backfill_tbl_stacked(config_file: Path,
                                     f"backfill aborted by memory panic watchdog "
                                     f"(>{bf_pct}% RAM for >={bf_grace}s)"
                                 )
+                            _check_pause_or_cancel()
                             touched += count
                     finally:
                         pstate["pool"] = None
@@ -4447,17 +4555,37 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                         rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
                     except Exception:
                         rss_gb = None
-                pct = (progress_state["done"] / max(1, total_chunks)) * 100.0
-                active_workers = min(max_workers, max(0, total_chunks - progress_state["done"]))
+                done = progress_state["done"]
+                pct = (done / max(1, total_chunks)) * 100.0
+                active_workers = min(max_workers, max(0, total_chunks - done))
+                # Compute ETA from elapsed time and chunks completed so far.
+                # Heartbeat fires every HEARTBEAT_SECS regardless of whether
+                # a new chunk has finished, so without this the ETA stays at
+                # "?" during long chunks even though we already have enough
+                # data points to project a finish time.
+                eta = "?"
+                try:
+                    started_at = float(progress_state.get("started_at") or 0.0)
+                    if done > 0 and started_at > 0:
+                        elapsed = time.time() - started_at
+                        est_total = elapsed / done * total_chunks
+                        remaining = max(0.0, est_total - elapsed)
+                        eta_ts = datetime.now() + timedelta(seconds=remaining)
+                        eta = eta_ts.strftime("%H:%M:%S")
+                        dd = (eta_ts.date() - datetime.now().date()).days
+                        if dd > 0:
+                            eta += f" (+{dd}d)"
+                except Exception:
+                    eta = "?"
                 msg = (
-                    f"[heartbeat] {progress_state['done']}/{total_chunks} chunks (~{pct:.2f}%)"
+                    f"[heartbeat] {done}/{total_chunks} chunks (~{pct:.2f}%)"
                     f" • rows written: {progress_state['rows']:,}"
                     f" • active workers {active_workers}/{max_workers}"
                 )
                 if vm_used: msg += f" • RAM used {vm_used}"
                 if rss_gb is not None:
                     msg += f" • proc RSS ~{rss_gb:.2f} GB"
-                msg += " • ETA ?"
+                msg += f" • ETA {eta}"
                 log_to_gui(log_widget, msg)
             except Exception: pass
     hb_thread = threading.Thread(target=_heartbeat, daemon=True); hb_thread.start()
@@ -4514,6 +4642,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                             f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
                         )
                         break
+                    _check_pause_or_cancel()
                     progress_state["done"] += 1; done_count = progress_state["done"]
                     if logs:
                         for line in logs: log_to_gui(log_widget, line)

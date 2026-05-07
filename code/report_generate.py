@@ -220,6 +220,34 @@ def _analysis_latest_run_filter(df: pd.DataFrame, group_id: str) -> pd.DataFrame
     return sub
 
 
+def _analysis_primary_geocode(flat_df: pd.DataFrame) -> str:
+    """Pick the geocode group the report should treat as primary.
+
+    Prefers ``basic_mosaic`` if it appears in ``analysis_geocode``, otherwise
+    the first sorted distinct value (puts ``H3_R6`` < ``H3_R7`` < … <
+    ``H3_R10`` ahead of arbitrary imported set names — coarsest-resolution
+    H3 grid covers the most area, safest fallback when basic_mosaic was
+    skipped per the project's geocode-strategy setting).
+
+    Returns an empty string if the column is missing/empty so callers can
+    skip the filter without raising.
+    """
+    if flat_df is None or getattr(flat_df, "empty", True):
+        return ""
+    if "analysis_geocode" not in flat_df.columns:
+        return ""
+    try:
+        vals = flat_df["analysis_geocode"].dropna().astype(str).str.strip().str.lower()
+    except Exception:
+        return ""
+    available = sorted({v for v in vals.tolist() if v})
+    if not available:
+        return ""
+    if "basic_mosaic" in available:
+        return "basic_mosaic"
+    return available[0]
+
+
 def _analysis_polygons_for_group(gpq_dir: str, group_id: str) -> gpd.GeoDataFrame:
     # tbl_analysis_flat.parquet contains *many* geometries per polygon (typically per geocode cell)
     # and is not suitable for rendering analysis area boundaries. We instead use it only to
@@ -232,9 +260,14 @@ def _analysis_polygons_for_group(gpq_dir: str, group_id: str) -> gpd.GeoDataFram
             flat_df = pd.DataFrame(gdf_flat)
             flat_df = _analysis_latest_run_filter(flat_df, group_id)
             if "analysis_geocode" in flat_df.columns:
-                # Match the rest of the report (basic_mosaic totals)
-                mask = flat_df["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
-                flat_df = flat_df.loc[mask].copy()
+                # Filter to the project's primary geocode group. Prefers
+                # basic_mosaic; falls back to first available geocode group
+                # when basic_mosaic was skipped (project geocode-strategy
+                # setting in the geocode-manage popup).
+                primary = _analysis_primary_geocode(flat_df)
+                if primary:
+                    mask = flat_df["analysis_geocode"].astype(str).str.lower() == primary
+                    flat_df = flat_df.loc[mask].copy()
             if "analysis_polygon_id" in flat_df.columns:
                 polygon_ids = [
                     str(v).strip()
@@ -279,8 +312,10 @@ def _analysis_flat_for_group(gpq_dir: str, group_id: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     if "analysis_geocode" in subset.columns:
-        mask = subset["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
-        subset = subset.loc[mask]
+        primary = _analysis_primary_geocode(subset)
+        if primary:
+            mask = subset["analysis_geocode"].astype(str).str.lower() == primary
+            subset = subset.loc[mask]
     return subset
 
 
@@ -297,8 +332,10 @@ def _analysis_flat_geo_for_group(gpq_dir: str, group_id: str) -> gpd.GeoDataFram
         df = pd.DataFrame(gdf)
         df = _analysis_latest_run_filter(df, group_id)
         if "analysis_geocode" in df.columns:
-            mask = df["analysis_geocode"].astype(str).str.lower() == "basic_mosaic"
-            df = df.loc[mask].copy()
+            primary = _analysis_primary_geocode(df)
+            if primary:
+                mask = df["analysis_geocode"].astype(str).str.lower() == primary
+                df = df.loc[mask].copy()
         out = gpd.GeoDataFrame(df, geometry="geometry", crs=getattr(gdf, "crs", None))
         out = out.dropna(subset=["geometry"]).copy()
         return out
@@ -4820,6 +4857,19 @@ def generate_report(base_dir: str,
                             rows.append([code, desc, area])
                         table = [cols] + rows
                         order_list.append(('table_data', ("Sensitivity totals (max)", table)))
+
+                        # If the totals were derived from a non-basic_mosaic
+                        # geocode group (because the project opted out via
+                        # the geocode-strategy setting), call out that the
+                        # per-class areas are approximations.
+                        primary_gc = _analysis_primary_geocode(flat_sub)
+                        if primary_gc and primary_gc != "basic_mosaic":
+                            order_list.append((
+                                'text',
+                                f"Note: per-class areas above are aggregated by {primary_gc} cell shape, "
+                                f"not by asset boundaries. Treat as approximations — basic_mosaic was "
+                                f"skipped per the project geocode-strategy setting."
+                            ))
                     order_list.append(('new_page', None))
 
                 mode = str(analysis_mode or "single").strip().lower()

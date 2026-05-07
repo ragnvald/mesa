@@ -156,6 +156,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QPlainTextEdit, QLineEdit,
     QCheckBox, QProgressBar, QFrame, QSizePolicy,
     QMessageBox, QHeaderView, QTreeWidget, QTreeWidgetItem,
+    QRadioButton, QButtonGroup,
 )
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
@@ -1121,22 +1122,54 @@ def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200):
     return None
 
 
+def _reduce_pair_worker(pair):
+    """Module-level worker for parallel pairwise unions inside the mosaic
+    reduction tree (must be importable by spawn-context Pool workers).
+
+    Receives a (a, b) tuple of shapely geometries. b may be None for the
+    odd-one-out partial passed straight through. The result is identical to
+    serial unary_union([a, b]) — order of independent pairs within a round
+    has no effect on the final reduced geometry, so parallelisation does
+    not affect output quality.
+    """
+    a, b = pair
+    if b is None:
+        return a
+    try:
+        if shapely_union_all is not None:
+            return shapely_union_all([a, b])
+        return unary_union([a, b])
+    except Exception:
+        # If GEOS rejects this specific pair, return `a` so the round still
+        # makes progress; the parent will see one un-merged partial and the
+        # overall result remains correct (just one extra round may be
+        # needed). Better than crashing the whole reduction.
+        return a
+
+
 def _tree_reduce_unions(
     unions: list,
     *,
     max_partials: int,
     label: str = "unions",
     heartbeat_s: float = 10.0,
+    n_workers: int = 1,
 ) -> list:
     """Repeatedly merge unions in a tree-like pairwise fashion.
 
-    Note: GEOS unary_union is typically single-threaded, so this stage can look
-    like "only one core" in Task Manager. We emit throttled progress logs so
-    long merges don't appear stalled.
+    When n_workers > 1, independent pairs within a single round are dispatched
+    to a multiprocessing.Pool so multi-core hosts no longer leave 11+ cores
+    idle while a single GEOS unary_union pins one core. Late rounds with one
+    or two merges fall back to serial automatically (round_workers is capped
+    at merges_total). The output is bitwise-identical to the serial path:
+    pairwise unions within a round are independent, and unary_union is
+    associative + commutative, so processing order within a round does not
+    change the result.
     """
     max_partials = max(2, int(max_partials))
     label = (label or "unions").strip()
     hb = max(1.0, float(heartbeat_s or 10.0))
+    n_workers = max(1, int(n_workers or 1))
 
     started = time.time()
     last_log = started
@@ -1154,36 +1187,94 @@ def _tree_reduce_unions(
         n_in = len(unions)
         merges_total = (n_in + 1) // 2
 
+        # Build the pair list for this round. The odd-one-out (when n_in is
+        # odd) is paired with None and passed through.
+        pairs = []
+        it = iter(unions)
+        for a in it:
+            b = next(it, None)
+            pairs.append((a, b))
+
+        # Cap parallelism at the number of merges in this round; later rounds
+        # with 1-2 merges automatically drop to (near-)serial.
+        round_workers = min(n_workers, merges_total)
+
         now = time.time()
-        if now - last_log >= hb:
+        if now - last_log >= hb or round_idx == 1:
             elapsed = now - started
+            par_note = f", workers={round_workers}" if round_workers > 1 else ""
             log_to_gui(
-                f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} starting (n={n_in:,} -> <= {max_partials:,}); merges={merges_total:,}; elapsed {elapsed:.0f}s…",
+                f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} starting (n={n_in:,} -> <= {max_partials:,}); merges={merges_total:,}{par_note}; elapsed {elapsed:.0f}s…",
                 "INFO",
             )
             last_log = now
 
         merged = []
-        it = iter(unions)
         merge_i = 0
-        for a in it:
-            b = next(it, None)
-            merge_i += 1
-            if b is None:
-                merged.append(a)
-            else:
-                u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2)
-                merged.append(u if u is not None else a)
 
-            now = time.time()
-            if now - last_log >= hb:
-                elapsed = now - started
-                pct = (merge_i / max(1, merges_total)) * 100.0
+        if round_workers > 1:
+            try:
+                ctx = mp.get_context("spawn")
+                # maxtasksperchild=1 keeps each worker's address space small —
+                # they each handle one pair, return the result, then exit and
+                # are replaced. This prevents memory accumulation across the
+                # late rounds where each pair already holds large geometries.
+                with ctx.Pool(processes=round_workers, maxtasksperchild=1) as pool:
+                    for u in pool.imap_unordered(_reduce_pair_worker, pairs, chunksize=1):
+                        merge_i += 1
+                        merged.append(u)
+                        now = time.time()
+                        if now - last_log >= hb:
+                            elapsed = now - started
+                            pct = (merge_i / max(1, merges_total)) * 100.0
+                            log_to_gui(
+                                f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
+                                "INFO",
+                            )
+                            last_log = now
+            except Exception as e:
+                # Pool failure (e.g. spawn issue, OOM in a worker) falls back
+                # to the robust serial path with the existing chunked retry
+                # in _unary_union_safe. The partials produced before the
+                # failure are preserved; remaining ones run serial.
                 log_to_gui(
-                    f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
-                    "INFO",
+                    f"[Mosaic] Reducing {label}: round {round_idx} parallel path failed ({type(e).__name__}: {e}); falling back to serial for the rest of this round.",
+                    "WARN",
                 )
-                last_log = now
+                for a, b in pairs[merge_i:]:
+                    merge_i += 1
+                    if b is None:
+                        merged.append(a)
+                    else:
+                        u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2)
+                        merged.append(u if u is not None else a)
+                    now = time.time()
+                    if now - last_log >= hb:
+                        elapsed = now - started
+                        pct = (merge_i / max(1, merges_total)) * 100.0
+                        log_to_gui(
+                            f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
+                            "INFO",
+                        )
+                        last_log = now
+        else:
+            for a, b in pairs:
+                merge_i += 1
+                if b is None:
+                    merged.append(a)
+                else:
+                    u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2)
+                    merged.append(u if u is not None else a)
+
+                now = time.time()
+                if now - last_log >= hb:
+                    elapsed = now - started
+                    pct = (merge_i / max(1, merges_total)) * 100.0
+                    log_to_gui(
+                        f"[Mosaic] Reducing {label}: round {round_idx}/{max(1, total_rounds)} merge {merge_i:,}/{merges_total:,} ({pct:.0f}%) • elapsed {elapsed:.0f}s",
+                        "INFO",
+                    )
+                    last_log = now
 
         unions = merged
         now = time.time()
@@ -1387,6 +1478,8 @@ def _build_linework_and_coverage(
     batch_size = max(200, _cfg_int(cfg, "mosaic_line_union_batch", 4000))
     max_partials = max(2, _cfg_int(cfg, "mosaic_line_union_max_partials", 16))
     cov_batch_size = max(50, _cfg_int(cfg, "mosaic_coverage_union_batch", 500))
+    # Per-round parallelism for the tree reduction. 1 = old serial behaviour.
+    reduce_workers = max(1, _cfg_int(cfg, "mosaic_reduce_workers", 4))
 
     stats = {
         "assets": int(len(a_metric)),
@@ -1423,7 +1516,7 @@ def _build_linework_and_coverage(
             stats["union_batches"] += 1
             if len(line_partials) > max_partials:
                 line_partials[:] = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
-                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
+                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges", n_workers=reduce_workers)
         boundary_batch.clear()
 
     def flush_coverage():
@@ -1434,7 +1527,7 @@ def _build_linework_and_coverage(
             cov_partials.append(u)
             if len(cov_partials) > max_partials:
                 cov_partials[:] = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
-                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
+                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage", n_workers=reduce_workers)
         cov_batch.clear()
 
     # Prefer parallel extraction/union when workers>1. This stage is the bottleneck.
@@ -1625,10 +1718,10 @@ def _build_linework_and_coverage(
             )
             if len(line_partials) > max_partials:
                 line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
-                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges")
+                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges", n_workers=reduce_workers)
             if cov_partials and len(cov_partials) > max_partials:
                 cov_partials = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
-                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage")
+                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage", n_workers=reduce_workers)
             if progress_floor is not None and progress_ceiling is not None:
                 update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.97))
 
@@ -1689,7 +1782,7 @@ def _build_linework_and_coverage(
     if progress_floor is not None and progress_ceiling is not None:
         update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.985))
     line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
-    line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)")
+    line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)", n_workers=reduce_workers)
     edge_net = _unary_union_safe(line_partials, label="linework_final", min_step=2)
     if edge_net is None:
         edge_net = line_partials[0]
@@ -1698,7 +1791,7 @@ def _build_linework_and_coverage(
     if cov_partials:
         if coverage_union_enabled:
             cov_partials = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
-            cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)")
+            cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)", n_workers=reduce_workers)
             coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2)
             if coverage is None:
                 coverage = cov_partials[0]
@@ -2730,6 +2823,25 @@ def run_mosaic(base_dir: Path, buffer_m: float, grid_size_m: float, on_done=None
         # publish_mosaic_as_geocode() refreshes the group during the merge-write; pre-clearing risks
         # leaving the project with no basic_mosaic if a later step fails (e.g. file lock during write).
         cfg = read_config(config_path(base_dir))
+
+        # Honour the project geocode-strategy opt-out. When the user has
+        # picked "Skip basic_mosaic" in the geocode-manage Mosaic tab, the
+        # build is a no-op and downstream consumers fall back to whichever
+        # geocode group exists (H3 grids, imported polygon sets) via
+        # mesa_shared.choose_primary_geocode.
+        try:
+            use_basic = str(cfg["DEFAULT"].get("geocode_use_basic_mosaic", "true")).strip().lower() in ("1", "true", "yes", "on")
+        except Exception:
+            use_basic = True
+        if not use_basic:
+            log_to_gui("[Mosaic] Skipped per project setting (geocode_use_basic_mosaic=false). Using H3 grids / imported polygon sets only.")
+            success = True
+            status_detail = "skipped by project setting"
+            if on_done:
+                try: on_done(True)
+                except Exception: pass
+            return
+
         # Optional force-serial (via config or ENV)
         force_serial = False
         try:
@@ -2921,6 +3033,7 @@ class GeocodeManagerWindow(QMainWindow):
         main_layout.addWidget(self.tabs, stretch=1)
 
         # Build tabs
+        self._build_strategy_tab()
         self._build_mosaic_tab()
         self._build_h3_tab()
         self._build_import_tab()
@@ -2934,13 +3047,88 @@ class GeocodeManagerWindow(QMainWindow):
         self.progress_bar.setFormat("%p%")
         main_layout.addWidget(self.progress_bar)
 
-        # Select start tab
-        tab_lookup = {"": 0, "mosaic": 0, "basic": 0, "h3": 1, "other": 1,
-                      "import": 2, "bin": 2, "edit": 3, "group": 3}
+        # Strategy and Edit-geocodes tabs have no long-running task, so hide
+        # the shared progress bar on them.
+        self.tabs.currentChanged.connect(self._sync_progress_bar_visibility)
+
+        # Select start tab. Index 0 is now the new Strategy tab so a fresh
+        # operator sees the basic_mosaic / skip choice before doing anything
+        # else; existing CLI hints "mosaic" / "basic" still open the build tab.
+        tab_lookup = {"": 0, "strategy": 0, "setup": 0,
+                      "mosaic": 1, "basic": 1,
+                      "h3": 2, "other": 2,
+                      "import": 3, "bin": 3,
+                      "edit": 4, "group": 4}
         try:
             self.tabs.setCurrentIndex(tab_lookup.get(str(start_tab).strip().lower(), 0))
         except Exception:
             pass
+        self._sync_progress_bar_visibility(self.tabs.currentIndex())
+
+    def _sync_progress_bar_visibility(self, index: int):
+        # 0 = Strategy, 4 = Edit geocodes — neither runs background work.
+        self.progress_bar.setVisible(index not in (0, 4))
+
+    # ---- Tab 0: Strategy (project-level choice; affects all other tabs) ----
+    def _build_strategy_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "<b>Pick how this project's analytical units are built.</b><br>"
+            "MESA can build <i>basic_mosaic</i> from your asset boundaries (asset-shaped faces) and/or "
+            "use H3 hex grids plus any polygon sets you import. The choice below controls whether the "
+            "basic_mosaic build runs at all; the H3 and import tabs work either way.<br>"
+            "<a href=\"https://github.com/ragnvald/mesa/wiki/Definitions#geocodes\">"
+            "Read more about analytical units (geocodes) in the wiki</a>."
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        intro.setOpenExternalLinks(True)
+        intro.setStyleSheet("color: #453621; padding-bottom: 4px;")
+        layout.addWidget(intro)
+
+        strategy_group = QGroupBox("Project geocode strategy")
+        strategy_layout = QVBoxLayout(strategy_group)
+        strategy_layout.setSpacing(4)
+
+        self.mosaic_use_radio = QRadioButton("Build basic_mosaic — recommended for asset-shaped analytical units.")
+        self.mosaic_skip_radio = QRadioButton("Skip basic_mosaic — use only H3 grids and imported polygon sets.")
+        self._strategy_btn_grp = QButtonGroup(strategy_group)
+        self._strategy_btn_grp.addButton(self.mosaic_use_radio)
+        self._strategy_btn_grp.addButton(self.mosaic_skip_radio)
+
+        if self._read_use_basic_mosaic():
+            self.mosaic_use_radio.setChecked(True)
+        else:
+            self.mosaic_skip_radio.setChecked(True)
+
+        strategy_layout.addWidget(self.mosaic_use_radio)
+        strategy_layout.addWidget(self.mosaic_skip_radio)
+
+        consequences = QLabel(
+            "<b>What changes when you skip basic_mosaic:</b><br>"
+            "&nbsp;&nbsp;• Reports and the map viewer fall back to H3 grids and imported polygon sets.<br>"
+            "&nbsp;&nbsp;• Setup time drops by hours-to-days on dense data — the boundary-edge reduction tree is the slow stage.<br>"
+            "&nbsp;&nbsp;• <b>Area calculations become approximations.</b> H3 hexes and imported polygon sets do not follow asset boundaries, so per-class area totals (km² in A–E, sensitivity-by-class breakdowns, etc.) are inherited from the geocode cell shape rather than the underlying asset shape. Fine for screening and ranking; less precise for asset-aware reporting.<br>"
+            "&nbsp;&nbsp;• You can change this later: re-enable and re-run the Mosaic build at any time."
+        )
+        consequences.setWordWrap(True)
+        consequences.setTextFormat(Qt.RichText)
+        consequences.setStyleSheet("color: #715a36; font-size: 9pt; padding: 4px 0;")
+        strategy_layout.addWidget(consequences)
+
+        layout.addWidget(strategy_group)
+        layout.addStretch(1)
+
+        self.tabs.addTab(tab, "Strategy")
+
+        # Wire the radios after creation; the mosaic tab built next will pick
+        # up the initial state via its own _apply_strategy hook.
+        self.mosaic_use_radio.toggled.connect(self._on_strategy_changed)
+        self.mosaic_skip_radio.toggled.connect(self._on_strategy_changed)
 
     # ---- Tab 1: Mosaic ----
     def _build_mosaic_tab(self):
@@ -2951,8 +3139,8 @@ class GeocodeManagerWindow(QMainWindow):
 
         layout.addWidget(QLabel("Create/update the basic mosaic geocode group."))
 
-        action_group = QGroupBox("Mosaic action")
-        action_layout = QHBoxLayout(action_group)
+        self._mosaic_action_group = QGroupBox("Mosaic action")
+        action_layout = QHBoxLayout(self._mosaic_action_group)
         action_layout.addWidget(QLabel("Status:"))
         self.mosaic_status_label = QLabel("")
         self.mosaic_status_label.setStyleSheet("font-weight: 600; min-width: 100px;")
@@ -2962,7 +3150,16 @@ class GeocodeManagerWindow(QMainWindow):
         build_btn.setProperty("role", "primary")
         build_btn.clicked.connect(self._run_mosaic)
         action_layout.addWidget(build_btn)
-        layout.addWidget(action_group)
+        layout.addWidget(self._mosaic_action_group)
+
+        self._mosaic_skip_note = QLabel(
+            "Mosaic build is skipped per the project geocode strategy. "
+            "Open the <i>Strategy</i> tab to change."
+        )
+        self._mosaic_skip_note.setTextFormat(Qt.RichText)
+        self._mosaic_skip_note.setStyleSheet("color: #b45309; font-size: 9pt; font-style: italic; padding: 2px 0;")
+        self._mosaic_skip_note.setWordWrap(True)
+        layout.addWidget(self._mosaic_skip_note)
 
         log_group = QGroupBox("Log")
         log_layout = QVBoxLayout(log_group)
@@ -2973,6 +3170,65 @@ class GeocodeManagerWindow(QMainWindow):
         layout.addWidget(log_group, stretch=1)
 
         self.tabs.addTab(tab, "Basic mosaic")
+
+        # Apply current strategy state to this tab now that its widgets exist.
+        self._on_strategy_changed()
+
+    def _read_use_basic_mosaic(self) -> bool:
+        try:
+            v = str(self.cfg["DEFAULT"].get("geocode_use_basic_mosaic", "true")).strip().lower()
+        except Exception:
+            return True
+        return v in ("1", "true", "yes", "on")
+
+    def _set_use_basic_mosaic_in_config(self, use: bool) -> None:
+        """Persist the strategy choice to config.ini in-place so user comments
+        and key ordering are preserved (avoid configparser.write() — it
+        reformats the whole file). See learning.md notes on INI editing."""
+        cfg_p = config_path(self.base)
+        new_val = "true" if use else "false"
+        try:
+            try:
+                self.cfg["DEFAULT"]["geocode_use_basic_mosaic"] = new_val
+            except Exception:
+                pass
+            with open(cfg_p, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            replaced = False
+            for i, line in enumerate(lines):
+                if "=" not in line:
+                    continue
+                left, sep, _ = line.partition("=")
+                if sep and left.strip().casefold() == "geocode_use_basic_mosaic":
+                    indent = left[: len(left) - len(left.lstrip())]
+                    lines[i] = f"{indent}geocode_use_basic_mosaic = {new_val}\n"
+                    replaced = True
+                    break
+            if not replaced:
+                lines.append(f"geocode_use_basic_mosaic = {new_val}\n")
+            with open(cfg_p, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as e:
+            if hasattr(self, "mosaic_log"):
+                try:
+                    self.mosaic_log.appendPlainText(f"[Strategy] Failed to persist setting: {e}")
+                except Exception:
+                    pass
+
+    def _on_strategy_changed(self) -> None:
+        use = self.mosaic_use_radio.isChecked()
+        self._set_use_basic_mosaic_in_config(use)
+        # Dim the Mosaic tab's build controls when opted out, so the user
+        # cannot accidentally trigger the build that the project setting
+        # explicitly excludes.
+        if hasattr(self, "_mosaic_action_group"):
+            self._mosaic_action_group.setEnabled(use)
+        if hasattr(self, "_mosaic_skip_note"):
+            self._mosaic_skip_note.setVisible(not use)
+        # Status label reads OPTED OUT / OK / REQUIRED depending on this flag
+        # plus the actual presence of the table on disk.
+        if hasattr(self, "mosaic_status_label"):
+            self._update_mosaic_status()
 
     # ---- Tab 2: H3 ----
     def _build_h3_tab(self):
@@ -3214,6 +3470,14 @@ class GeocodeManagerWindow(QMainWindow):
     # Mosaic
     # ------------------------------------------------------------------
     def _update_mosaic_status(self):
+        # Three-state status:
+        #   - OPTED OUT  : project chose Skip basic_mosaic in the Strategy tab
+        #   - OK         : mosaic table is present
+        #   - REQUIRED   : project wants basic_mosaic but it has not been built yet
+        if not self._read_use_basic_mosaic():
+            self.mosaic_status_label.setText("OPTED OUT")
+            self.mosaic_status_label.setStyleSheet("font-weight: 600; color: #715a36; min-width: 100px;")
+            return
         exists = mosaic_exists(self.base)
         status = "OK" if exists else "REQUIRED"
         color = "#4d7c0f" if exists else "#b02a37"

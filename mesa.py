@@ -464,9 +464,9 @@ def get_status(geoparquet_dir):
         if missing_cols_msg:
             parts.append(missing_cols_msg.strip())
         else:
-            parts.append("importance/susceptibility/sensitivity not assigned (>0) in tbl_asset_group")
+            parts.append("importance, susceptibility and sensitivity values are not yet set in the asset table")
         detail = "; ".join([p for p in parts if p]) or "Incomplete setup."
-        return "-", f"You need to set up the calculation. \nPress the 'Assets'-button to proceed. ({detail})"
+        return "-", f"You need to set up the calculation. Press the Assets button to proceed ({detail})."
 
     def append_status(symbol, message, link):
         status_list.append({'Status': symbol, 'Message': message, 'Link': link})
@@ -476,13 +476,13 @@ def get_status(geoparquet_dir):
         has_asset_group_rows = asset_group_count is not None and asset_group_count > 0
         append_status("+" if has_asset_group_rows else "-",
                       f"Asset layers imported: {asset_group_count}" if has_asset_group_rows else
-                      "Assets are missing.\nUse 'Assets' to import and register asset groups.",
+                      "Assets are missing. Use the Assets button to import and register asset groups.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
 
         geocode_group_count = read_table_and_count('tbl_geocode_group')
         append_status("+" if geocode_group_count is not None else "/",
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else
-                      "Geocodes are missing.\nImport assets by pressing the Assets button.",
+                      "Geocodes are missing. Import assets by pressing the Assets button.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
 
         lines_original_count = read_table_and_count('tbl_lines_original')
@@ -490,7 +490,7 @@ def get_status(geoparquet_dir):
         visible_lines_count = lines_original_count if lines_original_count is not None else lines_processed_count
         append_status("+" if visible_lines_count is not None else "/",
                   f"Lines: {visible_lines_count}" if visible_lines_count is not None else
-                  "Lines are missing.\nImport or initiate lines if you want to use\nthe line feature.",
+                  "Lines are missing. Import or initiate lines if you want to use the line feature.",
                   "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
 
         symbol, message = read_setup_status()
@@ -515,7 +515,7 @@ def get_status(geoparquet_dir):
         append_status("+" if segments_flat_count is not None else "/",
                   f"Segments are in place with {segments_flat_count} segments along {lines_count_label} lines."
                       if segments_flat_count is not None else
-                      "Segments are missing.\nImport or initiate lines if you want to use\nthe line feature.",
+                      "Segments are missing. Import or initiate lines if you want to use the line feature.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
 
         return pd.DataFrame(status_list)
@@ -3344,7 +3344,7 @@ class MesaMainWindow(QMainWindow):
 
         if not os.path.isdir(geoparquet_dir):
             self._add_status_row(0, "danger",
-                                 "No data imported.\nStart with importing data.",
+                                 "No data imported. Start by importing data.",
                                  "https://github.com/ragnvald/mesa/wiki")
         else:
             my_status = get_status(geoparquet_dir)
@@ -3355,8 +3355,7 @@ class MesaMainWindow(QMainWindow):
                     self._add_status_row(idx, role, row['Message'], row['Link'])
             else:
                 self._add_status_row(0, "danger",
-                                     "To initiate the system please import assets.\n"
-                                     "Press the Assets button.",
+                                     "To initiate the system please import assets. Press the Assets button.",
                                      "https://github.com/ragnvald/mesa/wiki")
 
     def _add_status_row(self, row_idx, status_role, message, link_url):

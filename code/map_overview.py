@@ -14,7 +14,7 @@ except Exception:
     STRtree = None
 from pyproj import Geod
 from pathlib import Path
-from mesa_shared import leaflet_bundle
+from mesa_shared import leaflet_bundle, choose_primary_geocode
 from mesa_constants import (
     TABLE_FLAT, TABLE_SEGMENT_FLAT, TABLE_SEGMENTS, TABLE_LINES, DEFAULT_CRS,
 )
@@ -113,6 +113,10 @@ SEGMENT_OUTLINE_FILE  = PARQUET_DIR / TABLE_SEGMENTS
 LINES_FILE            = PARQUET_DIR / TABLE_LINES
 
 PLOT_CRS         = DEFAULT_CRS
+# Preferred primary group name for the A–E area chart and area_stats lookup.
+# When this group is missing (e.g. user opted out of basic_mosaic in the
+# geocode-strategy radio in the geocode-manage popup), helpers below fall
+# back to the first available group via choose_primary_geocode.
 BASIC_GROUP_NAME = "basic_mosaic"
 ZOOM_THRESHOLD   = 10
 STEEL_BLUE       = "#4682B4"
@@ -314,16 +318,21 @@ def geodesic_area_m2(geom) -> float:
 
 def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> dict:
     labels = list("ABCDE")
-    msg = f'The geocode/partition "{BASIC_GROUP_NAME}" is missing.'
     if df_flat.empty or "name_gis_geocodegroup" not in df_flat.columns:
-        return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
+        return {"labels": labels, "values": [0,0,0,0,0], "group_name": BASIC_GROUP_NAME,
+                "message": f'The geocode/partition "{BASIC_GROUP_NAME}" is missing.'}
 
     df = df_flat.copy()
     df["name_gis_geocodegroup"] = df["name_gis_geocodegroup"].astype("string").str.strip().str.lower()
-    df = df[df["name_gis_geocodegroup"] == BASIC_GROUP_NAME]
+    # Prefer basic_mosaic; fall back to whichever geocode group is present
+    # when basic_mosaic was skipped per the project geocode-strategy setting.
+    available = df["name_gis_geocodegroup"].dropna().unique().tolist()
+    primary = choose_primary_geocode(available, prefer=BASIC_GROUP_NAME) or BASIC_GROUP_NAME
+    df = df[df["name_gis_geocodegroup"] == primary]
     df = only_A_to_E(df)
     if df.empty:
-        return {"labels": labels, "values": [0,0,0,0,0], "message": msg}
+        return {"labels": labels, "values": [0,0,0,0,0], "group_name": primary,
+                "message": f'No A–E classified cells found in geocode group "{primary}".'}
 
     if "id_geocode_object" in df.columns:
         df = df.drop_duplicates(subset=["id_geocode_object"])
@@ -345,7 +354,7 @@ def compute_stats_by_geodesic_area_from_flat_basic(df_flat: gpd.GeoDataFrame, cf
             continue
         a_m2 = float(sub.geometry.apply(geodesic_area_m2).sum())
         out.append(a_m2 / 1e6)
-    return {"labels": labels, "values": out}
+    return {"labels": labels, "values": out, "group_name": primary}
 
 # ===============================
 # Area JSON reader (robust)
@@ -467,12 +476,29 @@ def _read_area_json(path: Path, group_name: str) -> dict | None:
         return None
 
 def get_area_stats() -> dict:
-    js = _read_area_json(AREA_JSON, BASIC_GROUP_NAME)
+    # Prefer basic_mosaic in the JSON, falling back to whichever group key is
+    # present (project may have opted out of basic_mosaic via the
+    # geocode-strategy setting).
+    primary = BASIC_GROUP_NAME
+    try:
+        with open(AREA_JSON, "r", encoding="utf-8") as f:
+            blob = json.load(f) or {}
+        keys = []
+        if isinstance(blob, dict) and isinstance(blob.get("groups"), dict):
+            keys = list(blob["groups"].keys())
+        elif isinstance(blob, dict):
+            keys = [k for k in blob.keys() if isinstance(blob.get(k), dict)]
+        primary = choose_primary_geocode(keys, prefer=BASIC_GROUP_NAME) or BASIC_GROUP_NAME
+    except Exception:
+        primary = BASIC_GROUP_NAME
+    js = _read_area_json(AREA_JSON, primary)
     if js is not None:
+        js.setdefault("group_name", primary)
         return js
     msg = ("Area statistics JSON not available yet; using live computation from GeoParquet. "
            f"Expected at {AREA_JSON.name}.")
     fallback = compute_stats_by_geodesic_area_from_flat_basic(GDF, cfg)
+    fallback.setdefault("group_name", primary)
     if "message" in fallback:
         return fallback
     fallback["message"] = msg
@@ -1707,7 +1733,19 @@ function renderLegend(stats){
     }
   } else { codes.forEach(c=>values[c]=0); }
   function pct(x){ return Number(x||0).toLocaleString('en-US',{maximumFractionDigits:1}); }
-  var html='<div style="font-weight:600;margin-bottom:6px;">Totals by sensitivity from basic mosaic</div>';
+  // The chart's source geocode group is sent through stats.group_name. When
+  // basic_mosaic was skipped per the project geocode-strategy setting the
+  // primary group falls back to whatever exists (H3_R6 etc.), so reflect
+  // that in the legend title rather than always saying "basic mosaic".
+  var groupName = (stats && stats.group_name) ? String(stats.group_name) : 'basic_mosaic';
+  var groupLabel = (groupName === 'basic_mosaic') ? 'basic mosaic' : groupName;
+  var html='<div style="font-weight:600;margin-bottom:6px;">Totals by sensitivity from '+groupLabel+'</div>';
+  if (groupName !== 'basic_mosaic'){
+    html += '<div style="font-size:9px;color:#9a4b00;margin-bottom:6px;font-style:italic;">'
+         + 'Approximation: areas are aggregated by '+groupLabel+' cell shape, not by asset boundaries. '
+         + 'Build basic_mosaic for asset-shaped per-class totals.'
+         + '</div>';
+  }
   html+='<table width=100%><thead><tr><th></th><th>Code</th><th>Description</th><th class="num">Area (km²)</th><th class="num">Share</th></tr></thead><tbody>';
   for (var k=0;k<codes.length;k++){
     var c=codes[k], color=(COLOR_MAP[c]||'#bdbdbd'), desc=(DESC_MAP[c]||''), km2=(values[c]||0), p=(total>0?(km2/total*100):0);
