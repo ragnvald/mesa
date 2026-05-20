@@ -38,9 +38,11 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from asset_manage import apply_shared_stylesheet
 
 import argparse
+import atexit
 import configparser
 import datetime
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -260,6 +262,56 @@ def _log_line(base_dir: Path, log_fn: Callable[[str], None], msg: str) -> None:
         pass
 
 
+def _caffeinate_start(
+    base_dir: Path,
+    cfg: configparser.ConfigParser,
+    log_fn: Callable[[str], None],
+) -> subprocess.Popen | None:
+    # macOS-only: hold sleep / App Nap / IO-throttle assertions for the duration
+    # of the pipeline run. -w <pid> makes caffeinate self-terminate if mesa.py
+    # dies before _caffeinate_stop() runs.
+    if sys.platform != "darwin":
+        return None
+    try:
+        if not cfg.getboolean("DEFAULT", "macos_caffeinate", fallback=True):
+            return None
+    except Exception:
+        return None
+    try:
+        proc = subprocess.Popen(
+            ["caffeinate", "-dimsu", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _log_line(base_dir, log_fn,
+                  f"[caffeinate] holding -dimsu assertions (pid {proc.pid})")
+        return proc
+    except FileNotFoundError:
+        _log_line(base_dir, log_fn, "[caffeinate] /usr/bin/caffeinate not found; skipping")
+        return None
+    except Exception as exc:
+        _log_line(base_dir, log_fn, f"[caffeinate] failed to start: {exc}")
+        return None
+
+
+def _caffeinate_stop(
+    base_dir: Path,
+    proc: subprocess.Popen | None,
+    log_fn: Callable[[str], None],
+) -> None:
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _log_line(base_dir, log_fn, "[caffeinate] released")
+    except Exception:
+        pass
+
+
 def _run_subprocess_streaming(
     base_dir: Path,
     log_fn: Callable[[str], None],
@@ -268,6 +320,7 @@ def _run_subprocess_streaming(
     env: dict[str, str] | None = None,
     line_prefix: str = "[child]",
 ) -> int:
+    prefix = line_prefix or "[child]"
     try:
         _log_line(base_dir, log_fn, "Running: " + " ".join(argv))
         proc = subprocess.Popen(
@@ -281,14 +334,51 @@ def _run_subprocess_streaming(
             errors="replace",
             bufsize=1,
         )
-        if proc.stdout:
-            prefix = line_prefix or ""
-            for line in proc.stdout:
-                if line:
-                    _log_line(base_dir, log_fn, f"{prefix} {line.rstrip()}".rstrip())
-                else:
-                    _log_line(base_dir, log_fn, prefix)
-        proc.wait()
+
+        # Watchdog: poll the global cancel flag; terminate (then kill) the
+        # child as soon as the operator requests cancel, so we don't have to
+        # wait for it to finish on its own.
+        watch_stop = threading.Event()
+        was_cancelled = {"flag": False}
+
+        def _cancel_watcher() -> None:
+            while not watch_stop.wait(0.5):
+                try:
+                    import processing_internal as dpi
+                    if dpi.is_cancelled():
+                        was_cancelled["flag"] = True
+                        try:
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+
+        watcher = threading.Thread(target=_cancel_watcher, daemon=True)
+        watcher.start()
+        try:
+            if proc.stdout:
+                for line in proc.stdout:
+                    if line:
+                        _log_line(base_dir, log_fn, f"{prefix} {line.rstrip()}".rstrip())
+                    else:
+                        _log_line(base_dir, log_fn, prefix)
+            proc.wait()
+        finally:
+            watch_stop.set()
+
+        if was_cancelled["flag"]:
+            _log_line(base_dir, log_fn,
+                      f"{prefix} subprocess terminated due to cancel request")
+            return 130
         if proc.returncode != 0:
             _log_line(base_dir, log_fn, f"ERROR: process failed (exit={proc.returncode})")
         return int(proc.returncode or 0)
@@ -1460,6 +1550,95 @@ def run_analysis_process(
 # ---------------------------------------------------------------------------
 
 
+_STAGE_NAMES: tuple[str, ...] = ("data", "tiles", "lines", "analysis")
+
+# First-run fallback. Units are arbitrary but proportional to typical wall
+# clock seconds, tuned from observed MESA runs (tiles is the dominant stage,
+# not the lightest as the previous static table claimed). After the first
+# real run, observed durations from tbl_stage_runtime replace these.
+_DEFAULT_STAGE_WEIGHTS: dict[str, float] = {
+    "data": 600.0,
+    "tiles": 1200.0,
+    "lines": 180.0,
+    "analysis": 300.0,
+}
+
+
+def _stage_runtime_path(base_dir: Path) -> Path:
+    return base_dir / "output" / "geoparquet" / "tbl_stage_runtime.parquet"
+
+
+def _read_recent_stage_durations(
+    base_dir: Path, *, recent_n: int = 5
+) -> dict[str, float]:
+    """Return mean duration_seconds per stage from the most recent clean
+    completions. Missing stages are absent from the result; the caller is
+    expected to fall back to _DEFAULT_STAGE_WEIGHTS for those."""
+    path = _stage_runtime_path(base_dir)
+    if not path.exists():
+        return {}
+    try:
+        import pandas as pd
+        df = pd.read_parquet(path)
+    except Exception:
+        return {}
+    if df.empty or "stage" not in df.columns or "duration_seconds" not in df.columns:
+        return {}
+    if "had_error" in df.columns:
+        df = df[~df["had_error"].astype(bool)]
+    if "was_cancelled" in df.columns:
+        df = df[~df["was_cancelled"].astype(bool)]
+    if df.empty:
+        return {}
+    out: dict[str, float] = {}
+    for stage, sub in df.groupby("stage"):
+        if "started_utc" in sub.columns:
+            sub = sub.sort_values("started_utc").tail(recent_n)
+        else:
+            sub = sub.tail(recent_n)
+        try:
+            mean = float(sub["duration_seconds"].mean())
+        except Exception:
+            continue
+        if mean > 0:
+            out[str(stage)] = mean
+    return out
+
+
+def _append_stage_runtime(
+    base_dir: Path,
+    rows: list[dict],
+    log_fn: Callable[[str], None],
+) -> None:
+    """Append measured per-stage durations to the per-project learning
+    table. Tolerates a missing pandas import or a corrupt file by logging a
+    one-line warning and giving up - this is purely a learning cache."""
+    if not rows:
+        return
+    try:
+        import pandas as pd
+    except Exception:
+        return
+    path = _stage_runtime_path(base_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _log_line(base_dir, log_fn,
+                  f"WARNING: cannot create {path.parent} for stage runtime: {e}")
+        return
+    new_df = pd.DataFrame(rows)
+    try:
+        if path.exists():
+            existing = pd.read_parquet(path)
+            combined = pd.concat([existing, new_df], ignore_index=True)
+        else:
+            combined = new_df
+        combined.to_parquet(path, index=False)
+    except Exception as e:
+        _log_line(base_dir, log_fn,
+                  f"WARNING: could not write stage runtime history ({path.name}): {e}")
+
+
 def run_selected(
     base_dir: Path,
     cfg: configparser.ConfigParser,
@@ -1481,15 +1660,81 @@ def run_selected(
 
     had_errors = False
     _log_line(base_dir, log_fn, "[Process] STARTED")
+    caf = _caffeinate_start(base_dir, cfg, log_fn)
 
-    # Weighted progress allocation (normalized across selected processes).
-    # This provides more realistic overall movement than fixed 25% blocks.
+    # Inter-stage cancel gate. Without this, a cancel that fires inside e.g.
+    # the Data stage gets absorbed by the per-stage `except Exception` below
+    # and the next stage starts anyway. Call _bail_if_cancelled() between
+    # stages so cancel actually stops the pipeline.
+    def _is_cancelled() -> bool:
+        try:
+            import processing_internal as dpi
+            return bool(dpi.is_cancelled())
+        except Exception:
+            return False
+
+    def _bail_if_cancelled() -> None:
+        if not _is_cancelled():
+            return
+        try:
+            import processing_internal as dpi
+            raise getattr(dpi, "ProcessingCancelled", RuntimeError)("Cancelled by operator")
+        except ImportError:
+            raise RuntimeError("Cancelled by operator")
+
+    # If tiles step is unchecked but old tiles are on disk, wipe them so they
+    # cannot silently misalign with the new processing results. The UI surfaces
+    # this with a warning next to the unchecked Tiles checkbox.
+    if not plan.run_tiles:
+        mbt_dir = base_dir / "output" / "mbtiles"
+        try:
+            stale = list(mbt_dir.glob("*.mbtiles")) if mbt_dir.is_dir() else []
+        except OSError:
+            stale = []
+        if stale:
+            try:
+                shutil.rmtree(mbt_dir)
+                _log_line(base_dir, log_fn,
+                          f"[Process] Tiles unchecked: removed {len(stale)} stale "
+                          f"mbtiles file(s) from {mbt_dir}")
+            except OSError as exc:
+                _log_line(base_dir, log_fn,
+                          f"WARNING: could not remove stale tiles in {mbt_dir}: {exc}")
+
+    # Weighted progress allocation, calibrated from this project's own
+    # history. _read_recent_stage_durations returns mean seconds per stage
+    # from the last few clean completions; _DEFAULT_STAGE_WEIGHTS fills in
+    # any stage we haven't observed yet. After each successful run we append
+    # measured durations to tbl_stage_runtime.parquet so subsequent runs get
+    # progressively more accurate proportions.
+    observed = _read_recent_stage_durations(base_dir)
     weights: dict[str, float] = {
-        "data": 4.0,
-        "tiles": 1.0,
-        "lines": 2.5,
-        "analysis": 2.5,
+        name: float(observed.get(name) or _DEFAULT_STAGE_WEIGHTS.get(name, 1.0))
+        for name in _STAGE_NAMES
     }
+    if observed:
+        seen = ", ".join(f"{n}={observed[n]:.0f}s" for n in _STAGE_NAMES if n in observed)
+        _log_line(base_dir, log_fn,
+                  f"[Process] Progress weights from history: {seen}")
+
+    # Per-stage runtime measurements. Appended to tbl_stage_runtime at the
+    # end of the run so future runs can self-calibrate.
+    run_id = uuid.uuid4().hex[:12]
+    runtime_rows: list[dict] = []
+
+    def _record_stage(stage: str, started_iso: str, t0: float,
+                      had_error: bool) -> None:
+        try:
+            runtime_rows.append({
+                "run_id": run_id,
+                "stage": stage,
+                "started_utc": started_iso,
+                "duration_seconds": float(time.monotonic() - t0),
+                "had_error": bool(had_error),
+                "was_cancelled": _is_cancelled(),
+            })
+        except Exception:
+            pass
 
     total_weight = sum(weights.get(name, 1.0) for name in active)
     if total_weight <= 0:
@@ -1516,71 +1761,114 @@ def run_selected(
 
         return _slice
 
-    if plan.run_data:
-        try:
-            s, e = ranges.get("data", (0.0, 100.0))
-            sub_summary = ", ".join([
-                name for name, on in [("prep", plan.run_prep),
-                                       ("intersect", plan.run_intersect),
-                                       ("flatten", plan.run_flatten),
-                                       ("backfill", plan.run_backfill)]
-                if on
-            ]) or "(none)"
-            _log_line(base_dir, log_fn,
-                      f"[Process] Progress range data: {s:.1f}% -> {e:.1f}% (sub-stages: {sub_summary})")
-            run_data_process(
-                base_dir,
-                log_fn,
-                make_slice_progress(s, e),
-                explode_flat_multipolygons=bool(plan.explode_flat_multipolygons),
-                run_prep=bool(plan.run_prep),
-                run_intersect=bool(plan.run_intersect),
-                run_flatten=bool(plan.run_flatten),
-                run_backfill=bool(plan.run_backfill),
-                cleanup_slivers=bool(plan.cleanup_slivers),
-            )
-        except Exception as exc:
-            _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
-            had_errors = True
+    def _now_iso() -> str:
+        return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-    if plan.run_tiles:
-        try:
-            s, e = ranges.get("tiles", (0.0, 100.0))
-            _log_line(base_dir, log_fn, f"[Process] Progress range tiles: {s:.1f}% -> {e:.1f}%")
-            gpq = parquet_dir(base_dir, cfg)
-            if not _exists_any([gpq / "tbl_flat.parquet"]):
-                # Soft skip: user opted in to tiles but the upstream artifact
-                # is not on disk. Honour the rerun-parts intent rather than
-                # failing the whole batch.
+    try:
+        _bail_if_cancelled()
+        if plan.run_data:
+            _t0 = time.monotonic()
+            _started_iso = _now_iso()
+            _err = False
+            try:
+                s, e = ranges.get("data", (0.0, 100.0))
+                sub_summary = ", ".join([
+                    name for name, on in [("prep", plan.run_prep),
+                                           ("intersect", plan.run_intersect),
+                                           ("flatten", plan.run_flatten),
+                                           ("backfill", plan.run_backfill)]
+                    if on
+                ]) or "(none)"
                 _log_line(base_dir, log_fn,
-                          "Tiles: skipped - tbl_flat.parquet is missing. "
-                          "Run Flatten (or Data processing end-to-end) first.")
-            else:
-                run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
-        except Exception as exc:
-            _log_line(base_dir, log_fn, f"ERROR: raster tiles failed: {exc}")
-            had_errors = True
+                          f"[Process] Progress range data: {s:.1f}% -> {e:.1f}% (sub-stages: {sub_summary})")
+                run_data_process(
+                    base_dir,
+                    log_fn,
+                    make_slice_progress(s, e),
+                    explode_flat_multipolygons=bool(plan.explode_flat_multipolygons),
+                    run_prep=bool(plan.run_prep),
+                    run_intersect=bool(plan.run_intersect),
+                    run_flatten=bool(plan.run_flatten),
+                    run_backfill=bool(plan.run_backfill),
+                    cleanup_slivers=bool(plan.cleanup_slivers),
+                )
+            except Exception as exc:
+                if not _is_cancelled():
+                    _err = True
+                    _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
+                    had_errors = True
+            finally:
+                _record_stage("data", _started_iso, _t0, _err)
 
-    if plan.run_lines:
-        try:
-            s, e = ranges.get("lines", (0.0, 100.0))
-            _log_line(base_dir, log_fn, f"[Process] Progress range lines: {s:.1f}% -> {e:.1f}%")
-            run_lines_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
-        except Exception as exc:
-            _log_line(base_dir, log_fn, f"ERROR: lines processing failed: {exc}")
-            had_errors = True
+        _bail_if_cancelled()
+        if plan.run_tiles:
+            _t0 = time.monotonic()
+            _started_iso = _now_iso()
+            _err = False
+            try:
+                s, e = ranges.get("tiles", (0.0, 100.0))
+                _log_line(base_dir, log_fn, f"[Process] Progress range tiles: {s:.1f}% -> {e:.1f}%")
+                gpq = parquet_dir(base_dir, cfg)
+                if not _exists_any([gpq / "tbl_flat.parquet"]):
+                    # Soft skip: user opted in to tiles but the upstream artifact
+                    # is not on disk. Honour the rerun-parts intent rather than
+                    # failing the whole batch.
+                    _log_line(base_dir, log_fn,
+                              "Tiles: skipped - tbl_flat.parquet is missing. "
+                              "Run Flatten (or Data processing end-to-end) first.")
+                else:
+                    run_tiles_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
+            except Exception as exc:
+                if not _is_cancelled():
+                    _err = True
+                    _log_line(base_dir, log_fn, f"ERROR: raster tiles failed: {exc}")
+                    had_errors = True
+            finally:
+                _record_stage("tiles", _started_iso, _t0, _err)
 
-    if plan.run_analysis:
-        try:
-            s, e = ranges.get("analysis", (0.0, 100.0))
-            _log_line(base_dir, log_fn, f"[Process] Progress range analysis: {s:.1f}% -> {e:.1f}%")
-            run_analysis_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
-        except Exception as exc:
-            _log_line(base_dir, log_fn, f"ERROR: analysis processing failed: {exc}")
-            had_errors = True
+        _bail_if_cancelled()
+        if plan.run_lines:
+            _t0 = time.monotonic()
+            _started_iso = _now_iso()
+            _err = False
+            try:
+                s, e = ranges.get("lines", (0.0, 100.0))
+                _log_line(base_dir, log_fn, f"[Process] Progress range lines: {s:.1f}% -> {e:.1f}%")
+                run_lines_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
+            except Exception as exc:
+                if not _is_cancelled():
+                    _err = True
+                    _log_line(base_dir, log_fn, f"ERROR: lines processing failed: {exc}")
+                    had_errors = True
+            finally:
+                _record_stage("lines", _started_iso, _t0, _err)
 
-    progress_fn(100.0)
-    _log_line(base_dir, log_fn, "[Process] FAILED" if had_errors else "[Process] COMPLETED")
+        _bail_if_cancelled()
+        if plan.run_analysis:
+            _t0 = time.monotonic()
+            _started_iso = _now_iso()
+            _err = False
+            try:
+                s, e = ranges.get("analysis", (0.0, 100.0))
+                _log_line(base_dir, log_fn, f"[Process] Progress range analysis: {s:.1f}% -> {e:.1f}%")
+                run_analysis_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
+            except Exception as exc:
+                if not _is_cancelled():
+                    _err = True
+                    _log_line(base_dir, log_fn, f"ERROR: analysis processing failed: {exc}")
+                    had_errors = True
+            finally:
+                _record_stage("analysis", _started_iso, _t0, _err)
+
+        _bail_if_cancelled()
+        progress_fn(100.0)
+        _log_line(base_dir, log_fn, "[Process] FAILED" if had_errors else "[Process] COMPLETED")
+    finally:
+        # Always persist what we measured and release caffeinate, even if a
+        # cancel raised mid-pipeline. The learning table filters out cancelled
+        # / errored rows when computing future weights.
+        _append_stage_runtime(base_dir, runtime_rows, log_fn)
+        _caffeinate_stop(base_dir, caf, log_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -1630,6 +1918,9 @@ class ProcessRunnerWindow(QMainWindow):
         self._cfg = cfg
         self._signals = _RunnerSignals()
         self._tail_state: dict[str, int] = {}
+        # Flips True when the current run ended via operator cancel, so
+        # _on_task_finished can show a distinct terminal state.
+        self._was_cancelled: bool = False
 
         self.setWindowTitle("MESA \u2013 Process all")
         self.resize(1100, 600)
@@ -1800,23 +2091,28 @@ class ProcessRunnerWindow(QMainWindow):
                     "; ".join(avail.reasons) if avail.reasons else "Missing inputs")
             lbl = QLabel(status)
             lbl.setWordWrap(True)
+            # Stash the resting status text so transient warnings can be restored.
+            lbl.setProperty("normal_text", status)
             grid.addWidget(lbl, row, 4)
             if not avail.available:
                 cb.setEnabled(False)
                 cb.setChecked(False)
-            return cb
+            return cb, lbl
 
         tiles_status = "Run Flatten (or full data) first" if not tiles_flat_exists else None
-        self._cb_tiles    = _mk_row_right(1, "5. Tiles processing (MBTiles)",
-                                          tiles_default, avail_tiles,
-                                          "Re-renders from tbl_flat",
-                                          tiles_status)
-        self._cb_lines    = _mk_row_right(2, "6. Lines processing (segments)",
-                                          avail_lines.available, avail_lines,
-                                          "Re-aggregates from tbl_flat")
-        self._cb_analysis = _mk_row_right(3, "7. Analysis processing (study areas)",
-                                          avail_analysis.available, avail_analysis,
-                                          "Consumes tbl_flat")
+        self._cb_tiles, self._lbl_tiles = _mk_row_right(
+            1, "5. Tiles processing (MBTiles)",
+            tiles_default, avail_tiles,
+            "Re-renders from tbl_flat",
+            tiles_status)
+        self._cb_lines, _ = _mk_row_right(
+            2, "6. Lines processing (segments)",
+            avail_lines.available, avail_lines,
+            "Re-aggregates from tbl_flat")
+        self._cb_analysis, _ = _mk_row_right(
+            3, "7. Analysis processing (study areas)",
+            avail_analysis.available, avail_analysis,
+            "Consumes tbl_flat")
 
         # Options under the grid (spans all columns) so they're clearly the
         # flatten / data options, not specific to either stage column.
@@ -1875,6 +2171,24 @@ class ProcessRunnerWindow(QMainWindow):
             if not enabled:
                 self._cb_tiles.setChecked(False)
 
+        def _sync_tiles_warning():
+            # Show a red warning next to the Tiles checkbox when leaving it
+            # unchecked would cause existing tiles to be deleted at run start.
+            mbt_dir = base_dir / "output" / "mbtiles"
+            try:
+                has_existing = mbt_dir.is_dir() and any(mbt_dir.glob("*.mbtiles"))
+            except OSError:
+                has_existing = False
+            if (not self._cb_tiles.isChecked()) and has_existing:
+                self._lbl_tiles.setText(
+                    "Existing tiles in output/mbtiles will be DELETED at run start "
+                    "to keep them aligned with new processing results."
+                )
+                self._lbl_tiles.setStyleSheet("color: #b34a00; font-weight: bold;")
+            else:
+                self._lbl_tiles.setText(self._lbl_tiles.property("normal_text") or "")
+                self._lbl_tiles.setStyleSheet("")
+
         self._cb_data_master.clicked.connect(_on_master_clicked)
         for cb in sub_cbs:
             cb.clicked.connect(_refresh_master_state)
@@ -1882,9 +2196,12 @@ class ProcessRunnerWindow(QMainWindow):
         # an on-disk tbl_flat) controls Tiles availability.
         self._cb_flatten.clicked.connect(_sync_data_option)
         self._cb_flatten.clicked.connect(_sync_tiles)
+        # Tiles toggle drives the stale-tiles warning text.
+        self._cb_tiles.clicked.connect(_sync_tiles_warning)
 
         _sync_data_option()
         _sync_tiles()
+        _sync_tiles_warning()
         _refresh_master_state()
 
         # Button row
@@ -1983,10 +2300,20 @@ class ProcessRunnerWindow(QMainWindow):
 
     def _on_task_finished(self) -> None:
         self._process_btn.setEnabled(True)
+        self._process_btn.setText(
+            "Process all selected" if self._rb_advanced.isChecked() else "Process"
+        )
         self._pause_btn.setText("Pause")
         self._pause_btn.setEnabled(False)
         self._cancel_btn.setText("Cancel")
         self._cancel_btn.setEnabled(False)
+        if self._was_cancelled:
+            # Mark a clean terminal state in the UI so the operator sees that
+            # the cancel actually took effect, instead of the label sitting on
+            # "Cancelling…" forever. Reset the progress bar so it doesn't look
+            # like the run was almost done.
+            self._progress_bar.setValue(0)
+            self._append_log(f"{_ts()} - ————— RUN CANCELLED. READY FOR A NEW RUN. —————")
         # Resume log-file tailing; skip to current EOF so we don't replay
         # lines already shown via the worker's direct signal path.
         log_path = self._base_dir / "log.txt"
@@ -2127,12 +2454,14 @@ class ProcessRunnerWindow(QMainWindow):
                 )
                 return  # button stays enabled so the operator can retry
         self._process_btn.setEnabled(False)
+        self._process_btn.setText("Processing…")
         # Reset pause/cancel state for the new run and enable the controls.
         try:
             import processing_internal as dpi
             dpi.reset_run_state()
         except Exception:
             pass
+        self._was_cancelled = False
         self._pause_btn.setText("Pause")
         self._pause_btn.setEnabled(True)
         self._cancel_btn.setText("Cancel")
@@ -2207,6 +2536,7 @@ class ProcessRunnerWindow(QMainWindow):
             except Exception:
                 cancelled_cls = None
             if cancelled_cls is not None and isinstance(e, cancelled_cls):
+                self._was_cancelled = True
                 self._signals.log_message.emit(f"{_ts()} - PROCESSING CANCELLED BY OPERATOR")
             else:
                 self._signals.log_message.emit(f"{_ts()} - ERROR: {e}")
@@ -2282,6 +2612,80 @@ def run(base_dir: str, master=None) -> None:
     return run_ui(resolved, cfg, master=master)
 
 
+def _acquire_pipeline_lock(base_dir: Path) -> tuple[bool, str | None]:
+    """Single-instance lockfile for the processing pipeline.
+
+    Two pipeline subprocesses writing to the same project share one log.txt
+    and one set of geoparquet outputs; the log becomes unreadable and the
+    outputs race each other. Refuse a second concurrent run.
+
+    Stale locks (process crashed without cleanup) are detected via PID
+    liveness and silently reclaimed.
+    """
+    lock_path = base_dir / "output" / ".pipeline.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return False, f"cannot create {lock_path.parent}: {e}"
+
+    if lock_path.exists():
+        try:
+            content = lock_path.read_text(encoding="utf-8").strip()
+            existing_pid = int(content.split("\n", 1)[0])
+            try:
+                os.kill(existing_pid, 0)
+                holder = f"PID {existing_pid}"
+                rest = content.split("\n", 1)[1] if "\n" in content else ""
+                if rest:
+                    holder = f"{holder} (started {rest})"
+                return False, holder
+            except (OSError, ProcessLookupError):
+                pass  # stale lock; reclaim below
+        except (OSError, ValueError):
+            pass  # garbage; reclaim below
+
+    my_pid = os.getpid()
+    my_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        lock_path.write_text(f"{my_pid}\n{my_time}\n", encoding="utf-8")
+    except OSError as e:
+        return False, f"cannot write {lock_path}: {e}"
+
+    def _release():
+        try:
+            if not lock_path.exists():
+                return
+            content = lock_path.read_text(encoding="utf-8").strip()
+            if content.startswith(str(my_pid)):
+                lock_path.unlink()
+        except Exception:
+            pass
+
+    atexit.register(_release)
+    return True, None
+
+
+def _refuse_concurrent_run(base_dir: Path, holder: str, headless: bool) -> None:
+    """Show the operator a clear "already running" message and exit non-zero."""
+    msg_short = "A processing run is already in progress on this project."
+    msg_detail = (
+        f"Existing run: {holder}\n"
+        f"Lockfile: {base_dir / 'output' / '.pipeline.lock'}\n\n"
+        "Wait for it to finish, or cancel it from the other window, before "
+        "starting another."
+    )
+    if headless:
+        print(f"ERROR: {msg_short}\n{msg_detail}", file=sys.stderr)
+    else:
+        try:
+            app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.warning(None, "MESA — Processing already running",
+                                f"{msg_short}\n\n{msg_detail}")
+        except Exception:
+            print(f"ERROR: {msg_short}\n{msg_detail}", file=sys.stderr)
+    sys.exit(2)
+
+
 def main() -> None:
     args = parse_args()
     base_dir = resolve_base_dir(args.original_working_directory)
@@ -2330,6 +2734,14 @@ def main() -> None:
         print("Base dir:", base_dir)
         print("Would run:", ", ".join(selected) if selected else "(nothing)")
         return
+
+    # Single-instance guard: refuse a second concurrent pipeline run for this
+    # project (overlapping runs share one log.txt and one set of parquet
+    # outputs and produce unreadable mixed logs + raced files).
+    acquired, holder = _acquire_pipeline_lock(base_dir)
+    if not acquired:
+        _refuse_concurrent_run(base_dir, holder or "(unknown)", bool(args.headless))
+        return  # _refuse_concurrent_run already called sys.exit; defensive.
 
     if args.headless:
         def log_print(line: str) -> None:
