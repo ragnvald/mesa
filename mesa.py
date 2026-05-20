@@ -97,9 +97,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QScrollArea, QFrame, QSizePolicy,
     QMessageBox, QFileDialog, QHeaderView, QSplitter,
     QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit,
+    QDialog,
 )
 from PySide6.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QColor, QPalette, QDesktopServices
-from PySide6.QtCore import Qt, QTimer, QUrl, QSize
+from PySide6.QtCore import Qt, QTimer, QUrl, QSize, QObject, Signal
 
 import subprocess
 import webbrowser
@@ -818,6 +819,15 @@ def edit_lines():
 # ---------------------------------------------------------------------
 # Backup / restore / clear (unchanged logic, Qt dialogs)
 # ---------------------------------------------------------------------
+class _BackupSignals(QObject):
+    """Bridge progress updates from the backup/restore worker thread back to
+    the GUI thread. Always create on the GUI thread so emitted signals are
+    delivered there."""
+    progress = Signal(int, int, str)        # current, total, current_arcname
+    finished = Signal(str)                  # result_path (empty on failure)
+    failed = Signal(str)                    # error message
+
+
 def _iter_backup_files(root_path: Path):
     for dirpath, dirnames, filenames in os.walk(root_path):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
@@ -836,12 +846,27 @@ def _safe_zip_member_names(names: list[str]) -> list[str]:
         safe.append("/".join(parts))
     return safe
 
-def create_backup_archive(base_dir: str, destination_path: str) -> str:
+def create_backup_archive(
+    base_dir: str,
+    destination_path: str,
+    *,
+    include_tiles: bool = True,
+    compression_kind: str = "deflate",
+    progress_cb=None,
+) -> str:
     """Create a backup zip at destination_path.
 
     destination_path is the full zip path the caller wants the file written
     to; ``.zip`` is appended if no suffix is present, and parent directories
     are created as needed.
+
+    include_tiles: when False, files under output/mbtiles/ are skipped. Tiles
+    are large (often gigabytes) and fully regenerable from tbl_flat, so users
+    typically don't need them in a backup.
+
+    compression_kind: "deflate" (universal, what zip always supported) or
+    "lzma" (~30-40% smaller on text/parquet, requires modern unzip — Windows
+    Explorer's built-in Extract can't open these; 7-Zip and macOS open them).
     """
     base = Path(base_dir)
     dest = Path(destination_path)
@@ -855,19 +880,43 @@ def create_backup_archive(base_dir: str, destination_path: str) -> str:
     files_to_add: list[tuple[Path, str]] = []
     if config_path.is_file():
         files_to_add.append((config_path, "config.ini"))
+    mbtiles_dir = output_dir / "mbtiles"
+    skipped_tile_count = 0
     for folder in (input_dir, output_dir):
         if folder.is_dir():
             for file_path in _iter_backup_files(folder):
                 if file_path.is_file():
+                    if (not include_tiles
+                            and mbtiles_dir in file_path.parents):
+                        skipped_tile_count += 1
+                        continue
                     arc = file_path.relative_to(base).as_posix()
                     files_to_add.append((file_path, arc))
-    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for file_path, arcname in files_to_add:
-            zf.write(file_path, arcname=arcname)
-    log_to_logfile(f"Created backup archive: {zip_path}")
+
+    if compression_kind == "lzma":
+        zf_kwargs = dict(compression=zipfile.ZIP_LZMA)
+    else:
+        zf_kwargs = dict(compression=zipfile.ZIP_DEFLATED, compresslevel=6)
+    total = len(files_to_add)
+    with zipfile.ZipFile(zip_path, mode="w", **zf_kwargs) as zf:
+        for i, (file_path, arcname) in enumerate(files_to_add, start=1):
+            # Per-entry override is needed because ZIP_LZMA isn't valid as a
+            # default in older Python tarballs; passing it via write keeps
+            # us safe across versions.
+            zf.write(file_path, arcname=arcname, compress_type=zf_kwargs["compression"])
+            if progress_cb is not None:
+                try:
+                    progress_cb(i, total, arcname)
+                except Exception:
+                    pass  # never let a UI callback break the backup
+    if skipped_tile_count:
+        log_to_logfile(f"Created backup archive: {zip_path} "
+                       f"(tiles excluded: {skipped_tile_count} file(s))")
+    else:
+        log_to_logfile(f"Created backup archive: {zip_path}")
     return str(zip_path)
 
-def restore_backup_archive(base_dir: str, zip_path: str) -> None:
+def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) -> None:
     base = Path(base_dir)
     zip_file = Path(zip_path)
     if not zip_file.is_file():
@@ -888,7 +937,8 @@ def restore_backup_archive(base_dir: str, zip_path: str) -> None:
                 cfg.unlink()
             except Exception:
                 pass
-        for member in to_extract:
+        total = len(to_extract)
+        for i, member in enumerate(to_extract, start=1):
             target = (base / Path(member)).resolve()
             base_resolved = base.resolve()
             if target != base_resolved and base_resolved not in target.parents:
@@ -896,6 +946,11 @@ def restore_backup_archive(base_dir: str, zip_path: str) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member, "r") as src, open(target, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+            if progress_cb is not None:
+                try:
+                    progress_cb(i, total, member)
+                except Exception:
+                    pass
     check_and_create_folders()
     log_to_logfile(f"Restored backup archive: {zip_file}")
 
@@ -2945,13 +3000,126 @@ class MesaMainWindow(QMainWindow):
 
         self._main_layout.addWidget(self._tabs, stretch=1)
 
+        self._build_welcome_tab()
         self._build_workflows_tab()
         self._build_status_tab()
         self._build_manage_tab()
         self._build_config_tab()
         self._build_about_tab()
 
-    # ---- Tab 1: Workflows ----
+    # ---- Tab 1: Welcome ----
+    def _project_info_path(self):
+        return os.path.join(
+            original_working_directory, "output", "geoparquet", "tbl_project_info.parquet"
+        )
+
+    def _read_project_info(self):
+        path = self._project_info_path()
+        blank = {"project_name": "", "about": "", "updated_utc": ""}
+        if not os.path.exists(path):
+            return blank
+        try:
+            df = pd.read_parquet(path)
+            if df.empty:
+                return blank
+            row = df.iloc[0]
+            return {
+                "project_name": str(row.get("project_name", "") or ""),
+                "about": str(row.get("about", "") or ""),
+                "updated_utc": str(row.get("updated_utc", "") or ""),
+            }
+        except Exception:
+            return blank
+
+    def _save_project_info(self):
+        path = self._project_info_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        row = {
+            "project_name": self._project_name_edit.text().strip(),
+            "about": self._project_about_edit.toPlainText().strip(),
+            "updated_utc": now_utc,
+        }
+        try:
+            pd.DataFrame([row]).to_parquet(path, index=False)
+            self._project_info_status.setText(f"Last saved: {now_utc}")
+            self._project_continue_btn.setVisible(True)
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", f"Could not save project info:\n{e}")
+
+    def _build_welcome_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        intro_group = QGroupBox("Welcome to MESA")
+        intro_layout = QVBoxLayout(intro_group)
+        intro_text = QLabel(
+            "MESA (Method for an Easy Sensitivity Assessment) helps you run a complete "
+            "sensitivity assessment on your own machine: import spatial data, configure "
+            "the analysis, run the processing pipeline, and produce maps and reports. "
+            "All data stays local — nothing is uploaded to external services.\n\n"
+            "Use the tabs above to move through the workflow. Start by giving this "
+            "project a name and a short description below."
+        )
+        intro_text.setWordWrap(True)
+        intro_layout.addWidget(intro_text)
+        layout.addWidget(intro_group)
+
+        form_group = QGroupBox("This project")
+        form_layout = QVBoxLayout(form_group)
+        form_layout.setSpacing(8)
+
+        name_row = QHBoxLayout()
+        name_label = QLabel("Project name:")
+        name_label.setMinimumWidth(120)
+        self._project_name_edit = QLineEdit()
+        self._project_name_edit.setPlaceholderText("e.g. North Sea Wind Farm 2026")
+        name_row.addWidget(name_label)
+        name_row.addWidget(self._project_name_edit, stretch=1)
+        form_layout.addLayout(name_row)
+
+        about_label = QLabel("About this project:")
+        form_layout.addWidget(about_label)
+        self._project_about_edit = QPlainTextEdit()
+        self._project_about_edit.setPlaceholderText(
+            "A short description of the area, scope, stakeholders, or anything that helps "
+            "you and collaborators remember what this project is about."
+        )
+        form_layout.addWidget(self._project_about_edit, stretch=1)
+
+        button_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.setProperty("role", "primary")
+        save_btn.clicked.connect(self._save_project_info)
+        self._project_info_status = QLabel("")
+        self._project_info_status.setStyleSheet("color: #6e5a37; font-size: 9pt;")
+        self._project_continue_btn = QPushButton("Continue to Workflows →")
+        self._project_continue_btn.setProperty("role", "success")
+        self._project_continue_btn.setVisible(False)
+        self._project_continue_btn.clicked.connect(
+            lambda: self._tabs.setCurrentWidget(self._tabs.widget(1))
+        )
+        button_row.addWidget(save_btn)
+        button_row.addSpacing(12)
+        button_row.addWidget(self._project_info_status)
+        button_row.addStretch()
+        button_row.addWidget(self._project_continue_btn)
+        form_layout.addLayout(button_row)
+
+        layout.addWidget(form_group, stretch=1)
+
+        info = self._read_project_info()
+        self._project_name_edit.setText(info["project_name"])
+        self._project_about_edit.setPlainText(info["about"])
+        if info["updated_utc"]:
+            self._project_info_status.setText(f"Last saved: {info['updated_utc']}")
+            self._project_continue_btn.setVisible(True)
+
+        self._tabs.addTab(tab, "Welcome")
+
+    # ---- Tab 2: Workflows ----
     def _build_workflows_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -4097,9 +4265,81 @@ class MesaMainWindow(QMainWindow):
         layout.addStretch()
         self._tabs.addTab(tab, "Manage data")
 
+    def _ask_backup_options(self):
+        """Show a small modal dialog with backup options.
+
+        Returns (include_tiles: bool, compression_kind: str) or None if the
+        user cancelled.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Backup options")
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Choose what to include in the backup and how to compress it."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        tiles_cb = QCheckBox("Include rendered tiles (output/mbtiles/)")
+        tiles_cb.setChecked(True)
+        tiles_hint = QLabel(
+            "Tiles are large (often gigabytes) and can be regenerated from "
+            "tbl_flat. Uncheck to keep the backup small."
+        )
+        tiles_hint.setWordWrap(True)
+        tiles_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        layout.addWidget(tiles_cb)
+        layout.addWidget(tiles_hint)
+
+        layout.addSpacing(4)
+
+        fmt_label = QLabel("Compression:")
+        layout.addWidget(fmt_label)
+        fmt_combo = QComboBox()
+        fmt_combo.addItem("Compatible (.zip, DEFLATE)", userData="deflate")
+        fmt_combo.addItem("Smaller (.zip, LZMA)", userData="lzma")
+        layout.addWidget(fmt_combo)
+        fmt_hint = QLabel(
+            "LZMA produces a ~30-40% smaller archive on text + parquet data. "
+            "Modern unzip tools (7-Zip on Windows, macOS, Linux) open it. "
+            "Windows Explorer's built-in Extract does NOT — pick Compatible "
+            "if recipients only have that."
+        )
+        fmt_hint.setWordWrap(True)
+        fmt_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        layout.addWidget(fmt_hint)
+
+        layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        ok_btn = QPushButton("Continue…")
+        ok_btn.setProperty("role", "primary")
+        ok_btn.setDefault(True)
+        cancel_btn.clicked.connect(dlg.reject)
+        ok_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        layout.addLayout(btn_row)
+
+        dlg.resize(420, dlg.sizeHint().height())
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return bool(tiles_cb.isChecked()), str(fmt_combo.currentData())
+
     def _do_backup(self):
-        # Suggest a timestamped filename but let the user revise both folder
-        # and name in a single Save-As dialog.
+        # Step 1: collect options (tiles + compression) before asking where to save.
+        opts = self._ask_backup_options()
+        if opts is None:
+            return  # user cancelled
+        include_tiles, compression_kind = opts
+
+        # Step 2: file dialog for save path.
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         default_name = f"mesa_backup_{ts}.zip"
         default_path = os.path.join(original_working_directory, default_name)
@@ -4114,28 +4354,36 @@ class MesaMainWindow(QMainWindow):
         if not chosen_path.lower().endswith(".zip"):
             chosen_path += ".zip"
 
-        # Show progress dialog (backup can be slow for large projects)
-        progress = QProgressDialog("Creating backup archive...", None, 0, 0, self)
+        # The backup runs on a worker thread so the GUI (and macOS Finder
+        # previews of the growing .zip) stays responsive. LZMA in particular
+        # can take many seconds per file on the GUI thread.
+        progress = QProgressDialog(
+            "Preparing backup…", None, 0, 0, self
+        )
         progress.setWindowTitle("Backup in progress")
         progress.setMinimumDuration(0)
         progress.setWindowModality(Qt.WindowModal)
         progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.show()
-        QApplication.processEvents()
 
-        result_path = None
-        error_msg = None
-        try:
-            result_path = create_backup_archive(original_working_directory, chosen_path)
-        except Exception as e:
-            error_msg = str(e)
+        signals = _BackupSignals()
 
-        progress.close()
+        def _on_progress(current: int, total: int, arcname: str) -> None:
+            # First tick switches the dialog from busy spinner to a real bar.
+            if progress.maximum() != total:
+                progress.setRange(0, total)
+            progress.setValue(current)
+            # Show just the file leaf so the dialog doesn't grow horizontally
+            # on deep paths.
+            leaf = arcname.rsplit("/", 1)[-1]
+            progress.setLabelText(
+                f"Archiving file {current:,} of {total:,}…\n{leaf}"
+            )
 
-        if error_msg:
-            self._manage_status.setText(f"Backup failed: {error_msg}")
-            QMessageBox.critical(self, "Backup failed", error_msg)
-        else:
+        def _on_finished(result_path: str) -> None:
+            progress.close()
             fname = os.path.basename(result_path) if result_path else "backup"
             fdir = os.path.dirname(result_path) if result_path else ""
             try:
@@ -4148,6 +4396,29 @@ class MesaMainWindow(QMainWindow):
                                     f"Backup saved successfully.\n\n"
                                     f"File: {fname}\n"
                                     f"Location: {fdir}{size_str}")
+
+        def _on_failed(error_msg: str) -> None:
+            progress.close()
+            self._manage_status.setText(f"Backup failed: {error_msg}")
+            QMessageBox.critical(self, "Backup failed", error_msg)
+
+        signals.progress.connect(_on_progress)
+        signals.finished.connect(_on_finished)
+        signals.failed.connect(_on_failed)
+
+        def _worker():
+            try:
+                result_path = create_backup_archive(
+                    original_working_directory, chosen_path,
+                    include_tiles=include_tiles,
+                    compression_kind=compression_kind,
+                    progress_cb=lambda i, n, a: signals.progress.emit(i, n, a),
+                )
+                signals.finished.emit(result_path)
+            except Exception as e:
+                signals.failed.emit(str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _do_restore(self):
         zip_path, _ = QFileDialog.getOpenFileName(
@@ -4166,26 +4437,28 @@ class MesaMainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        progress = QProgressDialog("Restoring backup archive...", None, 0, 0, self)
+        progress = QProgressDialog("Preparing restore…", None, 0, 0, self)
         progress.setWindowTitle("Restore in progress")
         progress.setMinimumDuration(0)
         progress.setWindowModality(Qt.WindowModal)
         progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.show()
-        QApplication.processEvents()
 
-        error_msg = None
-        try:
-            restore_backup_archive(original_working_directory, zip_path)
-        except Exception as e:
-            error_msg = str(e)
+        signals = _BackupSignals()
 
-        progress.close()
+        def _on_progress(current: int, total: int, member: str) -> None:
+            if progress.maximum() != total:
+                progress.setRange(0, total)
+            progress.setValue(current)
+            leaf = member.rsplit("/", 1)[-1]
+            progress.setLabelText(
+                f"Restoring file {current:,} of {total:,}…\n{leaf}"
+            )
 
-        if error_msg:
-            self._manage_status.setText(f"Restore failed: {error_msg}")
-            QMessageBox.critical(self, "Restore failed", error_msg)
-        else:
+        def _on_finished(_unused: str) -> None:
+            progress.close()
             self._manage_status.setText(f"Backup restored: {zip_path}")
             QMessageBox.information(self, "Restore completed",
                                     "Backup restore completed successfully.")
@@ -4193,6 +4466,27 @@ class MesaMainWindow(QMainWindow):
                 self._refresh_status_tab()
             except Exception:
                 pass
+
+        def _on_failed(error_msg: str) -> None:
+            progress.close()
+            self._manage_status.setText(f"Restore failed: {error_msg}")
+            QMessageBox.critical(self, "Restore failed", error_msg)
+
+        signals.progress.connect(_on_progress)
+        signals.finished.connect(_on_finished)
+        signals.failed.connect(_on_failed)
+
+        def _worker():
+            try:
+                restore_backup_archive(
+                    original_working_directory, zip_path,
+                    progress_cb=lambda i, n, m: signals.progress.emit(i, n, m),
+                )
+                signals.finished.emit("")
+            except Exception as e:
+                signals.failed.emit(str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _do_clear_output(self):
         output_dir = os.path.join(original_working_directory, "output")

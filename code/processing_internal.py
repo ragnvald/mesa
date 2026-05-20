@@ -1187,7 +1187,7 @@ def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
 
 def write_parquet(name: str, gdf: gpd.GeoDataFrame):
     path = gpq_dir() / f"{name}.parquet"
-    gdf.to_parquet(path, index=False)
+    gdf.to_parquet(path, index=False, compression="zstd", compression_level=3)
     log_to_gui(log_widget, f"Wrote {path}")
 
 def _rm_rf(path: Path):
@@ -1281,7 +1281,7 @@ def write_data_extent(working_epsg: int) -> None:
         crs=working_epsg,
     )
     out_path = gpq_dir() / "tbl_data_extent.parquet"
-    out.to_parquet(out_path, index=False)
+    out.to_parquet(out_path, index=False, compression="zstd", compression_level=3)
     try:
         n_polys = len(union.geoms) if union.geom_type == 'MultiPolygon' else 1
     except Exception:
@@ -1335,7 +1335,7 @@ def _grid_worker(input_path: str) -> str:
     try: j = j[j.geometry.notna() & ~j.geometry.is_empty]
     except Exception: pass
     out = _GRID_OUT_DIR / f"grid_tag_{os.getpid()}_{uuid.uuid4().hex}.parquet"
-    j.to_parquet(out, index=False)
+    j.to_parquet(out, index=False, compression="zstd", compression_level=3)
     del g, j
     gc.collect()
     return str(out)
@@ -1581,7 +1581,7 @@ def assign_geocodes_to_grid(geodata: gpd.GeoDataFrame, meters_cell: int, max_wor
     for i in range(0, len(geodata), rows_per_chunk):
         part = geodata.iloc[i:i+rows_per_chunk]
         p = tmp_in / f"geo_{i:09d}.parquet"
-        part.to_parquet(p, index=False)
+        part.to_parquet(p, index=False, compression="zstd", compression_level=3)
         input_parts.append(str(p))
 
     started_at = time.time(); last_ping = started_at
@@ -1860,7 +1860,7 @@ def _intersection_worker(args):
                     pass
             fname = f"part_{os.getpid()}_{uuid.uuid4().hex}.parquet"
             path = _PARTS_DIR / fname
-            gdf.to_parquet(path, index=False)
+            gdf.to_parquet(path, index=False, compression="zstd", compression_level=3)
             gc.collect()
             return [str(path)]
         except Exception:
@@ -2947,7 +2947,9 @@ def _backfill_worker(args):
         if 'area_m2_flat' in merged.columns:
             merged['area_m2'] = merged['area_m2_flat']
             merged.drop(columns=['area_m2_flat'], inplace=True)
-        gpd.GeoDataFrame(merged, geometry=part.geometry.name, crs=part.crs).to_parquet(path, index=False)
+        gpd.GeoDataFrame(merged, geometry=part.geometry.name, crs=part.crs).to_parquet(
+            path, index=False, compression="zstd", compression_level=3,
+        )
         return len(part)
     except Exception:
         return 0
@@ -3749,7 +3751,7 @@ def backfill_tbl_stacked(config_file: Path,
     # whole DataFrame across every spawn boundary.
     area_map_path = gpq_dir() / "__area_map.parquet"
     try:
-        area_map.to_parquet(area_map_path, index=False)
+        area_map.to_parquet(area_map_path, index=False, compression="zstd", compression_level=3)
         worker_area_arg = area_map_path
     except Exception as e:
         log_to_gui(log_widget,
