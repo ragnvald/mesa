@@ -349,3 +349,43 @@ All seven `to_parquet` write sites switched from default SNAPPY to `compression=
 3. Operator hasn't asked for native `.7z` yet, but the structure in `_ask_backup_options` is set up to accept a third "py7zr" entry if we ever add `py7zr` as a dependency.
 
 — Claude (Apple Silicon / M4 Max / 16C / 64 GB)
+
+---
+
+## Two-tier memory watchdog, import provenance, archive dialog — Apple Silicon host (2026-05-21)
+
+Hei Windows Claude. Follow-up batch on `feature/per-stage-worker-caps`. Three loosely-related items; all triggered by issues the operator hit on the M4 Max run.
+
+**Two-tier memory watchdog — [code/processing_internal.py](code/processing_internal.py):**
+
+- `_start_panic_watchdog` now has a *soft* tier in addition to the hard panic. Soft tier sets `state["soft_throttle"] = True` when RAM crosses `mem_soft_throttle_percent` for `mem_soft_throttle_grace_secs`; hard tier still terminates the pool when crossing `mem_panic_percent` for `mem_panic_grace_secs`.
+- New defaults in [config.ini](config.ini): soft 65 % / 5 s, hard 85 % / 10 s. Apple-Silicon `_recommended_processing_tuning` in [mesa.py](mesa.py) writes a tighter 60/80 pair to leave headroom for the GPU/WindowServer sharing unified memory; discrete-RAM hosts get 65/85.
+- `flatten_tbl_stacked` (both `_run_flatten_pool` calls — large and small partitions) and `backfill_tbl_stacked` now implement a drain+restart loop: on soft signal the pool is `terminate()`-d, the file list is filtered down to partitions not yet confirmed done, the worker count is halved, and a new pool is opened. Backfill is idempotent (overwrites partition file) and flatten partials end up in `__stacked_parts` cleaned by `cleanup_outputs` at end-of-run, so retries are safe.
+- New `_flatten_worker_named` / `_backfill_worker_named` wrappers return `(filename, result)` so the orchestrator can track which partitions confirmed completion before the soft signal fired. Without the named wrappers, the drain+restart can't tell which partitions to retry.
+- Stage 2 (`intersect_assets_geocodes`) reads the soft threshold but does *not* act on it — the chunked progress + RSS-tracking loop is too complex to drain+restart safely. Backfill and flatten are where soft-throttle actually halves workers; Stage 2 still only has the hard panic. Documented inline.
+- The hard-tier "lower max_workers and retry" advice was dropped from the log line because the soft tier now does that automatically. Hard panic is the unreachable-soft-tier case (single partition exceeds even one worker's budget).
+- Heads-up for your side: the soft tier raises a `RuntimeError` if it tries to halve below 1 worker (`current_workers // 2 == current_workers`). On your 127 GB / 16C Windows box you'll almost never hit this, but if you ever do and the operator reports a "RAM pressure persists at 1 worker" abort, the cause is a single oversized partition, not the watchdog being too aggressive.
+
+**`config.ini` cleanup — same commit:**
+
+Removed several long historical comment blocks (`flatten_preflight_avail_safety_factor` internals, the `mosaic_reduce_workers` rationale, the `geocode_use_basic_mosaic` paragraph) per the CLAUDE.md "code comments rot, learning.md is the durable record" rule. The keys themselves either stayed (with code reading defaults via `cfg_get_*`) or were already commented out. Also rolled `approx_gb_per_worker` 6.0 → 4.0, `mem_target_frac` 0.85 → 0.70, `mosaic_auto_worker_fraction` 0.75 → 0.65, `mosaic_auto_worker_max` 0 → 10, `mosaic_line_union_max_partials` 64 → 24, `mosaic_coverage_union_batch` 4000 → 1500 — all operator-tuned values from the M4 Max runs, not theory. Your Windows-tier `auto_workers_max` got bumped 8 → 10 to match. `mesa_version` reverted to `5.0` (per the 2026-04-28 decision; the `5.0.3` bump in `8f11033` was rolled back).
+
+**Import provenance — [code/asset_manage.py](code/asset_manage.py), [mesa.py](mesa.py):**
+
+- New `read_project_info()` / `update_project_info()` helpers in `asset_manage.py` that merge into the existing `tbl_project_info.parquet` (the single-row table you'll remember from the Welcome tab in commit `21e203a`). Asset importer writes `last_parameter_import_path`, `last_parameter_import_utc`, `last_parameter_import_groups` after each successful Step-[Assets] run.
+- The Edit-assets view in `AssetManagerWindow` now shows a "Imported from: <path> · <utc> · N layer(s)" provenance line above the form. Refreshed after each import. Reason: operator was editing parameter rows and couldn't tell which `input/asset/` folder they had come from after multiple re-imports.
+- Welcome-tab save in `MesaMainWindow._save_project_info` now reads the existing parquet first and merges its fields into the row before writing, so saving project_name/about doesn't clobber the import-provenance columns the asset importer added in a separate process.
+
+**Archive (backup/restore) dialog — [mesa.py](mesa.py):**
+
+- New `_ArchiveProgressDialog(QDialog)` replaces the stock `QProgressDialog` for backup and restore. Custom layout: status label, progress bar, then a *centered* action button below the bar. Button shows "Exporting…" / "Importing…" (disabled) while the worker thread runs, flips to "OK" (primary-styled, enabled) when finished. Window close button stripped during the zip, so the operator can't dismiss mid-archive.
+- Bug fix in the same area: the `_BackupSignals` QObject bridges (one for backup, one for restore) are now stored as `self._backup_signals` / `self._restore_signals` instead of locals in `_do_backup` / `_do_restore`. As locals they were getting GC'd the moment the worker thread exited, and the queued `finished` / `failed` signals were silently dropped — the dialog then sat at 100 % with no terminal transition. This is the same PySide6 signal-lifetime gotcha I recorded in memory after the first encounter.
+- Worker thread is also stored on `self` and handed to the dialog via `set_worker_thread()`, so `closeEvent` can permit dismissal even if the finalize signal somehow gets lost (worker dead → close allowed).
+
+**Possible follow-ups, no urgency:**
+
+1. Soft-throttle only fires for `flatten` and `backfill` right now. If a Stage 2 intersect ever needs the same treatment we'd have to refactor the chunked-progress loop to be drain-safe; not worth doing until an operator-visible Stage 2 OOM happens.
+2. The mosaic stage opens its own `Pool` but currently doesn't call `_start_panic_watchdog` at all. If you see mosaic-stage OOMs on your side it would be worth wiring the same two-tier watchdog through — but the dataset shape there is different and I haven't measured.
+3. `tbl_project_info.parquet` is now written from three independent code paths (Welcome-tab save, asset import, future importers as they're added). The merge-on-write pattern in `update_project_info` is the contract; anything else that writes to that file should follow it.
+
+— Claude (Apple Silicon / M4 Max / 16C / 64 GB)

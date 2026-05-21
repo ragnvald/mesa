@@ -538,20 +538,34 @@ def _log_memory_snapshot(context: str, extra: dict | None = None, force: bool = 
 # ----------------------------
 # Memory panic watchdog helper
 # ----------------------------
-def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int):
+def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int,
+                          soft_pct: int = 0, soft_grace_s: int = 5):
     """
-    Start a daemon thread that monitors psutil.virtual_memory().percent and
-    terminates the registered multiprocessing pool if pressure crosses
-    panic_pct for grace_s consecutive seconds. Returns (state, stop_event,
-    thread). Caller must:
+    Start a daemon thread that monitors psutil.virtual_memory().percent.
+    Two-tier behaviour:
+      - When pressure >= soft_pct for soft_grace_s, sets
+        state["soft_throttle"] = True. The caller is expected to read this
+        in its imap_unordered loop and drain+restart the pool with fewer
+        workers (see backfill / flatten for the pattern). The watchdog
+        does NOT terminate the pool at this level — drain is cooperative.
+      - When pressure >= panic_pct for grace_s, sets state["triggered"] =
+        True AND terminates the pool immediately. Last-line defence.
+
+    Returns (state, stop_event, thread). Caller must:
       - assign state["pool"] = pool right after the pool is opened
-      - check state["triggered"] inside the imap_unordered loop and break
+      - check state["soft_throttle"] and state["triggered"] inside the
+        imap_unordered loop and react accordingly
       - call stop_event.set() when the pool block exits
     The watchdog is a no-op if psutil is unavailable.
+    Set soft_pct = 0 to disable the soft tier (legacy behaviour: hard
+    panic only).
     """
     import threading as _threading
-    state = {"triggered": False, "pool": None, "since": None,
+    state = {"triggered": False, "soft_throttle": False,
+             "pool": None,
+             "since_hard": None, "since_soft": None,
              "panic_pct": int(panic_pct), "grace_s": int(grace_s),
+             "soft_pct": int(soft_pct), "soft_grace_s": int(soft_grace_s),
              "label": str(label)}
     stop = _threading.Event()
 
@@ -562,10 +576,11 @@ def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int):
             try:
                 pct = psutil.virtual_memory().percent
                 now = time.time()
+                # Hard tier — terminate pool when crossed.
                 if pct >= state["panic_pct"]:
-                    if state["since"] is None:
-                        state["since"] = now
-                    elif (now - state["since"]) >= state["grace_s"] and not state["triggered"]:
+                    if state["since_hard"] is None:
+                        state["since_hard"] = now
+                    elif (now - state["since_hard"]) >= state["grace_s"] and not state["triggered"]:
                         state["triggered"] = True
                         try:
                             rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
@@ -576,8 +591,7 @@ def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int):
                             f"[PANIC:{state['label']}] RAM pressure {pct:.0f}% "
                             f">= {state['panic_pct']}% for {state['grace_s']}s "
                             f"(parent RSS ~{rss_gb:.1f} GB). Terminating pool to "
-                            f"avoid swap death. Lower max_workers or per-stage caps "
-                            f"and retry."
+                            f"avoid swap death."
                         )
                         pool = state.get("pool")
                         if pool is not None:
@@ -587,7 +601,24 @@ def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int):
                                 pass
                         return
                 else:
-                    state["since"] = None
+                    state["since_hard"] = None
+                # Soft tier — signal the caller to drain and restart smaller.
+                if state["soft_pct"] > 0 and pct >= state["soft_pct"]:
+                    if state["since_soft"] is None:
+                        state["since_soft"] = now
+                    elif ((now - state["since_soft"]) >= state["soft_grace_s"]
+                          and not state["soft_throttle"]):
+                        state["soft_throttle"] = True
+                        log_to_gui(
+                            log_widget,
+                            f"[THROTTLE:{state['label']}] RAM pressure "
+                            f"{pct:.0f}% >= {state['soft_pct']}% for "
+                            f"{state['soft_grace_s']}s. Pool will drain and "
+                            f"restart with fewer workers."
+                        )
+                        # NOTE: do not terminate; caller decides when to.
+                else:
+                    state["since_soft"] = None
             except Exception:
                 pass
 
@@ -596,16 +627,28 @@ def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int):
     return state, stop, t
 
 
-def _panic_cfg(cfg: "configparser.ConfigParser | None" = None) -> tuple[int, int]:
-    """Read mem_panic_percent / mem_panic_grace_secs from cfg with safe defaults."""
-    pct, grace = 75, 10
+def _panic_cfg(cfg: "configparser.ConfigParser | None" = None) -> tuple[int, int, int, int]:
+    """Read panic watchdog thresholds from cfg.
+
+    Returns (panic_pct, panic_grace_s, soft_pct, soft_grace_s).
+    Defaults: 85% / 10s hard, 65% / 5s soft. Soft_pct=0 disables the
+    soft tier (legacy behaviour). Soft_pct is auto-capped at panic_pct-5
+    to keep a sane gap between tiers.
+    """
+    pct, grace = 85, 10
+    soft_pct, soft_grace = 65, 5
     try:
         cfg_ref = cfg if cfg is not None else _ensure_cfg()
-        pct = max(50, min(99, cfg_get_int(cfg_ref, "mem_panic_percent", 75)))
+        pct = max(50, min(99, cfg_get_int(cfg_ref, "mem_panic_percent", 85)))
         grace = max(1, cfg_get_int(cfg_ref, "mem_panic_grace_secs", 10))
+        soft_pct = cfg_get_int(cfg_ref, "mem_soft_throttle_percent", 65)
+        soft_grace = max(1, cfg_get_int(cfg_ref, "mem_soft_throttle_grace_secs", 5))
+        # Either disable (0) or keep at least 5% below the hard tier.
+        if soft_pct > 0:
+            soft_pct = max(40, min(pct - 5, soft_pct))
     except Exception:
         pass
-    return pct, grace
+    return pct, grace, soft_pct, soft_grace
 
 
 def _release_stale_parent_state():
@@ -2739,6 +2782,16 @@ def _compute_index_owa_from_counts(
 # ----------------------------
 # Parallel Flattening Workers
 # ----------------------------
+def _flatten_worker_named(args):
+    """Wrapper so the drain+restart orchestrator can track which input
+    partition produced which result. Files for which we receive a tuple
+    are confirmed done; the rest go back into the todo list for the
+    smaller pool on the next round."""
+    parquet_path = args[0]
+    res = _flatten_worker(args)
+    return (str(parquet_path), res)
+
+
 def _flatten_worker(args):
     """
     Process one tbl_stacked parquet file and return aggregated stats per code.
@@ -2921,6 +2974,17 @@ def _flatten_worker(args):
                 result_df[col] = 0
         
     return result_df
+
+def _backfill_worker_named(args):
+    """Wrapper so the orchestrator can track which file each result
+    corresponds to (needed for the drain+restart soft-throttle path —
+    we need to know which partitions are confirmed done so the
+    remainder can be re-submitted to a smaller pool without re-doing
+    completed work)."""
+    path, _ = args
+    count = _backfill_worker(args)
+    return (str(path), count)
+
 
 def _backfill_worker(args):
     """
@@ -3310,42 +3374,75 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             f"{len(small_files)} small with {workers_small} workers."
         )
 
-    panic_pct, panic_grace_s = _panic_cfg(cfg_local)
+    panic_pct, panic_grace_s, soft_pct, soft_grace = _panic_cfg(cfg_local)
 
     def _run_flatten_pool(paths, n_workers: int, label: str) -> None:
         if not paths:
             return
         log_to_gui(log_widget, f"[{label}] {len(paths)} partitions using {n_workers} workers…")
         if _mp_allowed() and n_workers > 1:
-            # imap_unordered so each worker's payload is consumed and released
-            # as it returns, rather than buffering all partials to the end.
-            pstate, pstop, pthread = _start_panic_watchdog(label, panic_pct, panic_grace_s)
-            try:
-                with multiprocessing.get_context("spawn").Pool(n_workers) as pool:
-                    pstate["pool"] = pool
-                    args = [(f, ranges_map, desc_map, index_weights) for f in paths]
-                    try:
-                        for res in pool.imap_unordered(_flatten_worker, args, chunksize=1):
+            # Drain+restart on soft RAM pressure. See backfill_tbl_stacked
+            # for the rationale; flatten is idempotent at the partition
+            # level (orphan partial files in __stacked_parts get cleaned
+            # up by cleanup_outputs at the end of the run).
+            todo = [str(p) for p in paths]
+            current_workers = n_workers
+            while todo:
+                pstate, pstop, pthread = _start_panic_watchdog(
+                    label, panic_pct, panic_grace_s, soft_pct, soft_grace
+                )
+                done_this_round: set[str] = set()
+                try:
+                    with multiprocessing.get_context("spawn").Pool(current_workers) as pool:
+                        pstate["pool"] = pool
+                        args = [(Path(p), ranges_map, desc_map, index_weights) for p in todo]
+                        try:
+                            for fname, res in pool.imap_unordered(_flatten_worker_named, args, chunksize=1):
+                                if pstate["triggered"]:
+                                    raise RuntimeError(
+                                        f"{label} aborted by memory panic watchdog "
+                                        f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
+                                    )
+                                _check_pause_or_cancel()
+                                done_this_round.add(fname)
+                                if res is not None:
+                                    partials.append(res)
+                                if pstate["soft_throttle"]:
+                                    try: pool.terminate()
+                                    except Exception: pass
+                                    break
+                        except Exception:
                             if pstate["triggered"]:
                                 raise RuntimeError(
                                     f"{label} aborted by memory panic watchdog "
                                     f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
                                 )
-                            _check_pause_or_cancel()
-                            if res is not None:
-                                partials.append(res)
-                    except Exception:
-                        if pstate["triggered"]:
-                            raise RuntimeError(
-                                f"{label} aborted by memory panic watchdog "
-                                f"(>{panic_pct}% RAM for >={panic_grace_s}s)"
-                            )
-                        raise
-                    finally:
-                        pstate["pool"] = None
-            finally:
-                pstop.set()
-                try: pthread.join(timeout=1.5)
+                            raise
+                        finally:
+                            pstate["pool"] = None
+                finally:
+                    pstop.set()
+                    try: pthread.join(timeout=1.5)
+                    except Exception: pass
+
+                todo = [p for p in todo if p not in done_this_round]
+                if not pstate["soft_throttle"]:
+                    break
+                next_workers = max(1, current_workers // 2)
+                if next_workers == current_workers:
+                    raise RuntimeError(
+                        f"{label}: RAM pressure persists at "
+                        f"{current_workers} worker(s); cannot reduce further"
+                    )
+                log_to_gui(
+                    log_widget,
+                    f"[{label}] Soft-throttle: reducing workers "
+                    f"{current_workers} → {next_workers}, "
+                    f"{len(todo)} partitions remaining."
+                )
+                current_workers = next_workers
+                time.sleep(1.0)
+                try: gc.collect()
                 except Exception: pass
         else:
             for f in paths:
@@ -3766,26 +3863,78 @@ def backfill_tbl_stacked(config_file: Path,
     touched = 0
     try:
         if _mp_allowed() and backfill_workers > 1:
-            bf_pct, bf_grace = _panic_cfg(cfg_local)
-            pstate, pstop, pthread = _start_panic_watchdog("backfill", bf_pct, bf_grace)
-            try:
-                with multiprocessing.get_context("spawn").Pool(backfill_workers) as pool:
-                    pstate["pool"] = pool
-                    args = [(f, worker_area_arg) for f in files]
-                    try:
-                        for count in pool.imap_unordered(_backfill_worker, args):
-                            if pstate["triggered"]:
-                                raise RuntimeError(
-                                    f"backfill aborted by memory panic watchdog "
-                                    f"(>{bf_pct}% RAM for >={bf_grace}s)"
-                                )
-                            _check_pause_or_cancel()
-                            touched += count
-                    finally:
-                        pstate["pool"] = None
-            finally:
-                pstop.set()
-                try: pthread.join(timeout=1.5)
+            bf_pct, bf_grace, soft_pct, soft_grace = _panic_cfg(cfg_local)
+            # Drain+restart loop: under soft RAM pressure the active pool
+            # is torn down and a new pool with HALF the workers is opened
+            # for the remaining partitions. Files already returned by
+            # imap_unordered are confirmed done; everything else (queued,
+            # in-flight, killed-mid-write) goes back into the todo list
+            # for the smaller pool to retry. Backfill is idempotent: a
+            # partial rewrite that got terminated is just overwritten on
+            # the retry.
+            todo = [str(p) for p in files]
+            current_workers = backfill_workers
+            while todo:
+                pstate, pstop, pthread = _start_panic_watchdog(
+                    "backfill", bf_pct, bf_grace, soft_pct, soft_grace
+                )
+                done_this_round: set[str] = set()
+                try:
+                    with multiprocessing.get_context("spawn").Pool(current_workers) as pool:
+                        pstate["pool"] = pool
+                        args = [(Path(p), worker_area_arg) for p in todo]
+                        try:
+                            for fname, count in pool.imap_unordered(_backfill_worker_named, args):
+                                if pstate["triggered"]:
+                                    raise RuntimeError(
+                                        f"backfill aborted by memory panic watchdog "
+                                        f"(>{bf_pct}% RAM for >={bf_grace}s)"
+                                    )
+                                _check_pause_or_cancel()
+                                done_this_round.add(fname)
+                                touched += count
+                                if pstate["soft_throttle"]:
+                                    # Stop submitting; tear down to free
+                                    # memory from in-flight workers, then
+                                    # restart smaller. In-flight files
+                                    # that didn't return by now will be
+                                    # retried on the next iteration.
+                                    try: pool.terminate()
+                                    except Exception: pass
+                                    break
+                        finally:
+                            pstate["pool"] = None
+                finally:
+                    pstop.set()
+                    try: pthread.join(timeout=1.5)
+                    except Exception: pass
+
+                # Filter the todo list down to what didn't complete this round.
+                todo = [p for p in todo if p not in done_this_round]
+
+                if not pstate["soft_throttle"]:
+                    break  # Pool finished normally.
+
+                # Halve the worker count for the next round; if already at
+                # the minimum, escalate to an explicit abort rather than
+                # spin forever.
+                next_workers = max(1, current_workers // 2)
+                if next_workers == current_workers:
+                    raise RuntimeError(
+                        f"backfill: RAM pressure persists at "
+                        f"{current_workers} worker(s); cannot reduce further"
+                    )
+                log_to_gui(
+                    log_widget,
+                    f"[backfill] Soft-throttle: reducing workers "
+                    f"{current_workers} → {next_workers}, "
+                    f"{len(todo)} partitions remaining."
+                )
+                current_workers = next_workers
+                # Give the OS a beat to reclaim memory from the
+                # terminated workers before opening the next pool.
+                time.sleep(1.0)
+                try: gc.collect()
                 except Exception: pass
         else:
             for f in files:
@@ -4540,10 +4689,13 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     # Memory panic watchdog. Stage 2 can move from comfortable to swapping
     # within seconds when an sjoin against a dense asset region produces 10x
     # the row count the estimator predicted. The watchdog terminates the
-    # pool cleanly when host RAM pressure crosses mem_panic_percent.
-    panic_pct, panic_grace_s = _panic_cfg()
+    # pool cleanly when host RAM pressure crosses mem_panic_percent. Soft
+    # throttle on this stage is only a visibility log (the chunked progress
+    # + RSS-tracking loop here is too complex to drain+restart safely;
+    # backfill and flatten are where soft-throttle actually acts).
+    panic_pct, panic_grace_s, soft_pct, soft_grace = _panic_cfg()
     panic_state, panic_stop, wd_thread = _start_panic_watchdog(
-        "intersect", panic_pct, panic_grace_s
+        "intersect", panic_pct, panic_grace_s, soft_pct, soft_grace
     )
 
     def _heartbeat():
