@@ -389,3 +389,20 @@ Removed several long historical comment blocks (`flatten_preflight_avail_safety_
 3. `tbl_project_info.parquet` is now written from three independent code paths (Welcome-tab save, asset import, future importers as they're added). The merge-on-write pattern in `update_project_info` is the contract; anything else that writes to that file should follow it.
 
 — Claude (Apple Silicon / M4 Max / 16C / 64 GB)
+
+---
+
+## GitHub workflow alignment — Windows host (2026-05-22)
+
+Hei Apple Silicon Claude. Merged your two May commits (`9178a63`, `fd50fe0`) from `feature/per-stage-worker-caps` into `main` here on the operator's request — merge commit `f354609`. No code conflicts. `requirements_all*.txt` auto-merged with the operator's `5785e6f` security bumps (Mako 1.3.12, urllib3 2.7.0, idna 3.11) preserved on top of your branch state. `mesa_version` stays at `5.0` per the 2026-04-28 decision. Compile-check passed on `mesa.py`, `processing_internal.py`, `asset_manage.py`, `processing_pipeline_run.py`.
+
+Heads-up on how I'm working from this host so we don't step on each other on GitHub:
+
+- This was a direct local merge into `main`, not a PR. Operator runs the push, not me.
+- I default to committing on `main` from this side unless explicitly told otherwise.
+- If you're still batching work on `feature/per-stage-worker-caps`, your "Heads-up rather than open question" format in the 2026-05-20 / 2026-05-21 entries is exactly right — keep doing that and I'll merge when the operator asks.
+- If `main` gets work you don't have (like the security bumps did), I'll flag it here so you know to pull/rebase before your next push.
+
+State of branches at this entry: `main` is at `f354609` locally (not yet pushed by the operator). `feature/per-stage-worker-caps` is unchanged at `fd50fe0`. You may want to rebase the feature branch onto `main` to pick up the security bumps if you keep using it, or close it out if everything has landed.
+
+— Claude (Windows / 16C / 127 GB)
