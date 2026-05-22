@@ -593,6 +593,43 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path):
         raise
 
 
+# ---------------------------------------------------------------------
+# tbl_project_info.parquet — small single-row table written by mesa.py
+# (Welcome tab) and updated by the importers to record where parameters
+# came from. Not versioned; overwritten on each import.
+# ---------------------------------------------------------------------
+
+def _project_info_path(base_dir: Path) -> Path:
+    return Path(base_dir) / "output" / "geoparquet" / "tbl_project_info.parquet"
+
+
+def read_project_info(base_dir: Path) -> dict:
+    path = _project_info_path(base_dir)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_parquet(path)
+        if df.empty:
+            return {}
+        row = df.iloc[0].to_dict()
+        return {k: ("" if pd.isna(v) else v) for k, v in row.items()}
+    except Exception:
+        return {}
+
+
+def update_project_info(base_dir: Path, updates: dict) -> None:
+    """Merge updates into the single-row tbl_project_info, preserving any
+    existing columns (project_name, about, updated_utc, …) that are not in
+    `updates`. Safe to call from importer subprocesses."""
+    existing = read_project_info(base_dir)
+    merged = {**existing, **updates}
+    path = _project_info_path(base_dir)
+    try:
+        _atomic_write_parquet(pd.DataFrame([merged]), path)
+    except Exception:
+        pass  # best-effort; never let metadata write break the importer
+
+
 def load_asset_group_df(file_name: str) -> pd.DataFrame:
     path = _parquet_path(file_name)
     if path.exists():
@@ -848,6 +885,16 @@ class AssetManagerWindow(QMainWindow):
         self.edit_state_label = QLabel("")
         self.edit_state_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
         layout.addWidget(self.edit_state_label)
+
+        # Source provenance line: which file/folder these values came from.
+        # Populated from tbl_project_info; refreshed after each import.
+        self.edit_source_label = QLabel("")
+        self.edit_source_label.setWordWrap(True)
+        self.edit_source_label.setStyleSheet(
+            "color: #4d4029; font-size: 9pt; padding: 4px 0;"
+        )
+        layout.addWidget(self.edit_source_label)
+        self._refresh_import_source_label()
 
         form_group = QGroupBox("Asset group details")
         form = QGridLayout(form_group)
@@ -1397,6 +1444,20 @@ class AssetManagerWindow(QMainWindow):
             self._save_parquet("tbl_asset_object", asset_objects)
             self._save_parquet("tbl_asset_group", asset_groups)
             self._log_import_summary(asset_objects, asset_groups)
+            # Record where this set of asset parameters came from, so the
+            # Edit-assets view (and the Welcome tab) can show the operator
+            # the source of the values they're editing. Overwritten on next
+            # import — not versioned.
+            try:
+                n_groups = len(asset_groups) if asset_groups is not None else 0
+                update_project_info(self.base_dir, {
+                    "last_parameter_import_path": str(self.input_folder_asset),
+                    "last_parameter_import_utc": datetime.datetime.utcnow()
+                        .replace(microsecond=0).isoformat() + "Z",
+                    "last_parameter_import_groups": int(n_groups),
+                })
+            except Exception as exc:
+                self._log(f"Could not record import provenance: {exc}", "WARN")
             self._log("Step [Assets] COMPLETED")
         except Exception as exc:
             self._log(f"Step [Assets] FAILED: {exc}", "ERROR")
@@ -1449,6 +1510,25 @@ class AssetManagerWindow(QMainWindow):
     def _on_import_finished(self):
         """Slot: called on UI thread when import completes."""
         self._refresh_edit_data()
+        self._refresh_import_source_label()
+
+    def _refresh_import_source_label(self) -> None:
+        """Read tbl_project_info and show where the parameters came from."""
+        info = read_project_info(self.base_dir)
+        path = str(info.get("last_parameter_import_path", "") or "")
+        ts = str(info.get("last_parameter_import_utc", "") or "")
+        n_groups = info.get("last_parameter_import_groups", "")
+        if not path:
+            self.edit_source_label.setText(
+                "<i>No parameter import on record for this project. "
+                "Run the Import assets tab first.</i>"
+            )
+            return
+        groups_str = f", {n_groups} layer(s)" if n_groups else ""
+        ts_str = f" · {ts}" if ts else ""
+        self.edit_source_label.setText(
+            f"<b>Imported from:</b> {path}{ts_str}{groups_str}"
+        )
 
     # ------------------------------------------------------------------
     # Edit logic (all business logic preserved from original)

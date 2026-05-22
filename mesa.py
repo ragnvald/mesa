@@ -828,6 +828,113 @@ class _BackupSignals(QObject):
     failed = Signal(str)                    # error message
 
 
+class _ArchiveProgressDialog(QDialog):
+    """Backup/restore progress dialog. Custom layout: status label, then a
+    proper-height progress bar, then a *centered* action button below.
+
+    The button reads "Exporting…" / "Importing…" while the worker is
+    running (disabled), and flips to "OK" (primary-styled, enabled) when
+    the work finishes. Closing the window is blocked until the worker
+    finishes — the OK button is the only way to dismiss.
+    """
+
+    def __init__(self, parent, title: str, action_word: str):
+        super().__init__(parent)
+        self._action_word = action_word
+        self._finished = False
+        self._worker_thread = None  # set later via set_worker_thread()
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(480)
+        # Strip the close button so the operator can't dismiss mid-zip
+        # (the worker would keep running but the UI wouldn't know).
+        try:
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        self._label = QLabel("Preparing…")
+        self._label.setWordWrap(True)
+        self._label.setMinimumHeight(44)
+        layout.addWidget(self._label)
+
+        self._bar = QProgressBar()
+        self._bar.setMinimumHeight(24)
+        self._bar.setTextVisible(True)
+        self._bar.setAlignment(Qt.AlignCenter)
+        self._bar.setFormat("%p%")
+        self._bar.setRange(0, 0)  # busy spinner until first progress tick
+        layout.addWidget(self._bar)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._btn = QPushButton(f"{action_word}…")
+        self._btn.setEnabled(False)
+        self._btn.setMinimumWidth(160)
+        btn_row.addWidget(self._btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+    # --- Compatibility shims so existing progress-callback code still works ---
+    def setLabelText(self, s: str) -> None:
+        self._label.setText(s)
+
+    def maximum(self) -> int:
+        return self._bar.maximum()
+
+    def setRange(self, lo: int, hi: int) -> None:
+        self._bar.setRange(lo, hi)
+
+    def setValue(self, v: int) -> None:
+        self._bar.setValue(v)
+
+    # --- Terminal state ---
+    def finalize(self, label_text: str, *, success: bool) -> None:
+        if self._bar.maximum() <= 0:
+            self._bar.setRange(0, 1)
+        self._bar.setValue(self._bar.maximum() if success else 0)
+        self._label.setText(label_text)
+        self._btn.setText("OK")
+        self._btn.setEnabled(True)
+        self._btn.setDefault(True)
+        self._btn.setProperty("role", "primary" if success else "danger")
+        # Re-polish so the role-based stylesheet picks up the new property.
+        try:
+            self._btn.style().unpolish(self._btn)
+            self._btn.style().polish(self._btn)
+        except Exception:
+            pass
+        try:
+            self._btn.clicked.disconnect()
+        except Exception:
+            pass
+        self._btn.clicked.connect(self.accept)
+        self._finished = True
+
+    def set_worker_thread(self, t) -> None:
+        """Let the dialog know which worker thread is doing the zip; used
+        by closeEvent so a missed finalize doesn't permanently trap the
+        user (if worker has exited, close is allowed even without
+        finalize)."""
+        self._worker_thread = t
+
+    def closeEvent(self, event):
+        # Allow close if either the work has been finalised normally, OR
+        # the worker thread has exited (e.g. finished/failed signal got
+        # lost — we still let the operator dismiss instead of trapping
+        # them in a dead modal).
+        worker_alive = bool(self._worker_thread is not None
+                            and self._worker_thread.is_alive())
+        if self._finished or not worker_alive:
+            event.accept()
+        else:
+            event.ignore()
+
+
 def _iter_backup_files(root_path: Path):
     for dirpath, dirnames, filenames in os.walk(root_path):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
@@ -1723,7 +1830,7 @@ QLabel[role="footer"] {
 # Custom widgets
 # =====================================================================
 from PySide6.QtGui import QPainter, QPen, QBrush
-from PySide6.QtWidgets import QProgressDialog, QLineEdit, QCheckBox
+from PySide6.QtWidgets import QLineEdit, QCheckBox, QProgressBar
 
 
 class _ActionCard(QFrame):
@@ -2531,8 +2638,15 @@ class TuneProcessingWindow(QMainWindow):
         if is_apple_silicon:
             approx_gb_per_worker = max(2.5, approx_gb_per_worker - 2.0)
             mem_target_frac = 0.70
+            # Tighter soft/hard for unified memory: 5% extra headroom for GPU.
+            mem_soft_pct = 60
+            mem_panic_pct = 80
         else:
             mem_target_frac = 0.85
+            # Discrete RAM: standard 65/85 split (soft 65 → halve workers,
+            # hard 85 → abort).
+            mem_soft_pct = 65
+            mem_panic_pct = 85
 
         # Per-stage caps. These are independent from the Stage 2 CPU cap so
         # that a memory-skewed stage (flatten large-partition phase) does not
@@ -2631,6 +2745,13 @@ class TuneProcessingWindow(QMainWindow):
             "mosaic_extract_chunk_size": str(mosaic_chunk_size),
             "mosaic_coverage_union_batch": str(mosaic_cov_batch),
             "mosaic_line_union_max_partials": str(mosaic_line_partials),
+            # Memory watchdog thresholds (two-tier: soft = halve workers,
+            # hard = abort). Apple Silicon gets tighter limits because the
+            # GPU/WindowServer compete for the same unified memory pool.
+            "mem_soft_throttle_percent": str(mem_soft_pct),
+            "mem_soft_throttle_grace_secs": "5",
+            "mem_panic_percent": str(mem_panic_pct),
+            "mem_panic_grace_secs": "10",
         }
 
         if is_apple_silicon:
@@ -3035,7 +3156,22 @@ class MesaMainWindow(QMainWindow):
         path = self._project_info_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        # Merge with any existing columns (e.g. last_parameter_import_*
+        # written by the asset importer) so saving here doesn't clobber
+        # them.
+        existing: dict = {}
+        try:
+            if os.path.exists(path):
+                df = pd.read_parquet(path)
+                if not df.empty:
+                    existing = {
+                        k: ("" if pd.isna(v) else v)
+                        for k, v in df.iloc[0].to_dict().items()
+                    }
+        except Exception:
+            existing = {}
         row = {
+            **existing,
             "project_name": self._project_name_edit.text().strip(),
             "about": self._project_about_edit.toPlainText().strip(),
             "updated_utc": now_utc,
@@ -4265,6 +4401,15 @@ class MesaMainWindow(QMainWindow):
         layout.addStretch()
         self._tabs.addTab(tab, "Manage data")
 
+    def _make_archive_progress_dialog(self, title: str, action_word: str):
+        """Custom backup/restore dialog with the action button centered
+        below the progress bar. See _ArchiveProgressDialog."""
+        return _ArchiveProgressDialog(self, title, action_word)
+
+    def _finalize_archive_dialog(self, progress, label_text: str,
+                                 *, success: bool) -> None:
+        progress.finalize(label_text, success=success)
+
     def _ask_backup_options(self):
         """Show a small modal dialog with backup options.
 
@@ -4357,50 +4502,53 @@ class MesaMainWindow(QMainWindow):
         # The backup runs on a worker thread so the GUI (and macOS Finder
         # previews of the growing .zip) stays responsive. LZMA in particular
         # can take many seconds per file on the GUI thread.
-        progress = QProgressDialog(
-            "Preparing backup…", None, 0, 0, self
+        progress = self._make_archive_progress_dialog(
+            "Backup in progress", "Exporting"
         )
-        progress.setWindowTitle("Backup in progress")
-        progress.setMinimumDuration(0)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setCancelButton(None)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
         progress.show()
 
-        signals = _BackupSignals()
+        # CRITICAL: store the signal bridge on self, NOT as a local. If left
+        # local, the QObject is GC'd the moment the worker thread exits, and
+        # the queued finished/failed signal is silently dropped — the dialog
+        # then sits at 100% with no terminal-state transition. See
+        # learning.md / memory feedback_pyside6_signal_lifetime.
+        self._backup_signals = _BackupSignals()
+        signals = self._backup_signals
 
         def _on_progress(current: int, total: int, arcname: str) -> None:
-            # First tick switches the dialog from busy spinner to a real bar.
             if progress.maximum() != total:
                 progress.setRange(0, total)
             progress.setValue(current)
-            # Show just the file leaf so the dialog doesn't grow horizontally
-            # on deep paths.
             leaf = arcname.rsplit("/", 1)[-1]
             progress.setLabelText(
                 f"Archiving file {current:,} of {total:,}…\n{leaf}"
             )
 
         def _on_finished(result_path: str) -> None:
-            progress.close()
             fname = os.path.basename(result_path) if result_path else "backup"
             fdir = os.path.dirname(result_path) if result_path else ""
             try:
                 size_mb = os.path.getsize(result_path) / (1024 * 1024)
-                size_str = f"\nSize: {size_mb:.1f} MB"
+                size_str = f"  ·  {size_mb:.1f} MB"
             except Exception:
                 size_str = ""
             self._manage_status.setText(f"Backup created: {result_path}")
-            QMessageBox.information(self, "Backup created",
-                                    f"Backup saved successfully.\n\n"
-                                    f"File: {fname}\n"
-                                    f"Location: {fdir}{size_str}")
+            progress.setWindowTitle("Backup complete")
+            self._finalize_archive_dialog(
+                progress,
+                f"Backup saved successfully.{size_str}\n\n"
+                f"File: {fname}\nLocation: {fdir}",
+                success=True,
+            )
 
         def _on_failed(error_msg: str) -> None:
-            progress.close()
             self._manage_status.setText(f"Backup failed: {error_msg}")
-            QMessageBox.critical(self, "Backup failed", error_msg)
+            progress.setWindowTitle("Backup failed")
+            self._finalize_archive_dialog(
+                progress,
+                f"Backup failed.\n\n{error_msg}",
+                success=False,
+            )
 
         signals.progress.connect(_on_progress)
         signals.finished.connect(_on_finished)
@@ -4418,7 +4566,9 @@ class MesaMainWindow(QMainWindow):
             except Exception as e:
                 signals.failed.emit(str(e))
 
-        threading.Thread(target=_worker, daemon=True).start()
+        self._backup_worker_thread = threading.Thread(target=_worker, daemon=True)
+        progress.set_worker_thread(self._backup_worker_thread)
+        self._backup_worker_thread.start()
 
     def _do_restore(self):
         zip_path, _ = QFileDialog.getOpenFileName(
@@ -4437,16 +4587,14 @@ class MesaMainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        progress = QProgressDialog("Preparing restore…", None, 0, 0, self)
-        progress.setWindowTitle("Restore in progress")
-        progress.setMinimumDuration(0)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setCancelButton(None)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
+        progress = self._make_archive_progress_dialog(
+            "Restore in progress", "Importing"
+        )
         progress.show()
 
-        signals = _BackupSignals()
+        # See _do_backup: keep the signal bridge on self so it survives worker exit.
+        self._restore_signals = _BackupSignals()
+        signals = self._restore_signals
 
         def _on_progress(current: int, total: int, member: str) -> None:
             if progress.maximum() != total:
@@ -4458,19 +4606,26 @@ class MesaMainWindow(QMainWindow):
             )
 
         def _on_finished(_unused: str) -> None:
-            progress.close()
             self._manage_status.setText(f"Backup restored: {zip_path}")
-            QMessageBox.information(self, "Restore completed",
-                                    "Backup restore completed successfully.")
+            progress.setWindowTitle("Restore complete")
+            self._finalize_archive_dialog(
+                progress,
+                f"Backup restore completed successfully.\n\nFrom: {zip_path}",
+                success=True,
+            )
             try:
                 self._refresh_status_tab()
             except Exception:
                 pass
 
         def _on_failed(error_msg: str) -> None:
-            progress.close()
             self._manage_status.setText(f"Restore failed: {error_msg}")
-            QMessageBox.critical(self, "Restore failed", error_msg)
+            progress.setWindowTitle("Restore failed")
+            self._finalize_archive_dialog(
+                progress,
+                f"Restore failed.\n\n{error_msg}",
+                success=False,
+            )
 
         signals.progress.connect(_on_progress)
         signals.finished.connect(_on_finished)
@@ -4486,7 +4641,9 @@ class MesaMainWindow(QMainWindow):
             except Exception as e:
                 signals.failed.emit(str(e))
 
-        threading.Thread(target=_worker, daemon=True).start()
+        self._restore_worker_thread = threading.Thread(target=_worker, daemon=True)
+        progress.set_worker_thread(self._restore_worker_thread)
+        self._restore_worker_thread.start()
 
     def _do_clear_output(self):
         output_dir = os.path.join(original_working_directory, "output")
