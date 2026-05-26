@@ -27,7 +27,7 @@ DOCS = REPO / "docs"
 
 AUTHOR = "Ragnvald Larsen"
 AFFILIATION = "Norwegian Environment Agency"
-VERSION = "MESA 5.0.3"
+VERSION = "MESA 5.1.0"
 
 PT_MONTHS = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -89,8 +89,8 @@ def build_blocks():
         "The MESA method identifies and evaluates key environmental factors such as ecological significance, biodiversity, species abundance, habitat quality, and the presence of sensitive or protected areas. By combining these factors, the method supports a structured assessment of how pollution incidents may affect the environment.",
         "O método MESA identifica e avalia factores ambientais essenciais, tais como o significado ecológico, a biodiversidade, a abundância de espécies, a qualidade do habitat e a presença de áreas sensíveis ou protegidas. Ao combinar estes factores, o método permite uma avaliação estruturada de como os incidentes de poluição podem afectar o ambiente."))
     add(P(
-        "Complementing the method, the MESA tool provides a Windows desktop workflow for conducting environmental sensitivity assessments and producing map- and report-ready outputs. The current MESA 5.0 build produces:",
-        "Complementando o método, a ferramenta MESA disponibiliza um fluxo de trabalho de ambiente de trabalho Windows para realizar avaliações de sensibilidade ambiental e produzir resultados prontos para mapas e relatórios. A actual versão MESA 5.0 produz:"))
+        "Complementing the method, the MESA tool provides a Windows desktop workflow for conducting environmental sensitivity assessments and producing map- and report-ready outputs. The current MESA 5.1 build produces:",
+        "Complementando o método, a ferramenta MESA disponibiliza um fluxo de trabalho de ambiente de trabalho Windows para realizar avaliações de sensibilidade ambiental e produzir resultados prontos para mapas e relatórios. A actual versão MESA 5.1 produz:"))
     add(UL(
         ["GeoParquet tables under output/geoparquet/ as the canonical analysis store",
          "MBTiles under output/mbtiles/ for fast map viewing",
@@ -104,8 +104,8 @@ def build_blocks():
         "If you use the packaged distribution, start with mesa.exe. If you are running from source, start with python mesa.py.",
         "Se utilizar a distribuição empacotada, inicie com mesa.exe. Se estiver a executar a partir do código-fonte, inicie com python mesa.py."))
     add(P(
-        "MESA 5.0 is the current release line. The method continues to evolve, and ongoing method development will guide future tool development.",
-        "MESA 5.0 é a linha de versão actual. O método continua a evoluir e o desenvolvimento contínuo do método orientará o desenvolvimento futuro da ferramenta."))
+        "MESA 5.1 is the current release line. The method continues to evolve, and ongoing method development will guide future tool development.",
+        "MESA 5.1 é a linha de versão actual. O método continua a evoluir e o desenvolvimento contínuo do método orientará o desenvolvimento futuro da ferramenta."))
 
     add(H(2, "1.1 System requirements (minimum)", "1.1 Requisitos de sistema (mínimo)"))
     add(UL(
@@ -121,12 +121,12 @@ def build_blocks():
     add(PB())
 
     # =========================================================================
-    # 2. What's new in MESA 5.0
+    # 2. What's new in MESA 5.1
     # =========================================================================
-    add(H(1, "2. What's new in MESA 5.0", "2. Novidades no MESA 5.0"))
+    add(H(1, "2. What's new in MESA 5.1", "2. Novidades no MESA 5.1"))
     add(P(
-        "MESA 5.0 is a usability-, packaging-, and reliability-focused update of the desktop workflow. The headline gains are faster processing on real project data and a much lower crash rate on long runs, both driven by smarter memory and CPU balancing inside the pipeline. Around those two, the launcher has been simplified, screens have been deprecated or moved, and the report engine has had a substantial polish pass.",
-        "O MESA 5.0 é uma actualização do fluxo de trabalho de ambiente de trabalho centrada na usabilidade, empacotamento e fiabilidade. Os principais ganhos são um processamento mais rápido em dados reais de projecto e uma taxa de falhas muito inferior em execuções longas, ambos resultado de um balanceamento mais inteligente de memória e CPU dentro da pipeline. Em torno destes dois eixos, o iniciador foi simplificado, alguns ecrãs foram removidos ou deslocados e o motor de relatórios foi substancialmente aperfeiçoado."))
+        "MESA 5.1 is a usability-, packaging-, and reliability-focused update of the desktop workflow. The headline gains are faster processing on real project data and a much lower crash rate on long runs, both driven by smarter memory and CPU balancing inside the pipeline. Around those two, the launcher has been simplified, screens have been deprecated or moved, and the report engine has had a substantial polish pass.",
+        "O MESA 5.1 é uma actualização do fluxo de trabalho de ambiente de trabalho centrada na usabilidade, empacotamento e fiabilidade. Os principais ganhos são um processamento mais rápido em dados reais de projecto e uma taxa de falhas muito inferior em execuções longas, ambos resultado de um balanceamento mais inteligente de memória e CPU dentro da pipeline. Em torno destes dois eixos, o iniciador foi simplificado, alguns ecrãs foram removidos ou deslocados e o motor de relatórios foi substancialmente aperfeiçoado."))
 
     add(H(2, "2.1 Headline gains", "2.1 Principais ganhos"))
     add(H(3, "Substantially faster processing", "Processamento substancialmente mais rápido"))

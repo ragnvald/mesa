@@ -230,7 +230,7 @@ def _description_highlights(description_text: str) -> list[str]:
     text = description_text.lower()
     highlights: list[str] = []
     if "fully replaces all earlier mesa versions" in text:
-        highlights.append("Version 5.0 fully replaces the earlier MESA releases.")
+        highlights.append("Version 5.1 fully replaces the earlier MESA releases.")
     if "end-to-end workflow" in text or "from inputs to published outputs" in text:
         highlights.append("New end-to-end workflow from project inputs to published outputs.")
     if "word-first" in text or ".docx" in text:

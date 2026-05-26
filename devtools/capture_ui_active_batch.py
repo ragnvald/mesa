@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import ctypes
 import hashlib
 import os
@@ -330,9 +331,13 @@ def send_ctrl_tab(reverse: bool = False) -> None:
 
 def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
     # Tab order and filenames must match what User-interface.md references.
-    # Current launcher (mesa.py): Workflows / Status / Manage data / Config / About.
-    # Title hint matches mesa_version_display, default "MESA 5" from config.ini.
+    # Current launcher (mesa.py): Welcome / Workflows / Status / Manage data / Config / About.
+    # mesa.py now sets the window title to the bare version from config.ini
+    # (e.g. "5.1") — read it dynamically so this tool keeps working across
+    # version bumps. The pid-tree match in find_app_window is the primary
+    # identifier; the hint is a fallback.
     desktop_tabs = [
+        ("ui_welcome.png", "Welcome"),
         ("ui_workflows.png", "Workflows"),
         ("ui_status.png", "Status"),
         ("ui_manage.png", "Manage data"),
@@ -340,9 +345,16 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         ("ui_about.png", "About"),
     ]
 
+    cfg = configparser.ConfigParser()
+    try:
+        cfg.read(repo / "config.ini", encoding="utf-8")
+        title_hint = str(cfg["DEFAULT"].get("mesa_version", "")).strip() or "mesa"
+    except Exception:
+        title_hint = "mesa"
+
     proc = subprocess.Popen([str(py), "mesa.py"], cwd=repo)
     try:
-        hwnd, title = find_app_window(proc.pid, "mesa 5", timeout=300.0)
+        hwnd, title = find_app_window(proc.pid, title_hint, timeout=300.0)
         if hwnd is None:
             print("FAIL mesa_desktop: window not found")
             return

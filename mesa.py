@@ -1155,63 +1155,117 @@ def _wmic_list(command_args: list[str]) -> list[dict] | None:
     except Exception:
         return None
 
+_FAKE_GPU_NAME_FRAGMENTS = (
+    "microsoft basic display",
+    "microsoft basic render",
+    "remote display adapter",
+    "idd driver",
+)
+
+
+def _is_real_gpu_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    return not any(frag in n for frag in _FAKE_GPU_NAME_FRAGMENTS)
+
+
+def _query_gpu_vram_registry_gb() -> float | None:
+    """Return the largest dedicated VRAM (in GB) reported via the GPU class
+    registry key. Reads HardwareInformation.qwMemorySize (REG_QWORD), which
+    is the true 64-bit size — Win32_VideoController.AdapterRAM is a 32-bit
+    field capped at ~4 GB and is wrong on every modern card."""
+    try:
+        ps = (
+            "$ErrorActionPreference='Stop';"
+            "$items = Get-ItemProperty -Path "
+            "'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\*' "
+            "-ErrorAction SilentlyContinue;"
+            "$vals = @($items | ForEach-Object { $_.'HardwareInformation.qwMemorySize' } "
+            "| Where-Object { $_ -ne $null -and $_ -gt 0 });"
+            "if ($vals.Count -gt 0) { ($vals | Measure-Object -Maximum).Maximum } else { 0 }"
+        )
+        flags = 0
+        try:
+            flags = subprocess.CREATE_NO_WINDOW
+        except Exception:
+            flags = 0
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            stderr=subprocess.DEVNULL, text=True, creationflags=flags, timeout=8,
+        )
+        v = float((out or "0").strip() or 0)
+        if v <= 0:
+            return None
+        return round(v / (1024 ** 3), 1)
+    except Exception:
+        return None
+
+
 def _collect_gpu_info_windows() -> dict:
     out: dict = {}
+    gpus: list[dict] = []
     try:
         gpu = _powershell_json(
             "Get-CimInstance Win32_VideoController | "
             "Select-Object Name, DriverVersion, AdapterRAM | ConvertTo-Json -Depth 2"
         )
-        gpus: list[dict] = []
         if isinstance(gpu, list):
             gpus = [g for g in gpu if isinstance(g, dict)]
         elif isinstance(gpu, dict):
             gpus = [gpu]
         if gpus:
             out["gpu_probe_method"] = "powershell_cim"
-            names = [str(g.get("Name") or "").strip() for g in gpus if str(g.get("Name") or "").strip()]
-            drivers = [str(g.get("DriverVersion") or "").strip() for g in gpus if str(g.get("DriverVersion") or "").strip()]
-            ram = []
-            for g in gpus:
-                try:
-                    v = g.get("AdapterRAM")
-                    if v is None:
-                        continue
-                    ram.append(round(float(v) / (1024 ** 3), 2))
-                except Exception:
-                    continue
-            out["gpu_count"] = len(gpus)
-            out["gpu_names"] = "; ".join(names) if names else None
-            out["gpu_driver_versions"] = "; ".join(drivers) if drivers else None
-            out["gpu_adapter_ram_gb"] = "; ".join(str(x) for x in ram) if ram else None
-            return out
     except Exception:
-        pass
-    try:
-        blocks = _wmic_list(["wmic", "path", "Win32_VideoController", "get", "Name,DriverVersion,AdapterRAM", "/format:list"])
-        if blocks:
-            out["gpu_probe_method"] = "wmic"
-            names = [str(b.get("Name") or "").strip() for b in blocks if str(b.get("Name") or "").strip()]
-            drivers = [str(b.get("DriverVersion") or "").strip() for b in blocks if str(b.get("DriverVersion") or "").strip()]
-            ram = []
-            for b in blocks:
-                try:
-                    v = b.get("AdapterRAM")
-                    if v is None:
-                        continue
-                    v2 = float(re.sub(r"[^0-9.]", "", str(v)))
-                    if v2:
-                        ram.append(round(v2 / (1024 ** 3), 2))
-                except Exception:
-                    continue
-            out["gpu_count"] = len(blocks)
-            out["gpu_names"] = "; ".join(names) if names else None
-            out["gpu_driver_versions"] = "; ".join(drivers) if drivers else None
-            out["gpu_adapter_ram_gb"] = "; ".join(str(x) for x in ram) if ram else None
-            return out
-    except Exception:
-        pass
-    out["gpu_probe_method"] = "unavailable"
+        gpus = []
+    if not gpus:
+        try:
+            blocks = _wmic_list(["wmic", "path", "Win32_VideoController", "get", "Name,DriverVersion,AdapterRAM", "/format:list"])
+            if blocks:
+                out["gpu_probe_method"] = "wmic"
+                for b in blocks:
+                    try:
+                        v = b.get("AdapterRAM")
+                        if v is not None:
+                            b["AdapterRAM"] = float(re.sub(r"[^0-9.]", "", str(v)) or 0)
+                    except Exception:
+                        b["AdapterRAM"] = None
+                gpus = blocks
+        except Exception:
+            gpus = []
+    if not gpus:
+        out["gpu_probe_method"] = "unavailable"
+        return out
+
+    real = [g for g in gpus if _is_real_gpu_name(str(g.get("Name") or ""))]
+    chosen = real or gpus
+    names = [str(g.get("Name") or "").strip() for g in chosen if str(g.get("Name") or "").strip()]
+    drivers = [str(g.get("DriverVersion") or "").strip() for g in chosen if str(g.get("DriverVersion") or "").strip()]
+
+    wmi_max_gb: float | None = None
+    for g in chosen:
+        try:
+            v = g.get("AdapterRAM")
+            if v in (None, "", 0):
+                continue
+            gb = round(float(v) / (1024 ** 3), 1)
+            if wmi_max_gb is None or gb > wmi_max_gb:
+                wmi_max_gb = gb
+        except Exception:
+            continue
+
+    # Win32_VideoController.AdapterRAM is a 32-bit field that caps near 4 GB.
+    # Trust the registry's qwMemorySize whenever it reports a larger value.
+    reg_gb = _query_gpu_vram_registry_gb()
+    if reg_gb is not None and (wmi_max_gb is None or reg_gb > wmi_max_gb):
+        ram_gb = reg_gb
+    else:
+        ram_gb = wmi_max_gb
+
+    out["gpu_count"] = len(chosen)
+    out["gpu_names"] = "; ".join(names) if names else None
+    out["gpu_driver_versions"] = "; ".join(drivers) if drivers else None
+    out["gpu_adapter_ram_gb"] = ram_gb if ram_gb is not None else None
     return out
 
 def _windows_friendly_release() -> str:
@@ -1374,7 +1428,7 @@ def _ensure_system_capabilities_snapshot(cfg: configparser.ConfigParser) -> None
         out_path = os.path.join(geoparquet_dir, "tbl_system_capabilities.parquet")
         if has_info:
             return
-        if os.path.exists(out_path):
+        if os.path.exists(out_path) and not _snapshot_needs_refresh(out_path):
             return
         row = _collect_system_capabilities()
         written = _write_system_capabilities_parquet(geoparquet_dir, row)
@@ -1383,20 +1437,26 @@ def _ensure_system_capabilities_snapshot(cfg: configparser.ConfigParser) -> None
     except Exception:
         pass
 
-def _read_system_capabilities_latest_row() -> dict | None:
+
+def _snapshot_needs_refresh(path: str) -> bool:
+    """Detect legacy snapshot formats and re-collect when found.
+    Currently triggers on the old '; '-joined gpu_adapter_ram_gb string
+    (replaced by a single max value with registry fallback) and on a
+    stale mesa_version that no longer matches config.ini."""
     try:
-        geoparquet_dir = _detect_geoparquet_dir()
-        path = os.path.join(geoparquet_dir, "tbl_system_capabilities.parquet")
-        if not os.path.exists(path):
-            return None
         df = pd.read_parquet(path)
         if df is None or df.empty:
-            return None
-        row = dict(df.iloc[-1].to_dict())
-        row.pop("geometry", None)
-        return row
+            return True
+        row = df.iloc[-1].to_dict()
+        ram = str(row.get("gpu_adapter_ram_gb") or "")
+        if "; " in ram or ram.count(".") > 1:
+            return True
+        recorded = str(row.get("mesa_version") or "").strip()
+        if recorded and recorded != (mesa_version_display or "").strip():
+            return True
     except Exception:
-        return None
+        return False
+    return False
 
 def _format_system_capabilities_for_about(row: dict | None) -> str:
     if not row:
@@ -1441,7 +1501,10 @@ def _format_system_capabilities_for_about(row: dict | None) -> str:
     lines.append(f"Python:    {_g('python_version')}")
     lines.append(f"Exe:       {_g('python_executable')}")
     lines.append("")
-    lines.append(f"MESA:      {_g('mesa_version')}")
+    # Always show the running version, not whatever the snapshot was first
+    # written with — config.ini is authoritative and the snapshot only refreshes
+    # when its parquet is missing.
+    lines.append(f"MESA:      {mesa_version_display or _g('mesa_version')}")
     if str(row.get("ram_probe_method") or "").strip():
         lines.append("")
         lines.append(f"RAM probe: {_g('ram_probe_method')}")
@@ -4791,6 +4854,14 @@ class MesaMainWindow(QMainWindow):
         linkedin_row.addStretch()
         links_layout.addLayout(linkedin_row)
 
+        links_layout.addSpacing(8)
+        credits_row = QHBoxLayout()
+        credits_btn = QPushButton("Credits…")
+        credits_btn.clicked.connect(self._open_credits_dialog)
+        credits_row.addWidget(credits_btn)
+        credits_row.addStretch()
+        links_layout.addLayout(credits_row)
+
         links_layout.addStretch()
         right_col.addWidget(links_group)
 
@@ -4807,18 +4878,99 @@ class MesaMainWindow(QMainWindow):
 
         self._tabs.addTab(tab, "About")
 
-        # Populate system info. The parquet snapshot is written async by
-        # _ensure_system_capabilities_snapshot, so on first launch the file
-        # may not exist yet when this tab is built. Fall back to live
-        # collection so the panel is never empty.
+        # Populate system info. Always re-collect live so the displayed
+        # values match the running build — the cached parquet is for audit
+        # records and can lag behind code changes (e.g. an old GPU-RAM
+        # format) until a new snapshot is written.
         try:
-            row = _read_system_capabilities_latest_row()
-            if not row:
-                row = _collect_system_capabilities()
+            row = _collect_system_capabilities()
             txt = _format_system_capabilities_for_about(row)
         except Exception:
             txt = "Unable to read system profile."
         self._system_text.setPlainText(txt)
+
+    def _open_credits_dialog(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Credits — open-source components")
+        dlg.setModal(True)
+        dlg.resize(760, 580)
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(16, 14, 16, 12)
+        v.setSpacing(10)
+
+        intro = QLabel(
+            "MESA stands on the shoulders of a remarkable open-source ecosystem. "
+            "The libraries below are the ones MESA leans on most directly — for "
+            "spatial data handling, interactive maps, reports, and the desktop UI. "
+            "Without the time, craft, and generosity of these projects' maintainers "
+            "and contributors, MESA could not exist. Their work is gratefully "
+            "acknowledged."
+        )
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+
+        entries: list[tuple[str, str, str]] = [
+            ("Python (CPython)", "Programming language and runtime", "PSF License"),
+            ("PySide6 (Qt for Python)", "Desktop UI framework", "LGPL-3.0"),
+            ("GDAL / OGR", "Geospatial vector and raster engine", "MIT"),
+            ("GEOS (via Shapely)", "Geometry engine for unions, intersections, buffers", "LGPL-2.1"),
+            ("PROJ (via pyproj)", "Coordinate-system transformations", "MIT"),
+            ("geopandas", "Spatial dataframes", "BSD-3-Clause"),
+            ("shapely", "Pythonic geometry operations", "BSD-3-Clause"),
+            ("pyproj", "Projections and CRS transforms", "MIT"),
+            ("fiona", "OGR-based vector I/O", "BSD-3-Clause"),
+            ("h3", "Uber H3 hexagonal grid", "Apache-2.0"),
+            ("pandas", "Tabular data and analysis", "BSD-3-Clause"),
+            ("numpy", "Arrays and numerical primitives", "BSD-3-Clause"),
+            ("pyarrow", "Apache Arrow / Parquet I/O", "Apache-2.0"),
+            ("matplotlib", "Plotting and figure rendering", "Matplotlib License (PSF-based)"),
+            ("Pillow", "Image processing", "HPND"),
+            ("pywebview", "Embedded WebView for map windows", "BSD-3-Clause"),
+            ("Leaflet (bundled)", "Browser-side interactive maps", "BSD-2-Clause"),
+            ("Leaflet.draw (bundled)", "Drawing controls for Leaflet", "MIT"),
+            ("contextily", "Basemap tiles for matplotlib", "BSD-3-Clause"),
+            ("python-docx", "Word (.docx) report generation", "MIT"),
+            ("psutil", "System and process monitoring", "BSD-3-Clause"),
+            ("requests", "HTTP client", "Apache-2.0"),
+            ("OpenStreetMap", "Map tiles & data © OpenStreetMap contributors", "ODbL 1.0"),
+        ]
+
+        table = QTableWidget(len(entries), 3, dlg)
+        table.setHorizontalHeaderLabels(["Library", "Purpose in MESA", "License"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(True)
+        for r, (lib, purpose, lic) in enumerate(entries):
+            table.setItem(r, 0, QTableWidgetItem(lib))
+            table.setItem(r, 1, QTableWidgetItem(purpose))
+            table.setItem(r, 2, QTableWidgetItem(lic))
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        table.resizeRowsToContents()
+        v.addWidget(table, stretch=1)
+
+        footnote = QLabel(
+            "License labels above are common short-form identifiers; the canonical "
+            "license text ships with each project."
+        )
+        footnote.setWordWrap(True)
+        footnote.setStyleSheet("color: #6b5d44; font-size: 9pt;")
+        v.addWidget(footnote)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        v.addLayout(btn_row)
+
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Footer
