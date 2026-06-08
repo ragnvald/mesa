@@ -3,7 +3,7 @@
 # For packaging-only builds, use requirements_compile_win311.txt in .venv_compile.
 
 affine==2.4.0
-aiohttp==3.13.4
+aiohttp==3.14.0
 aiosignal==1.4.0
 alabaster==0.7.13
 altgraph==0.17.4
@@ -100,7 +100,7 @@ proglog==0.1.10
 psutil==5.9.6
 psycopg2==2.9.9
 pubnub==7.4.2
-pyarrow==17.0.0
+pyarrow==23.0.1
 pycodestyle==2.11.1
 pycparser==2.21
 pycryptodomex==3.20.0
