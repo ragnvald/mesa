@@ -913,7 +913,8 @@ class ReportEngine:
 
     def render_geocode_maps(self,
                             flat_df: gpd.GeoDataFrame,
-                            set_progress_callback) -> tuple[list, list, list]:
+                            set_progress_callback,
+                            selected_groups: list | None = None) -> tuple[list, list, list]:
         pages: list = []
         intro_table = None
         groups = []
@@ -932,24 +933,31 @@ class ReportEngine:
                       .dropna().unique().tolist())
         all_groups = sorted(all_groups)
 
-        # Prefer configured basic group if present, else fall back to a literal basic_mosaic, else first group.
-        chosen = None
-        for cand in (basic_name, 'basic_mosaic'):
-            if any(str(g).strip().lower() == str(cand).strip().lower() for g in all_groups):
-                chosen = cand
-                break
-        if chosen is None and all_groups:
-            chosen = str(all_groups[0])
-        groups = [chosen] if chosen else []
+        # Operator selection (multi) wins; preserve the on-disk group order.
+        groups = []
+        if selected_groups:
+            want = {str(s).strip().lower() for s in selected_groups if str(s).strip()}
+            groups = [g for g in all_groups if str(g).strip().lower() in want]
+        if not groups:
+            # Prefer configured basic group if present, else literal basic_mosaic, else first group.
+            chosen = None
+            for cand in (basic_name, 'basic_mosaic'):
+                if any(str(g).strip().lower() == str(cand).strip().lower() for g in all_groups):
+                    chosen = cand
+                    break
+            if chosen is None and all_groups:
+                chosen = str(all_groups[0])
+            groups = [chosen] if chosen else []
 
         counts = (flat_df.groupby('name_gis_geocodegroup')
                   .agg(total=('name_gis_geocodegroup', 'size'),
                        populated=('geometry', lambda s: int(s.notna().sum())))
                   .reset_index())
-        # Only show the chosen (basic) group in the intro table.
+        # Only show the rendered group(s) in the intro table.
         try:
-            if chosen:
-                mask = counts['name_gis_geocodegroup'].astype('string').str.strip().str.lower() == str(chosen).strip().lower()
+            if groups:
+                want = {str(g).strip().lower() for g in groups}
+                mask = counts['name_gis_geocodegroup'].astype('string').str.strip().str.lower().isin(want)
                 counts = counts[mask].copy()
         except Exception:
             pass
@@ -1221,13 +1229,16 @@ class ReportEngine:
     def render_index_statistics(self,
                                flat_df: gpd.GeoDataFrame,
                                cfg: configparser.ConfigParser,
-                               set_progress_callback=None) -> list:
-        """Create one page per index showing basic_mosaic distribution."""
+                               set_progress_callback=None,
+                               group_override: str | None = None) -> list:
+        """Create one page per index showing the chosen geocode group's
+        distribution (group_override wins; defaults to basic_group_name)."""
         pages: list = []
         if flat_df is None or flat_df.empty:
             return pages
 
-        basic_name = (cfg["DEFAULT"].get("basic_group_name", "basic_mosaic") or "basic_mosaic").strip()
+        basic_name = (str(group_override).strip() if group_override
+                      else (cfg["DEFAULT"].get("basic_group_name", "basic_mosaic") or "basic_mosaic").strip())
 
         candidates = [
             ("index_importance", "Importance index", "index_importance"),
@@ -4387,6 +4398,9 @@ def generate_report(base_dir: str,
                     include_other_maps: bool = True,
                     include_index_statistics: bool = True,
                     include_lines_and_segments: bool = True,
+                    include_segmentation: bool = False,
+                    segmentation_layers: list | None = None,
+                    report_geocode_groups: list | None = None,
                     include_atlas_maps: bool | None = None,
                     include_analysis_presentation: bool = False,
                     analysis_mode: str = "single",
@@ -4625,11 +4639,29 @@ def generate_report(base_dir: str,
             start = 45 if include_atlas_maps else 38
             set_progress(start + int(30 * done / max(1, total)), f"Rendered maps for group {done}/{total}")
 
+        # Resolve which geocode groups the report's maps/index cover. Operator
+        # multi-select wins; default to basic_mosaic (else first available).
+        _avail_geo = []
+        try:
+            if flat_df is not None and not flat_df.empty and 'name_gis_geocodegroup' in flat_df.columns:
+                _avail_geo = sorted(flat_df['name_gis_geocodegroup'].dropna().astype(str).unique().tolist())
+        except Exception:
+            _avail_geo = []
+        if report_geocode_groups:
+            _want = {str(s).strip().lower() for s in report_geocode_groups if str(s).strip()}
+            report_groups_sel = [g for g in _avail_geo if g.lower() in _want]
+        else:
+            report_groups_sel = []
+        if not report_groups_sel:
+            report_groups_sel = (['basic_mosaic'] if 'basic_mosaic' in _avail_geo
+                                 else (_avail_geo[:1] if _avail_geo else []))
+
         geocode_pages = []
         geocode_intro_table = None
         geocode_groups = []
         if include_other_maps and engine is not None:
-            geocode_pages, geocode_intro_table, geocode_groups = engine.render_geocode_maps(flat_df, _progress_geocode)
+            geocode_pages, geocode_intro_table, geocode_groups = engine.render_geocode_maps(
+                flat_df, _progress_geocode, selected_groups=report_groups_sel)
             if geocode_pages:
                 write_to_log("Per-geocode maps created.", base_dir)
             else:
@@ -4657,7 +4689,10 @@ def generate_report(base_dir: str,
 
         index_pages = []
         if include_index_statistics and engine is not None:
-            index_pages = engine.render_index_statistics(flat_df, cfg, _progress_indexes)
+            # One set of index pages per selected geocode group.
+            for _grp in (report_groups_sel or [None]):
+                index_pages += engine.render_index_statistics(
+                    flat_df, cfg, _progress_indexes, group_override=_grp)
             # Settle on a clear "indexes done" mark so the next leap to the
             # compose phase starts from a known baseline.
             set_progress(_index_start + 5, "Index charts completed.")
@@ -4689,6 +4724,25 @@ def generate_report(base_dir: str,
             contents_lines.append("- Index statistics + maps (basic_mosaic)")
         if include_lines_and_segments:
             contents_lines.append("- Line overview (summary across all lines)")
+        # Resolve which segmented levels go into the report. Explicit selection
+        # (GUI multi-select) wins; otherwise include_segmentation defaults to
+        # basic_mosaic only (else all available). Used by the TOC and the section.
+        seg_layers_render: list[str] = []
+        _seg_prof_path = os.path.join(str(gpq_dir), "tbl_segmentation_profiles.parquet")
+        if os.path.exists(_seg_prof_path):
+            try:
+                _avail_seg = sorted(pd.read_parquet(
+                    _seg_prof_path, columns=["name_gis_geocodegroup"]
+                )["name_gis_geocodegroup"].astype(str).unique().tolist())
+            except Exception:
+                _avail_seg = []
+            if segmentation_layers:
+                _want = {str(s).strip().lower() for s in segmentation_layers if str(s).strip()}
+                seg_layers_render = [L for L in _avail_seg if L.lower() in _want]
+            elif include_segmentation:
+                seg_layers_render = ["basic_mosaic"] if "basic_mosaic" in _avail_seg else _avail_seg
+        if seg_layers_render:
+            contents_lines.append("- Segmentation (area types & zones from tbl_segmentation)")
         if include_atlas_maps and atlas_pages:
             contents_lines.append("- Atlas tile maps (per atlas object with inset)")
         if include_lines_and_segments:
@@ -5060,6 +5114,86 @@ def generate_report(base_dir: str,
             order_list.append(('new_page', None))
             order_list.extend(pages_lines)
 
+        # Optional Segmentation section (Stage 5 output). Self-contained:
+        # renders only the selected, available levels (seg_layers_render). Per
+        # level: a signature mosaic, then one per-zone table PER method (the
+        # method names the sub-heading, so it is not a table column), with zones
+        # sorted big-to-small by total area. See docs/SEGMENTATION_INTEGRATION_PLAN.md.
+        if seg_layers_render and os.path.exists(_seg_prof_path):
+            try:
+                seg_prof = pd.read_parquet(_seg_prof_path)
+            except Exception as exc:
+                seg_prof = None
+                write_to_log(f"Segmentation section skipped (read failed): {exc}", base_dir)
+            if seg_prof is not None and not seg_prof.empty:
+                try:
+                    import segmentation as _seg
+                except Exception as exc:
+                    _seg = None
+                    write_to_log(f"Segmentation module unavailable for report: {exc}", base_dir)
+
+                def _pretty_seg_method(m: str) -> str:
+                    if m == "signatures":
+                        return "Overlap signatures"
+                    mm = re.match(r"(agglomerative_ward|kmeans)_k(\d+)$", str(m))
+                    if mm:
+                        algo = "agglomerative ward" if mm.group(1) == "agglomerative_ward" else "k-means"
+                        return f"Zones — {algo} (k={mm.group(2)})"
+                    return f"Zones — {m}"
+
+                def _fmt_area(v) -> str:
+                    try:
+                        f = float(v)
+                        return f"{f:,.2f}" if f == f else "–"  # NaN -> dash
+                    except (TypeError, ValueError):
+                        return "–"
+
+                order_list.append(('heading(2)', "Segmentation"))
+                order_list.append(('text',
+                    "Segmentation groups the analytical cells into a small number of interpretable "
+                    "<b>area types</b>. The deterministic <i>overlap signature</i> labels each cell by the "
+                    "set of sensitivity classes (A–E) of the assets it overlaps — e.g. <b>B+C+D+E</b>. Where "
+                    "algorithmic clustering was enabled, contiguous <i>zones</i> are reported as well. Each "
+                    "table lists the zones largest-first by total area; the mosaic shows how the area divides "
+                    "across signatures, with column width proportional to frequency."))
+                order_list.append(('rule', None))
+                for layer in seg_layers_render:
+                    lp = seg_prof[seg_prof["name_gis_geocodegroup"].astype(str) == layer]
+                    if lp.empty:
+                        continue
+                    order_list.append(('heading(3)', f"Segmentation – {layer}"))
+                    if _seg is not None:
+                        try:
+                            mosaic_png = os.path.join(tmp_dir, f"segmentation_mosaic_{layer}.png")
+                            if _seg.make_signature_mosaic(str(gpq_dir), layer, mosaic_png):
+                                order_list.append(('image', (f"{layer} – overlap-signature mosaic", mosaic_png)))
+                        except Exception as exc:
+                            write_to_log(f"Segmentation mosaic failed for {layer}: {exc}", base_dir)
+                    # Signatures first, then any cluster method(s).
+                    methods = lp["method"].astype(str).unique().tolist()
+                    methods_ordered = (["signatures"] if "signatures" in methods else []) + \
+                                      sorted(m for m in methods if m != "signatures")
+                    for method in methods_ordered:
+                        mp = lp[lp["method"].astype(str) == method]
+                        has_area = "total_area_km2" in mp.columns and mp["total_area_km2"].notna().any()
+                        if has_area:
+                            mp = mp.sort_values("total_area_km2", ascending=False, na_position="last")
+                        else:
+                            mp = mp.sort_values("n_polygons", ascending=False)
+                        mp = mp.head(30)
+                        order_list.append(('heading(4)', _pretty_seg_method(method)))
+                        tbl = [["Zone", "Total area (km²)", "Polygons", "Mean sensitivity", "Mean # assets"]]
+                        for _, r in mp.iterrows():
+                            tbl.append([
+                                str(r["zone"]),
+                                _fmt_area(r.get("total_area_km2")),
+                                f"{int(r['n_polygons']):,}",
+                                f"{float(r['sens_mean']):.2f}",
+                                f"{float(r['mean_n_assets']):.1f}",
+                            ])
+                        order_list.append(('table', tbl))
+                    order_list.append(('new_page', None))
+
         if atlas_pages:
             order_list.append(('heading(2)', "Atlas maps"))
             atlas_intro = (
@@ -5131,11 +5265,14 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  include_other_maps: bool,
                                  include_index_statistics: bool,
                                  include_lines_and_segments: bool,
-                                 include_atlas_maps: bool,
-                                 include_analysis_presentation: bool,
-                                 analysis_mode: str,
-                                 analysis_area_left: str | None,
-                                 analysis_area_right: str | None):
+                                 include_segmentation: bool = False,
+                                 segmentation_layers: list | None = None,
+                                 report_geocode_groups: list | None = None,
+                                 include_atlas_maps: bool = False,
+                                 include_analysis_presentation: bool = False,
+                                 analysis_mode: str = "single",
+                                 analysis_area_left: str | None = None,
+                                 analysis_area_right: str | None = None):
     threading.Thread(
         target=generate_report,
         kwargs={
@@ -5148,6 +5285,9 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
             'include_other_maps': include_other_maps,
             'include_index_statistics': include_index_statistics,
             'include_lines_and_segments': include_lines_and_segments,
+            'include_segmentation': include_segmentation,
+            'segmentation_layers': segmentation_layers,
+            'report_geocode_groups': report_geocode_groups,
             'include_atlas_maps': include_atlas_maps,
             'include_analysis_presentation': include_analysis_presentation,
             'analysis_mode': analysis_mode,
@@ -5217,7 +5357,7 @@ class ReportGeneratorWindow(QMainWindow):
         self._chk_assets.setChecked(True)
         self._chk_analysis = QCheckBox("Analysis presentation (graphs)")
         self._chk_analysis.setChecked(False)
-        self._chk_other_maps = QCheckBox("Other maps (basic_mosaic)")
+        self._chk_other_maps = QCheckBox("Other maps")
         self._chk_other_maps.setChecked(True)
         self._chk_index_stats = QCheckBox("Index statistics")
         self._chk_index_stats.setChecked(True)
@@ -5234,7 +5374,65 @@ class ReportGeneratorWindow(QMainWindow):
         for idx, chk in enumerate(_include_checks):
             include_grid.addWidget(chk, idx // 2, idx % 2)
 
-        action_layout.addWidget(include_group)
+        # Segmentation levels: one checkbox per geocode level that the Segment
+        # stage (5) has actually produced, enumerated from tbl_segmentation/.
+        # basic_mosaic is checked by default; the others are opt-in.
+        seg_group = QGroupBox("Segmentation (area types)")
+        seg_vbox = QVBoxLayout(seg_group)
+        self._chk_seg_levels: dict[str, QCheckBox] = {}
+        seg_part_dir = os.path.join(base_dir, "output", "geoparquet", "tbl_segmentation")
+        seg_levels = []
+        if os.path.isdir(seg_part_dir):
+            seg_levels = sorted(
+                os.path.splitext(f)[0] for f in os.listdir(seg_part_dir) if f.endswith(".parquet")
+            )
+        if seg_levels:
+            for lvl in seg_levels:
+                cb = QCheckBox(lvl)
+                cb.setChecked(lvl == "basic_mosaic")
+                seg_vbox.addWidget(cb)
+                self._chk_seg_levels[lvl] = cb
+        else:
+            hint = QLabel("Run the Segment stage (5) first")
+            hint.setEnabled(False)
+            seg_vbox.addWidget(hint)
+        seg_vbox.addStretch(1)
+
+        # Geocode groups the report's Other maps + Index pages cover. One
+        # checkbox per geocode group; basic_mosaic checked by default.
+        geo_group = QGroupBox("Map geocode groups")
+        geo_vbox = QVBoxLayout(geo_group)
+        self._chk_report_geocats: dict[str, QCheckBox] = {}
+        _geo_cats = []
+        try:
+            import pandas as _pd
+            _ggp = os.path.join(base_dir, "output", "geoparquet", "tbl_geocode_group.parquet")
+            if os.path.exists(_ggp):
+                _geo_cats = sorted(_pd.read_parquet(_ggp, columns=["name_gis_geocodegroup"])
+                                   ["name_gis_geocodegroup"].dropna().astype(str).unique().tolist())
+        except Exception:
+            _geo_cats = []
+        _geo_cats = sorted(_geo_cats, key=lambda c: (c != "basic_mosaic", c))
+        if _geo_cats:
+            for c in _geo_cats:
+                cb = QCheckBox(c)
+                cb.setChecked(c == "basic_mosaic")
+                geo_vbox.addWidget(cb)
+                self._chk_report_geocats[c] = cb
+        else:
+            _gh = QLabel("No geocode groups found")
+            _gh.setEnabled(False)
+            geo_vbox.addWidget(_gh)
+        geo_vbox.addStretch(1)
+
+        # Settings row: general includes | geocode groups | segmentation levels.
+        settings_row = QWidget()
+        settings_hbox = QHBoxLayout(settings_row)
+        settings_hbox.setContentsMargins(0, 0, 0, 0)
+        settings_hbox.addWidget(include_group, 1)
+        settings_hbox.addWidget(geo_group)
+        settings_hbox.addWidget(seg_group)
+        action_layout.addWidget(settings_row)
 
         # Analysis presentation options
         analysis_group = QGroupBox("Analysis presentation options")
@@ -5420,6 +5618,8 @@ class ReportGeneratorWindow(QMainWindow):
             include_other_maps=self._chk_other_maps.isChecked(),
             include_index_statistics=self._chk_index_stats.isChecked(),
             include_lines_and_segments=self._chk_lines_segments.isChecked(),
+            segmentation_layers=[lvl for lvl, cb in self._chk_seg_levels.items() if cb.isChecked()],
+            report_geocode_groups=[c for c, cb in self._chk_report_geocats.items() if cb.isChecked()],
             include_atlas_maps=self._chk_atlas.isChecked(),
         )
 
@@ -5428,13 +5628,16 @@ class ReportGeneratorWindow(QMainWindow):
             return
         folder = os.path.dirname(last_report_path)
         if os.path.isdir(folder):
+            # Platform-aware reveal: Windows Explorer, macOS Finder, Linux xdg-open.
             try:
-                os.startfile(folder)  # Windows
-            except Exception:
-                try:
-                    subprocess.Popen(["explorer", folder])
-                except Exception as ee:
-                    write_to_log(f"Failed to open folder: {ee}", self._base_dir)
+                if sys.platform.startswith("win"):
+                    os.startfile(folder)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", folder])
+                else:
+                    subprocess.Popen(["xdg-open", folder])
+            except Exception as ee:
+                write_to_log(f"Failed to open folder: {ee}", self._base_dir)
         else:
             write_to_log("Report folder not found.", self._base_dir)
 

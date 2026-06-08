@@ -98,17 +98,20 @@ class ProcessPlan:
     run_intersect: bool
     run_flatten: bool
     run_backfill: bool
+    run_segment: bool
     explode_flat_multipolygons: bool
     cleanup_slivers: bool
     run_tiles: bool
     run_lines: bool
     run_analysis: bool
+    # Geocode categories to segment (empty -> stage default = basic_mosaic).
+    segment_layers: tuple = ()
 
     @property
     def run_data(self) -> bool:
-        """True if any of the four data sub-stages is selected."""
+        """True if any data sub-stage (incl. the optional Segment stage) is selected."""
         return bool(self.run_prep or self.run_intersect
-                    or self.run_flatten or self.run_backfill)
+                    or self.run_flatten or self.run_backfill or self.run_segment)
 
 
 def _exists_any(paths: Iterable[Path]) -> bool:
@@ -554,14 +557,16 @@ def run_data_process(
     run_intersect: bool = True,
     run_flatten: bool = True,
     run_backfill: bool = True,
+    run_segment: bool = False,
+    segment_layers: list | None = None,
     cleanup_slivers: bool = True,
 ) -> None:
     """Run the data-processing pipeline.
 
-    Sub-stages (prep / intersect / flatten / backfill) can be skipped
+    Sub-stages (prep / intersect / flatten / backfill / segment) can be skipped
     independently via the run_* flags; the internal pipeline does soft
     validation and logs a clear skip line when an upstream artifact is
-    missing.
+    missing. Segment is optional and OFF by default.
 
     Important: when frozen (PyInstaller), calling a .py via `sys.executable` does not work.
     We therefore run the pipeline in-process by importing the internal module.
@@ -593,6 +598,8 @@ def run_data_process(
             run_intersect=bool(run_intersect),
             run_flatten=bool(run_flatten),
             run_backfill=bool(run_backfill),
+            run_segment=bool(run_segment),
+            segment_layers=list(segment_layers) if segment_layers else None,
             cleanup_slivers=bool(cleanup_slivers),
         )
         stop_pulse.set()
@@ -1776,7 +1783,8 @@ def run_selected(
                     name for name, on in [("prep", plan.run_prep),
                                            ("intersect", plan.run_intersect),
                                            ("flatten", plan.run_flatten),
-                                           ("backfill", plan.run_backfill)]
+                                           ("backfill", plan.run_backfill),
+                                           ("segment", plan.run_segment)]
                     if on
                 ]) or "(none)"
                 _log_line(base_dir, log_fn,
@@ -1790,6 +1798,8 @@ def run_selected(
                     run_intersect=bool(plan.run_intersect),
                     run_flatten=bool(plan.run_flatten),
                     run_backfill=bool(plan.run_backfill),
+                    run_segment=bool(plan.run_segment),
+                    segment_layers=list(plan.segment_layers) if plan.segment_layers else None,
                     cleanup_slivers=bool(plan.cleanup_slivers),
                 )
             except Exception as exc:
@@ -2009,8 +2019,9 @@ class ProcessRunnerWindow(QMainWindow):
         grid.setContentsMargins(10, 0, 10, 0)
 
         # Two-column layout:
-        #   Left column (cols 0-1): data sub-stages (Prep / Intersect / Flatten / Backfill)
-        #   Right column (cols 3-4): post-data stages (Tiles / Lines / Analysis)
+        #   Left column (cols 0-1): ALL process/stage items (Prep / Intersect /
+        #     Flatten / Backfill / Segment / Tiles / Lines / Analysis) + status.
+        #   Right column (cols 3-4): Options (sliver/explode, segment geocodes).
         #   Col 2: visual gap.
         # Stage labels are prefixed "1." .. "7." so the operator can see at a
         # glance which stage runs first and can pick a sensible re-run cutoff
@@ -2025,16 +2036,15 @@ class ProcessRunnerWindow(QMainWindow):
         # Status cells stay empty when a stage is ready (the enabled checkbox
         # is signal enough); when something blocks the stage we show the
         # reason instead, so the column only fills up with words worth reading.
-        self._cb_data_master = QCheckBox("Process (1. Prep → 5. Tiles)")
+        self._cb_data_master = QCheckBox("Process (1. Prep → 6. Tiles)")
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
         grid.addWidget(self._cb_data_master, 0, 0, 1, 2)
         master_status = "" if avail_data.available else (
             "; ".join(avail_data.reasons) if avail_data.reasons else "Missing inputs")
-        master_status_lbl = QLabel(master_status)
-        master_status_lbl.setWordWrap(True)
-        grid.addWidget(master_status_lbl, 0, 3, 1, 2)
+        if master_status:
+            self._cb_data_master.setToolTip(master_status)
 
         # Flatten options stacked vertically below the master row, spanning
         # the whole grid so they sit clearly under the master.
@@ -2047,6 +2057,31 @@ class ProcessRunnerWindow(QMainWindow):
         self._cb_cleanup_slivers = QCheckBox("Drop sliver cells (<1 m²)")
         self._cb_cleanup_slivers.setChecked(True)
         opts_col.addWidget(self._cb_cleanup_slivers)
+
+        # Segment (stage 5): which geocode categories to build tbl_segmentation for.
+        # Enumerated from tbl_geocode_group; basic_mosaic checked by default,
+        # the rest opt-in. Empty selection -> stage default (basic_mosaic).
+        self._chk_seg_geocats: dict[str, QCheckBox] = {}
+        try:
+            import pandas as _pd
+            _ggp = self._base_dir / "output" / "geoparquet" / "tbl_geocode_group.parquet"
+            _cats = (sorted(_pd.read_parquet(_ggp, columns=["name_gis_geocodegroup"])
+                            ["name_gis_geocodegroup"].dropna().astype(str).unique().tolist())
+                     if _ggp.exists() else [])
+        except Exception:
+            _cats = []
+        if _cats:
+            _seglbl = QLabel("Segment geocodes:")
+            _seglbl.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
+            opts_col.addWidget(_seglbl)
+            # basic_mosaic first
+            _cats = sorted(_cats, key=lambda c: (c != "basic_mosaic", c))
+            for _c in _cats:
+                _scb = QCheckBox(_c)
+                _scb.setChecked(_c == "basic_mosaic")
+                opts_col.addWidget(_scb)
+                self._chk_seg_geocats[_c] = _scb
+
         opts_host = QWidget()
         opts_host.setLayout(opts_col)
 
@@ -2054,79 +2089,62 @@ class ProcessRunnerWindow(QMainWindow):
         # purpose hint when the stage is ready (so the operator can see at a
         # glance which stages are pure geometry and which carry parameter
         # values), and the missing-inputs reason when it isn't.
-        def _mk_sub(row, text, default_checked, ready_hint):
+        def _mk_sub(row, text, default_checked, ready_hint, avail=None, status_override=None):
+            av = avail if avail is not None else avail_data
             cb = QCheckBox("    " + text)  # indent for visual hierarchy
-            cb.setEnabled(avail_data.available)
-            cb.setChecked(default_checked and avail_data.available)
+            cb.setEnabled(av.available)
+            cb.setChecked(default_checked and av.available)
             grid.addWidget(cb, row, 0)
-            status = ready_hint if avail_data.available else "Missing inputs"
-            lbl = QLabel(status)
-            lbl.setWordWrap(True)
-            grid.addWidget(lbl, row, 1)
-            return cb
-
-        self._cb_prep      = _mk_sub(1, "1. Prep (workspace, status)",
-                                     avail_data.available,
-                                     "Geometry stage")
-        self._cb_intersect = _mk_sub(2, "2. Intersect (build tbl_stacked)",
-                                     avail_data.available,
-                                     "Geometry stage")
-        self._cb_flatten   = _mk_sub(3, "3. Flatten (build tbl_flat)",
-                                     avail_data.available,
-                                     "Parameter cutoff — start here after parameter changes")
-        self._cb_backfill  = _mk_sub(4, "4. Backfill (area_m2 → tbl_stacked)",
-                                     avail_data.available,
-                                     "Geometry stage")
-
-        # Right column: post-data stages. Custom helper because _mk_row
-        # writes to col 0/1 and we want col 3/4.
-        def _mk_row_right(row, text, checked, avail, ready_hint, status_override=None):
-            cb = QCheckBox(text)
-            cb.setChecked(checked and avail.available)
-            grid.addWidget(cb, row, 3)
             if status_override is not None:
                 status = status_override
+            elif av.available:
+                status = ready_hint
             else:
-                status = ready_hint if avail.available else (
-                    "; ".join(avail.reasons) if avail.reasons else "Missing inputs")
+                status = "; ".join(av.reasons) if getattr(av, "reasons", None) else "Missing inputs"
             lbl = QLabel(status)
             lbl.setWordWrap(True)
-            # Stash the resting status text so transient warnings can be restored.
             lbl.setProperty("normal_text", status)
-            grid.addWidget(lbl, row, 4)
-            if not avail.available:
-                cb.setEnabled(False)
-                cb.setChecked(False)
+            grid.addWidget(lbl, row, 1)
             return cb, lbl
 
-        tiles_status = "Run Flatten (or full data) first" if not tiles_flat_exists else None
-        self._cb_tiles, self._lbl_tiles = _mk_row_right(
-            1, "5. Tiles processing (MBTiles)",
-            tiles_default, avail_tiles,
-            "Re-renders from tbl_flat",
-            tiles_status)
-        self._cb_lines, _ = _mk_row_right(
-            2, "6. Lines processing (segments)",
-            avail_lines.available, avail_lines,
-            "Re-aggregates from tbl_flat")
-        self._cb_analysis, _ = _mk_row_right(
-            3, "7. Analysis processing (study areas)",
-            avail_analysis.available, avail_analysis,
-            "Consumes tbl_flat")
+        # All process/stage items live in the LEFT column (rows 1-8).
+        self._cb_prep, _      = _mk_sub(1, "1. Prep (workspace, status)",
+                                        avail_data.available, "Geometry stage")
+        self._cb_intersect, _ = _mk_sub(2, "2. Intersect (build tbl_stacked)",
+                                        avail_data.available, "Geometry stage")
+        self._cb_flatten, _   = _mk_sub(3, "3. Flatten (build tbl_flat)",
+                                        avail_data.available,
+                                        "Parameter cutoff — start here after parameter changes")
+        self._cb_backfill, _  = _mk_sub(4, "4. Backfill (area_m2 → tbl_stacked)",
+                                        avail_data.available, "Geometry stage")
+        self._cb_segment, _   = _mk_sub(5, "5. Segment (build tbl_segmentation)",
+                                        avail_data.available,
+                                        "Overlap-signature typology / zones from tbl_stacked")
 
-        # Options under the grid (spans all columns) so they're clearly the
-        # flatten / data options, not specific to either stage column.
-        layout.addWidget(grid_widget)
+        tiles_status = "Run Flatten (or full data) first" if not tiles_flat_exists else None
+        self._cb_tiles, self._lbl_tiles = _mk_sub(
+            6, "6. Tiles processing (MBTiles)", tiles_default,
+            "Re-renders from tbl_flat", avail=avail_tiles, status_override=tiles_status)
+        self._cb_lines, _ = _mk_sub(
+            7, "7. Lines processing (segments)", avail_lines.available,
+            "Re-aggregates from tbl_flat", avail=avail_lines)
+        self._cb_analysis, _ = _mk_sub(
+            8, "8. Analysis processing (study areas)", avail_analysis.available,
+            "Consumes tbl_flat", avail=avail_analysis)
+
+        # Options live in the RIGHT column (col 3-4), beside the stage list, so
+        # the left column is purely process/stage items and the right is options.
         opts_label = QLabel("Options")
-        opts_label.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 6px;")
-        layout.addWidget(opts_label)
-        layout.addWidget(opts_host)
+        opts_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        grid.addWidget(opts_label, 0, 3, 1, 2)
+        grid.addWidget(opts_host, 1, 3, 8, 2)
+        layout.addWidget(grid_widget)
 
         # ----- Master <-> sub cascade -----
         # Use `clicked` (fires only on user interaction, not setCheckState) so
         # programmatic updates don't recurse - no guard flag needed.
         sub_cbs = [self._cb_prep, self._cb_intersect, self._cb_flatten,
-                   self._cb_backfill, self._cb_tiles]
+                   self._cb_backfill, self._cb_segment, self._cb_tiles]
 
         def _on_master_clicked():
             state = self._cb_data_master.checkState()
@@ -2481,6 +2499,8 @@ class ProcessRunnerWindow(QMainWindow):
                     run_intersect=self._cb_intersect.isChecked(),
                     run_flatten=self._cb_flatten.isChecked(),
                     run_backfill=self._cb_backfill.isChecked(),
+                    run_segment=self._cb_segment.isChecked(),
+                    segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
                     explode_flat_multipolygons=self._cb_data_explode.isChecked(),
                     cleanup_slivers=self._cb_cleanup_slivers.isChecked(),
                     run_tiles=self._cb_tiles.isChecked(),
@@ -2495,6 +2515,8 @@ class ProcessRunnerWindow(QMainWindow):
                     run_intersect=data_on,
                     run_flatten=data_on,
                     run_backfill=data_on,
+                    run_segment=data_on,
+                    segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
                     explode_flat_multipolygons=False,
                     cleanup_slivers=True,
                     run_tiles=self._avail_tiles.available and (data_on or self._tiles_flat_exists),
@@ -2588,6 +2610,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-intersect", action="store_true", help="Skip Intersect sub-stage of data processing")
     p.add_argument("--no-flatten", action="store_true", help="Skip Flatten sub-stage of data processing")
     p.add_argument("--no-backfill", action="store_true", help="Skip Backfill sub-stage (area_m2 enrichment of tbl_stacked)")
+    p.add_argument("--segment", action="store_true", help="(Deprecated/no-op) Segment now runs by default; kept for back-compat.")
+    p.add_argument("--no-segment", action="store_true", help="Skip the Segment sub-stage (build tbl_segmentation). Segment runs by default.")
     p.add_argument(
         "--explode-flat-multipolygons",
         action="store_true",
@@ -2701,6 +2725,7 @@ def main() -> None:
         run_intersect=data_on and not bool(args.no_intersect),
         run_flatten=data_on and not bool(args.no_flatten),
         run_backfill=data_on and not bool(args.no_backfill),
+        run_segment=data_on and not bool(args.no_segment),
         explode_flat_multipolygons=bool(args.explode_flat_multipolygons),
         cleanup_slivers=not bool(args.no_cleanup_slivers),
         run_tiles=data_on and not bool(args.no_tiles),
@@ -2725,6 +2750,8 @@ def main() -> None:
             selected.append("data:flatten")
         if default_plan.run_backfill:
             selected.append("data:backfill")
+        if default_plan.run_segment:
+            selected.append("data:segment")
         if default_plan.run_tiles:
             selected.append("tiles")
         if default_plan.run_lines:

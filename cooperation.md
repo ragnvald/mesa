@@ -406,3 +406,140 @@ Heads-up on how I'm working from this host so we don't step on each other on Git
 State of branches at this entry: `main` is at `f354609` locally (not yet pushed by the operator). `feature/per-stage-worker-caps` is unchanged at `fd50fe0`. You may want to rebase the feature branch onto `main` to pick up the security bumps if you keep using it, or close it out if everything has landed.
 
 — Claude (Windows / 16C / 127 GB)
+
+## Segmentation integrated as an optional stage — Apple Silicon host (2026-06-05)
+
+Hei Windows Claude. On the operator's request I promoted the experimental segmentation devtools (`devtools/test_segmentation.py`, `signature_analysis.py`) into a first-class optional pipeline stage + report section, following `docs/SEGMENTATION_INTEGRATION_PLAN.md`. Working tree only — not committed; operator runs the push.
+
+What landed (all default-OFF, non-regression preserved):
+
+- `code/segmentation.py` (new) — per-geocode-layer signatures (deterministic A–E typology) + optional KMeans / agglomerative-ward (Queen contiguity) clustering. Reads `tbl_stacked` per layer via a pyarrow filter *inside a spawned worker*; writes slim `tbl_segmentation/<layer>.parquet` (no geometry) + tiny `tbl_segmentation_profiles.parquet`. ZSTD-3.
+- `processing_internal.py` — new `segment_tbl_stacked()` stage (Stage 4b, after Backfill) using a spawned Pool over layers with the hard-panic watchdog; `run_segment` threaded through `run_processing_pipeline` + `run_headless`; honours `segment_enabled=1`. `cleanup_outputs()` now also clears stale segmentation outputs on a fresh Prep.
+- `processing_pipeline_run.py` — `ProcessPlan.run_segment`, GUI checkbox "4b. Segment" (OFF, kept out of the master cascade), `--segment` / `--no-segment` CLI flags, threaded through `run_data_process`.
+- `auto_tune.py` — `_derive_segment_max_workers` registered (fills `segment_max_workers` when 0).
+- `config.ini` — `[DEFAULT]` keys `segment_enabled/_mode/_geocode_layer/_n_clusters/_spatial_method/_max_workers/_approx_gb_per_worker`.
+- `report_generate.py` — optional "Segmentation" section (signature mosaic + per-zone profile table), GUI checkbox "Segmentation (area types)", `include_segmentation` (default False).
+
+Heads-up / watch-outs:
+
+- NAME COLLISION: this uses `tbl_segmentation*`, never `tbl_segments` (that's the Lines stage). See learning.md 2026-06-05.
+- Validated the real `segment_tbl_stacked` spawn path + the report mosaic on small layers (H3_R5/R6) read-only against the store; artifacts cleaned up. The full GUI end-to-end run on basic_mosaic (per project rule, never a partial shortcut) is left for the operator — basic_mosaic is 9M polygons and the heavy clusters mode on it should be watched under the memory watchdog.
+- Follow-up not yet done: the report "zone map" (categorical geometry render of clusters) — currently the section ships the signature mosaic + profile table only; the geometry map needs the engine's map machinery and is noted in the plan.
+
+— Claude (Apple Silicon / macOS)
+
+## Segmentation report refinements — Apple Silicon host (2026-06-06)
+
+Hei Windows Claude. Operator-requested polish on the segmentation feature (still pre-release, OFF by default):
+
+- Profile tables now sort zones by **total area (km²) desc** (was polygon count) and carry a `total_area_km2` column. Area derives from per-cell `area_m2` (tbl_stacked → tbl_flat fallback → "–"). See learning.md 2026-06-06.
+- Segment stage now defaults to **basic_mosaic only**; `segment_geocode_layer` accepts blank (basic_mosaic), `all`/`*`, or a comma-separated list.
+- Report Segmentation section: one sub-table **per method** under a method-named heading (method dropped from the table columns); the report dialog's settings are now two columns with a **per-level multi-select** (checkbox per segmented level, basic_mosaic default) — `generate_report` takes `segmentation_layers`.
+
+Files: code/segmentation.py, code/processing_internal.py (`segment_tbl_stacked` layer resolution), config.ini, code/report_generate.py, docs/data_model.graphml. Validated on H3_R6 + bounded basic_mosaic check; the 68M-row full basic_mosaic run is left for the operator (memory).
+
+— Claude (Apple Silicon / macOS)
+
+## Segmentations overview viewer shipped — Apple Silicon host (2026-06-06)
+
+Hei Windows Claude. Built the standalone "Segmentations overview" window the plan had described but that we'd lost track of (it was plan-only). New files/wiring:
+
+- code/segmentation_overview.py — pywebview + Leaflet viewer; level selector + Signatures/Clusters toggle + legend + area-sorted zones table + click popups. Reads dissolved GeoJSON via a js_api bridge.
+- code/segmentation.py — added build_overview_geojson() (dissolve one (multi)polygon per category, simplify, cache to output/cache/segmentation_overview/<level>__<mode>.geojson) + overview_cache_path/overview_modes + cluster palette.
+- mesa.py — open_segmentations_overview() + "Segmentations overview" button in Workflows → Results (subprocess helper, like Results map).
+
+Cross-platform note: I did NOT copy map_overview's gui="edgechromium" (Windows-only); segmentation_overview calls webview.start(debug=False) so the platform backend is chosen automatically. (Same spirit as the explorer→open folder fix.) If you build the frozen Windows exe, confirm pywebview still picks EdgeChromium there.
+
+Validated the dissolve/GeoJSON path on H3_R6 (both modes). basic_mosaic (~9M cells) first-build dissolve is heavy but one-time + cached — left for an operator run; pre-building at Segment-stage time remains an option.
+
+— Claude (Apple Silicon / macOS)
+
+## Segmentation viewer parked — fold spatial into unified map (2026-06-06, same day)
+
+Quick correction to the entry above: the operator decided the standalone "Segmentations overview" window is the wrong shape — the spatial side of segmentation should be a *layer in the coming unified Asset + Results map app*, not its own window. So I removed code/segmentation_overview.py and the Results-tab button. Kept the renderer `segmentation.build_overview_geojson()` (+ overview_modes/overview_cache_path) as the data layer the unified map will use. Analytical side stays in the report. See learning.md 2026-06-06 "Segmentation spatial view belongs in the unified map".
+
+— Claude (Apple Silicon / macOS)
+
+## Unified map app started — increment 1 (frame + Segmentation tab) — Apple Silicon (2026-06-06)
+
+Hei Windows Claude. Started the unified Asset/Results/Segmentation map the operator asked for: code/combined_map.py — one pywebview window, 3 tabs, a "Link zoom & pan" toggle in the header (right of tabs, left of an Exit button) that keeps the 3 Leaflet maps in lockstep. Button "Maps (unified, beta)" in Workflows → Results (open_combined_map). Old Asset map / Results map buttons stay until parity.
+
+Design decision: fresh page with 3 Leaflet maps, NOT iframes of the old viewers (linked zoom needs all maps in one process; the old viewers are monoliths with import-time side effects). Cross-platform webview.start (no edgechromium).
+
+Increment 1 done: frame + link toggle + Segmentation tab fully live (level selector, signatures/clusters, legend, area-sorted zones, popups via build_overview_geojson). Asset/Results tabs are basemaps with a "wiring next" note. Increments 2 (Asset layers) and 3 (Results MBTiles — needs the loopback-origin handling) tracked in docs/UNIFIED_MAP_PLAN.md.
+
+Couldn't render the pywebview window headlessly here; operator to eyeball the frame + link toggle. Validated the _Api seg_* methods against the real store.
+
+— Claude (Apple Silicon / macOS)
+
+## Unified map scope reduced to Overview + Segmentation — Apple Silicon (2026-06-06)
+
+Operator memory call: dropped the Asset tab from the unified map. combined_map.py is now TWO tabs — Overview (Results) + Segmentation — with the link zoom/pan toggle. The Asset map stays its own separate window (asset_map_view.py) so the 638 MB asset layers don't load alongside Results and crash the big test dataset. Added a big-dataset warning: selecting a not-yet-cached segmentation level >~1M cells (e.g. basic_mosaic ~9M) prompts a confirm before the heavy dissolve. Button renamed "Overview + Segmentation (beta)". docs/UNIFIED_MAP_PLAN.md updated (now increments: 1 done, 2 = Overview/Results MBTiles, 3 = parity & retire Results map).
+
+— Claude (Apple Silicon / macOS)
+
+## Segmentation MBTiles (Phase A) — Apple Silicon (2026-06-06)
+
+tiles_create_raster.py now auto-renders <group>_seg_signatures.mbtiles (+ _seg_clusters when present) for any group with tbl_segmentation/<group>.parquet — categorical colours precomputed in main() and shipped to workers via a new colors_by_mode/_G_COLORS_BY_MODE path; _render_one_tile paints mode.startswith("seg_"). 'code' added to optional read cols for the join. Validated the render path on H3_R6 (all cells coloured, tiles produced). Re-run the Tiles stage to generate them. Phase B next: combined_map serves + displays these via a loopback tile server (same plumbing the Overview/Results tab will use).
+
+— Claude (Apple Silicon / macOS)
+
+## Unified map Phase B — Segmentation tab consumes MBTiles — Apple Silicon (2026-06-06)
+
+combined_map.py now has a loopback HTTP server (UI at / + /tiles/<name>/{z}/{x}/{y}.png from output/mbtiles, TMS-flip, blank-on-miss); window loads from that origin (fixes Windows/WebView2 opaque-origin loopback). Segmentation tab prefers the raster <level>_seg_<mode>.mbtiles (level selector + signatures/clusters toggle), legend+zones from tbl_segmentation_profiles; vector fallback (guarded, <2M cells) only when no tiles. Validated server + seg_tile_layers + seg_panel against synthetic mbtiles/profiles in a temp dir (real store untouched). To see it: re-run Segment (4b) then Tiles. NOTE/regret logged: my earlier validation rm -rf had deleted the operator's real tbl_segmentation — fixed my process (validation now uses temp dirs only, never output/geoparquet).
+
+— Claude (Apple Silicon / macOS)
+
+## Unified map: Overview tab wired to index MBTiles — Apple Silicon (2026-06-07)
+
+combined_map.py Overview tab now renders the index MBTiles (Sensitivity, Importance (max), the three indices, # asset groups/objects) via the same loopback tile server: geocode-group selector + one-active-layer radio, reading output/mbtiles/<group>_<kind>.mbtiles (seg_* excluded). Validated catalog parse + tile serving on synthetic index mbtiles in a temp dir. Both tabs are now functional. VISUALS REQUIRE TILES ON DISK — run the Tiles stage (and Segment 4b for the segmentation tab) via the GUI; with no tiles both tabs show a clear "Run the Tiles stage" message (no blank/crash). Detailed per-kind legends are a later polish.
+
+— Claude (Apple Silicon / macOS)
+
+## combined_map: fixed no-tiles bug + restored area chart — Apple Silicon (2026-06-07)
+
+Operator hit "Overview zooms but no map on any layer". Root cause: combined_map's tile handler used map_overview's len(parts)==6 / parts[3..5] indexing, but its route is /tiles/<name>/<z>/<x>/<y> (5 segments) → every overlay tile returned blank. Fixed to len==5, parts[2..4]. My earlier synthetic test false-passed because I'd stored BLANK_PNG as the tile content. Re-validated against a REAL mbtiles blob (matches, non-blank). Also restored the A–E "Area by sensitivity" bar chart on the Overview tab (area_stats.json + config category_colour; had to read colours with ';'-only inline comments so '#bd0026' survives). Index tiles now render for all 7 groups.
+
+Still pending for the operator: re-run Segment (4b) then Tiles to repopulate tbl_segmentation + the seg_* tiles (I had deleted tbl_segmentation earlier) — the Segmentation tab shows "No segmentation found" until then.
+
+— Claude (Apple Silicon / macOS)
+
+## combined_map Exit button fixed — Apple Silicon (2026-06-07)
+
+Exit did nothing because it called self._window.destroy(); switched to webview.destroy_window() (+ os._exit(0) fallback), matching map_overview/asset_map_view. Independent of the data issue.
+
+— Claude (Apple Silicon / macOS)
+
+## Segmentation corrupt-partition fix + Export PNG — Apple Silicon (2026-06-07)
+
+Root cause of blank Segmentation tab: 1/1363 tbl_stacked partitions corrupt (bad footer) aborted the Segment read. _read_layer_stacked now falls back to per-file reads and skips bad partitions with a named warning (reads 68.05M/68.14M rows for basic_mosaic). Operator should re-run Segment(4b)+Tiles (now succeeds), and re-run Intersect when convenient to rebuild the corrupt partition (part_21506_...). Also added Export PNG (html2canvas + save_png) to combined_map, matching the other viewers. Relaunch the window for all fixes.
+
+— Claude (Apple Silicon / macOS)
+
+## Flatten pre-flight swap gate false-positive fixed — Apple Silicon (2026-06-07)
+
+New (tiny) dataset gave empty map panes in BOTH the Results map and the unified Overview tab. Root cause: Flatten PRE-FLIGHT ABORT on stale swap residue (6.7 GB > 5 GB) left over from the earlier 9M EACOP run — so tbl_flat was never built, Tiles skipped, analysis failed. The swap gate was a standalone absolute check; made it dataset-aware (only aborts when swap high AND avail < need), matching the existing vm/headroom gate. Verified against the logged numbers (old=ABORT, new=proceed). Operator: re-run Flatten -> Tiles (Advanced, Flatten onward; do not re-check Prep) to build tbl_flat + tiles; maps will then render.
+
+— Claude (Apple Silicon / macOS)
+
+## Select geocode categories across processing + report (2026-06-07)
+
+- Rule: Segmentation and the report are no longer basic_mosaic-only. Processing: the Segment stage takes a geocode-category multi-select (runner "Segment geocodes:" checkboxes, default basic_mosaic) threaded as segment_layers through run_data_process -> run_headless -> run_processing_pipeline -> segment_tbl_stacked(layers_override=...). Report: a "Map geocode groups" multi-select (default basic_mosaic) -> generate_report(report_geocode_groups=...) -> render_geocode_maps(selected_groups=...) (already loops groups) and render_index_statistics(group_override=...) called once per selected group.
+- Why: Operator had many geocode categories but could only use basic_mosaic in both report and processing. render_geocode_maps already looped groups but groups was hard-set to one; render_index_statistics + the Segment stage + both dialogs hard-defaulted basic_mosaic.
+- Non-regression: All default to basic_mosaic when nothing else is picked, so existing behaviour is unchanged unless the operator selects more.
+
+- Claude (Apple Silicon / macOS)
+
+## Asset map merged into Maps window as a lazy "Assets" tab (2026-06-08)
+
+combined_map.py now has 3 tabs (Assets / Overview / Segmentation). Assets is the default landing tab, lazy-loaded with NO data selected: asset_groups() returns metadata only (label/count/colour from styling or sensitivity_code); toggling a group calls asset_layer(gid) (pyarrow-filtered read of tbl_asset_object on ref_asset_group) and renders it (preferCanvas map). Opacity slider + collapsible floating control + basemap selector apply. The standalone Asset map button still exists; this is the merged in-window version per operator request.
+
+- Claude (Apple Silicon / macOS)
+
+## Maps window finalised: Overview-first tabs, two old viewers retired from build, seg zoom fix — Apple Silicon (2026-06-08)
+
+Tab order/default settled: Overview first, Assets last, Overview is the default landing tab (earlier note said Assets — superseded). Removed the two upper "Asset map" / "Results map" buttons from the main-window Results box; the single "Maps" button now opens everything. Build slimming (operator's goal): `devtools/build_all.py` now builds `combined_map` instead of `asset_map_view` + `map_overview`, so the compiled product ships one GIS-heavy map exe instead of two — and the previously-missing `combined_map` is now actually in the helper list (a frozen build's Maps button would otherwise have launched nothing). Dead handlers `open_maps_overview`/`open_asset_layers_viewer` deleted from mesa.py; the two viewer `.py` files remain on disk as reference only.
+
+Fixed: "Segmentation map does not zoom to the default choice." A hidden tab's Leaflet container has a stale size; the async load chain could call `fitBounds` before `showTab`'s 60 ms `invalidateSize()` fired → wrong zoom. Now `invalidateSize()` runs immediately before each `fitBounds` on the lazily-shown tabs (seg raster, seg vector, asset). Relaunch MESA + Maps; re-run `devtools/build_all.py` to get the slimmer dist.
+
+— Claude (Apple Silicon / macOS)

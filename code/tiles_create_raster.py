@@ -510,6 +510,9 @@ _G_VALS_BY_MODE: Dict[str, List[Optional[float]]] = {}
 _G_PALETTES_BY_MODE: Dict[str, Dict] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
+# Per-feature precomputed RGBA for categorical layers (seg_signatures, seg_clusters):
+# mode -> list of (r,g,b,a) aligned to feature index.
+_G_COLORS_BY_MODE: Dict[str, List[Tuple[int,int,int,int]]] = {}
 
 def _worker_init(
     geoms,
@@ -518,14 +521,16 @@ def _worker_init(
     palettes_by_mode,
     stroke_rgba,
     stroke_w,
+    colors_by_mode=None,
 ):
-    global _G_GEOMS, _G_SENS_CODES, _G_VALS_BY_MODE, _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W
+    global _G_GEOMS, _G_SENS_CODES, _G_VALS_BY_MODE, _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W, _G_COLORS_BY_MODE
     _G_GEOMS = geoms
     _G_SENS_CODES = sens_codes
     _G_VALS_BY_MODE = vals_by_mode or {}
     _G_PALETTES_BY_MODE = palettes_by_mode or {}
     _G_STROKE_RGBA = stroke_rgba
     _G_STROKE_W = float(stroke_w)
+    _G_COLORS_BY_MODE = colors_by_mode or {}
 
 def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
     """
@@ -576,6 +581,15 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
                     except Exception:
                         v = None
                 fill_rgba = index_layer_color(v, gradient)
+            elif mode.startswith("seg_"):
+                # Categorical segmentation layers: per-feature RGBA precomputed
+                # in main() (signature ramp / cluster palette). Cells with no
+                # segmentation get a transparent colour and are skipped.
+                colors = _G_COLORS_BY_MODE.get(mode)
+                try:
+                    fill_rgba = colors[i] if colors is not None else (0, 0, 0, 0)
+                except Exception:
+                    fill_rgba = (0, 0, 0, 0)
             else:
                 continue
 
@@ -817,6 +831,7 @@ def main():
         "sensitivity_code_max", "sensitivity_max",
     ]
     optional_cols = [
+        "code",  # needed to join segmentation categories; optional so old datasets still tile
         "asset_groups_total", "assets_overlap_total",
         "index_importance", "index_sensitivity",
         "index_owa",
@@ -1051,9 +1066,48 @@ def main():
             "index_owa": sensitivity_index_palette,
         }
 
+        # Segmentation categorical layers — auto when tbl_segmentation/<slug>.parquet
+        # exists. Per-feature RGBA is precomputed here (signature ramp / cluster
+        # palette) and shipped to workers via colors_by_mode; cells with no
+        # segmentation get a transparent colour so they are not painted.
+        colors_by_mode: Dict[str, List[Tuple[int,int,int,int]]] = {}
+        seg_part = gpq_dir() / "tbl_segmentation" / f"{slug}.parquet"
+        if seg_part.exists() and "code" in gdf.columns:
+            try:
+                import segmentation as _segmod
+                seg_df = pd.read_parquet(seg_part)
+                seg_df["code"] = seg_df["code"].astype(str)
+                codes = gdf["code"].astype(str).values
+                a = int(round(255 * sens_alpha))
+                sig_by_code = dict(zip(seg_df["code"], seg_df["signature"].fillna("")))
+                sig_colors = []
+                for c in codes:
+                    sig = sig_by_code.get(c, "")
+                    if not sig:
+                        sig_colors.append((0, 0, 0, 0))
+                    else:
+                        r, g, b = _segmod._signature_colour(sig)
+                        sig_colors.append((int(r), int(g), int(b), a))
+                colors_by_mode["seg_signatures"] = sig_colors
+                if "cluster_id" in seg_df.columns and seg_df["cluster_id"].notna().any():
+                    clu_by_code = dict(zip(seg_df["code"], seg_df["cluster_id"]))
+                    clu_colors = []
+                    for c in codes:
+                        cid = clu_by_code.get(c)
+                        if cid is None or (isinstance(cid, float) and cid != cid):
+                            clu_colors.append((0, 0, 0, 0))
+                        else:
+                            clu_colors.append(hex_to_rgba(_segmod._overview_colour(f"cluster {int(cid)}", "clusters"), sens_alpha))
+                    colors_by_mode["seg_clusters"] = clu_colors
+                log(f"  → segmentation tiles enabled for '{gv}' "
+                    f"({'signatures' + ('+clusters' if 'seg_clusters' in colors_by_mode else '')})")
+            except Exception as exc:
+                log(f"  → segmentation tiles skipped for '{gv}': {exc}")
+                colors_by_mode = {}
+
         # Shared worker pool for this group (reused across all layers)
         geoms = list(gdf.geometry.values)
-        init_args = (geoms, senslst, vals_by_mode, palettes_by_mode, stroke_rgba, args.stroke_width)
+        init_args = (geoms, senslst, vals_by_mode, palettes_by_mode, stroke_rgba, args.stroke_width, colors_by_mode)
 
         procs = max(1, int(args.procs))
         with ctx.Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
@@ -1123,6 +1177,14 @@ def main():
                 _run_layer(f"{slug}_index_owa", "index_owa", 1.0, 100.0)
             else:
                 log("  → skipping index_owa tiles (index_owa column missing)")
+
+            # Segmentation categorical layers (auto when tbl_segmentation exists).
+            if "seg_signatures" in colors_by_mode:
+                log(f"  → building {slug}_seg_signatures.mbtiles …")
+                _run_layer(f"{slug}_seg_signatures", "seg_signatures", 0.0, 0.0)
+            if "seg_clusters" in colors_by_mode:
+                log(f"  → building {slug}_seg_clusters.mbtiles …")
+                _run_layer(f"{slug}_seg_clusters", "seg_clusters", 0.0, 0.0)
 
     log("All done.")
 

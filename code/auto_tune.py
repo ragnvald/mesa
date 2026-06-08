@@ -309,6 +309,25 @@ def _derive_tiles_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple
     return n, reason
 
 
+def _derive_segment_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, str]:
+    """Segment (optional Stage 4b): one geocode layer per worker. Each worker
+    holds that layer's tbl_stacked rows plus a small feature matrix, so RAM
+    scales with the largest layer rather than worker count. Parallelism is
+    coarse (few layers), so we cap conservatively by the RAM budget and CPU."""
+    avail_gb = hw["ram_avail_gb"]
+    try:
+        per_worker_gb = float(cfg["DEFAULT"].get("segment_approx_gb_per_worker", "4.0"))
+    except Exception:
+        per_worker_gb = 4.0
+    mem_target = _mem_target(cfg, hw)
+    by_ram = max(1, int((avail_gb * mem_target) / max(0.5, per_worker_gb)))
+    n = max(1, min(by_ram, hw["cpu_count"], 8))
+    reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
+              f"{per_worker_gb:.1f} GB per-segment-worker = {by_ram}, "
+              f"capped to min(CPU={hw['cpu_count']}, 8)")
+    return n, reason
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -355,6 +374,7 @@ def auto_tune_in_place(
     _apply_int("flatten_small_max_workers",   lambda: _derive_flatten_small_max_workers(hw, cfg))
     _apply_int("tiles_max_workers",           lambda: _derive_tiles_max_workers(hw, cfg))
     _apply_int("backfill_max_workers",        lambda: _derive_backfill_max_workers(hw, cfg))
+    _apply_int("segment_max_workers",         lambda: _derive_segment_max_workers(hw, cfg))
 
     # Single coherent log block so the operator can audit at a glance.
     mt = _mem_target(cfg, hw)

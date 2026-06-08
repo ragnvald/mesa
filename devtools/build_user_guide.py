@@ -162,21 +162,23 @@ def build_blocks():
         "Um único bloco [auto-tune] no topo de cada registo de execução resume a plataforma, o hardware, a impressão digital dos dados e as decisões por chave, permitindo aos operadores auditar de relance em vez de procurar linhas de registo dispersas."))
 
     add(H(2, "2.2 Launcher and workflow", "2.2 Iniciador e fluxo de trabalho"))
-    add(H(3, "Simpler tab structure", "Estrutura de separadores mais simples"))
+    add(H(3, "Tab structure", "Estrutura de separadores"))
     add(P(
-        "The desktop launcher now has five tabs (down from the earlier six):",
-        "O iniciador do ambiente de trabalho tem agora cinco separadores (anteriormente seis):"))
+        "The desktop launcher now has six tabs. A new Welcome tab opens first as the launcher's landing screen; the former Tune processing and Publish to GeoNode tabs were moved into popups so the day-to-day tabs stay focused:",
+        "O iniciador do ambiente de trabalho tem agora seis separadores. Um novo separador Boas-vindas abre primeiro como ecrã inicial do iniciador; os antigos separadores Afinação do processamento e Publicar no GeoNode foram convertidos em janelas pop-up para manter os separadores do dia-a-dia focados:"))
     add(UL(
-        ["Workflows — launch the per-phase tools",
+        ["Welcome — a short intro plus a Project name and About this project form (new in 5.1)",
+         "Workflows — launch the per-phase tools",
          "Status — project counters, recent activity, and headline metrics",
          "Manage data — backup, restore, clear output, and Publish to GeoNode",
          "Config — direct config.ini editor; also opens the Tune processing popup",
-         "About — build banner and system profile"],
-        ["Fluxos de trabalho — abrem as ferramentas de cada fase",
+         "About — build banner, system profile, and the new Credits dialog"],
+        ["Boas-vindas — uma breve introdução mais um formulário de Nome do projecto e Sobre este projecto (novo na 5.1)",
+         "Fluxos de trabalho — abrem as ferramentas de cada fase",
          "Estado — contadores do projecto, actividade recente e métricas principais",
          "Gerir dados — cópia de segurança, restauro, limpeza dos resultados e Publicar no GeoNode",
          "Config — editor directo de config.ini; abre também a janela Afinação do processamento",
-         "Sobre — informação da versão e perfil do sistema"]))
+         "Sobre — informação da versão, perfil do sistema e a nova janela Créditos"]))
     add(P(
         "Two former top-level tabs were extracted into popups so the launcher stays focused on day-to-day work: Tune processing is now a popup launched from the Config tab, and Publish to GeoNode is now a popup launched from the Manage data tab.",
         "Dois antigos separadores principais foram convertidos em janelas pop-up para manter o iniciador focado no trabalho do dia-a-dia: Afinação do processamento é agora uma janela aberta a partir do separador Config, e Publicar no GeoNode é agora uma janela aberta a partir do separador Gerir dados."))
@@ -210,6 +212,35 @@ def build_blocks():
     add(P(
         "Asset import has two convenience options on by default: Dissolve adjacent polygons (merges touching polygons that share identical attribute values) and automatic buffering of point and line inputs using default_point_buffer_m and default_line_buffer_m so zero-area features still contribute. The atlas helper now reads existing atlas state on open and includes a Delete action. The Word report engine has had a layout pass — index maps include legends, area maps are scaled down with explanatory text, atlas tile maps show the full grid with the current tile highlighted, and each atlas tile heading begins on a fresh page.",
         "A importação de Activos tem duas opções de conveniência activas por omissão: Dissolver polígonos adjacentes (combina polígonos contíguos que partilham valores de atributos idênticos) e amortecimento automático de entradas de pontos e linhas, utilizando default_point_buffer_m e default_line_buffer_m para que as feições de área zero continuem a contribuir. O auxiliar de atlas lê agora o estado existente do atlas ao abrir e inclui uma acção Eliminar. O motor de relatórios Word recebeu uma revisão de paginação — os mapas-índice incluem legendas, os mapas de área foram reduzidos com texto explicativo, os mapas dos azulejos do atlas mostram a grelha completa com o azulejo actual destacado, e cada cabeçalho de azulejo do atlas começa numa nova página."))
+
+    add(H(2, "2.4 Reliability and operator controls (new in 5.1)",
+          "2.4 Fiabilidade e controlos do operador (novo na 5.1)"))
+    add(P(
+        "On top of the 5.0 reliability baseline, MESA 5.1 adds a layer of operator-facing controls that recover from trouble instead of aborting, and make long runs safer to start, stop, and resume:",
+        "Sobre a base de fiabilidade da 5.0, o MESA 5.1 acrescenta uma camada de controlos para o operador que recuperam de problemas em vez de abortar, e tornam as execuções longas mais seguras de iniciar, parar e retomar:"))
+    add(UL(
+        [
+            "Soft memory throttle. The per-pool memory watchdog now has two tiers. When RAM use crosses the soft threshold for a few seconds, the active pool is drained and restarted with half the workers — the run continues with reduced parallelism instead of aborting. The existing hard panic remains the last line of defence. Set mem_soft_throttle_percent = 0 to disable the soft tier.",
+            "Cancel that actually fires mid-stage. The Cancel button now interrupts a running stage within about half a second rather than waiting for it to finish, ending in a clear RUN CANCELLED marker; follow-on stages do not start.",
+            "Single-instance pipeline lock. Each project holds an exclusive output/.pipeline.lock for the duration of a run, so a second run on the same project is refused with a clear message instead of two pipelines interleaving. Stale locks from a crash are reclaimed automatically; different projects can still run in parallel.",
+            "Self-calibrating progress weights. The progress bar's split across Data / Tiles / Lines / Analysis is now learned from recent clean run times instead of fixed guesses, so the bar tracks reality after a couple of completed runs.",
+            "Smaller, faster GeoParquet (ZSTD-3). Processing outputs are now written with ZSTD level 3 instead of SNAPPY, roughly halving on-disk size on large partitions; reading is unchanged.",
+            "Threaded backup with a progress dialog. Create / Restore backup now run off the GUI thread with a proper progress dialog, plus options to include or skip MBTiles and to choose DEFLATE (Explorer-compatible) or LZMA (smaller) archives.",
+            "Tiles cleanup when unchecked. Unchecking Tiles and re-running deletes the existing .mbtiles at run start so they cannot silently misalign with new results; a warning label surfaces the deletion.",
+            "Asset-import provenance. Asset import records the source path, time, and layer count, shown above the parameter editor so you can tell which input/asset/ folder a parameter set came from after several re-imports.",
+            "Corrected GPU RAM and live version on the About tab. GPU VRAM now reads the full 64-bit value (no 4 GB truncation) and the reported MESA version always reflects the running build.",
+        ],
+        [
+            "Limitação suave de memória. O vigilante de memória por pool tem agora dois níveis. Quando o uso de RAM ultrapassa o limiar suave durante alguns segundos, o pool activo é esvaziado e reiniciado com metade dos processos — a execução continua com paralelismo reduzido em vez de abortar. O pânico rígido existente mantém-se como última linha de defesa. Defina mem_soft_throttle_percent = 0 para desactivar o nível suave.",
+            "Cancelar que actua mesmo a meio da fase. O botão Cancelar interrompe agora uma fase em curso em cerca de meio segundo, em vez de esperar que termine, terminando com um marcador claro EXECUÇÃO CANCELADA; as fases seguintes não arrancam.",
+            "Bloqueio de instância única da pipeline. Cada projecto mantém um output/.pipeline.lock exclusivo durante a execução, pelo que uma segunda execução no mesmo projecto é recusada com uma mensagem clara, em vez de duas pipelines se entrelaçarem. Bloqueios obsoletos de uma falha são recuperados automaticamente; projectos diferentes podem continuar a correr em paralelo.",
+            "Pesos de progresso auto-calibrados. A divisão da barra de progresso entre Dados / Azulejos / Linhas / Análise é agora aprendida a partir dos tempos de execuções limpas recentes, em vez de valores fixos, pelo que a barra acompanha a realidade após algumas execuções concluídas.",
+            "GeoParquet mais pequeno e rápido (ZSTD-3). Os resultados do processamento são agora escritos com ZSTD nível 3 em vez de SNAPPY, reduzindo para cerca de metade o tamanho em disco nas partições grandes; a leitura não muda.",
+            "Cópia de segurança em thread com janela de progresso. Criar / Restaurar cópia correm agora fora da thread da interface com uma janela de progresso adequada, com opções para incluir ou ignorar os MBTiles e para escolher arquivos DEFLATE (compatível com o Explorador) ou LZMA (mais pequenos).",
+            "Limpeza de azulejos quando desmarcado. Desmarcar Azulejos e voltar a executar elimina os .mbtiles existentes no início da execução para que não fiquem silenciosamente desalinhados com os novos resultados; um aviso assinala a eliminação.",
+            "Proveniência da importação de activos. A importação de activos regista o caminho de origem, a hora e o número de camadas, mostrados acima do editor de parâmetros para identificar de que pasta input/asset/ veio um conjunto de parâmetros após várias reimportações.",
+            "RAM da GPU corrigida e versão actual no separador Sobre. A VRAM da GPU lê agora o valor completo de 64 bits (sem truncagem a 4 GB) e a versão MESA indicada reflecte sempre a compilação em execução.",
+        ]))
     add(PB())
 
     # =========================================================================
@@ -327,8 +358,8 @@ def build_blocks():
     # =========================================================================
     add(H(1, "4. Desktop user interface", "4. Interface gráfica"))
     add(P(
-        "The MESA 5 desktop launcher opens on Workflows and organizes the project into four practical phases: prepare data, configure the project, run processing, and review results.",
-        "O iniciador MESA 5 abre no separador Fluxos de trabalho e organiza o projecto em quatro fases práticas: preparar dados, configurar o projecto, executar o processamento e rever os resultados."))
+        "The MESA 5.1 desktop launcher opens on the Welcome tab, where you can name the project and add a short description, then continue to Workflows. The Workflows tab organizes the project into four practical phases: prepare data, configure the project, run processing, and review results.",
+        "O iniciador MESA 5.1 abre no separador Boas-vindas, onde pode nomear o projecto e adicionar uma breve descrição, e depois continuar para Fluxos de trabalho. O separador Fluxos de trabalho organiza o projecto em quatro fases práticas: preparar dados, configurar o projecto, executar o processamento e rever os resultados."))
     add(IMG("ui_workflows.png",
             "Desktop launcher — Workflows tab.",
             "Iniciador do ambiente de trabalho — separador Fluxos de trabalho.",

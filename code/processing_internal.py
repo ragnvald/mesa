@@ -1255,9 +1255,9 @@ def _rm_rf(path: Path):
     log_to_gui(log_widget, f"Error removing {path.name}: {last_err}")
 
 def cleanup_outputs():
-    for fn in ["tbl_stacked.parquet","tbl_flat.parquet"]:
+    for fn in ["tbl_stacked.parquet","tbl_flat.parquet","tbl_segmentation_profiles.parquet"]:
         _rm_rf(gpq_dir() / fn)
-    for d in ["tbl_stacked", "__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
+    for d in ["tbl_stacked", "tbl_segmentation", "__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
         _rm_rf(_dataset_dir(d))
 
 
@@ -3201,10 +3201,16 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                     f"avail {avail_gb:.1f} GB < {preflight_safety:.2f} × est_peak "
                     f"{est_peak_gb:.1f} GB = {need_gb:.1f} GB"
                 )
-            if swap_gb > preflight_max_swap_gb:
+            # Swap-residue gate is also dataset-aware: stale swap from a previous
+            # stage is only dangerous when there is ALSO not enough real RAM to
+            # cover this job's estimated need. A tiny flatten on a host with
+            # plenty of free RAM must not be blocked by leftover swap (the OS
+            # reclaims it under pressure). See learning.md "Flatten pre-flight
+            # swap gate must consider dataset size".
+            if swap_gb > preflight_max_swap_gb and headroom_fail:
                 reasons.append(
                     f"swap_used {swap_gb:.1f} GB > {preflight_max_swap_gb:.1f} GB "
-                    f"(swap residue from a previous stage)"
+                    f"(swap residue) AND avail {avail_gb:.1f} GB < need {need_gb:.1f} GB"
                 )
             if reasons:
                 msg = (
@@ -3953,6 +3959,152 @@ def backfill_tbl_stacked(config_file: Path,
                f"Backfilled area_m2 to {len(files)} parts ({touched:,} rows).")
 
 
+def segment_tbl_stacked(config_file: Path,
+                        *, cfg: configparser.ConfigParser | None = None,
+                        layers_override: list[str] | None = None) -> None:
+    """Optional Segment stage: build tbl_segmentation from tbl_stacked, one slim
+    partition per geocode layer, plus a tiny tbl_segmentation_profiles table.
+
+    layers_override: explicit list of geocode categories to segment (from the GUI
+    picker). When given it wins over the config segment_geocode_layer key.
+
+    The heavy per-layer read + clustering runs inside spawned workers (one
+    geocode layer per task) so the orchestrator never materialises a large
+    dataset. See learning.md "Parent-side memory in the pipeline" and
+    docs/SEGMENTATION_INTEGRATION_PLAN.md. Soft validation: missing tbl_stacked
+    logs a clear skip and returns without raising; a failure soft-fails the
+    stage (optional) rather than aborting the run.
+    """
+    try:
+        import segmentation as _seg
+    except Exception as exc:
+        log_to_gui(log_widget, f"[segment] Skipped: segmentation module unavailable ({exc}).")
+        return
+
+    cfg_local = cfg if cfg is not None else read_config(config_file)
+
+    # Inputs present?
+    ds_dir = _dataset_dir("tbl_stacked")
+    has_parts = ds_dir.exists() and any(ds_dir.glob("*.parquet"))
+    has_single = (gpq_dir() / "tbl_stacked.parquet").exists()
+    if not (has_parts or has_single):
+        log_to_gui(log_widget,
+                   "[segment] Skipped: no tbl_stacked on disk. Run Intersect first.")
+        return
+
+    # Options (config-driven).
+    mode = _strip_inline_comments(
+        cfg_local["DEFAULT"].get("segment_mode", "signatures") or "signatures").lower()
+    if mode not in ("signatures", "clusters", "both"):
+        mode = "signatures"
+    n_clusters = cfg_get_int(cfg_local, "segment_n_clusters", 0)
+    spatial_method = _strip_inline_comments(
+        cfg_local["DEFAULT"].get("segment_spatial_method", "agglomerative") or "agglomerative").lower()
+    layer_sel = _strip_inline_comments(
+        cfg_local["DEFAULT"].get("segment_geocode_layer", "") or "").strip()
+
+    available = _seg.list_geocode_layers(gpq_dir())
+    if not available:
+        log_to_gui(log_widget, "[segment] Skipped: no geocode layers found.")
+        return
+    avail_lower = {a.lower(): a for a in available}
+    # Explicit GUI selection wins; otherwise fall back to the config key.
+    # Config: blank -> basic_mosaic only (else first available); 'all'/'*' -> every
+    # layer; otherwise a comma-separated, case-insensitive list.
+    if layers_override:
+        layers = [avail_lower.get(str(n).strip().lower(), str(n).strip())
+                  for n in layers_override if str(n).strip()]
+        layers = list(dict.fromkeys(layers))
+    elif not layer_sel:
+        layers = ["basic_mosaic"] if "basic_mosaic" in available else available[:1]
+    elif layer_sel.lower() in ("all", "*"):
+        layers = available
+    else:
+        layers = []
+        for name in (s.strip() for s in layer_sel.split(",")):
+            if not name:
+                continue
+            layers.append(avail_lower.get(name.lower(), name))
+        layers = list(dict.fromkeys(layers))
+    if not layers:
+        log_to_gui(log_widget, "[segment] Skipped: no matching geocode layers.")
+        return
+
+    # Fresh outputs so a rerun never leaves a stale mix.
+    _rm_rf(_dataset_dir("tbl_segmentation"))
+    _rm_rf(gpq_dir() / "tbl_segmentation_profiles.parquet")
+
+    # Worker count: coarse-grained (one geocode layer per task).
+    seg_workers = cfg_get_int(cfg_local, "segment_max_workers", 0)
+    try:
+        cpu_cap = max(1, multiprocessing.cpu_count())
+    except Exception:
+        cpu_cap = 1
+    if seg_workers <= 0:
+        seg_workers = max(1, min(cpu_cap, len(layers), cfg_get_int(cfg_local, "max_workers", 0) or 2))
+    seg_workers = max(1, min(seg_workers, cpu_cap, len(layers)))
+
+    opts = {"mode": mode, "n_clusters": n_clusters, "spatial_method": spatial_method}
+    args = [(str(gpq_dir()), L, opts) for L in layers]
+    log_to_gui(log_widget,
+               f"Segmentation: {len(layers)} layer(s) [{', '.join(layers)}], "
+               f"mode={mode}, {seg_workers} worker(s)…")
+
+    all_profiles: list[dict] = []
+    panic_pct, panic_grace, soft_pct, soft_grace = _panic_cfg(cfg_local)
+    try:
+        if _mp_allowed():
+            # Always go through a spawned Pool (size >= 1) so the heavy per-layer
+            # work lives in a child, not the orchestrator. Hard panic terminates
+            # the pool; soft throttle is advisory here (a single layer is not
+            # splittable, so we lean on the hard tier as the backstop).
+            pstate, pstop, pthread = _start_panic_watchdog(
+                "segment", panic_pct, panic_grace, soft_pct, soft_grace)
+            try:
+                with multiprocessing.get_context("spawn").Pool(seg_workers) as pool:
+                    pstate["pool"] = pool
+                    try:
+                        for summary in pool.imap_unordered(_seg.segment_layer_worker, args):
+                            if pstate["triggered"]:
+                                raise RuntimeError(
+                                    f"segment aborted by memory panic watchdog "
+                                    f"(>{panic_pct}% RAM for >={panic_grace}s)")
+                            _check_pause_or_cancel()
+                            all_profiles += summary.get("profiles", [])
+                            log_to_gui(log_widget,
+                                       f"[segment] {summary['layer']}: "
+                                       f"{summary['n_written']:,} polygons, "
+                                       f"{len(summary.get('profiles', []))} zones")
+                    finally:
+                        pstate["pool"] = None
+            finally:
+                pstop.set()
+                try: pthread.join(timeout=1.5)
+                except Exception: pass
+        else:
+            # Multiprocessing disabled: run inline as a last resort.
+            log_to_gui(log_widget,
+                       "[segment] multiprocessing disabled — running inline (parent-side).")
+            for a in args:
+                _check_pause_or_cancel()
+                summary = _seg.segment_layer_worker(a)
+                all_profiles += summary.get("profiles", [])
+    except ProcessingCancelled:
+        raise
+    except Exception as e:
+        log_to_gui(log_widget, f"[segment] Failed: {e}")
+        return
+
+    try:
+        path = _seg.write_profiles(gpq_dir(), all_profiles)
+    except Exception as e:
+        log_to_gui(log_widget, f"[segment] profiles write failed: {e}")
+        path = None
+    log_to_gui(log_widget,
+               f"Segmentation done: {len(layers)} layer(s), "
+               f"{len(all_profiles)} zone rows" + (f" -> {path}" if path else "."))
+
+
 # ----------------------------
 # Top-level process
 # ----------------------------
@@ -3962,6 +4114,8 @@ def run_processing_pipeline(config_file: Path,
                             run_intersect: bool = True,
                             run_flatten: bool = True,
                             run_backfill: bool = True,
+                            run_segment: bool = False,
+                            segment_layers: list[str] | None = None,
                             cleanup_slivers: bool = True):
     """Stages can be skipped independently. Soft validation: each stage that
     depends on a previous output checks the artifact on disk and skips with a
@@ -4087,10 +4241,20 @@ def run_processing_pipeline(config_file: Path,
         else:
             log_to_gui(log_widget, "[Stage 3b] Backfill skipped (unchecked).")
 
+        # Segment runs when requested via the UI/CLI flag OR forced on in
+        # config (segment_enabled = 1). Optional and OFF by default.
+        seg_enabled_cfg = cfg_get_int(cfg, "segment_enabled", 0) == 1
+        if run_segment or seg_enabled_cfg:
+            log_to_gui(log_widget, "[Stage 3c] Segmenting geocode layers (tbl_segmentation)…")
+            segment_tbl_stacked(config_file, cfg=cfg, layers_override=segment_layers)
+            update_progress(97)
+        else:
+            log_to_gui(log_widget, "[Stage 3c] Segment skipped (optional; not enabled).")
+
         # __mosaic_faces_tmp is produced by geocode_manage.py's polygonize
         # step; the mosaic path does not clean it itself. Only sweep when we
         # actually ran a stage that may have produced these scratches.
-        if run_prep or run_intersect or run_flatten or run_backfill:
+        if run_prep or run_intersect or run_flatten or run_backfill or run_segment:
             for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out", "__mosaic_faces_tmp"]:
                 _rm_rf(_dataset_dir(temp_dir))
 
@@ -4885,6 +5049,8 @@ def run_headless(original_working_directory_arg: str | None = None,
                  run_intersect: bool = True,
                  run_flatten: bool = True,
                  run_backfill: bool = True,
+                 run_segment: bool = False,
+                 segment_layers: list[str] | None = None,
                  cleanup_slivers: bool = True) -> None:
     """Entry point for headless processing (callable from other modules).
 
@@ -4946,6 +5112,8 @@ def run_headless(original_working_directory_arg: str | None = None,
                                 run_intersect=run_intersect,
                                 run_flatten=run_flatten,
                                 run_backfill=run_backfill,
+                                run_segment=run_segment,
+                                segment_layers=segment_layers,
                                 cleanup_slivers=cleanup_slivers)
     finally:
         _external_log_fn = None

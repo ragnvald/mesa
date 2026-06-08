@@ -515,9 +515,8 @@ def helper_collects_for(basename: str) -> list[str]:
     # packaging does not rely only on import-pattern detection.
     force_webview = {
         "analysis_setup",
-        "asset_map_view",
+        "combined_map",
         "line_manage",
-        "map_overview",
     }
     uses_webview = basename in force_webview or _imports_any_module(src, {"webview"})
     uses_h3 = _imports_any_module(src, {"h3"})
@@ -820,12 +819,16 @@ def main() -> None:
     helpers: list[str] = []
     if BUILD_HELPERS:
         helpers = [
-            # These 5 remain as standalone subprocess exes:
+            # These 4 remain as standalone subprocess exes:
             # - tiles_create_raster : spawned internally by processing_pipeline_run
             # - analysis_setup      : webview-based UI, cannot run in-process
             # - line_manage         : webview-based UI, cannot run in-process
-            # - asset_map_view      : webview-based UI, cannot run in-process
-            # - map_overview        : webview-based UI, cannot run in-process
+            # - combined_map        : webview-based unified Maps window (Overview +
+            #                         Segmentation + Assets). Replaces the two former
+            #                         viewers asset_map_view + map_overview, so the
+            #                         compiled product ships one GIS-heavy map exe
+            #                         instead of two. Those two .py files remain on
+            #                         disk as reference but are no longer built.
             #
             # The 7 former helpers (geocode_manage, asset_manage, atlas_manage,
             # processing_setup, processing_pipeline_run, report_generate,
@@ -834,8 +837,7 @@ def main() -> None:
             "tiles_create_raster",
             "analysis_setup",
             "line_manage",
-            "asset_map_view",
-            "map_overview",
+            "combined_map",
         ]
 
         # Optional helper selection:

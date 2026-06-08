@@ -22,8 +22,8 @@
           <y:BorderStyle hasColor="false" type="line" width="1.0"/>
           <y:NodeLabel alignment="center" autoSizePolicy="content" fontFamily="Dialog" fontSize="12" fontStyle="plain" hasBackgroundColor="false" hasLineColor="false" height="62.8046875" horizontalTextPosition="center" iconTextGap="4" modelName="custom" textColor="#000000" verticalTextPosition="bottom" visible="true" width="190.08203125" x="19.958984375" xml:space="preserve" y="23.59765625">Mesa desktop launcher (mesa.py)
 
-Workflows / Status / Manage data /
-Config / About tabs<y:LabelModel><y:SmartNodeLabelModel distance="4.0"/></y:LabelModel><y:ModelParameter><y:SmartNodeLabelModelParameter labelRatioX="0.0" labelRatioY="0.0" nodeRatioX="0.0" nodeRatioY="0.0" offsetX="0.0" offsetY="0.0" upX="0.0" upY="-1.0"/></y:ModelParameter></y:NodeLabel>
+Welcome / Workflows / Status /
+Manage data / Config / About tabs<y:LabelModel><y:SmartNodeLabelModel distance="4.0"/></y:LabelModel><y:ModelParameter><y:SmartNodeLabelModelParameter labelRatioX="0.0" labelRatioY="0.0" nodeRatioX="0.0" nodeRatioY="0.0" offsetX="0.0" offsetY="0.0" upX="0.0" upY="-1.0"/></y:ModelParameter></y:NodeLabel>
         </y:GenericNode>
       </data>
     </node>
@@ -184,6 +184,18 @@ applies index weights)<y:LabelModel><y:SmartNodeLabelModel distance="4.0"/></y:L
           <y:NodeLabel alignment="center" autoSizePolicy="content" fontFamily="Dialog" fontSize="12" fontStyle="plain" hasBackgroundColor="false" hasLineColor="false" height="48.103515625" horizontalTextPosition="center" iconTextGap="4" modelName="custom" textColor="#000000" verticalTextPosition="bottom" visible="true" width="120.0625" x="24.96875" xml:space="preserve" y="10.9482421875">Backfill
 (area_m2 enrichment
 back into tbl_stacked)<y:LabelModel><y:SmartNodeLabelModel distance="4.0"/></y:LabelModel><y:ModelParameter><y:SmartNodeLabelModelParameter labelRatioX="0.0" labelRatioY="0.0" nodeRatioX="0.0" nodeRatioY="0.0" offsetX="0.0" offsetY="0.0" upX="0.0" upY="-1.0"/></y:ModelParameter></y:NodeLabel>
+        </y:GenericNode>
+      </data>
+    </node>
+    <node id="n30">
+      <data key="d6">
+        <y:GenericNode configuration="BevelNode3">
+          <y:Geometry height="70.0" width="170.0" x="2246.0" y="1340.0"/>
+          <y:Fill color="#7FB37F" transparent="false"/>
+          <y:BorderStyle hasColor="false" type="line" width="1.0"/>
+          <y:NodeLabel alignment="center" autoSizePolicy="content" fontFamily="Dialog" fontSize="12" fontStyle="plain" hasBackgroundColor="false" hasLineColor="false" height="48.103515625" horizontalTextPosition="center" iconTextGap="4" modelName="custom" textColor="#000000" verticalTextPosition="bottom" visible="true" width="150.0" x="10.0" xml:space="preserve" y="10.9482421875">Segment (optional 4b)
+(tbl_stacked -&gt; tbl_segmentation:
+overlap signatures / zones)<y:LabelModel><y:SmartNodeLabelModel distance="4.0"/></y:LabelModel><y:ModelParameter><y:SmartNodeLabelModelParameter labelRatioX="0.0" labelRatioY="0.0" nodeRatioX="0.0" nodeRatioY="0.0" offsetX="0.0" offsetY="0.0" upX="0.0" upY="-1.0"/></y:ModelParameter></y:NodeLabel>
         </y:GenericNode>
       </data>
     </node>
@@ -1926,6 +1938,17 @@ of parquet + MBTiles<y:LabelModel><y:SmartNodeLabelModel distance="4.0"/></y:Lab
           <y:LineStyle color="#666666" type="line" width="1.0"/>
           <y:Arrows source="none" target="standard"/>
           <y:EdgeLabel alignment="center" backgroundColor="#FFFFFFA0" distance="2.0" fontFamily="Dialog" fontSize="10" fontStyle="plain" hasLineColor="false" height="16.2509765625" horizontalTextPosition="center" iconTextGap="4" modelName="six_pos" modelPosition="tail" preferredPlacement="anywhere" ratio="0.5" textColor="#000000" verticalTextPosition="bottom" visible="true" width="63.4775390625" x="395.59454345703125" xml:space="preserve" y="73.94440542353846">consumed by<y:PreferredPlacementDescriptor angle="0.0" angleOffsetOnRightSide="0" angleReference="absolute" angleRotationOnRightSide="co" distance="-1.0" frozen="true" placement="anywhere" side="anywhere" sideReference="relative_to_edge_flow"/></y:EdgeLabel>
+          <y:BendStyle smoothed="false"/>
+        </y:PolyLineEdge>
+      </data>
+    </edge>
+    <edge id="e53" source="n12" target="n30">
+      <data key="d10">
+        <y:PolyLineEdge>
+          <y:Path sx="0.0" sy="0.0" tx="0.0" ty="0.0"/>
+          <y:LineStyle color="#666666" type="line" width="1.0"/>
+          <y:Arrows source="none" target="standard"/>
+          <y:EdgeLabel alignment="center" backgroundColor="#FFFFFFA0" distance="2.0" fontFamily="Dialog" fontSize="10" fontStyle="plain" hasLineColor="false" horizontalTextPosition="center" iconTextGap="4" modelName="six_pos" modelPosition="tail" preferredPlacement="anywhere" ratio="0.5" textColor="#000000" verticalTextPosition="bottom" visible="true" xml:space="preserve">optional</y:EdgeLabel>
           <y:BendStyle smoothed="false"/>
         </y:PolyLineEdge>
       </data>

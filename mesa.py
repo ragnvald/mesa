@@ -790,13 +790,12 @@ def make_atlas():
     log_to_logfile("Launching atlas_manage")
     _launch_helper("atlas_manage", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
-def open_maps_overview():
-    log_to_logfile("Launching map_overview subprocess")
-    _launch_helper_subprocess("map_overview")
-
-def open_asset_layers_viewer():
-    log_to_logfile("Launching asset_map_view subprocess")
-    _launch_helper_subprocess("asset_map_view")
+def open_combined_map():
+    # Unified Maps window (Overview + Segmentation + Assets). Replaced the two
+    # former standalone viewers (map_overview, asset_map_view), which are no
+    # longer built — see devtools/build_all.py helpers list.
+    log_to_logfile("Launching combined_map subprocess")
+    _launch_helper_subprocess("combined_map")
 
 def open_present_files():
     log_to_logfile("Launching report_generate")
@@ -1579,6 +1578,10 @@ QTabWidget::pane {
     border: 1px solid #cbb791;
     border-top: none;
     background: #f3ecdf;
+}
+/* macOS centers QTabBar tabs by default; force left alignment to match Windows. */
+QTabWidget::tab-bar {
+    alignment: left;
 }
 QTabBar {
     background: #e6dac2;
@@ -3165,6 +3168,8 @@ class MesaMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _build_tabs(self):
         self._tabs = QTabWidget()
+        # Keep tabs left-aligned and natural width (macOS otherwise centers them).
+        self._tabs.tabBar().setExpanding(False)
 
         # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
@@ -3358,10 +3363,8 @@ class MesaMainWindow(QMainWindow):
                  "Runs area, line, and analysis processing."),
             ]),
             ("Results (step 4)", "Open the interactive viewers and export the deliverables.", [
-                ("Asset map", open_asset_layers_viewer,
-                 "Inspect layers with AI-assisted styling controls."),
-                ("Results map", open_maps_overview,
-                 "Review current background layers together with processed assets."),
+                ("Maps", open_combined_map,
+                 "Assets, results overview and segmentation in one tabbed window with linked zoom & pan."),
                 ("Compare study areas", open_data_analysis_presentation,
                  "Open the dashboard for comparing study groups."),
                 ("Report engine", open_present_files,
