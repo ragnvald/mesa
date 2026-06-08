@@ -832,32 +832,38 @@ HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 __MESA_LEAFLET_HEAD__
 <style>
+  /* MESA warm palette — matches the Qt helpers and combined_map:
+     bg #f3ecdf, panel #faf6ee, buttons #e6dac2, accent #d9bd7d/#9b7c3d,
+     text #3f3528/#5c4a2f, borders #cbb791/#c6b089. */
   html, body { height:100%; margin:0; }
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#3f3528; background:#f3ecdf; }
   .wrap { height:100vh; display:grid; grid-template-columns: 1fr 2fr; grid-template-rows: 56px 1fr 26px; grid-template-areas: "bar bar" "form map" "foot foot"; }
-  .bar { grid-area: bar; display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:2px solid #2b3442; }
-  .form { grid-area: form; border-right:2px solid #2b3442; padding:10px 12px; overflow:auto; font-size:14px; }
+  .bar { grid-area: bar; display:flex; gap:8px; align-items:center; padding:8px 12px; background:#f3ecdf; border-bottom:2px solid #cbb791; }
+  .form { grid-area: form; background:#faf6ee; border-right:2px solid #cbb791; padding:10px 12px; overflow:auto; font-size:14px; }
   .map { grid-area: map; position:relative; }
   #map { position:absolute; inset:0; }
-  .foot { grid-area: foot; font-size:12px; color:#475569; padding:4px 10px; border-top:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .btn { padding:6px 10px; border:1px solid #ccd; background:#fff; border-radius:6px; cursor:pointer; }
+  .foot { grid-area: foot; font-size:12px; color:#715a36; background:#f3ecdf; padding:4px 10px; border-top:1px solid #cbb791; display:flex; justify-content:space-between; align-items:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .btn { padding:6px 10px; border:1px solid #c6b089; background:#e6dac2; color:#5c4a2f; border-radius:6px; cursor:pointer; }
+  .btn:hover { background:#eadbbd; }
   .btn:disabled { opacity:0.5; cursor:not-allowed; }
   .btn:active { transform:translateY(1px); }
+  .btn.primary { background:#d9bd7d; border-color:#9b7c3d; color:#3f3018; font-weight:600; }
+  .btn.primary:hover { background:#e1c78d; }
   .row { margin-bottom:10px; }
-  label { display:block; font-weight:600; margin-bottom:4px; font-size:13px; }
-  input[type=text], input[type=number], textarea, select { width:100%; box-sizing:border-box; padding:8px; border:1px solid #cbd5e1; border-radius:6px; font-size:14px; }
-  input[readonly] { background:#f8fafc; color:#64748b; }
+  label { display:block; font-weight:600; color:#5c4a2f; margin-bottom:4px; font-size:13px; }
+  input[type=text], input[type=number], textarea, select { width:100%; box-sizing:border-box; padding:8px; border:1px solid #c6b089; border-radius:6px; font-size:14px; background:#fff; color:#3f3528; }
+  input[readonly] { background:#f3ecdf; color:#8a7a5e; }
   textarea { resize: vertical; min-height: 64px; }
   #status { min-height: 18px; margin-top:4px; }
   .status-ok { color:#166534; }
   .status-warn { color:#b45309; }
   .status-err { color:#b91c1c; }
-  .hint { font-size:12px; color:#475569; margin-left:8px; }
+  .hint { font-size:12px; color:#715a36; margin-left:8px; }
   .toolbar { display:flex; gap:6px; margin:6px 0 10px; align-items:center; flex-wrap: wrap; }
-  .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px; border:1px solid #cbd5e1; padding:1px 4px; border-radius:4px; background:#f8fafc; }
-  .help { font-size:12px; color:#334155; border:1px dashed #cbd5e1; padding:6px 8px; border-radius:6px; display:none; background:#f8fafc; }
+  .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px; border:1px solid #c6b089; padding:1px 4px; border-radius:4px; background:#f3ecdf; }
+  .help { font-size:12px; color:#5c4a2f; border:1px dashed #c6b089; padding:6px 8px; border-radius:6px; display:none; background:#faf6ee; }
   .help strong { font-weight:600; }
-  .badge { font-size:11px; border:1px solid #cbd5e1; border-radius:10px; padding:1px 6px; background:#f8fafc; }
+  .badge { font-size:11px; color:#5c4a2f; border:1px solid #c6b089; border-radius:10px; padding:1px 6px; background:#f3ecdf; }
   .form-actions { display:flex; gap:8px; align-items:center; margin-top:8px; }
 </style>
 </head>
@@ -867,7 +873,7 @@ __MESA_LEAFLET_BODY_OPEN__
   <div class="bar">
     <button id="homeBtn" class="btn">Home</button>
     <button id="reloadBtn" class="btn">Reload</button>
-    <button id="saveBtn" class="btn" title="Commit all staged changes to disk">Save all</button>
+    <button id="saveBtn" class="btn primary" title="Commit all staged changes to disk">Save all</button>
     <button id="discardBtn" class="btn">Discard</button>
     <button id="importBtn" class="btn" title="Import lines from input/lines into GeoParquet">Import lines</button>
     <button id="exitBtn" class="btn">Exit</button>
@@ -908,7 +914,7 @@ __MESA_LEAFLET_BODY_OPEN__
     <div class="row"><label>Description</label><textarea id="f_desc" placeholder="Short description"></textarea></div>
 
     <div class="form-actions">
-      <button id="formSaveBtn" class="btn" title="Commit all staged changes to disk from here">Save changes</button>
+      <button id="formSaveBtn" class="btn primary" title="Commit all staged changes to disk from here">Save changes</button>
       <span id="status" class="status-warn">Initializing…</span>
     </div>
   </div>

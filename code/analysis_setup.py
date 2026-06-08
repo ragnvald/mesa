@@ -1584,32 +1584,37 @@ HTML_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   __MESA_LEAFLET_HEAD__
   <style>
+    /* MESA warm palette — matches the Qt helpers and combined_map:
+       bg #f3ecdf, panel #faf6ee, buttons #e6dac2, accent #d9bd7d/#9b7c3d,
+       text #3f3528/#5c4a2f, borders #cbb791/#c6b089. */
     html, body { height:100%; margin:0; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f8fafc; color:#1e293b; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f3ecdf; color:#3f3528; }
     .wrap { height:100vh; display:grid; grid-template-columns: 260px 260px 1fr; grid-template-rows: 100%; grid-template-areas: "panel-left panel-right map"; }
-    .panel { padding:8px 10px; display:flex; flex-direction:column; gap:8px; overflow:auto; background:#fff; }
-    .panel-left { grid-area: panel-left; border-right:2px solid #1f2937; }
-    .panel-right { grid-area: panel-right; border-right:2px solid #1f2937; }
-    .panel h1 { font-size:16px; margin:0; }
-    .panel h2 { font-size:12px; margin:4px 0 2px; text-transform:uppercase; letter-spacing:0.03em; color:#334155; }
+    .panel { padding:8px 10px; display:flex; flex-direction:column; gap:8px; overflow:auto; background:#faf6ee; }
+    .panel-left { grid-area: panel-left; border-right:2px solid #cbb791; }
+    .panel-right { grid-area: panel-right; border-right:2px solid #cbb791; }
+    .panel h1 { font-size:16px; margin:0; color:#5c4a2f; }
+    .panel h2 { font-size:12px; margin:4px 0 2px; text-transform:uppercase; letter-spacing:0.03em; color:#715a36; }
     .panel .buttons { display:flex; gap:5px; flex-wrap:wrap; }
-    button { padding:4px 8px; border:1px solid #cbd5f5; border-radius:6px; background:#fff; cursor:pointer; }
-    button.primary { background:#2563eb; color:#fff; border-color:#1d4ed8; }
+    button { padding:4px 8px; border:1px solid #c6b089; border-radius:6px; background:#e6dac2; color:#5c4a2f; cursor:pointer; }
+    button:hover { background:#eadbbd; }
+    button.primary { background:#d9bd7d; color:#3f3018; border-color:#9b7c3d; font-weight:600; }
+    button.primary:hover { background:#e1c78d; }
     button:disabled { opacity:0.45; cursor:not-allowed; }
-    #polygonList { width:100%; min-height:90px; border:1px solid #cbd5f5; border-radius:6px; padding:3px; overflow:auto; }
-    #polygonList li { list-style:none; border-bottom:1px solid #e2e8f0; padding:4px 3px; display:flex; gap:6px; align-items:center; }
+    #polygonList { width:100%; min-height:90px; border:1px solid #c6b089; border-radius:6px; padding:3px; overflow:auto; background:#fff; }
+    #polygonList li { list-style:none; border-bottom:1px solid #e3d7be; padding:4px 3px; display:flex; gap:6px; align-items:center; }
     #polygonList li:last-child { border-bottom:none; }
-    #polygonList .title { font-weight:600; }
-    #polygonList .meta { font-size:11px; color:#64748b; }
+    #polygonList .title { font-weight:600; color:#3f3528; }
+    #polygonList .meta { font-size:11px; color:#8a7a5e; }
     .form-group { display:flex; flex-direction:column; gap:2px; }
-    .form-group input, .form-group textarea { border:1px solid #cbd5f5; border-radius:6px; padding:4px 6px; font-size:12px; width:100%; }
+    .form-group input, .form-group textarea { border:1px solid #c6b089; border-radius:6px; padding:4px 6px; font-size:12px; width:100%; background:#fff; color:#3f3528; }
     .form-group textarea { min-height:40px; resize:vertical; }
-    .status { font-size:11px; color:#334155; }
+    .status { font-size:11px; color:#715a36; }
     .status.error { color:#b91c1c; }
     .map { grid-area: map; position:relative; }
     #map { position:absolute; inset:0; }
-    .grid-label { font-size:11px; font-weight:500; color:#1f2937; background:rgba(255,255,255,0.85); padding:2px 4px; border-radius:4px; }
-    .section-divider { border:none; border-top:1px solid #e2e8f0; margin:3px 0 2px; }
+    .grid-label { font-size:11px; font-weight:500; color:#3f3528; background:rgba(250,246,238,0.9); padding:2px 4px; border-radius:4px; }
+    .section-divider { border:none; border-top:1px solid #e3d7be; margin:3px 0 2px; }
   </style>
 </head>
 <body>
