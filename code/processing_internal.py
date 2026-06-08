@@ -224,34 +224,6 @@ _GEOD = Geod(ellps="WGS84")
 # Default basic mosaic group name (can be overridden in config.ini [DEFAULT] basic_group_name)
 _DEFAULT_BASIC_GROUP_NAME = "basic_mosaic"
 
-INDEX_WEIGHT_DEFAULTS = {
-    "importance": [1, 1, 2, 3, 3],
-    # Sensitivity is derived as importance * susceptibility (both 1..5).
-    # Only these products can occur.
-    "sensitivity": [
-        10, # 1
-        10, # 2
-        10, # 3
-        10, # 4
-        10, # 5
-        10, # 6
-        10, # 8
-        10, # 9
-        10, # 10
-        10, # 12
-        10, # 15
-        10, # 16
-        10, # 20
-        10, # 25
-    ],
-}
-INDEX_WEIGHT_KEYS = {
-    "importance": "index_importance_weights",
-    "sensitivity": "index_sensitivity_weights",
-}
-
-SENSITIVITY_PRODUCT_VALUES: list[int] = [1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 20, 25]
-
 # ----------------------------
 # Paths & config helpers
 # ----------------------------
@@ -1017,7 +989,7 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
     """
     tile_ceiling = 99.0  # keep headroom for explicit "completed" phase to own 100%
     try:
-        layers_per_group = 7  # sensitivity, groupstotal, assetstotal, importance_max, index_importance, index_sensitivity, index_owa
+        layers_per_group = 5  # sensitivity, groupstotal, assetstotal, importance_max, index_owa
         ok, counts = _has_big_polygon_group()
         total_groups = len([k for k,v in counts.items() if v>0])
         total_steps = max(1, total_groups * layers_per_group)
@@ -2529,108 +2501,6 @@ def _write_area_stats_json(stats: dict):
     except Exception as e:
         log_to_gui(log_widget, f"Failed to write area_stats.json: {e}")
 
-def _parse_index_weight_line(text: str, default: list[int]) -> list[int]:
-    try:
-        if not text:
-            return default.copy()
-        parts = [int(x.strip()) for x in str(text).replace(";", ",").split(",") if x.strip()]
-        want = len(default)
-        values = [max(1, v) for v in parts[:want]]
-        while len(values) < want:
-            values.append(default[len(values)])
-        return values
-    except Exception:
-        return default.copy()
-
-def _load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, list[int]]:
-    settings: dict[str, list[int]] = {}
-    defaults = cfg.defaults()
-    for key, option in INDEX_WEIGHT_KEYS.items():
-        base = INDEX_WEIGHT_DEFAULTS[key]
-        raw = defaults.get(option, "")
-        settings[key] = _parse_index_weight_line(raw, base)
-    return settings
-
-def _compute_sensitivity_raw_scores_from_stacked(df: pd.DataFrame, weights: list[int]) -> pd.Series:
-    """Compute sensitivity raw scores using explicit weights per product value.
-
-    Sensitivity values are expected to be the product of importance (1..5) and susceptibility (1..5),
-    yielding values in SENSITIVITY_PRODUCT_VALUES.
-    """
-    if df.empty or "code" not in df.columns or "sensitivity" not in df.columns:
-        return pd.Series(dtype="float64")
-    if not weights:
-        return pd.Series(dtype="float64")
-
-    tmp = df[["code", "sensitivity"]].copy()
-    tmp = tmp.dropna(subset=["code", "sensitivity"])
-    if tmp.empty:
-        return pd.Series(dtype="float64")
-
-    vals = pd.to_numeric(tmp["sensitivity"], errors="coerce").round()
-    tmp = tmp.assign(product=vals)
-    tmp = tmp.dropna(subset=["product"])
-    if tmp.empty:
-        return pd.Series(dtype="float64")
-
-    weight_map = {v: int(weights[i]) if i < len(weights) else 1 for i, v in enumerate(SENSITIVITY_PRODUCT_VALUES)}
-    tmp["product"] = tmp["product"].astype(int)
-    g = tmp.groupby(["code", "product"]).size().reset_index(name="count")
-    g["weight"] = g["product"].map(lambda x: int(weight_map.get(int(x), 0)))
-    g["score_part"] = g["count"] * g["weight"]
-    scores = g.groupby("code")["score_part"].sum()
-    scores = pd.to_numeric(scores, errors="coerce").fillna(0).astype("float64")
-    return scores
-
-def _compute_index_scores_from_stacked(df: pd.DataFrame, value_col: str, weights: list[int]) -> pd.Series:
-    if df.empty or value_col not in df.columns or "code" not in df.columns:
-        return pd.Series(dtype="float64")
-    tmp = df[["code", value_col]].copy()
-    tmp = tmp.dropna(subset=["code", value_col])
-    if tmp.empty:
-        return pd.Series(dtype="float64")
-    vals = pd.to_numeric(tmp[value_col], errors="coerce").round()
-    tmp = tmp.assign(value=vals)
-    tmp = tmp.dropna(subset=["value"])
-    if tmp.empty:
-        return pd.Series(dtype="float64")
-    max_bucket = len(weights)
-    tmp["value"] = tmp["value"].clip(1, max_bucket).astype(int)
-    grouped = tmp.groupby(["code", "value"]).size().unstack(fill_value=0)
-    scores = pd.Series(0.0, index=grouped.index, dtype="float64")
-    for bucket, weight in enumerate(weights, start=1):
-        if weight <= 0:
-            continue
-        col = grouped.get(bucket)
-        if col is None:
-            continue
-        scores += bucket * weight * col
-    return scores
-
-def _scale_index_scores(scores: pd.Series, labels: pd.Series | None = None) -> pd.Series:
-    if scores.empty:
-        return scores
-    df = pd.DataFrame({"score": scores})
-    if labels is not None:
-        df["label"] = labels.reindex(scores.index).fillna("__all__")
-    else:
-        df["label"] = "__all__"
-    scaled = pd.Series(0.0, index=scores.index, dtype="float64")
-    for label, group in df.groupby("label"):
-        sc = group["score"]
-        max_val = float(sc.max())
-        if not np.isfinite(max_val) or max_val <= 0:
-            scaled.loc[group.index] = 0.0
-            continue
-        vals = (sc / max_val) * 100.0
-        vals = vals.where(sc > 0, 0.0)
-        vals = vals.round()
-        vals = vals.where(sc == 0, vals.clip(lower=1.0))
-        vals = vals.clip(upper=100.0)
-        scaled.loc[group.index] = vals
-    return scaled
-
-
 _ASSET_GROUP_LOOKUP: pd.DataFrame | None = None
 
 
@@ -2795,9 +2665,9 @@ def _flatten_worker_named(args):
 def _flatten_worker(args):
     """
     Process one tbl_stacked parquet file and return aggregated stats per code.
-    args: (parquet_path, ranges_map, desc_map, index_weights)
+    args: (parquet_path, ranges_map, desc_map)
     """
-    parquet_path, ranges_map, desc_map, index_weights = args
+    parquet_path, ranges_map, desc_map = args
     try:
         df = gpd.read_parquet(parquet_path)
     except Exception:
@@ -2914,44 +2784,6 @@ def _flatten_worker(args):
         extremes.append(_select_extreme_local(df, metric_name, "min"))
         extremes.append(_select_extreme_local(df, metric_name, "max"))
 
-    # Raw Scores
-    # Importance: 1..5 bucket weights.
-    # Sensitivity: explicit weights per (importance×susceptibility) product.
-    raw_scores = {}
-    for idx_name in ["importance", "sensitivity"]:
-        w = index_weights.get(idx_name, [])
-        if not w:
-            continue
-
-        val_col = idx_name
-        tmp = df[["code", val_col]].dropna()
-        if tmp.empty:
-            continue
-
-        vals = pd.to_numeric(tmp[val_col], errors="coerce").round()
-        tmp = tmp.assign(value=vals)
-        tmp = tmp.dropna(subset=["value"])
-        if tmp.empty:
-            continue
-
-        if idx_name == "importance":
-            # Clip to 1..5 and treat as bucket index
-            tmp["bucket"] = tmp["value"].clip(1, len(w)).astype(int)
-            g = tmp.groupby(["code", "bucket"]).size().reset_index(name="count")
-            g["weight"] = g["bucket"].map(lambda x: w[x - 1] if 0 < x <= len(w) else 0)
-            g["score_part"] = g["count"] * g["weight"]
-        else:
-            # Sensitivity values are products in {1,2,3,4,5,6,8,9,10,12,15,16,20,25}.
-            # Map each product value to its configured weight.
-            weight_map = {v: (w[i] if i < len(w) else 1) for i, v in enumerate(SENSITIVITY_PRODUCT_VALUES)}
-            tmp["product"] = tmp["value"].astype(int)
-            g = tmp.groupby(["code", "product"]).size().reset_index(name="count")
-            g["weight"] = g["product"].map(lambda x: int(weight_map.get(int(x), 0)))
-            g["score_part"] = g["count"] * g["weight"]
-
-        score_sums = g.groupby("code")["score_part"].sum().reset_index(name=f"{idx_name}_raw_score")
-        raw_scores[idx_name] = score_sums
-
     # OWA counts (precautionary addition) from sensitivity values 1..25
     owa_counts = _compute_owa_counts_from_stacked(df, min_score=1, max_score=25)
 
@@ -2961,8 +2793,6 @@ def _flatten_worker(args):
     result_df = result_df.merge(asset_info, on="code", how="left")
     for extreme_df in extremes:
         result_df = result_df.merge(extreme_df, on="code", how="left")
-    for score_name, score_df in raw_scores.items():
-        result_df = result_df.merge(score_df, on="code", how="left")
 
     if owa_counts is not None and not owa_counts.empty:
         result_df = result_df.merge(owa_counts, on="code", how="left")
@@ -3124,7 +2954,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_importance','index_sensitivity','index_owa',
+            'index_owa',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -3147,7 +2977,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             cfg_local = read_config(config_file)
         except Exception:
             cfg_local = configparser.ConfigParser()
-    index_weights = _load_index_weight_settings(cfg_local)
 
     # 2b. Pre-flight memory check - refuse to start under existing pressure.
     # Two independent signals are evaluated; abort only if BOTH say no:
@@ -3401,7 +3230,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                 try:
                     with multiprocessing.get_context("spawn").Pool(current_workers) as pool:
                         pstate["pool"] = pool
-                        args = [(Path(p), ranges_map, desc_map, index_weights) for p in todo]
+                        args = [(Path(p), ranges_map, desc_map) for p in todo]
                         try:
                             for fname, res in pool.imap_unordered(_flatten_worker_named, args, chunksize=1):
                                 if pstate["triggered"]:
@@ -3452,7 +3281,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                 except Exception: pass
         else:
             for f in paths:
-                res = _flatten_worker((f, ranges_map, desc_map, index_weights))
+                res = _flatten_worker((f, ranges_map, desc_map))
                 if res is not None:
                     partials.append(res)
 
@@ -3485,7 +3314,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
             'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
             'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-            'index_importance','index_sensitivity','index_owa',
+            'index_owa',
             'geometry'
         ]
         gdf_empty = gpd.GeoDataFrame(columns=empty_cols, geometry='geometry', crs=f"EPSG:{working_epsg}")
@@ -3527,9 +3356,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
         log_to_gui(log_widget, "Resolving split geocodes…")
 
         simple_agg = {k:v for k,v in agg_rules.items() if k not in ["ref_asset_group", "name_gis_assetgroup"]}
-        for k in ["importance_raw_score", "sensitivity_raw_score"]:
-            if k in full.columns:
-                simple_agg[k] = "sum"
         for c in [c for c in full.columns if str(c).startswith("owa_n")]:
             simple_agg[c] = "sum"
         
@@ -3621,21 +3447,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
     except Exception:
         group_map = None
 
-    if "importance_raw_score" in tbl_flat.columns:
-        importance_norm = _scale_index_scores(tbl_flat.set_index("code")["importance_raw_score"], group_map).rename("index_importance")
-        tbl_flat = tbl_flat.merge(importance_norm, left_on="code", right_index=True, how="left")
-    else:
-        tbl_flat["index_importance"] = 0
-
-    if "sensitivity_raw_score" in tbl_flat.columns:
-        sensitivity_norm = _scale_index_scores(tbl_flat.set_index("code")["sensitivity_raw_score"], group_map).rename("index_sensitivity")
-        tbl_flat = tbl_flat.merge(sensitivity_norm, left_on="code", right_index=True, how="left")
-    else:
-        tbl_flat["index_sensitivity"] = 0
-
-    for col in ("index_importance", "index_sensitivity"):
-        tbl_flat[col] = pd.to_numeric(tbl_flat[col], errors="coerce").fillna(0).round().astype("Int64")
-
     # 6b. OWA index (precautionary addition) scaled 0..100
     try:
         owa = _compute_index_owa_from_counts(tbl_flat, group_map, min_score=1, max_score=25)
@@ -3718,7 +3529,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
         'sensitivity_min','sensitivity_max','sensitivity_code_min','sensitivity_description_min','sensitivity_code_max','sensitivity_description_max',
         'susceptibility_min','susceptibility_max','susceptibility_code_min','susceptibility_description_min','susceptibility_code_max','susceptibility_description_max',
         'asset_group_names','asset_groups_total','area_m2','assets_overlap_total',
-        'index_importance','index_sensitivity','index_owa',
+        'index_owa',
         'geometry'
     ]
     for c in preferred:

@@ -7,8 +7,6 @@ Per group in name_gis_geocodegroup, produces seven MBTiles:
   <group>_groupstotal.mbtiles        (light->dark blue, linear ramp of asset_groups_total per group)
   <group>_assetstotal.mbtiles        (light->dark blue, linear ramp of assets_overlap_total per group)
   <group>_importance_max.mbtiles     (discrete green ramp for importance_max 1..5)
-    <group>_index_importance.mbtiles   (1..100 gradient from the importance index)
-    <group>_index_sensitivity.mbtiles  (1..100 gradient from the sensitivity index)
     <group>_index_owa.mbtiles          (1..100 gradient from the OWA index)
 
 - EPSG:4326 input expected.
@@ -572,7 +570,7 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
                     except Exception:
                         v = None
                 fill_rgba = importance_max_color(v, imp_pal)
-            elif mode in ("index_importance", "index_sensitivity", "index_owa"):
+            elif mode == "index_owa":
                 gradient = palette.get("gradient", [])
                 v = None
                 if numvals is not None:
@@ -667,7 +665,7 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
 # ----------------------- Core -----------------------
 def run_one_layer(group_name: str,
                   gdf: gpd.GeoDataFrame,
-                  layer_mode: str,      # "sensitivity" | "groupstotal" | "assetstotal" | "importance_max" | "index_importance" | "index_sensitivity" | "index_owa"
+                  layer_mode: str,      # "sensitivity" | "groupstotal" | "assetstotal" | "importance_max" | "index_owa"
                   palette: Dict[str, Tuple[int,int,int,int]],
                   ranges_map: Dict[str, range],
                   out_dir: Path,
@@ -724,18 +722,6 @@ def run_one_layer(group_name: str,
         mbt_name = f"{group_name}_importance_max"
         out_path = out_dir / f"{mbt_name}.mbtiles"
         vmin = 1.0; vmax = 5.0
-    elif layer_mode == "index_importance":
-        numvals = pd.to_numeric(gdf.get("index_importance", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_index_importance"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-        vmin = 1.0; vmax = 100.0
-    elif layer_mode == "index_sensitivity":
-        numvals = pd.to_numeric(gdf.get("index_sensitivity", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_index_sensitivity"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-        vmin = 1.0; vmax = 100.0
     elif layer_mode == "index_owa":
         numvals = pd.to_numeric(gdf.get("index_owa", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
         sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
@@ -833,7 +819,6 @@ def main():
     optional_cols = [
         "code",  # needed to join segmentation categories; optional so old datasets still tile
         "asset_groups_total", "assets_overlap_total",
-        "index_importance", "index_sensitivity",
         "index_owa",
         "importance_max",
     ]
@@ -941,22 +926,13 @@ def main():
         index_palette_src,
         steps=INDEX_GRADIENT_STEPS,
     )
-    importance_index_gradient = build_index_gradient_from_palette(
-        build_importance_max_palette(alpha=index_alpha),
-        steps=INDEX_GRADIENT_STEPS,
-        order=[1, 2, 3, 4, 5],
-        fallback=hex_to_rgba(IMPORTANCE_MAX_HEX[1], index_alpha),
-    )
     sensitivity_index_palette = {"gradient": sensitivity_index_gradient}
-    importance_index_palette = {"gradient": importance_index_gradient}
     importance_max_alpha = _get_alpha("tiles_importance_max_alpha", args.importance_max_alpha, sens_alpha)
     importance_max_palette = {"importance_max_colors": build_importance_max_palette(importance_max_alpha)}
     ranges_map = read_ranges_map(cfg_path)
     stroke_rgba = hex_to_rgba(args.stroke, args.stroke_alpha)
     groups_total_available = "asset_groups_total" in gdf_all.columns
     assets_total_available = "assets_overlap_total" in gdf_all.columns
-    importance_index_available = "index_importance" in gdf_all.columns
-    sensitivity_index_available = "index_sensitivity" in gdf_all.columns
     index_owa_available = "index_owa" in gdf_all.columns
     importance_max_available = "importance_max" in gdf_all.columns
     blue_palette = {"blue_alpha": blue_alpha}
@@ -1044,14 +1020,6 @@ def main():
             s = pd.to_numeric(gdf.get("importance_max", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
             vals_by_mode["importance_max"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
 
-        if importance_index_available:
-            s = pd.to_numeric(gdf.get("index_importance", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-            vals_by_mode["index_importance"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
-
-        if sensitivity_index_available:
-            s = pd.to_numeric(gdf.get("index_sensitivity", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-            vals_by_mode["index_sensitivity"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
-
         if index_owa_available:
             s = pd.to_numeric(gdf.get("index_owa", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
             vals_by_mode["index_owa"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
@@ -1061,8 +1029,6 @@ def main():
             "groupstotal": blue_palette,
             "assetstotal": blue_palette,
             "importance_max": importance_max_palette,
-            "index_importance": importance_index_palette,
-            "index_sensitivity": sensitivity_index_palette,
             "index_owa": sensitivity_index_palette,
         }
 
@@ -1159,18 +1125,6 @@ def main():
                 _run_layer(f"{slug}_importance_max", "importance_max", 1.0, 5.0)
             else:
                 log("  → skipping importance_max tiles (importance_max column missing)")
-
-            if importance_index_available:
-                log(f"  → building {slug}_index_importance.mbtiles …")
-                _run_layer(f"{slug}_index_importance", "index_importance", 1.0, 100.0)
-            else:
-                log("  → skipping index_importance tiles (index_importance column missing)")
-
-            if sensitivity_index_available:
-                log(f"  → building {slug}_index_sensitivity.mbtiles …")
-                _run_layer(f"{slug}_index_sensitivity", "index_sensitivity", 1.0, 100.0)
-            else:
-                log("  → skipping index_sensitivity tiles (index_sensitivity column missing)")
 
             if index_owa_available:
                 log(f"  → building {slug}_index_owa.mbtiles …")

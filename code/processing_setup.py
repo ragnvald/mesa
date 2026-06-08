@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-# MESA – Processing setup (2 tabs: Sensitivity and Index weights)
+# MESA – Processing setup (Sensitivity)
 # Persistence: GeoParquet + JSON only (GPKG removed)
 # PySide6 UI (migrated from ttkbootstrap).
 
@@ -59,36 +59,7 @@ entries_vuln = []
 FALLBACK_VULN = 3
 gdf_asset_group = None  # set by run(); referenced by module-level functions
 root = None             # set by run(); referenced by close_application()
-INDEX_WEIGHT_DEFAULTS = {
-    "importance": [1, 2, 5, 5, 10],
-    # Sensitivity is derived as importance * susceptibility (both 1..5).
-    # Only these products can occur.
-    "sensitivity": [
-        10, # 1
-        10, # 2
-        10, # 3
-        10, # 4
-        10, # 5
-        10, # 6
-        10, # 8
-        10, # 9
-        10, # 10
-        10, # 12
-        10, # 15
-        10, # 16
-        10, # 20
-        10, # 25
-    ],
-}
-INDEX_WEIGHT_KEYS = {
-    "importance": "index_importance_weights",
-    "sensitivity": "index_sensitivity_weights",
-}
-index_weight_settings: dict[str, list[int]] = {}
-index_weight_vars: dict[str, list] = {}  # will hold QLineEdit references
 status_message_var = None  # will be a QLabel instance
-
-SENSITIVITY_PRODUCT_VALUES: list[int] = [1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 20, 25]
 
 # paths set in __main__
 original_working_directory = ""
@@ -110,42 +81,6 @@ import webbrowser
 
 from asset_manage import apply_shared_stylesheet
 
-
-WIKI_INDEX_URLS = {
-    "importance": "https://github.com/ragnvald/mesa/wiki/Indexes#importance-index-index_importance",
-    "sensitivity": "https://github.com/ragnvald/mesa/wiki/Indexes#sensitivity-index-index_sensitivity",
-    "owa":         "https://github.com/ragnvald/mesa/wiki/Indexes#owa-index-index_owa",
-}
-
-
-class _InfoCircleLabel(QLabel):
-    """Small painted circle with 'i' that opens a URL on click.
-
-    Mirrors the same widget used in mesa.py so the Parameters dialog has the
-    visual vocabulary as the main app's Status pane.
-    """
-
-    def __init__(self, url: str, parent=None):
-        super().__init__(parent)
-        self._url = url
-        self.setFixedSize(20, 20)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("Open detailed description in browser")
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor("#9b7c3d"), 1.5))
-        p.setBrush(QBrush(QColor("#faf6ee")))
-        p.drawEllipse(2, 2, 15, 15)
-        p.setPen(QColor("#715a36"))
-        p.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        p.drawText(self.rect(), Qt.AlignCenter, "i")
-        p.end()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._url:
-            webbrowser.open(self._url)
 
 # -------------------------------
 # Path helpers
@@ -378,38 +313,6 @@ def _cfg_get_any(cfg: configparser.ConfigParser, option: str, fallback: str = ""
         except Exception:
             pass
     return fallback
-
-def _parse_weight_line(text: str, default: list[int]) -> list[int]:
-    try:
-        if not text:
-            return default.copy()
-        raw = [int(x.strip()) for x in str(text).replace(";", ",").split(",") if x.strip()]
-        want = len(default)
-        cleaned = [max(1, v) for v in raw[:want]]
-        while len(cleaned) < want:
-            cleaned.append(default[len(cleaned)])
-        return cleaned
-    except Exception:
-        return default.copy()
-
-def load_index_weight_settings(cfg: configparser.ConfigParser) -> dict[str, list[int]]:
-    settings: dict[str, list[int]] = {}
-    for key, option in INDEX_WEIGHT_KEYS.items():
-        default = INDEX_WEIGHT_DEFAULTS[key]
-        raw = _cfg_get_any(cfg, option, fallback="")
-        settings[key] = _parse_weight_line(raw, default)
-    return settings
-
-def persist_index_weight_settings(cfg_path: str, settings: dict[str, list[int]]) -> None:
-    payload = {}
-    for key, weights in settings.items():
-        expected = len(INDEX_WEIGHT_DEFAULTS.get(key, [])) or 5
-        safe = [max(1, int(w)) for w in weights[:expected]]
-        while len(safe) < expected:
-            safe.append(1)
-        payload[INDEX_WEIGHT_KEYS[key]] = ",".join(str(v) for v in safe)
-    update_config_with_values(cfg_path, **payload)
-
 
 # -------------------------------
 # Type & vulnerability helpers
@@ -899,61 +802,6 @@ def update_all_vuln_rows(entries_list, gdf):
         gdf.at[idx, 'sensitivity_description'] = desc
 
 
-def _collect_index_weight_values(strict: bool = True) -> Optional[dict[str, list[int]]]:
-    """Read the current entry widgets and coerce them to positive integers."""
-    if not index_weight_vars:
-        return {}
-    collected: dict[str, list[int]] = {}
-    for key, widgets_list in index_weight_vars.items():
-        defaults = INDEX_WEIGHT_DEFAULTS.get(key, INDEX_WEIGHT_DEFAULTS['importance'])
-        labels = list(range(1, 6)) if key == "importance" else SENSITIVITY_PRODUCT_VALUES
-        values: list[int] = []
-        for idx, widget in enumerate(widgets_list, start=1):
-            txt = (widget.text() or "").strip()
-            if txt.isdigit():
-                val = int(txt)
-            else:
-                if strict:
-                    lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
-                    QMessageBox.critical(None, "Indices", f"Weight for value {lab} in {key} must be a positive integer.")
-                    return None
-                try:
-                    val = int(float(txt))
-                except Exception:
-                    fallback_idx = idx - 1
-                    val = defaults[fallback_idx] if fallback_idx < len(defaults) else 1
-            if val < 1:
-                if strict:
-                    lab = labels[idx - 1] if 0 <= (idx - 1) < len(labels) else idx
-                    QMessageBox.critical(None, "Indices", f"Weight for value {lab} in {key} must be at least 1.")
-                    return None
-                val = 1
-            values.append(val)
-        collected[key] = values
-    return collected
-
-
-def persist_index_weights_from_ui(strict: bool = True, silent: bool = False) -> bool:
-    updated = _collect_index_weight_values(strict=strict)
-    if updated is None:
-        return False
-    if not updated:
-        return True
-    try:
-        persist_index_weight_settings(config_file, updated)
-        index_weight_settings.update(updated)
-        if not silent:
-            _set_status_message("Index weights saved to config.ini")
-        return True
-    except Exception as err:
-        log_to_file(f"Failed to persist index weights: {err}")
-        if strict and not silent:
-            QMessageBox.critical(None, "Indexes", f"Could not save index weights:\n{err}")
-        elif not silent:
-            _set_status_message("Index weights could not be saved (see log).")
-        return False
-
-
 # =====================================================================
 # PySide6 Window
 # =====================================================================
@@ -1054,7 +902,7 @@ class SetupWindow(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
-        # --- Tabs: Sensitivity + Indexes ---
+        # --- Tabs: Sensitivity ---
         self._tabs = QTabWidget()
         main_layout.addWidget(self._tabs, stretch=1)
 
@@ -1062,17 +910,6 @@ class SetupWindow(QMainWindow):
         self._view_sensitivity = QWidget()
         self._build_sensitivity_view(self._view_sensitivity)
         self._tabs.addTab(self._view_sensitivity, "Sensitivity")
-
-        # Tab 2 – Indexes
-        self._view_indexes = QWidget()
-        self._build_indexes_view(self._view_indexes)
-        self._tabs.addTab(self._view_indexes, "Index weights")
-
-        # Honour the requested start tab. Accepts "sensitivity" (default) or
-        # "indexes" / "weights" / "index_weights" — used by devtools to capture
-        # the Index weights tab without manual clicks.
-        if self._start_tab in {"indexes", "weights", "index_weights"}:
-            self._tabs.setCurrentIndex(1)
 
         # --- Right corner: data-management buttons + Exit ---
         _corner_css = """
@@ -1126,151 +963,6 @@ class SetupWindow(QMainWindow):
         self._status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
         status_message_var = self._status_label
         main_layout.addWidget(self._status_label)
-
-    # ------------------------------------------------------------------
-    def _build_indexes_view(self, parent: QWidget):
-        global index_weight_vars
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        info = (
-            "Index weights control how importance and sensitivity values are aggregated "
-            "when multiple asset layers overlap within the same mosaic cell.\n\n"
-            "Importance index — Each asset layer has an importance value from 1 (low) to 5 (high). "
-            "The weight assigned here determines how much each importance level contributes to the "
-            "aggregated importance score. A higher weight increases the influence of that level.\n\n"
-            "Sensitivity index — Sensitivity is the product of importance × susceptibility "
-            "(resulting in values like 1, 2, 3, …, 25). The weight assigned to each product value "
-            "determines how much an overlap at that sensitivity level contributes to the aggregated "
-            "score. Defaults are flat because the product values already encode magnitude; raise "
-            "individual weights to over-emphasise particular sensitivity levels."
-        )
-        info_label = QLabel(info)
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #5c4a2f; font-size: 9pt; padding: 4px 0;")
-        layout.addWidget(info_label)
-
-        sections = [
-            ("importance", "Importance index weights (1-5)", list(range(1, 6))),
-            ("sensitivity", "Sensitivity index weights (products 1-25)", SENSITIVITY_PRODUCT_VALUES),
-        ]
-        weight_widgets: dict[str, list] = {}
-
-        for key, title, value_labels in sections:
-            box = QGroupBox(title)
-            box_outer = QHBoxLayout(box)
-            box_outer.setContentsMargins(8, 6, 8, 8)
-            box_outer.setSpacing(8)
-
-            # Left-column info icon linking to the wiki section for this index.
-            # Placed in a column rather than a top row so it doesn't add height
-            # and squeeze the weight entries vertically.
-            icon_col = QVBoxLayout()
-            icon_col.setContentsMargins(0, 0, 0, 0)
-            icon_col.setSpacing(0)
-            icon_col.addWidget(_InfoCircleLabel(WIKI_INDEX_URLS[key]), alignment=Qt.AlignTop)
-            icon_col.addStretch(1)
-            box_outer.addLayout(icon_col)
-
-            grid_holder = QWidget()
-            grid = QGridLayout(grid_holder)
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(4)
-            grid.setVerticalSpacing(8)
-
-            widgets_for_key: list = []
-            current = index_weight_settings.get(key, INDEX_WEIGHT_DEFAULTS[key])
-
-            # Lay out in 7 columns per line to keep the dialog readable.
-            per_line = 7
-
-            # Row 0 label headers
-            lbl_value = QLabel("Value")
-            lbl_value.setFixedWidth(60)
-            grid.addWidget(lbl_value, 0, 0)
-            lbl_weight = QLabel("Weight")
-            lbl_weight.setFixedWidth(60)
-            grid.addWidget(lbl_weight, 1, 0)
-
-            for idx_v, v in enumerate(value_labels):
-                block = (idx_v // per_line)
-                col = (idx_v % per_line) + 1
-                r0 = block * 2
-                val_label = QLabel(str(v))
-                val_label.setAlignment(Qt.AlignCenter)
-                val_label.setFixedWidth(50)
-                val_label.setMinimumHeight(22)
-                grid.addWidget(val_label, r0, col)
-
-                entry = QLineEdit(str(current[idx_v] if idx_v < len(current) else 1))
-                entry.setFixedWidth(50)
-                entry.setMinimumHeight(26)
-                entry.setAlignment(Qt.AlignCenter)
-                grid.addWidget(entry, r0 + 1, col)
-                widgets_for_key.append(entry)
-
-            # Add a visible gutter between block rows when the values wrap to a
-            # second line — otherwise the previous block's entries butt up
-            # against the next block's value labels.
-            n_blocks = (len(value_labels) + per_line - 1) // per_line
-            for block_idx in range(1, n_blocks):
-                gutter_row = block_idx * 2
-                grid.setRowMinimumHeight(gutter_row, 30)
-
-            box_outer.addWidget(grid_holder, stretch=1)
-            weight_widgets[key] = widgets_for_key
-            layout.addWidget(box)
-
-        tuning_note = QLabel(
-            "<b>Tuning tips.</b> Weights act as multipliers, so only their <i>proportions</i> "
-            "matter for the 0&ndash;100 ranking. Common patterns: set a weight to <b>0</b> to "
-            "filter that level out entirely (e.g. importance class 1 = 0 hides low-value "
-            "overlaps when screening for hotspots); raise a single weight to <b>emphasise</b> "
-            "that level (e.g. boost sensitivity product 25 so cells with extreme overlaps rise "
-            "to the top); keep the row <b>flat</b> when the input class numbers already encode "
-            "magnitude (this is why sensitivity defaults flat — a product of 25 is already 25&times; "
-            "a product of 1). Changes only affect future processing runs, so you can experiment "
-            "freely and re-run to compare."
-        )
-        tuning_note.setWordWrap(True)
-        tuning_note.setTextFormat(Qt.RichText)
-        tuning_note.setStyleSheet(
-            "color: #5c4a2f; font-size: 9pt; padding: 8px 10px; "
-            "background-color: #f6efe1; border: 1px solid #d8c9a4; border-radius: 4px;"
-        )
-        layout.addWidget(tuning_note)
-
-        owa_row = QHBoxLayout()
-        owa_row.setContentsMargins(0, 0, 0, 0)
-        owa_row.setSpacing(8)
-
-        owa_icon_col = QVBoxLayout()
-        owa_icon_col.setContentsMargins(0, 0, 0, 0)
-        owa_icon_col.addWidget(_InfoCircleLabel(WIKI_INDEX_URLS["owa"]), alignment=Qt.AlignTop)
-        owa_icon_col.addStretch(1)
-        owa_row.addLayout(owa_icon_col)
-
-        owa_note = QLabel(
-            "<b>OWA index — no tunable input.</b> MESA also produces a third index, the OWA "
-            "(Ordered Weighted Average) index, alongside the two weighted ones above. It ranks "
-            "cells using a precautionary &ldquo;worst-first&rdquo; rule: a cell containing even one "
-            "overlap at sensitivity 25 outranks any cell with zero overlaps at 25, regardless of "
-            "the lower-sensitivity stack. There are no weights to set — the rule is fixed and "
-            "uses only the sensitivity counts already produced from the table above."
-        )
-        owa_note.setWordWrap(True)
-        owa_note.setTextFormat(Qt.RichText)
-        owa_note.setStyleSheet(
-            "color: #5c4a2f; font-size: 9pt; padding: 8px 10px; "
-            "background-color: #f6efe1; border: 1px solid #d8c9a4; border-radius: 4px;"
-        )
-        owa_row.addWidget(owa_note, stretch=1)
-
-        layout.addLayout(owa_row)
-
-        index_weight_vars = weight_widgets
-        layout.addStretch(1)
 
     # ------------------------------------------------------------------
     def _build_sensitivity_view(self, parent: QWidget):
@@ -1479,7 +1171,6 @@ class SetupWindow(QMainWindow):
         enforce_vuln_dtypes_inplace(gdf_asset_group)
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
         save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        persist_index_weights_from_ui(strict=False, silent=True)
         _set_status_message("Saved asset-group layer to GeoParquet.")
 
     # ------------------------------------------------------------------
@@ -1488,7 +1179,6 @@ class SetupWindow(QMainWindow):
             update_all_vuln_rows(entries_vuln, gdf_asset_group)
             enforce_vuln_dtypes_inplace(gdf_asset_group)
             gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-            persist_index_weights_from_ui(strict=False, silent=True)
             save_asset_group_to_parquet(gdf_ready, original_working_directory)
         finally:
             self.close()
@@ -1499,7 +1189,6 @@ class SetupWindow(QMainWindow):
             update_all_vuln_rows(entries_vuln, gdf_asset_group)
             enforce_vuln_dtypes_inplace(gdf_asset_group)
             gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-            persist_index_weights_from_ui(strict=False, silent=True)
             save_asset_group_to_parquet(gdf_ready, original_working_directory)
         except Exception:
             pass
@@ -1516,7 +1205,7 @@ def run(base_dir: str, master=None, start_tab: str = "sensitivity") -> None:
     """
     global original_working_directory, config_file, status_message_var
     global valid_input_values, FALLBACK_VULN, gdf_asset_group, entries_vuln, root
-    global index_weight_settings, classification, workingprojection_epsg
+    global classification, workingprojection_epsg
 
     # Resolve base dir robustly
     resolved_base = find_base_dir(base_dir)
@@ -1533,23 +1222,6 @@ def run(base_dir: str, master=None, start_tab: str = "sensitivity") -> None:
     classification = read_config_classification(config_file)
     valid_input_values = get_valid_values(config)
     FALLBACK_VULN = get_fallback_value(config, valid_input_values)
-    index_weight_settings = load_index_weight_settings(config)
-
-    # Seed defaults when weights are missing OR present but blank/"nil".
-    seed_needed = []
-    try:
-        for opt in INDEX_WEIGHT_KEYS.values():
-            if _is_blankish(_cfg_get_any(config, opt, fallback="")):
-                seed_needed.append(opt)
-    except Exception:
-        seed_needed = list(INDEX_WEIGHT_KEYS.values())
-
-    if seed_needed:
-        try:
-            persist_index_weight_settings(config_file, index_weight_settings)
-            log_to_file("Seeded default index weights in config.ini")
-        except Exception as err:
-            log_to_file(f"Unable to seed index weights: {err}")
 
     workingprojection_epsg = (
         _cfg_get_any(config, 'working_projection_epsg', fallback='')
@@ -1591,8 +1263,5 @@ def run(base_dir: str, master=None, start_tab: str = "sensitivity") -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MESA - Processing setup')
     parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
-    parser.add_argument('--start-tab', default='sensitivity',
-                        choices=['sensitivity', 'indexes', 'weights', 'index_weights'],
-                        help='Which tab to focus when the window opens (default: sensitivity)')
     args = parser.parse_args()
-    run(args.original_working_directory, start_tab=args.start_tab)
+    run(args.original_working_directory)

@@ -988,18 +988,14 @@ class ReportEngine:
                     "For each geocode cell, this map shows the <b>highest sensitivity class</b> (A–E, derived from "
                     "the <code>sensitivity_max</code> field) found among all assets overlapping the cell. It is a "
                     "worst-case view: a single A-rated asset is enough to colour the cell as A, even if many "
-                    "lower-rated assets also overlap. Pair this with the <b>Sensitivity index</b> later in the "
-                    "report — the max highlights the single highest class present, while the index reflects "
-                    "accumulated weighted overlap. The polygon-fallback variant (used when raster tiles are "
+                    "lower-rated assets also overlap. The polygon-fallback variant (used when raster tiles are "
                     "missing) shows the same data drawn as analysis polygons rather than rasterised tiles.",
                 ),
                 (
                     "importance_max", "Importance (max)", "importance_max",
                     "Per-cell <b>highest importance class</b> (typically 1–5, from <code>importance_max</code>) "
                     "among overlapping assets. Use this to spot where the most important features are, regardless "
-                    "of how many lower-importance assets share the cell. Pair with the <b>Importance index</b> "
-                    "later in the report to distinguish a single standout asset (high max, low index) from broad "
-                    "accumulation (mid max, high index).",
+                    "of how many lower-importance assets share the cell.",
                 ),
                 (
                     "groupstotal", "# asset groups", "groupstotal",
@@ -1241,8 +1237,6 @@ class ReportEngine:
                       else (cfg["DEFAULT"].get("basic_group_name", "basic_mosaic") or "basic_mosaic").strip())
 
         candidates = [
-            ("index_importance", "Importance index", "index_importance"),
-            ("index_sensitivity", "Sensitivity index", "index_sensitivity"),
             ("index_owa", "OWA index", "index_owa"),
         ]
 
@@ -1254,65 +1248,14 @@ class ReportEngine:
         #   stats_lead -> one-sentence "what this index is", prepended to the stats page.
         #   map_intro  -> paragraph(s) shown above the map, explaining meaning, scale,
         #                 and how to read the colours. Grounded in the computation in
-        #                 code/processing_internal.py:_compute_index_scores_from_stacked
-        #                 and :_compute_index_owa_from_counts.
+        #                 code/processing_internal.py:_compute_index_owa_from_counts.
         index_descriptions = {
-            "index_importance": {
-                "stats_lead":
-                    "The <b>Importance index</b> aggregates the <i>importance</i> attribute of every asset "
-                    "that overlaps each geocode cell into a single 0–100 score per cell.",
-                "map_intro": (
-                    "The <b>Importance index</b> highlights where assets that have been rated as <b>important</b> "
-                    "concentrate on the map. For each geocode cell, MESA performs three steps: "
-                    "<b>(1) count</b> overlapping assets per importance class, "
-                    "<b>(2) weight</b> those counts using <code>index_importance_weights</code> from <b>Parameters</b> "
-                    "(in <code>config.ini</code>) and sum to a raw score, and "
-                    "<b>(3) rank</b> the cell against all others in the current <b>{basic}</b> grouping by "
-                    "rescaling to <b>0–100</b> (the most-loaded cell becomes 100; cells with no important "
-                    "assets stay at 0).",
-                    "<i>Worked example.</i> Suppose a cell overlaps 3 assets rated importance class 5 and the "
-                    "configured weight for class 5 is 50. The cell&rsquo;s raw score is 3 &times; 50 = 150. If "
-                    "150 happens to be the largest raw score anywhere in the geocode group, the cell shows "
-                    "<b>100</b>; every other cell scales down in proportion to its own raw score. Real weights "
-                    "and class counts come from your configuration, so the index is a <b>transparent expression "
-                    "of stakeholder choices</b> rather than an objective measurement.",
-                    "Read the colour ramp as a <b>relative</b> measure: darker / higher cells are the hotspots of "
-                    "important features inside this study area, not absolute importance scores. Use this map to "
-                    "spot clusters of high-value features (e.g. conservation targets, high-value infrastructure) "
-                    "and to compare the spatial reach of importance against sensitivity and OWA on the next pages.",
-                ),
-            },
-            "index_sensitivity": {
-                "stats_lead":
-                    "The <b>Sensitivity index</b> aggregates the <i>sensitivity</i> attribute of every asset "
-                    "that overlaps each geocode cell into a single 0–100 score per cell.",
-                "map_intro": (
-                    "The <b>Sensitivity index</b> shows where features that are <b>vulnerable to pressure or change</b> "
-                    "concentrate on the map. For each geocode cell, MESA performs three steps: "
-                    "<b>(1) count</b> overlaps per sensitivity-product value (importance × susceptibility, in "
-                    "{{1, 2, 3, …, 25}}), "
-                    "<b>(2) weight</b> those counts using <code>index_sensitivity_weights</code> from <b>Parameters</b> "
-                    "and sum to a raw score, and "
-                    "<b>(3) rank</b> the cell against all others in the current <b>{basic}</b> grouping by rescaling "
-                    "to <b>0–100</b>.",
-                    "Defaults for the sensitivity weights are <b>flat</b> because the sensitivity-product values themselves "
-                    "already encode magnitude — a product of 25 is intrinsically 25× a product of 1. With flat defaults "
-                    "the index reduces to a weighted count of sensitive overlaps. Raise individual weights to "
-                    "over-emphasise particular sensitivity levels (e.g. push the weight on 25 to make cells with "
-                    "extreme overlaps rise sharply).",
-                    "Read the colour ramp as a <b>relative</b> measure: a 100 means &ldquo;the most sensitive cell here&rdquo;, "
-                    "not an absolute sensitivity rating. Use this map to target survey and mitigation effort and to "
-                    "screen plans against the most vulnerable cells. Pair it with <b>Sensitive areas (A–E)</b> earlier "
-                    "in the report — that map shows the single highest sensitivity class present in each cell, while "
-                    "this index reflects accumulated weighted overlap.",
-                ),
-            },
             "index_owa": {
                 "stats_lead":
                     "The <b>OWA index</b> (Ordered Weighted Average, precautionary form) ranks each cell on a 0–100 "
                     "scale by giving more weight to its highest-sensitivity overlaps than to its many low ones.",
                 "map_intro": (
-                    "The <b>OWA index</b> is a <b>precautionary</b> companion to the Sensitivity index. Instead of "
+                    "The <b>OWA index</b> is a <b>precautionary</b> ranking of accumulated sensitivity. Instead of "
                     "summing weighted counts, it ranks cells <b>lexicographically</b> on their per-class count "
                     "vector, examined from the highest sensitivity class downwards. The ranks are rescaled to "
                     "<b>0–100</b> within the current <b>{basic}</b> grouping; cells with no overlapping sensitive "
@@ -1323,7 +1266,7 @@ class ReportEngine:
                     "the count at 24, then 23, and so on. The rule is fixed — there are no tunable weights for "
                     "OWA — and uses only the sensitivity counts produced earlier in the pipeline.",
                     "Read this map as the answer to &ldquo;<i>where would the worst case be worst?</i>&rdquo; Compared with "
-                    "the Sensitivity index, OWA pushes isolated high-sensitivity hits up the ranking and is the "
+                    "<b>Sensitive areas (A–E)</b>, OWA pushes isolated high-sensitivity hits up the ranking and is the "
                     "more conservative choice when any extreme-sensitivity overlap should dominate the result. Use "
                     "it for precautionary screening and red-flag mapping.",
                 ),
@@ -1391,7 +1334,7 @@ class ReportEngine:
                 # Legend strip below the map. Filename includes "_legend" so
                 # compile_docx routes it through the legend-width branch.
                 legend_png = self.make_path("index", _safe_name(col), "legend")
-                legend_kind = "importance" if col == "index_importance" else "sensitivity"
+                legend_kind = "sensitivity"
                 legend_caption = f"Index value 0–100 (relative within {basic_name})"
                 if _build_index_legend_png(
                     legend_png,
@@ -5064,22 +5007,19 @@ def generate_report(base_dir: str,
             order_list.extend([
                 ('heading(2)', "Index statistics"),
                 ('text',
-                    "MESA produces three <b>normalised composite indices</b> that condense the asset stack into a "
-                    "single 0–100 score, sitting alongside the four <b>per-cell summary indicators</b> "
+                    "MESA produces the <b>OWA index</b>, a <b>normalised composite index</b> that condenses the asset "
+                    "stack into a single 0–100 score, sitting alongside the four <b>per-cell summary indicators</b> "
                     "(Sensitive areas (A–E), Importance (max), # asset groups, # asset objects) shown on the "
-                    "preceding &ldquo;Other maps&rdquo; pages. The <b>Importance index</b> answers &ldquo;where are the most "
-                    "valuable features?&rdquo;, the <b>Sensitivity index</b> answers &ldquo;where is the most that "
-                    "could be harmed?&rdquo;, and the <b>OWA index</b> is a precautionary variant that lets a "
-                    "single very-sensitive overlap dominate the result. All three are scaled relative to "
-                    "the current study area (most-loaded cell = 100), so the colour ramps are comparable "
-                    "<i>within</i> the report but not across different runs. The indices reflect ranking; the "
+                    "preceding &ldquo;Other maps&rdquo; pages. The <b>OWA index</b> is a precautionary measure that lets a "
+                    "single very-sensitive overlap dominate the result. It is scaled relative to "
+                    "the current study area (most-loaded cell = 100), so the colour ramp is comparable "
+                    "<i>within</i> the report but not across different runs. The index reflects ranking; the "
                     "supplementary indicators reflect raw maxima and counts — read them together to ground-truth "
-                    "what each index summarises."),
+                    "what the index summarises."),
                 ('text',
-                    "Each index gets a statistics page (area distribution chart) followed by its map. "
-                    "Read the three together: an area where Importance and Sensitivity are both high is "
-                    "a high-stakes hotspot; an area where only OWA is elevated tells you a single rare "
-                    "but extreme overlap is driving the signal."),
+                    "The OWA index gets a statistics page (area distribution chart) followed by its map. "
+                    "Read it together with the per-cell indicators: an area where OWA is elevated tells you a "
+                    "single rare but extreme overlap is driving the signal."),
             ])
 
         if index_pages:

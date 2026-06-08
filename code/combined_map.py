@@ -188,8 +188,6 @@ class _Api:
         excluded (they belong to the Segmentation tab)."""
         suffixes = [
             ("sensitivity_max", "Sensitivity"),
-            ("index_importance", "Importance index"),
-            ("index_sensitivity", "Sensitivity index"),
             ("index_owa", "OWA index"),
             ("importance_max", "Importance (max)"),
             ("groupstotal", "# asset groups"),
@@ -698,8 +696,8 @@ HTML = r"""<!doctype html>
         <h2>Overview</h2>
         <div class="info" id="resInfo">
           <p>Pick a <b>geocode group</b> and <b>layer</b> on the map. <b>Sensitive areas (A–E)</b> shows the
-             highest sensitivity class per cell (worst-case). The <b>Importance / Sensitivity / OWA index</b>
-             layers are a 0–100 ranking <i>within the selected group</i>. <b># asset groups</b> = diversity,
+             highest sensitivity class per cell (worst-case). The <b>OWA index</b>
+             layer is a 0–100 ranking <i>within the selected group</i>. <b># asset groups</b> = diversity,
              <b># asset objects</b> = density per cell. <b>Line segments</b> overlays the line sensitivity.</p>
           <p>Use the <b>Opacity</b> slider in the header to blend a layer with the basemap.</p>
         </div>
@@ -942,12 +940,10 @@ HTML = r"""<!doctype html>
 
   // ---- overview (index MBTiles) tab ----
   var resLoaded=false, resGroup=null, resCatalog={};
-  var KIND_ORDER=['sensitivity_max','importance_max','index_sensitivity','index_importance','index_owa','groupstotal','assetstotal'];
+  var KIND_ORDER=['sensitivity_max','importance_max','index_owa','groupstotal','assetstotal'];
   var KIND_DESC={
     sensitivity_max:'Highest sensitivity class (A–E) among assets overlapping each cell — a worst-case view.',
     importance_max:'Highest importance class (1–5) per cell.',
-    index_sensitivity:'Sensitivity index 0–100, ranked within this geocode group.',
-    index_importance:'Importance index 0–100, ranked within this geocode group.',
     index_owa:'OWA-weighted index 0–100, ranked within this geocode group.',
     groupstotal:'Count of distinct asset groups per cell (diversity).',
     assetstotal:'Count of asset objects per cell (density).'

@@ -447,7 +447,7 @@ def build_blocks():
          "Linhas — importar e editar conjuntos lineares como transportes, rios, infra-estruturas ou linhas costeiras.",
          "Análise — definir polígonos de áreas de estudo e grupos de análise nomeados."]))
     add(IMG("ui_processing_setup.png",
-            "Parameters helper — sensitivity and index weights.",
+            "Parameters helper — sensitivity setup.",
             "Auxiliar de parâmetros — pesos de sensibilidade e índices.",
             width_cm=15.0))
     add(IMG("ui_line_manage.png",
@@ -691,43 +691,33 @@ def build_blocks():
         "An index is a function that maps one or more measured or derived variables to a single summary value. Index construction typically involves selecting variables, normalising them, applying weights, and aggregating them. Indices reduce complexity but introduce modelling choices: weighting, scaling, and aggregation rules can substantially affect interpretation and ranking.",
         "Um índice é uma função que mapeia uma ou mais variáveis medidas ou derivadas para um único valor sumário. A construção de um índice envolve normalmente a selecção de variáveis, a sua normalização, a aplicação de pesos e a sua agregação. Os índices reduzem a complexidade mas introduzem escolhas de modelação: regras de ponderação, escala e agregação podem afectar substancialmente a interpretação e a ordenação."))
     add(P(
-        "MESA produces a set of indices and indicators that summarise the intensity and composition of overlapping assets within each spatial reporting unit (a geocode polygon, and in some workflows along buffered/segmented lines). Three normalised indices serve as primary overlays — Importance index (index_importance), Sensitivity index (index_sensitivity), and OWA index (index_owa) for precautionary addition — alongside four supplementary per-cell indicators that provide raw maxima and counts: Sensitivity (sensitivity_max), Importance (importance_max), Asset groups (asset_groups_total), and Asset objects (assets_overlap_total). All seven are stored as fields in tbl_flat.parquet and rendered as overlays in the desktop viewer.",
-        "O MESA produz um conjunto de índices e indicadores que resumem a intensidade e a composição de activos sobrepostos em cada unidade espacial (um polígono de geocódigo, e em alguns fluxos de trabalho ao longo de linhas amortecidas/segmentadas). Três índices normalizados funcionam como sobreposições principais — Índice de Importância (index_importance), Índice de Sensibilidade (index_sensitivity) e Índice OWA (index_owa) para adição precaucional — juntamente com quatro indicadores complementares por célula que fornecem máximos e contagens em estado bruto: Sensibilidade (sensitivity_max), Importância (importance_max), Grupos de activos (asset_groups_total) e Objectos de activo (assets_overlap_total). Todos os sete são guardados como campos em tbl_flat.parquet e renderizados como sobreposições no visualizador desktop."))
+        "MESA produces one normalised composite index plus a set of raw indicators that summarise the intensity and composition of overlapping assets within each spatial reporting unit (a geocode polygon, and in some workflows along buffered/segmented lines). The OWA index (index_owa) serves as the precautionary primary overlay, alongside four supplementary per-cell indicators that provide raw maxima and counts: Sensitivity (sensitivity_max), Importance (importance_max), Asset groups (asset_groups_total), and Asset objects (assets_overlap_total). All five are stored as fields in tbl_flat.parquet and rendered as overlays in the desktop viewer. (The earlier Importance index and Sensitivity index were removed in MESA 5.2.)",
+        "O MESA produz um índice composto normalizado mais um conjunto de indicadores em estado bruto que resumem a intensidade e a composição de activos sobrepostos em cada unidade espacial (um polígono de geocódigo, e em alguns fluxos de trabalho ao longo de linhas amortecidas/segmentadas). O Índice OWA (index_owa) funciona como sobreposição principal precaucional, juntamente com quatro indicadores complementares por célula que fornecem máximos e contagens em estado bruto: Sensibilidade (sensitivity_max), Importância (importance_max), Grupos de activos (asset_groups_total) e Objectos de activo (assets_overlap_total). Todos os cinco são guardados como campos em tbl_flat.parquet e renderizados como sobreposições no visualizador desktop. (O antigo Índice de Importância e Índice de Sensibilidade foram removidos no MESA 5.2.)"))
     add(P(
         "For map presentation, an index value of 0 indicates the absence of relevant overlaps and is not symbolised in the index overlays — those units therefore remain blank in map outputs.",
         "Para a apresentação cartográfica, um valor de índice igual a 0 indica a ausência de sobreposições relevantes e não é simbolizado nas sobreposições de índice — essas unidades aparecem em branco nos mapas."))
 
-    add(H(2, "7.1 Importance index (index_importance)", "7.1 Índice de Importância (index_importance)"))
-    add(P(
-        "The importance index is an aggregate indicator of how important the overlapping assets are within a spatial unit. Each overlapping asset contributes an importance class (typically 1–5). For each spatial unit, MESA counts overlaps per importance class, applies a user-configurable weight per class, and normalises the raw score to 0–100 within the geocode group.",
-        "O Índice de Importância é um indicador agregado de quão importantes são os activos sobrepostos numa unidade espacial. Cada activo sobreposto contribui com uma classe de importância (tipicamente 1–5). Para cada unidade, o MESA conta as sobreposições por classe, aplica um peso configurável por classe e normaliza a pontuação bruta para o intervalo 0–100 dentro do grupo de geocódigos."))
-
-    add(H(2, "7.2 Sensitivity index (index_sensitivity)", "7.2 Índice de Sensibilidade (index_sensitivity)"))
-    add(P(
-        "The sensitivity index summarises the degree to which overlapping assets are sensitive to a specified pressure, taking both importance and susceptibility into account (commonly an importance × susceptibility product). Counts across product values are weighted, summed, and normalised to 0–100 within the geocode group, using the same max-based scaling as importance.",
-        "O Índice de Sensibilidade resume o grau de sensibilidade dos activos sobrepostos a uma pressão especificada, tomando em conta tanto a importância como a susceptibilidade (tipicamente um produto importância × susceptibilidade). As contagens por valor de produto são ponderadas, somadas e normalizadas para o intervalo 0–100 dentro do grupo de geocódigos, usando a mesma escala baseada no máximo da importância."))
-
-    add(H(2, "7.3 OWA index (index_owa)", "7.3 Índice OWA (index_owa)"))
+    add(H(2, "7.1 OWA index (index_owa)", "7.1 Índice OWA (index_owa)"))
     add(P(
         "OWA is used as a precautionary ranking device: locations that contain any very high sensitivity overlaps are prioritised ahead of locations that merely contain many moderate overlaps. This corresponds to a lexicographic comparison of the count-vector of sensitivity classes from highest to lowest. The OWA index is intentionally non-compensatory: a small number of high-sensitivity overlaps can dominate the ranking, so it should be paired with contextual reporting before management decisions.",
         "O OWA é utilizado como mecanismo de classificação precaucional: locais que contenham quaisquer sobreposições de sensibilidade muito alta são priorizados face a locais com muitas sobreposições moderadas. Isto corresponde a uma comparação lexicográfica do vector de contagens das classes de sensibilidade, da mais alta para a mais baixa. O Índice OWA é intencionalmente não-compensatório: um pequeno número de sobreposições de sensibilidade alta pode dominar a classificação, pelo que deve ser acompanhado de relatórios contextuais antes de tomar decisões de gestão."))
 
-    add(H(2, "7.4 Sensitivity (sensitivity_max)", "7.4 Sensibilidade (sensitivity_max)"))
+    add(H(2, "7.2 Sensitivity (sensitivity_max)", "7.2 Sensibilidade (sensitivity_max)"))
     add(P(
-        "The single highest sensitivity value present in the overlap stack of a spatial unit. Sensitivity per overlap is the product of importance and susceptibility (typically 1–25); this layer reports the worst-case overlap. It complements the Sensitivity index — the max highlights the single highest class present, while the index highlights accumulated weighted overlap. A cell can show Sensitivity = 25 with a low Sensitivity index (one extreme overlap in an otherwise sparse cell), or Sensitivity = 6 with a high Sensitivity index (many mid-class overlaps stacked).",
-        "O valor de sensibilidade mais alto presente na sobreposição de uma unidade espacial. A sensibilidade por sobreposição é o produto da importância e da susceptibilidade (tipicamente 1–25); esta camada reporta a pior sobreposição. Complementa o Índice de Sensibilidade — o máximo destaca a classe mais alta presente, enquanto o índice destaca a sobreposição acumulada e ponderada. Uma célula pode apresentar Sensibilidade = 25 com Índice de Sensibilidade baixo (uma sobreposição extrema numa célula de outra forma esparsa), ou Sensibilidade = 6 com Índice de Sensibilidade alto (muitas sobreposições de classe média empilhadas)."))
+        "The single highest sensitivity value present in the overlap stack of a spatial unit. Sensitivity per overlap is the product of importance and susceptibility (typically 1–25); this layer reports the worst-case overlap — a single A-rated asset is enough to colour the cell as A, even if many lower-rated assets also overlap.",
+        "O valor de sensibilidade mais alto presente na sobreposição de uma unidade espacial. A sensibilidade por sobreposição é o produto da importância e da susceptibilidade (tipicamente 1–25); esta camada reporta a pior sobreposição — um único activo classificado como A é suficiente para colorir a célula como A, mesmo que muitos activos de classe inferior também se sobreponham."))
 
-    add(H(2, "7.5 Importance (importance_max)", "7.5 Importância (importance_max)"))
+    add(H(2, "7.3 Importance (importance_max)", "7.3 Importância (importance_max)"))
     add(P(
-        "The maximum importance class among the overlapping assets in a spatial unit. Importance classes are typically integers in 1..5. This layer answers: what is the highest-importance asset class present in this cell? Pair with the Importance index to distinguish a single standout asset (high max, low index) from broad accumulation (mid max, high index).",
-        "A classe de importância máxima entre os activos sobrepostos numa unidade espacial. As classes de importância são tipicamente inteiros em 1..5. Esta camada responde: qual é a classe de importância mais alta presente nesta célula? Combine com o Índice de Importância para distinguir um único activo destacado (máximo alto, índice baixo) de uma acumulação mais ampla (máximo médio, índice alto)."))
+        "The maximum importance class among the overlapping assets in a spatial unit. Importance classes are typically integers in 1..5. This layer answers: what is the highest-importance asset class present in this cell, regardless of how many lower-importance assets share the cell?",
+        "A classe de importância máxima entre os activos sobrepostos numa unidade espacial. As classes de importância são tipicamente inteiros em 1..5. Esta camada responde: qual é a classe de importância mais alta presente nesta célula, independentemente de quantos activos de menor importância partilham a célula?"))
 
-    add(H(2, "7.6 Asset groups (asset_groups_total)", "7.6 Grupos de activos (asset_groups_total)"))
+    add(H(2, "7.4 Asset groups (asset_groups_total)", "7.4 Grupos de activos (asset_groups_total)"))
     add(P(
         "The number of distinct asset groups whose footprints overlap a spatial unit. An asset group is a logical category of features (e.g., wetlands, industrial sites); multiple objects from the same group count as one. This layer is a diversity indicator: high values mark cells where many kinds of features coincide (a multi-themed hotspot), independent of how many individual objects are involved. The names of the contributing groups are stored in the asset_group_names field.",
         "O número de grupos de activos distintos cujas pegadas se sobrepõem a uma unidade espacial. Um grupo de activos é uma categoria lógica de feições (por exemplo, zonas húmidas, locais industriais); múltiplos objectos do mesmo grupo contam como um. Esta camada é um indicador de diversidade: valores altos marcam células onde coincidem muitos tipos de feições (um ponto crítico multi-temático), independentemente do número de objectos individuais envolvidos. Os nomes dos grupos contribuintes são guardados no campo asset_group_names."))
 
-    add(H(2, "7.7 Asset objects (assets_overlap_total)", "7.7 Objectos de activo (assets_overlap_total)"))
+    add(H(2, "7.5 Asset objects (assets_overlap_total)", "7.5 Objectos de activo (assets_overlap_total)"))
     add(P(
         "The total number of individual asset objects (polygons, lines, points) overlapping a spatial unit. Two objects from the same asset group both count. This layer is a density indicator: high values mark cells where many features are stacked, regardless of group diversity. Pair with Asset groups to distinguish 'lots of one thing' (1 group, 50 objects) from 'diverse mix, but thin' (5 groups, 5 objects).",
         "O número total de objectos de activo individuais (polígonos, linhas, pontos) que se sobrepõem a uma unidade espacial. Dois objectos do mesmo grupo de activos contam ambos. Esta camada é um indicador de densidade: valores altos marcam células onde muitas feições estão empilhadas, independentemente da diversidade de grupos. Combine com Grupos de activos para distinguir 'muito de uma coisa' (1 grupo, 50 objectos) de 'mistura diversa, mas fina' (5 grupos, 5 objectos)."))
@@ -822,9 +812,7 @@ def build_blocks():
          "Socio-Economic Asset — natural or anthropogenic entities providing social, cultural, economic or political value.",
          "Importance — an asset's value at global, national, or local scale in relation to rarity, significance, functional and intrinsic value.",
          "Susceptibility — the degree to which an asset will be affected by a pressure, based on severity of impact and recovery ability.",
-         "Sensitivity — overall rating of consequences of allowing an impact to occur. Combines importance and susceptibility for a given pressure.",
-         "Importance index — normalised (1–100) score summarising weighted importance across overlapping assets.",
-         "Sensitivity index — normalised (1–100) score combining importance and susceptibility per geocode group."],
+         "Sensitivity — overall rating of consequences of allowing an impact to occur. Combines importance and susceptibility for a given pressure."],
         ["Atlas de Sensibilidade Ambiental — colectânea de mapas e texto narrativo de suporte que apresenta dados espaciais sobre a sensibilidade de activos ecológicos e/ou socioeconómicos a uma pressão específica.",
          "Sensibilidade Ambiental — combinação da susceptibilidade e da importância de um activo afectado, indicando o impacte potencial de uma dada pressão.",
          "Pressão (factor de stress) — fonte de impacte potencial de uma actividade (perda de habitat, perturbação, poluição, alteração de níveis de água, …).",
@@ -832,9 +820,7 @@ def build_blocks():
          "Activo Socioeconómico — entidades naturais ou antropogénicas com valor social, cultural, económico ou político.",
          "Importância — valor de um activo à escala global, nacional ou local, em relação à raridade, ao significado, ao valor funcional e intrínseco.",
          "Susceptibilidade — grau em que um activo é afectado por uma pressão, com base na severidade do impacte e na capacidade de recuperação.",
-         "Sensibilidade — classificação global das consequências de permitir um impacte. Combina importância e susceptibilidade para uma dada pressão.",
-         "Índice de Importância — pontuação normalizada (1–100) que resume a importância ponderada nos activos sobrepostos.",
-         "Índice de Sensibilidade — pontuação normalizada (1–100) que combina importância e susceptibilidade por grupo de geocódigos."]))
+         "Sensibilidade — classificação global das consequências de permitir um impacte. Combina importância e susceptibilidade para uma dada pressão."]))
     add(PB())
 
     # =========================================================================
@@ -872,7 +858,7 @@ def build_blocks():
         [
             ["Prep", "input parquet metadata, asset/geocode counts", "workspace status files", "seconds"],
             ["Intersect", "tbl_asset_object, tbl_geocode_object", "tbl_stacked/ (partitioned dataset)", "minutes to hours; the heaviest stage"],
-            ["Flatten", "tbl_stacked, sensitivity / index weights from config.ini", "tbl_flat.parquet", "seconds to minutes; scales with tbl_stacked size"],
+            ["Flatten", "tbl_stacked, sensitivity classification from config.ini", "tbl_flat.parquet", "seconds to minutes; scales with tbl_stacked size"],
             ["Backfill", "tbl_flat, tbl_stacked", "per-cell area_m2 enriched into tbl_stacked", "minutes; mostly pandas merges"],
             ["Tiles", "tbl_flat", "output/mbtiles/*.mbtiles", "minutes; depends on zoom range and bounding box"],
             ["Lines", "line inputs, tbl_flat", "tbl_lines_buffered, tbl_segments, tbl_segment_flat", "seconds to minutes"],
@@ -900,7 +886,7 @@ def build_blocks():
     add(TBL(
         ["If you changed…", "Re-run from…", "Notes"],
         [
-            ["Sensitivity weights, importance weights, index weights (Parameters helper)",
+            ["Importance / susceptibility per asset group (Parameters helper)",
              "Flatten + Backfill (plus Tiles / Analysis)",
              "Intersect output is unchanged; only tbl_flat recomputes. The cheapest meaningful iteration loop."],
             ["Sliver cleanup toggle (flatten_sliver_min_area_m2, the runner checkbox)",
@@ -983,7 +969,7 @@ def build_blocks():
          "The pre-flight at the start of Flatten checks both system-wide RAM use and a dataset-aware peak estimate (see 10.4 Memory safety nets). It will let small datasets through on busy desktops; if it ever blocks you incorrectly, the abort message names the two operator knobs to relax.",
          "Use Manage data → Create backup before exploratory parameter sweeps. Reverting is one click; figuring out what changed three iterations later is not.",
          "The Status tab shows row counts for tbl_stacked and tbl_flat. If you tick 'Flatten only' and rerun, watch the tbl_flat row count change; tbl_stacked should stay the same.",
-         "For pure parameter sweeps (sensitivity / index weights only), tick just Flatten + Backfill. Tiles and Analysis can wait until you have settled on a parameter set worth rendering."],
+         "For pure parameter sweeps (importance / susceptibility only), tick just Flatten + Backfill. Tiles and Analysis can wait until you have settled on a parameter set worth rendering."],
         ["Leia o bloco [auto-tune] no topo de cada registo de execução para confirmar que o executor escolheu o número de processos esperado. Se acabou de definir flatten_max_workers = 4 em config.ini mas o registo mostra flatten_max_workers = 1, o auto-tune foi limitado pela RAM disponível — feche outras aplicações ou aumente mem_target_frac e volte a executar.",
          "A verificação prévia no início de Flatten avalia tanto a utilização global de RAM como uma estimativa do pico que tem em conta o tamanho dos dados (ver 10.4 Redes de segurança de memória). Permite passar conjuntos pequenos em computadores ocupados; se alguma vez bloquear incorrectamente, a mensagem de aborto identifica os dois parâmetros do operador a relaxar.",
          "Utilize Gerir dados → Criar cópia de segurança antes de explorações de parâmetros. Reverter é um clique; descobrir três iterações depois o que mudou não.",

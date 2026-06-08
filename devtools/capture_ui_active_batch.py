@@ -513,7 +513,6 @@ def main() -> None:
         HelperCapture("geocode_create", ["code/geocode_manage.py", "--start-tab", "h3", "--original_working_directory", str(repo)], "geocode manage", 35.0),
         HelperCapture("asset_manage", ["code/asset_manage.py", "--original_working_directory", str(repo)], "asset", 35.0),
         HelperCapture("processing_setup", ["code/processing_setup.py", "--original_working_directory", str(repo)], "setup", 40.0),
-        HelperCapture("processing_setup_indexes", ["code/processing_setup.py", "--start-tab", "indexes", "--original_working_directory", str(repo)], "setup", 40.0),
         HelperCapture("processing_pipeline_run", ["code/processing_pipeline_run.py", "--original_working_directory", str(repo)], "process all", 40.0),
         HelperCapture("atlas_manage", ["code/atlas_manage.py", "--original_working_directory", str(repo)], "atlas", 35.0),
         HelperCapture("combined_map", ["code/combined_map.py"], "mesa maps", 50.0),
