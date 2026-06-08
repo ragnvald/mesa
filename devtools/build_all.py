@@ -36,6 +36,42 @@ def oslo_now() -> datetime:
             pass
     return datetime.now()
 
+
+# Per-task build durations (seconds), keyed by label e.g. "helper:combined_map".
+# Written from worker threads during parallel builds, so guard with a lock.
+_BUILD_TIMINGS: dict[str, float] = {}
+_BUILD_TIMINGS_LOCK = threading.Lock()
+
+
+def record_timing(label: str, seconds: float) -> None:
+    with _BUILD_TIMINGS_LOCK:
+        _BUILD_TIMINGS[label] = seconds
+
+
+def append_build_history(started_at: datetime, total_seconds: float) -> None:
+    """Append one build record to a persistent history log.
+
+    Lives at DIST_FOLDER_ROOT (D:/dist), which - unlike FINAL_DIST and
+    BUILD_FOLDER_ROOT - is wiped by neither a main build nor MESA_BUILD_CLEAN,
+    so durations accumulate across runs for comparison. Best-effort: a logging
+    failure must never fail the build.
+    """
+    history_path = DIST_FOLDER_ROOT / "build_history.log"
+    try:
+        with _BUILD_TIMINGS_LOCK:
+            timings = dict(_BUILD_TIMINGS)
+        stamp = started_at.strftime("%Y-%m-%d %H:%M:%S %z").strip()
+        scope = f"helpers={BUILD_HELPERS} main={BUILD_MAIN} parallel={BUILD_PARALLEL} clean={CLEAN_BUILD}"
+        lines = [f"{stamp} | {scope} | total {total_seconds:.1f}s"]
+        for label in sorted(timings):
+            lines.append(f"    {label:<32} {timings[label]:.1f}s")
+        DIST_FOLDER_ROOT.mkdir(parents=True, exist_ok=True)
+        with open(history_path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        log(f"Build history appended: {history_path}")
+    except Exception as exc:  # noqa: BLE001 - never let logging fail the build
+        log(f"[WARN] Could not write build history to '{history_path}': {exc}")
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -519,6 +555,16 @@ def helper_collects_for(basename: str) -> list[str]:
         "line_manage",
     }
     uses_webview = basename in force_webview or _imports_any_module(src, {"webview"})
+
+    # PySide6 (Qt) is large (~100 MB). Only the helpers that actually render a Qt
+    # UI need it - the webview-based helpers (combined_map, line_manage) and the
+    # pure-compute tile generator (tiles_create_raster) do not. Keep an explicit
+    # force set for Qt helpers that might lazy-import to avoid relying solely on
+    # source scanning. See learning.md "PySide6 bundling in standalone helpers".
+    force_qt = {
+        "analysis_setup",
+    }
+    uses_qt = basename in force_qt or _imports_any_module(src, {"PySide6", "PyQt5", "PyQt6"})
     uses_h3 = _imports_any_module(src, {"h3"})
     uses_docx = _imports_any_module(src, {"docx"})
 
@@ -531,7 +577,8 @@ def helper_collects_for(basename: str) -> list[str]:
     )
 
     collects: list[str] = []
-    collects += COLLECT_PYSIDE6
+    if uses_qt:
+        collects += COLLECT_PYSIDE6
     # Always include these small runtime deps to prevent frozen-startup failures
     # caused by transitive pkg_resources imports.
     collects += PKG_RESOURCES_HIDDEN_IMPORTS
@@ -621,6 +668,7 @@ def build_helper(basename: str) -> None:
         args[0:0] = ["--icon", str(icon_path)]
     run_pyinstaller(args)
     elapsed = time.perf_counter() - start
+    record_timing(f"helper:{basename}", elapsed)
     log(f"[HELPER] Finished '{basename}' in {elapsed:.1f}s")
 
 def build_main() -> None:
@@ -656,6 +704,7 @@ def build_main() -> None:
 
     run_pyinstaller(args)
     elapsed = time.perf_counter() - start
+    record_timing("main:mesa", elapsed)
     log(f"[MAIN] Finished 'mesa' in {elapsed:.1f}s")
 
 def flatten_onedir_output() -> None:
@@ -799,6 +848,9 @@ def main() -> None:
     if not CODE_DIR.is_dir():
         fail(f"Expected code directory at: {CODE_DIR}")
 
+    run_start = time.perf_counter()
+    started_at = oslo_now()
+
     log("\n==============================\n  Building MESA\n==============================\n")
     log(f"DEVTOOLS_DIR  = {DEVTOOLS_DIR}")
     log(f"CODE_DIR      = {CODE_DIR}")
@@ -931,6 +983,11 @@ def main() -> None:
                 "This is expected for helper-only builds; the dist will contain tools/resources only. "
                 "To build mesa.exe, re-run with MESA_BUILD_MAIN=1."
             )
+
+    total_seconds = time.perf_counter() - run_start
+    append_build_history(started_at, total_seconds)
+    mins, secs = divmod(int(total_seconds), 60)
+    log(f"Total build time: {total_seconds:.1f}s ({mins}m {secs}s)")
 
     log(f"\nDistribution ready at:\n  {FINAL_DIST}\n")
     sys.exit(0)
