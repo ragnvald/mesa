@@ -27,7 +27,7 @@ DOCS = REPO / "docs"
 
 AUTHOR = "Ragnvald Larsen"
 AFFILIATION = "Norwegian Environment Agency"
-VERSION = "MESA 5.1.0"
+VERSION = "MESA 5.2.0"
 
 PT_MONTHS = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -89,8 +89,8 @@ def build_blocks():
         "The MESA method identifies and evaluates key environmental factors such as ecological significance, biodiversity, species abundance, habitat quality, and the presence of sensitive or protected areas. By combining these factors, the method supports a structured assessment of how pollution incidents may affect the environment.",
         "O método MESA identifica e avalia factores ambientais essenciais, tais como o significado ecológico, a biodiversidade, a abundância de espécies, a qualidade do habitat e a presença de áreas sensíveis ou protegidas. Ao combinar estes factores, o método permite uma avaliação estruturada de como os incidentes de poluição podem afectar o ambiente."))
     add(P(
-        "Complementing the method, the MESA tool provides a Windows desktop workflow for conducting environmental sensitivity assessments and producing map- and report-ready outputs. The current MESA 5.1 build produces:",
-        "Complementando o método, a ferramenta MESA disponibiliza um fluxo de trabalho de ambiente de trabalho Windows para realizar avaliações de sensibilidade ambiental e produzir resultados prontos para mapas e relatórios. A actual versão MESA 5.1 produz:"))
+        "Complementing the method, the MESA tool provides a Windows desktop workflow for conducting environmental sensitivity assessments and producing map- and report-ready outputs. The current MESA 5.2 build produces:",
+        "Complementando o método, a ferramenta MESA disponibiliza um fluxo de trabalho de ambiente de trabalho Windows para realizar avaliações de sensibilidade ambiental e produzir resultados prontos para mapas e relatórios. A actual versão MESA 5.2 produz:"))
     add(UL(
         ["GeoParquet tables under output/geoparquet/ as the canonical analysis store",
          "MBTiles under output/mbtiles/ for fast map viewing",
@@ -104,8 +104,8 @@ def build_blocks():
         "If you use the packaged distribution, start with mesa.exe. If you are running from source, start with python mesa.py.",
         "Se utilizar a distribuição empacotada, inicie com mesa.exe. Se estiver a executar a partir do código-fonte, inicie com python mesa.py."))
     add(P(
-        "MESA 5.1 is the current release line. The method continues to evolve, and ongoing method development will guide future tool development.",
-        "MESA 5.1 é a linha de versão actual. O método continua a evoluir e o desenvolvimento contínuo do método orientará o desenvolvimento futuro da ferramenta."))
+        "MESA 5.2 is the current release line. The method continues to evolve, and ongoing method development will guide future tool development.",
+        "MESA 5.2 é a linha de versão actual. O método continua a evoluir e o desenvolvimento contínuo do método orientará o desenvolvimento futuro da ferramenta."))
 
     add(H(2, "1.1 System requirements (minimum)", "1.1 Requisitos de sistema (mínimo)"))
     add(UL(
@@ -121,14 +121,42 @@ def build_blocks():
     add(PB())
 
     # =========================================================================
-    # 2. What's new in MESA 5.1
+    # 2. What's new in MESA 5.2
     # =========================================================================
-    add(H(1, "2. What's new in MESA 5.1", "2. Novidades no MESA 5.1"))
+    add(H(1, "2. What's new in MESA 5.2", "2. Novidades no MESA 5.2"))
     add(P(
-        "MESA 5.1 is a usability-, packaging-, and reliability-focused update of the desktop workflow. The headline gains are faster processing on real project data and a much lower crash rate on long runs, both driven by smarter memory and CPU balancing inside the pipeline. Around those two, the launcher has been simplified, screens have been deprecated or moved, and the report engine has had a substantial polish pass.",
-        "O MESA 5.1 é uma actualização do fluxo de trabalho de ambiente de trabalho centrada na usabilidade, empacotamento e fiabilidade. Os principais ganhos são um processamento mais rápido em dados reais de projecto e uma taxa de falhas muito inferior em execuções longas, ambos resultado de um balanceamento mais inteligente de memória e CPU dentro da pipeline. Em torno destes dois eixos, o iniciador foi simplificado, alguns ecrãs foram removidos ou deslocados e o motor de relatórios foi substancialmente aperfeiçoado."))
+        "MESA 5.2 is a maps-and-segmentation release. The two biggest changes are visible the moment you open the Results tools: a single unified Maps window replaces the two former map viewers, and a new Segment stage in the processing runner builds a per-geocode-layer segmentation of the analysis result. The reliability and usability gains introduced in 5.1 are carried forward and summarised after the 5.2 highlights below.",
+        "O MESA 5.2 é uma versão centrada em mapas e segmentação. As duas maiores mudanças são visíveis assim que abre as ferramentas de Resultados: uma única janela de Mapas unificada substitui os dois antigos visualizadores de mapas, e uma nova fase Segmentar no executor de processamento constrói uma segmentação por camada de geocódigos do resultado da análise. Os ganhos de fiabilidade e usabilidade introduzidos na 5.1 são mantidos e resumidos após os destaques da 5.2 abaixo."))
 
-    add(H(2, "2.1 Headline gains", "2.1 Principais ganhos"))
+    add(H(2, "2.1 Unified Maps window", "2.1 Janela de Mapas unificada"))
+    add(P(
+        "The Results step now has a single Maps button (it was two: Asset map and Results map). It opens one window with three tabs: Overview (the index / sensitivity MBTiles layers over a basemap, with a small area bar chart), Segmentation (the layers produced by the new Segment stage; empty until a project has a segmentation partition), and Assets (imported asset layers, loaded lazily so the window opens quickly, with AI cartography assigning colours when you turn a group on). Shared controls in the header and a floating panel apply to the active tab: Link zoom & pan keeps all three maps framed on the same area, plus an opacity slider, a basemap selector, floating layer controls, and Export PNG.",
+        "A etapa de Resultados tem agora um único botão Mapas (eram dois: Mapa de Activos e Mapa de Resultados). Abre uma janela com três separadores: Visão Geral (as camadas MBTiles de índice / sensibilidade sobre um mapa-base, com um pequeno gráfico de barras de área), Segmentação (as camadas produzidas pela nova fase Segmentar; vazio até o projecto ter uma partição de segmentação) e Activos (camadas de activos importadas, carregadas de forma diferida para a janela abrir rapidamente, com cartografia assistida por IA a atribuir cores quando activa um grupo). Os controlos partilhados no cabeçalho e num painel flutuante aplicam-se ao separador activo: Ligar zoom e deslocamento mantém os três mapas enquadrados na mesma área, mais um cursor de opacidade, um selector de mapa-base, controlos de camadas flutuantes e Exportar PNG."))
+    add(IMG("ui_combined_map.png",
+            "Unified Maps window — Overview, Segmentation, and Assets tabs with linked zoom & pan.",
+            "Janela de Mapas unificada — separadores Visão Geral, Segmentação e Activos com zoom e deslocamento ligados.",
+            width_cm=15.0))
+
+    add(H(2, "2.2 Segmentation (new Segment stage)", "2.2 Segmentação (nova fase Segmentar)"))
+    add(P(
+        "The data pipeline gains a fifth sub-stage, Segment, which builds tbl_segmentation from tbl_stacked. It runs on by default when data is available and produces two complementary views per geocode layer:",
+        "A pipeline de dados ganha uma quinta subfase, Segmentar, que constrói tbl_segmentation a partir de tbl_stacked. Está activa por omissão quando há dados disponíveis e produz duas vistas complementares por camada de geocódigos:"))
+    add(UL(
+        [
+            "Signatures (default) — a deterministic typology: each polygon is labelled by the set of MESA sensitivity codes (A–E) carried by its overlapping assets, e.g. B+C+D+E. No tuning, fully reproducible, and cheap.",
+            "Clusters — algorithmic segmentation (KMeans, or a spatially-contiguous agglomerative-ward variant that keeps zones geographically connected). Optional and heavier; the spatial libraries are only loaded when you ask for it.",
+        ],
+        [
+            "Assinaturas (por omissão) — uma tipologia determinística: cada polígono é rotulado pelo conjunto de códigos de sensibilidade MESA (A–E) dos activos que o sobrepõem, por exemplo B+C+D+E. Sem afinação, totalmente reproduzível e económica.",
+            "Agrupamentos (clusters) — segmentação algorítmica (KMeans, ou uma variante aglomerativa-ward espacialmente contígua que mantém as zonas geograficamente ligadas). Opcional e mais pesada; as bibliotecas espaciais só são carregadas quando solicitada.",
+        ]))
+    add(P(
+        "A geocode-group multi-select on the runner controls which layers are segmented (default basic_mosaic). Outputs are slim, geometry-free tables (tbl_segmentation/<layer>.parquet plus a tiny tbl_segmentation_profiles.parquet), joined to geocode geometry only at render time. When a segmentation partition exists, the tile generator also renders <group>_seg_signatures.mbtiles and <group>_seg_clusters.mbtiles, which the Maps Segmentation tab shows. The report engine picks the segmentation up as per-method sub-tables with a Total area km² column and report-time multi-selects for geocode groups and segmentation levels.",
+        "Um selector múltiplo de grupos de geocódigos no executor controla quais as camadas a segmentar (por omissão basic_mosaic). Os resultados são tabelas compactas e sem geometria (tbl_segmentation/<camada>.parquet mais uma pequena tbl_segmentation_profiles.parquet), associadas à geometria do geocódigo apenas no momento da renderização. Quando existe uma partição de segmentação, o gerador de azulejos também produz <grupo>_seg_signatures.mbtiles e <grupo>_seg_clusters.mbtiles, mostrados no separador Segmentação dos Mapas. O motor de relatórios integra a segmentação como subtabelas por método com uma coluna Área total km² e selectores múltiplos, no momento do relatório, para grupos de geocódigos e níveis de segmentação."))
+    add(PB())
+
+    add(H(2, "2.3 Headline gains carried over from 5.1",
+          "2.3 Principais ganhos herdados da 5.1"))
     add(H(3, "Substantially faster processing", "Processamento substancialmente mais rápido"))
     add(P(
         "Recent work in the data pipeline cuts avoidable temp-I/O, re-plans chunks more carefully, and tightens the flatten path. On larger projects this materially shortens processing time and reduces the feeling that runs are stuck in I/O-heavy phases. Exact improvement depends on dataset size, geometry complexity, disk speed, and hardware.",
@@ -161,7 +189,7 @@ def build_blocks():
         "A single [auto-tune] block at the top of each run log summarises the platform, hardware, data fingerprint, and per-key decisions, so operators can audit at a glance instead of grepping scattered log lines.",
         "Um único bloco [auto-tune] no topo de cada registo de execução resume a plataforma, o hardware, a impressão digital dos dados e as decisões por chave, permitindo aos operadores auditar de relance em vez de procurar linhas de registo dispersas."))
 
-    add(H(2, "2.2 Launcher and workflow", "2.2 Iniciador e fluxo de trabalho"))
+    add(H(2, "2.4 Launcher and workflow", "2.4 Iniciador e fluxo de trabalho"))
     add(H(3, "Tab structure", "Estrutura de separadores"))
     add(P(
         "The desktop launcher now has six tabs. A new Welcome tab opens first as the launcher's landing screen; the former Tune processing and Publish to GeoNode tabs were moved into popups so the day-to-day tabs stay focused:",
@@ -208,13 +236,13 @@ def build_blocks():
         "Tune processing follows an evaluate-before-commit pattern: Evaluate shows current versus advised values first, Commit changes is separate, and Restore previous tuning rolls back the last committed tune set.",
         "A Afinação do processamento segue um padrão avaliar-antes-de-confirmar: Avaliar mostra primeiro os valores actuais face aos valores aconselhados, Confirmar alterações é separado, e Restaurar afinação anterior reverte o último conjunto de afinação confirmado."))
 
-    add(H(2, "2.3 Authoring and reporting", "2.3 Autoria e relatórios"))
+    add(H(2, "2.5 Authoring and reporting", "2.5 Autoria e relatórios"))
     add(P(
         "Asset import has two convenience options on by default: Dissolve adjacent polygons (merges touching polygons that share identical attribute values) and automatic buffering of point and line inputs using default_point_buffer_m and default_line_buffer_m so zero-area features still contribute. The atlas helper now reads existing atlas state on open and includes a Delete action. The Word report engine has had a layout pass — index maps include legends, area maps are scaled down with explanatory text, atlas tile maps show the full grid with the current tile highlighted, and each atlas tile heading begins on a fresh page.",
         "A importação de Activos tem duas opções de conveniência activas por omissão: Dissolver polígonos adjacentes (combina polígonos contíguos que partilham valores de atributos idênticos) e amortecimento automático de entradas de pontos e linhas, utilizando default_point_buffer_m e default_line_buffer_m para que as feições de área zero continuem a contribuir. O auxiliar de atlas lê agora o estado existente do atlas ao abrir e inclui uma acção Eliminar. O motor de relatórios Word recebeu uma revisão de paginação — os mapas-índice incluem legendas, os mapas de área foram reduzidos com texto explicativo, os mapas dos azulejos do atlas mostram a grelha completa com o azulejo actual destacado, e cada cabeçalho de azulejo do atlas começa numa nova página."))
 
-    add(H(2, "2.4 Reliability and operator controls (new in 5.1)",
-          "2.4 Fiabilidade e controlos do operador (novo na 5.1)"))
+    add(H(2, "2.6 Reliability and operator controls (from 5.1)",
+          "2.6 Fiabilidade e controlos do operador (da 5.1)"))
     add(P(
         "On top of the 5.0 reliability baseline, MESA 5.1 adds a layer of operator-facing controls that recover from trouble instead of aborting, and make long runs safer to start, stop, and resume:",
         "Sobre a base de fiabilidade da 5.0, o MESA 5.1 acrescenta uma camada de controlos para o operador que recuperam de problemas em vez de abortar, e tornam as execuções longas mais seguras de iniciar, parar e retomar:"))
@@ -318,14 +346,14 @@ def build_blocks():
     add(H(2, "3.5 Running processing", "3.5 Execução do processamento"))
     add(OL(
         ["Open Workflows → Process (step 3) → Process.",
-         "In the process runner, select the steps you want: Data processing (Prep / Intersect / Flatten), Tiles processing, Lines processing, Analysis processing.",
+         "In the process runner, select the steps you want: Data processing (Prep / Intersect / Flatten / Backfill / Segment), Tiles processing, Lines processing, Analysis processing.",
          "Leave Data processing enabled at minimum for a first full run.",
          "Enable Tiles processing if you want MBTiles in the same run.",
          "Enable Lines and/or Analysis processing when those datasets have been prepared.",
          "Use Progress map inside the process runner if you want a live minimap during longer runs.",
          "Use the Normal / Advanced toggle at the top of the runner to expose per-stage selectors and the sliver-cleanup option."],
         ["Abra Fluxos de trabalho → Processar (passo 3) → Processar.",
-         "No executor de processamento, seleccione as fases pretendidas: Processamento de dados (Prep / Intersect / Flatten), Processamento de azulejos, Processamento de linhas, Processamento de análise.",
+         "No executor de processamento, seleccione as fases pretendidas: Processamento de dados (Prep / Intersect / Flatten / Backfill / Segmentar), Processamento de azulejos, Processamento de linhas, Processamento de análise.",
          "Mantenha pelo menos o Processamento de dados activado para uma primeira execução completa.",
          "Active o Processamento de azulejos se quiser MBTiles na mesma execução.",
          "Active o Processamento de linhas e/ou Análise quando esses dados estiverem preparados.",
@@ -337,8 +365,8 @@ def build_blocks():
 
     add(H(2, "3.6 Reviewing results", "3.6 Rever os resultados"))
     add(P(
-        "After processing, use Workflows → Results (step 4): Asset map inspects asset layers and supporting data, Results map reviews processed outputs together with background layers, Compare study areas compares analysis groups side by side, and Report engine creates a Word report from the latest outputs.",
-        "Após o processamento, utilize Fluxos de trabalho → Resultados (passo 4): Mapa de Activos inspecciona camadas de activos e dados de suporte, Mapa de Resultados revê resultados processados em conjunto com camadas de fundo, Comparar áreas de estudo compara grupos de análise lado a lado, e Motor de relatórios cria um relatório Word a partir dos resultados mais recentes."))
+        "After processing, use Workflows → Results (step 4): Maps opens one tabbed window with Overview (index/sensitivity layers), Segmentation (the Segment-stage output), and Assets (imported asset layers), with linked zoom & pan, opacity, a basemap selector, and PNG export; Compare study areas compares analysis groups side by side; and Report engine creates a Word report from the latest outputs.",
+        "Após o processamento, utilize Fluxos de trabalho → Resultados (passo 4): Mapas abre uma janela com separadores Visão Geral (camadas de índice/sensibilidade), Segmentação (resultado da fase Segmentar) e Activos (camadas de activos importadas), com zoom e deslocamento ligados, opacidade, selector de mapa-base e exportação PNG; Comparar áreas de estudo compara grupos de análise lado a lado; e Motor de relatórios cria um relatório Word a partir dos resultados mais recentes."))
 
     add(H(2, "3.7 Backup and restore", "3.7 Cópia de segurança e restauro"))
     add(UL(
@@ -358,8 +386,8 @@ def build_blocks():
     # =========================================================================
     add(H(1, "4. Desktop user interface", "4. Interface gráfica"))
     add(P(
-        "The MESA 5.1 desktop launcher opens on the Welcome tab, where you can name the project and add a short description, then continue to Workflows. The Workflows tab organizes the project into four practical phases: prepare data, configure the project, run processing, and review results.",
-        "O iniciador MESA 5.1 abre no separador Boas-vindas, onde pode nomear o projecto e adicionar uma breve descrição, e depois continuar para Fluxos de trabalho. O separador Fluxos de trabalho organiza o projecto em quatro fases práticas: preparar dados, configurar o projecto, executar o processamento e rever os resultados."))
+        "The MESA 5.2 desktop launcher opens on the Welcome tab, where you can name the project and add a short description, then continue to Workflows. The Workflows tab organizes the project into four practical phases: prepare data, configure the project, run processing, and review results.",
+        "O iniciador MESA 5.2 abre no separador Boas-vindas, onde pode nomear o projecto e adicionar uma breve descrição, e depois continuar para Fluxos de trabalho. O separador Fluxos de trabalho organiza o projecto em quatro fases práticas: preparar dados, configurar o projecto, executar o processamento e rever os resultados."))
     add(IMG("ui_workflows.png",
             "Desktop launcher — Workflows tab.",
             "Iniciador do ambiente de trabalho — separador Fluxos de trabalho.",
@@ -437,8 +465,8 @@ def build_blocks():
             "Processar — executor de processamento unificado.",
             width_cm=15.0))
     add(P(
-        "The runner can execute, in order: Data processing (prep, intersect, flatten, backfill); Tiles processing; Lines processing; Analysis processing. Each materially-costly stage has its own checkbox in the run grid, so any one of them can be re-run without forcing the others to repeat. A Normal / Advanced toggle at the top keeps the default view simple. Worker counts for each stage are decided at runtime by the auto-tune step unless explicit values are set in config.ini.",
-        "O executor pode executar, por ordem: Processamento de dados (prep, intersect, flatten, backfill); Processamento de azulejos; Processamento de linhas; Processamento de análise. Cada fase materialmente custosa tem a sua própria caixa na grelha de execução, pelo que qualquer uma pode ser executada novamente sem forçar a repetição das restantes. O alternador Normal / Avançado no topo mantém a vista simples. As contagens de processos de trabalho de cada fase são decididas em tempo de execução pelo passo de auto-ajuste, salvo se forem definidos valores explícitos em config.ini."))
+        "The runner can execute eight numbered stages, in order: Data processing (prep, intersect, flatten, backfill, segment); Tiles processing; Lines processing; Analysis processing. The Segment sub-stage builds a per-geocode-layer segmentation (tbl_segmentation) and is on by default when data is available. Each materially-costly stage has its own checkbox in the run grid, so any one of them can be re-run without forcing the others to repeat. A Normal / Advanced toggle at the top keeps the default view simple. Worker counts for each stage are decided at runtime by the auto-tune step unless explicit values are set in config.ini.",
+        "O executor pode executar oito fases numeradas, por ordem: Processamento de dados (prep, intersect, flatten, backfill, segmentar); Processamento de azulejos; Processamento de linhas; Processamento de análise. A subfase Segmentar constrói uma segmentação por camada de geocódigos (tbl_segmentation) e está activa por omissão quando há dados disponíveis. Cada fase materialmente custosa tem a sua própria caixa na grelha de execução, pelo que qualquer uma pode ser executada novamente sem forçar a repetição das restantes. O alternador Normal / Avançado no topo mantém a vista simples. As contagens de processos de trabalho de cada fase são decididas em tempo de execução pelo passo de auto-ajuste, salvo se forem definidos valores explícitos em config.ini."))
     add(IMG("ui_processing_pipeline_run.png",
             "Processing pipeline runner — numbered stages and per-stage controls.",
             "Executor da pipeline de processamento — fases numeradas e controlos por fase.",
@@ -447,25 +475,19 @@ def build_blocks():
 
     add(H(2, "4.4 Results (step 4)", "4.4 Resultados (passo 4)"))
     add(IMG("overview_review_and_report.png",
-            "Results — asset map, results map, compare, report engine.",
-            "Resultados — mapa de activos, mapa de resultados, comparação, motor de relatórios.",
+            "Results — Maps, compare study areas, report engine.",
+            "Resultados — Mapas, comparar áreas de estudo, motor de relatórios.",
             width_cm=15.0))
     add(UL(
-        ["Asset map — inspect asset layers and supporting data.",
-         "Results map — review processed outputs together with basemaps / background layers.",
+        ["Maps — one tabbed window (replacing the former separate Asset map and Results map viewers) with Overview (index/sensitivity layers), Segmentation (Segment-stage output), and Assets (imported asset layers) tabs; linked zoom & pan, an opacity slider, a basemap selector, floating layer controls, and Export PNG.",
          "Compare study areas — compare analysis groups side by side.",
-         "Report engine — create a Word report from the latest results."],
-        ["Mapa de activos — inspeccionar camadas de activos e dados de suporte.",
-         "Mapa de resultados — rever resultados processados junto com mapas-base.",
+         "Report engine — create a Word report from the latest results, now including per-method segmentation sub-tables."],
+        ["Mapas — uma janela com separadores (substituindo os antigos visualizadores Mapa de Activos e Mapa de Resultados) com Visão Geral (camadas de índice/sensibilidade), Segmentação (resultado da fase Segmentar) e Activos (camadas de activos importadas); zoom e deslocamento ligados, cursor de opacidade, selector de mapa-base, controlos de camadas flutuantes e Exportar PNG.",
          "Comparar áreas de estudo — comparar grupos de análise lado a lado.",
-         "Motor de relatórios — criar um relatório Word a partir dos resultados mais recentes."]))
-    add(IMG("ui_asset_map_view.png",
-            "Asset map view.",
-            "Vista do mapa de activos.",
-            width_cm=15.0))
-    add(IMG("ui_map_overview.png",
-            "Results map view.",
-            "Vista do mapa de resultados.",
+         "Motor de relatórios — criar um relatório Word a partir dos resultados mais recentes, agora com subtabelas de segmentação por método."]))
+    add(IMG("ui_combined_map.png",
+            "Maps window — Overview / Segmentation / Assets tabs.",
+            "Janela de Mapas — separadores Visão Geral / Segmentação / Activos.",
             width_cm=15.0))
     add(IMG("ui_analysis_present.png",
             "Compare study areas.",
@@ -656,6 +678,9 @@ def build_blocks():
     add(P(
         "Geocode layers define how MESA aggregates results spatially. Drop polygon datasets (Quarter Degree Grid Cells, municipal boundaries, H3 hexagons, or any custom tessellation) into input/geocode/ and reference them in config.ini. Linear features follow a similar pattern: place line datasets under input/lines/. MESA buffers and optionally segments these features and stores results in tbl_segment_flat.parquet.",
         "As camadas de geocódigos definem como o MESA agrega os resultados espacialmente. Coloque conjuntos poligonais (células de grelha de quarto de grau, limites municipais, hexágonos H3 ou qualquer outra tesselação) em input/geocode/ e referencie-os em config.ini. As feições lineares seguem um padrão semelhante: coloque conjuntos lineares em input/lines/. O MESA aplica amortecimento e, opcionalmente, segmenta estas feições, armazenando os resultados em tbl_segment_flat.parquet."))
+    add(P(
+        "Distinct from line segmentation, MESA 5.2 adds geocode-layer segmentation: the Segment stage of the processing runner groups the polygons of a geocode layer into a smaller number of zones that share a similar sensitivity profile, so a dense result map can be read as a handful of distinct area types instead of thousands of individual cells. Two methods are offered — Signatures, a deterministic typology where each polygon is labelled by the set of sensitivity codes (A–E) carried by its overlapping assets (the default, needing no tuning), and Clusters, an algorithmic grouping by numeric sensitivity profile (KMeans or a spatially-contiguous variant). The output (tbl_segmentation) carries no geometry and joins back to geocode polygons on code at render time; the resulting zones appear on the Segmentation tab of the Maps window and in the report engine.",
+        "Distinta da segmentação de linhas, o MESA 5.2 acrescenta a segmentação por camada de geocódigos: a fase Segmentar do executor agrupa os polígonos de uma camada de geocódigos num número menor de zonas que partilham um perfil de sensibilidade semelhante, permitindo ler um mapa de resultados denso como um punhado de tipos de área distintos em vez de milhares de células individuais. São oferecidos dois métodos — Assinaturas, uma tipologia determinística em que cada polígono é rotulado pelo conjunto de códigos de sensibilidade (A–E) dos activos que o sobrepõem (a opção por omissão, sem afinação), e Agrupamentos, um agrupamento algorítmico por perfil numérico de sensibilidade (KMeans ou uma variante espacialmente contígua). O resultado (tbl_segmentation) não contém geometria e associa-se de novo aos polígonos de geocódigo pelo campo code no momento da renderização; as zonas resultantes surgem no separador Segmentação da janela de Mapas e no motor de relatórios."))
     add(PB())
 
     # =========================================================================

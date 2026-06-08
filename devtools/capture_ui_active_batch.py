@@ -35,8 +35,7 @@ TARGET_SCRIPT_NAMES = {
     "processing_setup.py",
     "processing_pipeline_run.py",
     "atlas_manage.py",
-    "map_overview.py",
-    "asset_map_view.py",
+    "combined_map.py",
     "report_generate.py",
     "analysis_setup.py",
     "analysis_present.py",
@@ -331,7 +330,7 @@ def send_ctrl_tab(reverse: bool = False) -> None:
 
 def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
     # Tab order and filenames must match what User-interface.md references.
-    # Current launcher (mesa.py): Welcome / Workflows / Status / Manage data / Config / About.
+    # Current launcher (mesa.py) addTab order: Welcome / Workflows / Status / Config / Manage data / About.
     # mesa.py now sets the window title to the bare version from config.ini
     # (e.g. "5.1") — read it dynamically so this tool keeps working across
     # version bumps. The pid-tree match in find_app_window is the primary
@@ -340,8 +339,8 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         ("ui_welcome.png", "Welcome"),
         ("ui_workflows.png", "Workflows"),
         ("ui_status.png", "Status"),
-        ("ui_manage.png", "Manage data"),
         ("ui_config.png", "Config"),
+        ("ui_manage.png", "Manage data"),
         ("ui_about.png", "About"),
     ]
 
@@ -517,8 +516,7 @@ def main() -> None:
         HelperCapture("processing_setup_indexes", ["code/processing_setup.py", "--start-tab", "indexes", "--original_working_directory", str(repo)], "setup", 40.0),
         HelperCapture("processing_pipeline_run", ["code/processing_pipeline_run.py", "--original_working_directory", str(repo)], "process all", 40.0),
         HelperCapture("atlas_manage", ["code/atlas_manage.py", "--original_working_directory", str(repo)], "atlas", 35.0),
-        HelperCapture("map_overview", ["code/map_overview.py"], "maps overview", 50.0),
-        HelperCapture("asset_map_view", ["code/asset_map_view.py"], "asset layers", 50.0),
+        HelperCapture("combined_map", ["code/combined_map.py"], "mesa maps", 50.0),
         HelperCapture("report_generate", ["code/report_generate.py", "--original_working_directory", str(repo)], "report generator", 35.0),
         HelperCapture("analysis_setup", ["code/analysis_setup.py", "--original_working_directory", str(repo)], "area analysis", 40.0),
         HelperCapture("analysis_present", ["code/analysis_present.py", "--original_working_directory", str(repo)], "comparison", 40.0),
