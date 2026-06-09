@@ -149,6 +149,12 @@ try:
 except Exception:
     h3 = None
 
+# QDGC (Quarter Degree Grid Cells) — vendored under code/qdgc_py (see code/qdgc_py/VENDORED.md).
+try:
+    import qdgc_py
+except Exception:
+    qdgc_py = None
+
 # GUI / PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
@@ -180,7 +186,8 @@ def _normalize_geocode_origin(raw_origin: object, group_name: object) -> str:
     gname = str(group_name or "").strip()
     if gname == BASIC_MOSAIC_GROUP:
         return GEOCODE_ORIGIN_BASIC_MOSAIC
-    if gname.upper().startswith("H3_R"):
+    upper = gname.upper()
+    if upper.startswith("H3_R") or upper.startswith("QDGC_L"):
         return GEOCODE_ORIGIN_GENERATED
     return GEOCODE_ORIGIN_IMPORTED
 
@@ -198,6 +205,14 @@ AVG_HEX_AREA_KM2 = {
     5: 253, 6: 36.1, 7: 5.15, 8: 0.736, 9: 0.105,
     10: 0.0150, 11: 0.00214, 12: 0.000305, 13: 0.0000436, 14: 0.00000623, 15: 0.00000089
 }
+
+# QDGC is degree-based: cell side = 1° / 2**level. Sizes below are at the equator
+# (1° ≈ 111.320 km); true metric size shrinks toward the poles, unlike H3's near
+# equal-area cells. These tables only drive the size-range suggester and labels —
+# actual cell generation uses qdgc_py. Levels 0..12 cover ~111 km down to ~27 m.
+QDGC_MAX_LEVEL = 12
+QDGC_SIDE_KM = {lvl: (1.0 / (2 ** lvl)) * 111.320 for lvl in range(0, QDGC_MAX_LEVEL + 1)}
+QDGC_SIDE_M = {lvl: km * 1000.0 for lvl, km in QDGC_SIDE_KM.items()}
 
 # -----------------------------------------------------------------------------
 # GUI globals + heartbeat
@@ -1845,6 +1860,31 @@ def h3_from_union(union_geom, res: int) -> gpd.GeoDataFrame:
     rows = [{"h3_index": h, "geometry": Polygon(_cell_boundary(h))} for h in hexes]
     return gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
 
+def qdgc_from_union(union_geom, level: int) -> gpd.GeoDataFrame:
+    """Fill a (multi)polygon AOI with QDGC cells at `level`, returning a GeoDataFrame
+    of [code, geometry]. Mirrors h3_from_union but uses the vendored qdgc_py grid.
+    Coordinates are WGS84 lon/lat, matching qdgc_py's (lon, lat) convention."""
+    if qdgc_py is None:
+        raise RuntimeError("qdgc_py module not available")
+    if union_geom is None:
+        return gpd.GeoDataFrame(columns=["code", "geometry"], geometry="geometry", crs="EPSG:4326")
+    geom_poly = _extract_polygonal(union_geom)
+    if geom_poly is None or geom_poly.is_empty:
+        return gpd.GeoDataFrame(columns=["code", "geometry"], geometry="geometry", crs="EPSG:4326")
+    polys = list(geom_poly.geoms) if geom_poly.geom_type == "MultiPolygon" else [geom_poly]
+    codes: set[str] = set()
+    for poly in polys:
+        try:
+            exterior = list(poly.exterior.coords)  # (lon, lat) in WGS84
+            holes = [list(ring.coords) for ring in poly.interiors] or None
+            codes |= set(qdgc_py.polygon_to_cells(exterior, level, holes=holes, predicate="intersects"))
+        except Exception as e:
+            log_to_gui(f"QDGC fill failed (Z{level}): {e}", "WARN")
+    if not codes:
+        return gpd.GeoDataFrame(columns=["code", "geometry"], geometry="geometry", crs="EPSG:4326")
+    rows = [{"code": c, "geometry": Polygon(qdgc_py.cell_to_polygon(c))} for c in codes]
+    return gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
+
 # -----------------------------------------------------------------------------
 # GeoParquet-first union for H3
 # -----------------------------------------------------------------------------
@@ -1873,7 +1913,7 @@ def _read_parquet_gdf(path: Path, default_crs: str = "EPSG:4326") -> gpd.GeoData
             log_to_gui(f"Failed reading {path.name}: {e}", "WARN")
     return gpd.GeoDataFrame(geometry=[], crs=default_crs)
 
-def union_from_asset_groups_or_objects(base_dir: Path):
+def union_from_asset_groups_or_objects(base_dir: Path, buffer_key: str = "h3_union_buffer_m"):
     cfg = read_config(config_path(base_dir))
     pq_groups = geoparquet_path(base_dir, "tbl_asset_group")
     g = _read_parquet_gdf(pq_groups)
@@ -1898,7 +1938,7 @@ def union_from_asset_groups_or_objects(base_dir: Path):
                     log_to_gui("Union source: GeoParquet tbl_asset_object (polygons)", "INFO")
                     return u
             try:
-                buf_m = float(cfg["DEFAULT"].get("h3_union_buffer_m", "50"))
+                buf_m = float(cfg["DEFAULT"].get(buffer_key, "50"))
             except Exception:
                 buf_m = 50.0
             metric_crs = working_metric_crs_for(ao, cfg)
@@ -2069,7 +2109,7 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
         "INFO",
     )
 
-def _list_existing_h3_group_names(base_dir: Path) -> list[str]:
+def _list_existing_group_names_with_prefix(base_dir: Path, prefix: str) -> list[str]:
     g, _ = _load_existing_geocodes(base_dir, load_objects=False)
     if g.empty or "name_gis_geocodegroup" not in g.columns:
         return []
@@ -2082,7 +2122,13 @@ def _list_existing_h3_group_names(base_dir: Path) -> list[str]:
         )
     except Exception:
         return []
-    return sorted({n for n in names if n and n.startswith("H3_R")})
+    return sorted({n for n in names if n and n.startswith(prefix)})
+
+def _list_existing_h3_group_names(base_dir: Path) -> list[str]:
+    return _list_existing_group_names_with_prefix(base_dir, "H3_R")
+
+def _list_existing_qdgc_group_names(base_dir: Path) -> list[str]:
+    return _list_existing_group_names_with_prefix(base_dir, "QDGC_L")
 
 def load_geocode_groups(base_dir: Path) -> gpd.GeoDataFrame:
     pg = gpq_dir(base_dir) / TABLE_GEOCODE_GROUP
@@ -2810,6 +2856,121 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
             else:
                 log_to_gui("Step [H3] COMPLETED")
 
+def write_qdgc_levels(base_dir: Path, levels: List[int], clear_existing: bool = False) -> int:
+    """Generate QDGC geocode groups (QDGC_L{level}) over the asset AOI.
+
+    Mirrors write_h3_levels: same AOI union, same per-level cap pre-flight, same
+    merge/write into tbl_geocode_group / tbl_geocode_object. Cells come from the
+    vendored qdgc_py grid instead of H3."""
+    update_progress(0)
+    log_to_gui("Step [QDGC] STARTED")
+    status_detail = None
+    failed = False
+    try:
+        if not levels:
+            status_detail = "No QDGC levels selected."
+            log_to_gui(status_detail, "WARN")
+            return 0
+        if qdgc_py is None:
+            status_detail = "qdgc_py package not available (expected vendored under code/qdgc_py)."
+            log_to_gui(status_detail, "WARN")
+            return 0
+
+        cfg = read_config(config_path(base_dir))
+        max_cells = float(cfg["DEFAULT"].get("qdgc_max_cells", "1200000")) if "DEFAULT" in cfg else 1_200_000.0
+        union_geom = union_from_asset_groups_or_objects(base_dir, buffer_key="qdgc_union_buffer_m")
+        if union_geom is None:
+            status_detail = "No polygonal AOI found in tbl_asset_group/tbl_asset_object (consider polygons or set [DEFAULT] qdgc_union_buffer_m)."
+            log_to_gui(status_detail, "WARN")
+            return 0
+        log_to_gui(f"QDGC version: {getattr(qdgc_py, '__version__', '?')}", "INFO")
+
+        groups_rows = []
+        objects_parts = []
+        levels_sorted = sorted(set(int(z) for z in levels))
+        if clear_existing:
+            existing_qdgc = _list_existing_qdgc_group_names(base_dir)
+            if existing_qdgc:
+                log_to_gui(
+                    f"[QDGC] Delete existing enabled → clearing {len(existing_qdgc)} group(s): {', '.join(existing_qdgc)}",
+                    "INFO",
+                )
+                _clear_geocode_groups(base_dir, existing_qdgc)
+            else:
+                log_to_gui("[QDGC] Delete existing enabled → no existing QDGC groups found to delete.", "INFO")
+        steps = max(1, len(levels_sorted))
+        bbox_poly = _bbox_polygon_from(union_geom)
+        if bbox_poly is None:
+            raise RuntimeError("Failed to compute bbox for QDGC group.")
+        try:
+            minx, miny, maxx, maxy = [float(v) for v in union_geom.bounds]
+        except Exception:
+            minx, miny, maxx, maxy = [float(v) for v in bbox_poly.bounds]
+
+        for i, z in enumerate(levels_sorted):
+            update_progress(5 + i * (80 / steps))
+            # Cheap bbox-fill estimate (>= the true polygon fill) for the cap check.
+            try:
+                approx_cells = float(qdgc_py.estimate_cell_count(None, z, bbox=(minx, miny, maxx, maxy)))
+            except Exception:
+                approx_cells = float("inf")
+            if approx_cells > max_cells:
+                log_to_gui(
+                    f"Skipping QDGC L{z}: AOI bbox → ~{approx_cells:,.0f} cells exceeds cap ({max_cells:,.0f}).",
+                    "WARN",
+                )
+                continue
+            group_name = f"QDGC_L{z}"
+            gdf = qdgc_from_union(union_geom, z)
+            if gdf.empty:
+                log_to_gui(f"No QDGC cells produced for level {z}.", "WARN")
+                continue
+            gdf["name_gis_geocodegroup"] = group_name
+            gdf = gdf[["code", "name_gis_geocodegroup", "geometry"]]
+            objects_parts.append(gdf)
+            log_to_gui(f"QDGC L{z}: prepared {len(gdf):,} cells.")
+            groups_rows.append({
+                "name": group_name, "name_gis_geocodegroup": group_name,
+                "geocode_origin": GEOCODE_ORIGIN_GENERATED,
+                "title_user": f"QDGC level {z}",
+                "description": f"Quarter Degree Grid Cells at level {z}",
+                "geometry": bbox_poly
+            })
+
+        if not groups_rows or not objects_parts:
+            status_detail = "No QDGC output generated (all levels skipped/empty)."
+            log_to_gui(status_detail, "WARN")
+            out_dir = gpq_dir(base_dir)
+            if not (out_dir / TABLE_GEOCODE_GROUP).exists():
+                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / TABLE_GEOCODE_GROUP, index=False)
+            if not (out_dir / TABLE_GEOCODE_OBJECT).exists():
+                gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(out_dir / TABLE_GEOCODE_OBJECT, index=False)
+            return 0
+
+        new_groups = gpd.GeoDataFrame(groups_rows, geometry="geometry", crs="EPSG:4326")
+        new_objects = gpd.GeoDataFrame(pd.concat(objects_parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
+
+        added_g, added_o, tot_g, tot_o = _merge_and_write_geocodes(
+            base_dir, new_groups, new_objects, refresh_group_names=[r["name_gis_geocodegroup"] for r in groups_rows]
+        )
+        log_to_gui(
+            f"Merged GeoParquet geocodes → {gpq_dir(base_dir)}  "
+            f"(added groups: {added_g}, added objects: {added_o:,}; totals => groups: {tot_g}, objects: {tot_o:,})"
+        )
+        status_detail = f"Generated QDGC levels: {', '.join(str(z) for z in levels_sorted)} (objects added: {added_o:,})"
+        return added_o
+    except Exception as e:
+        failed = True
+        log_to_gui(f"Step [QDGC] FAILED: {e}", "ERROR")
+        return 0
+    finally:
+        update_progress(100)
+        if not failed:
+            if status_detail:
+                log_to_gui(f"Step [QDGC] COMPLETED ({status_detail})")
+            else:
+                log_to_gui("Step [QDGC] COMPLETED")
+
 # -----------------------------------------------------------------------------
 # Mosaic runner
 # -----------------------------------------------------------------------------
@@ -2930,6 +3091,20 @@ def format_level_size_list(levels: list[int]) -> str:
         return "(none)"
     return ", ".join(f"R{r} ({H3_RES_ACROSS_FLATS_M[r]:,.0f} m)" for r in levels)
 
+def suggest_qdgc_levels_by_size(min_km: float, max_km: float) -> list[int]:
+    """QDGC analogue of suggest_h3_levels_by_size. Matches by equator cell side;
+    QDGC cells are smaller toward the poles, so this is an upper bound on size."""
+    out = []
+    for lvl, size in QDGC_SIDE_KM.items():
+        if min_km <= size <= max_km:
+            out.append(lvl)
+    return sorted(out)
+
+def format_qdgc_level_size_list(levels: list[int]) -> str:
+    if not levels:
+        return "(none)"
+    return ", ".join(f"L{z} ({QDGC_SIDE_M[z]:,.0f} m @eq)" for z in levels)
+
 # -----------------------------------------------------------------------------
 # GUI
 # -----------------------------------------------------------------------------
@@ -2975,6 +3150,7 @@ class GeocodeManagerWindow(QMainWindow):
         self.edit_idx = 0
         self.write_path = gpq_dir(base) / TABLE_GEOCODE_GROUP
         self._h3_levels: list[int] = []
+        self._qdgc_levels: list[int] = []
 
         self._mosaic_tail_state: dict[str, object] = {"offset": 0, "carry": "", "active": False}
 
@@ -3036,6 +3212,7 @@ class GeocodeManagerWindow(QMainWindow):
         self._build_strategy_tab()
         self._build_mosaic_tab()
         self._build_h3_tab()
+        self._build_qdgc_tab()
         self._build_import_tab()
         self._build_edit_tab()
 
@@ -3057,8 +3234,9 @@ class GeocodeManagerWindow(QMainWindow):
         tab_lookup = {"": 0, "strategy": 0, "setup": 0,
                       "mosaic": 1, "basic": 1,
                       "h3": 2, "other": 2,
-                      "import": 3, "bin": 3,
-                      "edit": 4, "group": 4}
+                      "qdgc": 3,
+                      "import": 4, "bin": 4,
+                      "edit": 5, "group": 5}
         try:
             self.tabs.setCurrentIndex(tab_lookup.get(str(start_tab).strip().lower(), 0))
         except Exception:
@@ -3066,8 +3244,8 @@ class GeocodeManagerWindow(QMainWindow):
         self._sync_progress_bar_visibility(self.tabs.currentIndex())
 
     def _sync_progress_bar_visibility(self, index: int):
-        # 0 = Strategy, 4 = Edit geocodes — neither runs background work.
-        self.progress_bar.setVisible(index not in (0, 4))
+        # 0 = Strategy, 5 = Edit geocodes — neither runs background work.
+        self.progress_bar.setVisible(index not in (0, 5))
 
     # ---- Tab 0: Strategy (project-level choice; affects all other tabs) ----
     def _build_strategy_tab(self):
@@ -3289,7 +3467,66 @@ class GeocodeManagerWindow(QMainWindow):
 
         self.tabs.addTab(tab, "H3 codes")
 
-    # ---- Tab 3: Import ----
+    # ---- Tab 3: QDGC ----
+    def _build_qdgc_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("Generate QDGC (Quarter Degree Grid Cells) from existing asset/geocode coverage."))
+
+        gen_group = QGroupBox("QDGC generation")
+        gen_layout = QGridLayout(gen_group)
+        gen_layout.setHorizontalSpacing(10)
+        gen_layout.setVerticalSpacing(6)
+
+        gen_layout.addWidget(QLabel("Min m:"), 0, 0, Qt.AlignRight)
+        self.qdgc_min_edit = QLineEdit("50")
+        self.qdgc_min_edit.setFixedWidth(100)
+        gen_layout.addWidget(self.qdgc_min_edit, 0, 1)
+
+        gen_layout.addWidget(QLabel("Max m:"), 0, 2, Qt.AlignRight)
+        self.qdgc_max_edit = QLineEdit("50000")
+        self.qdgc_max_edit.setFixedWidth(100)
+        gen_layout.addWidget(self.qdgc_max_edit, 0, 3)
+
+        self.qdgc_levels_label = QLabel("(none)")
+        gen_layout.addWidget(QLabel("Matching levels:"), 1, 0, Qt.AlignRight)
+        gen_layout.addWidget(self.qdgc_levels_label, 1, 1, 1, 3)
+
+        self.qdgc_clear_check = QCheckBox("Delete existing QDGC before generating")
+        gen_layout.addWidget(self.qdgc_clear_check, 2, 0, 1, 4)
+
+        btn_col = QVBoxLayout()
+        self.qdgc_suggest_btn = QPushButton("Suggest QDGC")
+        self.qdgc_suggest_btn.setProperty("role", "primary")
+        self.qdgc_suggest_btn.clicked.connect(self._suggest_qdgc)
+        btn_col.addWidget(self.qdgc_suggest_btn)
+        self.qdgc_generate_btn = QPushButton("Generate QDGC")
+        self.qdgc_generate_btn.setProperty("role", "primary")
+        self.qdgc_generate_btn.setEnabled(False)
+        self.qdgc_generate_btn.clicked.connect(self._generate_qdgc)
+        btn_col.addWidget(self.qdgc_generate_btn)
+        gen_layout.addLayout(btn_col, 0, 4, 3, 1)
+
+        if qdgc_py is None:
+            self.qdgc_levels_label.setText("qdgc_py module missing (expected vendored under code/qdgc_py)")
+            self.qdgc_suggest_btn.setEnabled(False)
+            self.qdgc_generate_btn.setEnabled(False)
+
+        layout.addWidget(gen_group)
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        self.qdgc_log = QPlainTextEdit()
+        self.qdgc_log.setReadOnly(True)
+        log_layout.addWidget(self.qdgc_log)
+        layout.addWidget(log_group, stretch=1)
+
+        self.tabs.addTab(tab, "QDGC codes")
+
+    # ---- Tab 4: Import ----
     def _build_import_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -3442,6 +3679,8 @@ class GeocodeManagerWindow(QMainWindow):
             label = self.tabs.tabText(self.tabs.currentIndex()).lower()
             if "mosaic" in label:
                 target = self.mosaic_log
+            elif "qdgc" in label:
+                target = self.qdgc_log
             elif "h3" in label:
                 target = self.h3_log
             elif "import" in label:
@@ -3583,6 +3822,35 @@ class GeocodeManagerWindow(QMainWindow):
         levels = list(self._h3_levels)
         clear = self.h3_clear_check.isChecked()
         _run_in_thread(write_h3_levels, self.base, levels, clear_existing=clear, on_done=True)
+
+    def _suggest_qdgc(self):
+        log_to_gui("[QDGC] Suggest requested.", "INFO")
+        try:
+            min_m = float(self.qdgc_min_edit.text())
+            max_m = float(self.qdgc_max_edit.text())
+            if min_m <= 0 or max_m <= 0 or max_m < min_m:
+                raise ValueError
+        except Exception:
+            log_to_gui("Enter valid positive meter values (min <= max).", "WARN")
+            return
+        min_km, max_km = min_m / 1000.0, max_m / 1000.0
+        self._qdgc_levels = suggest_qdgc_levels_by_size(min_km, max_km)
+        self.qdgc_levels_label.setText(format_qdgc_level_size_list(self._qdgc_levels))
+        self.qdgc_generate_btn.setEnabled(bool(self._qdgc_levels))
+        log_to_gui(
+            f"Suggested QDGC levels: {self._qdgc_levels}" if self._qdgc_levels
+            else "No QDGC levels for that size range.", "INFO"
+        )
+
+    def _generate_qdgc(self):
+        if not self._qdgc_levels:
+            log_to_gui("No suggested levels to generate.", "WARN")
+            return
+        self._active_log_widget = self.qdgc_log
+        log_to_gui(f"[QDGC] Generate requested for levels: {self._qdgc_levels}", "INFO")
+        levels = list(self._qdgc_levels)
+        clear = self.qdgc_clear_check.isChecked()
+        _run_in_thread(write_qdgc_levels, self.base, levels, clear_existing=clear, on_done=True)
 
     # ------------------------------------------------------------------
     # Import
