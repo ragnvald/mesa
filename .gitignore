@@ -48,3 +48,14 @@ code/log.txt
 mesa.code-workspace
 mesa.sln
 system_resources/mesa_illustration.xcf
+
+# --- local working-tree noise (2026-06-09) ---
+# macOS Finder metadata, in every directory.
+.DS_Store
+# macOS Finder duplicate artifacts, e.g. "readme 2.txt", "b2 2.jpg", "bilde_1 2.png".
+* [2-9].*
+# Local scratch / partial-pipeline experiments — not part of the shipped tool.
+run_flatten_only.py
+devtools/dissolve_clusters.py
+devtools/signature_analysis.py
+devtools/test_segmentation.py
