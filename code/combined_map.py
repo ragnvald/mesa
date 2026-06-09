@@ -111,7 +111,10 @@ _FI_RESULTS_OVERLAY_LABELS = {
     "assetstotal": "# asset objects",
 }
 # Always-shown context metrics. (label, column, transform, unit)
+# OWA index is here (not just under its own overlay) so the value is visible on
+# every results popup; _fi_metrics dedups by column so the OWA overlay won't repeat it.
 _FI_RESULTS_GENERAL = [
+    ("OWA index", "index_owa", None, None),
     ("# asset groups", "asset_groups_total", None, None),
     ("# asset objects", "assets_overlap_total", None, None),
     ("Area", "area_m2", lambda v: float(v) / 1_000_000.0, "km²"),
@@ -864,6 +867,8 @@ HTML = r"""<!doctype html>
   th,td{border-bottom:1px solid #e3d7be;padding:3px 4px;text-align:right}
   th:first-child,td:first-child{text-align:left}
   th{color:#715a36;font-weight:600}
+  #segZones thead th{cursor:pointer;user-select:none;white-space:nowrap}
+  #segZones thead th:hover{color:#3f3528}
   tfoot td{font-weight:600;border-top:1px solid #cbb791}
   .sw{display:inline-block;width:12px;height:12px;border:1px solid #b9a87f;vertical-align:middle;margin-right:6px}
   .muted{color:#8a7c63}
@@ -977,7 +982,7 @@ HTML = r"""<!doctype html>
         <h2>Segmentation</h2>
         <div class="row"><b>Legend</b><div id="segLegend" class="muted">–</div></div>
         <div class="row"><b>Zones</b> <span class="muted">(largest area first)</span>
-          <table id="segZones"><thead><tr><th>Zone</th><th>Area km²</th><th>Cells</th><th>Sens</th><th>Assets</th></tr></thead>
+          <table id="segZones"><thead><tr><th data-key="zone">Zone</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="sens_mean">Sens</th><th data-key="mean_n_assets">Assets</th></tr></thead>
           <tbody></tbody></table>
         </div>
       </div>
@@ -1327,17 +1332,58 @@ HTML = r"""<!doctype html>
   function clearSegLayers(){ if(segTile){ maps.seg.removeLayer(segTile); segTile=null; } segVec.clearLayers(); segVecGj=null; fiClear(); }
   function setMsg(t){ document.getElementById('segMsg').innerHTML=t||''; }
 
+  // Zone table sort state. Legend keeps the server order (largest area first);
+  // only the table reorders when a header is clicked.
+  var segZonesData=[], segSort={key:null, dir:1};
+
   function renderPanel(zones){
     var leg=document.getElementById('segLegend'); leg.innerHTML='';
-    var tb=document.querySelector('#segZones tbody'); tb.innerHTML='';
-    if(!zones || !zones.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
+    segZonesData = zones ? zones.slice() : [];
+    document.querySelector('#segZones tbody').innerHTML='';
+    if(!zones || !zones.length){ leg.innerHTML='<span class="muted">–</span>'; renderSegRows(); return; }
     zones.forEach(function(z){
       var d=document.createElement('div'); d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+z.zone; leg.appendChild(d);
+    });
+    renderSegRows();
+  }
+
+  function renderSegRows(){
+    var tb=document.querySelector('#segZones tbody'); tb.innerHTML='';
+    var rows=segZonesData.slice();
+    if(segSort.key){
+      var k=segSort.key, dir=segSort.dir;
+      rows.sort(function(a,b){
+        var va=a[k], vb=b[k];
+        if(k==='zone'){ return String(va==null?'':va).localeCompare(String(vb==null?'':vb))*dir; }
+        va=(va==null||isNaN(va))?-Infinity:Number(va); vb=(vb==null||isNaN(vb))?-Infinity:Number(vb);
+        return (va<vb?-1:va>vb?1:0)*dir;
+      });
+    }
+    rows.forEach(function(z){
       var tr=document.createElement('tr');
       tr.innerHTML='<td>'+z.zone+'</td><td>'+fmt(z.total_area_km2,2)+'</td><td>'+fmt(z.n_polygons,0)+'</td><td>'+fmt(z.sens_mean,1)+'</td><td>'+fmt(z.mean_n_assets,1)+'</td>';
       tb.appendChild(tr);
     });
+    document.querySelectorAll('#segZones thead th').forEach(function(th){
+      var base=th.getAttribute('data-label');
+      if(base===null){ base=th.textContent; th.setAttribute('data-label', base); }
+      th.textContent = (th.dataset.key===segSort.key) ? base+(segSort.dir>0?' ▲':' ▼') : base;
+    });
   }
+
+  (function(){
+    var thead=document.querySelector('#segZones thead');
+    if(!thead) return;
+    thead.addEventListener('click', function(e){
+      var th=e.target.closest('th'); if(!th || !th.dataset.key) return;
+      var k=th.dataset.key;
+      // Toggle direction on the active column; new column starts ascending for
+      // the zone name, descending for the numeric metrics (largest first).
+      if(segSort.key===k){ segSort.dir=-segSort.dir; }
+      else { segSort.key=k; segSort.dir=(k==='zone')?1:-1; }
+      renderSegRows();
+    });
+  })();
 
   function showTiles(info, level, mode){
     clearSegLayers();
