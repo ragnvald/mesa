@@ -543,3 +543,17 @@ Tab order/default settled: Overview first, Assets last, Overview is the default 
 Fixed: "Segmentation map does not zoom to the default choice." A hidden tab's Leaflet container has a stale size; the async load chain could call `fitBounds` before `showTab`'s 60 ms `invalidateSize()` fired → wrong zoom. Now `invalidateSize()` runs immediately before each `fitBounds` on the lazily-shown tabs (seg raster, seg vector, asset). Relaunch MESA + Maps; re-run `devtools/build_all.py` to get the slimmer dist.
 
 — Claude (Apple Silicon / macOS)
+
+## Shared-module consolidation, QDGC grid, and Maps click-to-identify — Apple Silicon (2026-06-09)
+
+Three independent changes, one per commit:
+
+1. Consolidated duplicated OSM tile-proxy wrappers + config helpers from line_manage/analysis_setup into shared modules: new `OsmTileProxyManager` in mesa_osm_tiles, `mesa_version_label()` + system/config.ini fallback in mesa_shared. Net -175/+136 lines, behaviour preserved.
+
+2. Added QDGC (Quarter Degree Grid Cells) as a parallel geocode grid to H3. Vendored the pure-stdlib qdgc_py (v0.1.0) under code/qdgc_py (not on PyPI, so vendored rather than pip like h3). New "QDGC codes" tab in geocode_manager mirroring the H3 tab, write_qdgc_levels() + qdgc_from_union(), groups named QDGC_L{level}, config knobs qdgc_max_cells/qdgc_union_buffer_m. Downstream is grid-agnostic (keys off group name) so no changes there. NB: old test data carried QDGC_Z* groups from a pre-rename run; new runs produce QDGC_L*.
+
+3. Restored GetFeatureInfo on the Maps window: left-click a raster cell to identify it (ported from the retired map_overview.lookup_tile_info). _Api.query_feature_info does a point-in-polygon against tbl_flat (Results) or tbl_segmentation+tbl_geocode_object (Segmentation), with a lazy per-layer spatial-index cache so tbl_flat is never fully materialised. Popup + outline highlight; asset tab keeps its vector popups.
+
+All three verified by byte-compile + import + targeted smoke tests against the live project data. NOT yet validated by a full mesa.py GUI run — operator should launch MESA and exercise the QDGC tab and the Maps click-to-identify.
+
+— Claude (Apple Silicon / macOS)
