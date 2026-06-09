@@ -49,6 +49,11 @@ class HelperCapture:
     args: list[str]
     title_hint: str
     wait_seconds: float
+    # Optional extra environment for the launch (e.g. the combined_map devtools
+    # hook MESA_DEVTOOLS_MAP=seg:sens_mean) and an explicit output filename when
+    # it should not follow the default ui_<key>.png convention.
+    env: dict[str, str] | None = None
+    out_filename: str | None = None
 
 
 @dataclass(frozen=True)
@@ -422,7 +427,11 @@ def capture_popup(popup: PopupCapture, repo: Path, py: Path, wiki_images: Path) 
 
 
 def capture_helper(helper: HelperCapture, repo: Path, py: Path, wiki_images: Path) -> bool:
-    proc = subprocess.Popen([str(py), *helper.args], cwd=repo)
+    launch_env = None
+    if helper.env:
+        launch_env = os.environ.copy()
+        launch_env.update(helper.env)
+    proc = subprocess.Popen([str(py), *helper.args], cwd=repo, env=launch_env)
     try:
         hwnd, title = find_app_window(proc.pid, helper.title_hint, timeout=300.0)
         if hwnd is None:
@@ -440,7 +449,7 @@ def capture_helper(helper: HelperCapture, repo: Path, py: Path, wiki_images: Pat
         current_hwnd = refreshed_hwnd or hwnd
         current_title = refreshed_title or title
 
-        out_path = wiki_images / f"ui_{helper.key}.png"
+        out_path = wiki_images / (helper.out_filename or f"ui_{helper.key}.png")
         last_error = None
         for attempt in range(1, 4):
             try:
@@ -516,6 +525,13 @@ def main() -> None:
         HelperCapture("processing_pipeline_run", ["code/processing_pipeline_run.py", "--original_working_directory", str(repo)], "process all", 40.0),
         HelperCapture("atlas_manage", ["code/atlas_manage.py", "--original_working_directory", str(repo)], "atlas", 35.0),
         HelperCapture("combined_map", ["code/combined_map.py"], "mesa maps", 50.0),
+        # Segmentation tab with the Zones table pre-sorted (by mean sensitivity)
+        # via the combined_map devtools hook, so the sortable-table feature is
+        # visible. Needs a project with a segmentation partition; otherwise the
+        # tab shows "No segmentation found" and the table is empty.
+        HelperCapture("combined_map_segmentation", ["code/combined_map.py"], "mesa maps", 60.0,
+                      env={"MESA_DEVTOOLS_MAP": "seg:sens_mean"},
+                      out_filename="ui_combined_map_segmentation.png"),
         HelperCapture("report_generate", ["code/report_generate.py", "--original_working_directory", str(repo)], "report generator", 35.0),
         HelperCapture("analysis_setup", ["code/analysis_setup.py", "--original_working_directory", str(repo)], "area analysis", 40.0),
         HelperCapture("analysis_present", ["code/analysis_present.py", "--original_working_directory", str(repo)], "comparison", 40.0),

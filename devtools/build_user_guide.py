@@ -153,6 +153,13 @@ def build_blocks():
     add(P(
         "A geocode-group multi-select on the runner controls which layers are segmented (default basic_mosaic). Outputs are slim, geometry-free tables (tbl_segmentation/<layer>.parquet plus a tiny tbl_segmentation_profiles.parquet), joined to geocode geometry only at render time. When a segmentation partition exists, the tile generator also renders <group>_seg_signatures.mbtiles and <group>_seg_clusters.mbtiles, which the Maps Segmentation tab shows. The report engine picks the segmentation up as per-method sub-tables with a Total area km² column and report-time multi-selects for geocode groups and segmentation levels.",
         "Um selector múltiplo de grupos de geocódigos no executor controla quais as camadas a segmentar (por omissão basic_mosaic). Os resultados são tabelas compactas e sem geometria (tbl_segmentation/<camada>.parquet mais uma pequena tbl_segmentation_profiles.parquet), associadas à geometria do geocódigo apenas no momento da renderização. Quando existe uma partição de segmentação, o gerador de azulejos também produz <grupo>_seg_signatures.mbtiles e <grupo>_seg_clusters.mbtiles, mostrados no separador Segmentação dos Mapas. O motor de relatórios integra a segmentação como subtabelas por método com uma coluna Área total km² e selectores múltiplos, no momento do relatório, para grupos de geocódigos e níveis de segmentação."))
+    add(P(
+        "The Segmentation tab also shows a Zones summary table whose columns (Zone, Area km², Cells, Sens, Assets) are sortable: click a header to sort, click again to reverse, with an arrow marking the active column. Numeric columns sort largest-first by default; only the table reorders — the colour legend keeps its largest-area-first order.",
+        "O separador Segmentação mostra também uma tabela-resumo de Zonas cujas colunas (Zona, Área km², Células, Sens, Activos) são ordenáveis: clique num cabeçalho para ordenar, clique novamente para inverter, com uma seta a marcar a coluna activa. As colunas numéricas ordenam por maior valor primeiro por omissão; apenas a tabela é reordenada — a legenda de cores mantém a ordem de maior área primeiro."))
+    add(IMG("ui_combined_map_segmentation.png",
+            "Segmentation tab — the Zones table sorted by mean sensitivity (click any column header to sort).",
+            "Separador Segmentação — a tabela de Zonas ordenada por sensibilidade média (clique em qualquer cabeçalho de coluna para ordenar).",
+            width_cm=15.0))
     add(PB())
 
     add(H(2, "2.3 Headline gains carried over from 5.1",

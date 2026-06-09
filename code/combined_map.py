@@ -991,6 +991,12 @@ HTML = r"""<!doctype html>
 </div>
 <script>
   function api(){ return window.pywebview.api; }
+  // Devtools hook: ?tab=seg&sort=<col> lets the screenshot tool open a tab and
+  // pre-sort the Zones table so the feature is visible without OS-level clicks.
+  // See devtools/capture_ui_active_batch.py.
+  var _qp=new URLSearchParams(location.search);
+  var START_TAB=_qp.get('tab')||'';
+  var START_SORT=_qp.get('sort')||'';
   // Basemaps (same set as the old Results map).
   var BASEMAPS=[
     {id:'osm', label:'OpenStreetMap', url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -1344,6 +1350,8 @@ HTML = r"""<!doctype html>
     zones.forEach(function(z){
       var d=document.createElement('div'); d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+z.zone; leg.appendChild(d);
     });
+    // Devtools: apply a one-time initial sort so the screenshot shows the arrow.
+    if(START_SORT && !segSort.key){ segSort={key:START_SORT, dir:(START_SORT==='zone')?1:-1}; }
     renderSegRows();
   }
 
@@ -1468,7 +1476,10 @@ HTML = r"""<!doctype html>
   }
 
   // Overview is the default active tab — init it once the bridge is ready.
-  window.addEventListener('pywebviewready', function(){ if(!resLoaded) initResults(); });
+  window.addEventListener('pywebviewready', function(){
+    if(!resLoaded) initResults();
+    if(START_TAB && START_TAB!=='results'){ showTab(START_TAB); }
+  });
 </script>
 </body></html>"""
 
@@ -1480,6 +1491,13 @@ def run(base: str | None = None) -> None:
     _BASE_DIR = Path(base) if base else base_dir()
     api = _Api(_BASE_DIR)
     url = _start_server()
+    # Devtools screenshot hook: open a tab / pre-sort the Zones table on load.
+    # MESA_DEVTOOLS_MAP=seg:sens_mean -> ?tab=seg&sort=sens_mean
+    dev = os.environ.get("MESA_DEVTOOLS_MAP", "").strip()
+    if dev:
+        tab, _, srt = dev.partition(":")
+        q = "tab=" + tab + (("&sort=" + srt) if srt else "")
+        url = url + ("&" if "?" in url else "?") + q
     window = webview.create_window(
         title="MESA maps (Assets / Overview / Segmentation)",
         url=url,
