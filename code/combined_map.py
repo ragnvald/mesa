@@ -100,6 +100,132 @@ def _mbtiles_meta(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# GetFeatureInfo payload builders (module-level so the bridge stays lean)
+# ---------------------------------------------------------------------------
+# Results overlay suffix -> human label (mirrors the Overview layer radios).
+_FI_RESULTS_OVERLAY_LABELS = {
+    "sensitivity_max": "Sensitivity (max)",
+    "importance_max": "Importance (max)",
+    "index_owa": "OWA index",
+    "groupstotal": "# asset groups",
+    "assetstotal": "# asset objects",
+}
+# Always-shown context metrics. (label, column, transform, unit)
+_FI_RESULTS_GENERAL = [
+    ("# asset groups", "asset_groups_total", None, None),
+    ("# asset objects", "assets_overlap_total", None, None),
+    ("Area", "area_m2", lambda v: float(v) / 1_000_000.0, "km²"),
+]
+# Overlay-specific metrics layered on top of the general ones.
+_FI_RESULTS_SPECIFIC = {
+    "sensitivity_max": [
+        ("Sensitivity (max)", "sensitivity_max", None, None),
+        ("Sensitivity code", "sensitivity_code_max", None, None),
+        ("Sensitivity description", "sensitivity_description_max", None, None),
+        ("Importance (max)", "importance_max", None, None),
+        ("Susceptibility (max)", "susceptibility_max", None, None),
+    ],
+    "importance_max": [
+        ("Importance (max)", "importance_max", None, None),
+        ("Importance code", "importance_code_max", None, None),
+        ("Importance description", "importance_description_max", None, None),
+    ],
+    "index_owa": [("OWA index", "index_owa", None, None)],
+    "groupstotal": [("Asset group names", "asset_group_names", None, None)],
+    "assetstotal": [("# asset objects", "assets_overlap_total", None, None)],
+}
+
+
+def _fi_clean_value(val):
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return None
+    except Exception:
+        pass
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        try:
+            f = float(val)
+        except Exception:
+            return val
+        if f != f or f in (float("inf"), float("-inf")):
+            return None
+        return int(f) if f.is_integer() else f
+    s = str(val).strip()
+    return s or None
+
+
+def _fi_metrics(row, fields):
+    out, seen = [], set()
+    for label, col, tx, unit in fields:
+        if col in seen:
+            continue
+        seen.add(col)
+        val = row.get(col)
+        if tx is not None and val is not None:
+            try:
+                val = tx(val)
+            except Exception:
+                continue
+        cl = _fi_clean_value(val)
+        if cl is not None and cl != "":
+            out.append({"label": label, "value": cl, "unit": unit})
+    return out
+
+
+def _fi_results_info(row, overlay, group):
+    overlay = overlay if overlay in _FI_RESULTS_OVERLAY_LABELS else "sensitivity_max"
+    fields = _FI_RESULTS_GENERAL + _FI_RESULTS_SPECIFIC.get(overlay, [])
+    return {
+        "title": str(row.get("code") or "Cell"),
+        "subtitle": f"{group} · {_FI_RESULTS_OVERLAY_LABELS[overlay]}",
+        "metrics": _fi_metrics(row, fields),
+    }
+
+
+def _fi_seg_info(row, level, mode):
+    if mode == "clusters":
+        cid = row.get("cluster_id")
+        title = f"Cluster {cid}" if cid is not None and str(cid) != "" else "Cluster"
+        fields = [
+            ("Cluster id", "cluster_id", None, None),
+            ("Method", "cluster_method", None, None),
+            ("# assets", "n_assets", None, None),
+            ("Mean sensitivity", "sens_mean", None, None),
+        ]
+    else:
+        title = str(row.get("signature") or "Signature")
+        fields = [
+            ("Signature", "signature", None, None),
+            ("# assets", "n_assets", None, None),
+            ("Mean sensitivity", "sens_mean", None, None),
+        ]
+    return {
+        "title": title,
+        "subtitle": f"{level} · {'Clusters' if mode == 'clusters' else 'Signatures'}",
+        "metrics": _fi_metrics(row, fields),
+    }
+
+
+def _fi_json_ready(v):
+    try:
+        import numpy as _np
+        if isinstance(v, (_np.integer,)):
+            return int(v)
+        if isinstance(v, (_np.floating,)):
+            return float(v)
+    except Exception:
+        pass
+    if isinstance(v, dict):
+        return {k: _fi_json_ready(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_fi_json_ready(x) for x in v]
+    return v
+
+
+# ---------------------------------------------------------------------------
 # Python <-> JS bridge
 # ---------------------------------------------------------------------------
 
@@ -108,6 +234,9 @@ class _Api:
         self.base = Path(base)
         self.gpq = self.base / "output" / "geoparquet"
         self._window = None
+        # GetFeatureInfo: lazily-built, per-(mode, layer) GeoDataFrame cache (4326,
+        # with a geopandas spatial index) so repeated map clicks don't re-read parquet.
+        self._fi_cache: dict = {}
 
     def set_window(self, w):
         self._window = w
@@ -470,6 +599,123 @@ class _Api:
         except Exception as exc:
             return {"error": str(exc)}
 
+    # -- GetFeatureInfo (click-to-query) -------------------------------------
+    # Even though the displayed layers are raster MBTiles, the underlying cell
+    # data lives in parquet. A left-click sends lat/lng here; we point-in-polygon
+    # against the cells of the *currently displayed* layer and return attributes
+    # + geometry for a popup and an outline highlight. Ported from the old
+    # map_overview.lookup_tile_info, trimmed to today's tbl_flat schema.
+    def _fi_load(self, mode: str, layer: str):
+        """Return a 4326 GeoDataFrame of cells for (mode, layer), cached. The
+        Results layer reads tbl_flat filtered to the group; Segmentation joins
+        tbl_segmentation/<level> to geometry from tbl_geocode_object."""
+        key = (mode, str(layer))
+        if key in self._fi_cache:
+            return self._fi_cache[key]
+        import geopandas as gpd
+        import pandas as pd
+        import pyarrow.parquet as pq
+        gdf = None
+        try:
+            if mode == "results":
+                p = self.gpq / "tbl_flat.parquet"
+                if not p.exists():
+                    self._fi_cache[key] = None
+                    return None
+                want = ["name_gis_geocodegroup", "code", "geometry",
+                        "sensitivity_max", "sensitivity_code_max", "sensitivity_description_max",
+                        "importance_max", "importance_code_max", "importance_description_max",
+                        "susceptibility_max", "index_owa", "asset_group_names",
+                        "asset_groups_total", "assets_overlap_total", "area_m2"]
+                have = set(pq.ParquetFile(p).schema_arrow.names)
+                cols = [c for c in want if c in have]
+                if "geometry" not in cols:
+                    cols.append("geometry")
+                try:
+                    gdf = gpd.read_parquet(p, columns=cols, filters=[("name_gis_geocodegroup", "=", str(layer))])
+                except Exception:
+                    gdf = gpd.read_parquet(p, columns=cols)
+                    gdf = gdf[gdf["name_gis_geocodegroup"].astype(str) == str(layer)]
+            else:  # segmentation
+                part = self.gpq / "tbl_segmentation" / f"{layer}.parquet"
+                go = self.gpq / "tbl_geocode_object.parquet"
+                if not part.exists() or not go.exists():
+                    self._fi_cache[key] = None
+                    return None
+                seg_df = pd.read_parquet(part)
+                try:
+                    geo = gpd.read_parquet(go, columns=["code", "geometry"],
+                                           filters=[("name_gis_geocodegroup", "=", str(layer))])
+                except Exception:
+                    geo = gpd.read_parquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
+                    geo = geo[geo["name_gis_geocodegroup"].astype(str) == str(layer)][["code", "geometry"]]
+                gdf = gpd.GeoDataFrame(seg_df.merge(geo, on="code", how="inner"),
+                                       geometry="geometry", crs=getattr(geo, "crs", None))
+            if gdf is not None and not gdf.empty:
+                try:
+                    if gdf.crs is not None and "4326" not in str(gdf.crs):
+                        gdf = gdf.to_crs(4326)
+                except Exception:
+                    pass
+        except Exception:
+            gdf = None
+        self._fi_cache[key] = gdf
+        return gdf
+
+    def _fi_point_lookup(self, gdf, lng: float, lat: float):
+        from shapely.geometry import Point
+        pt = Point(float(lng), float(lat))
+        try:
+            idxs = list(gdf.sindex.query(pt, predicate="intersects"))
+        except Exception:
+            idxs = []
+        for pos in idxs:
+            try:
+                geom = gdf.geometry.iloc[pos]
+            except Exception:
+                continue
+            if geom is not None and not geom.is_empty and geom.intersects(pt):
+                return gdf.iloc[pos]
+        # Fallback: linear scan (small layers, or if the spatial index is unavailable).
+        try:
+            sub = gdf[gdf.geometry.apply(lambda g: g is not None and not g.is_empty and g.intersects(pt))]
+            if not sub.empty:
+                return sub.iloc[0]
+        except Exception:
+            pass
+        return None
+
+    def query_feature_info(self, lat, lng, mode, layer, overlay=None) -> dict:
+        """Point-in-polygon lookup for the cell under a map click.
+
+        mode: 'results' (tbl_flat) or 'seg' (segmentation). layer: geocode group
+        / segmentation level name. overlay: results suffix (sensitivity_max, …) or
+        seg mode (signatures/clusters) — selects which attributes to surface."""
+        try:
+            if not layer:
+                return {"ok": False, "error": "No active layer."}
+            gdf = self._fi_load(str(mode), str(layer))
+            if gdf is None or gdf.empty:
+                return {"ok": False, "error": "No queryable data for this layer."}
+            try:
+                row = self._fi_point_lookup(gdf, float(lng), float(lat))
+            except Exception:
+                return {"ok": False, "error": "Invalid coordinates."}
+            if row is None:
+                return {"ok": False, "error": "No cell at that location."}
+            if str(mode) == "results":
+                info = _fi_results_info(row, str(overlay or "sensitivity_max"), str(layer))
+            else:
+                info = _fi_seg_info(row, str(layer), str(overlay or "signatures"))
+            geom = row.geometry
+            try:
+                info["geometry"] = geom.__geo_interface__ if (geom is not None and not geom.is_empty) else None
+            except Exception:
+                info["geometry"] = None
+            return {"ok": True, "info": _fi_json_ready(info)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
 
 # ---------------------------------------------------------------------------
 # Loopback server: HTML at / and MBTiles tiles at /tiles/<name>/{z}/{x}/{y}.png
@@ -773,6 +1019,9 @@ HTML = r"""<!doctype html>
   var resTile = null;                              // overview index raster layer
   var segOverlay = null;                           // line-segments vector overlay (Overview tab)
   var assetLayers = {};                            // gid -> asset L.geoJSON layer
+  var resKind = null;                              // active Overview overlay suffix (for click-to-query)
+  var fiHighlight = null;                          // GetFeatureInfo: clicked-cell outline overlay
+  var fiHighlightMap = null;                       // map the highlight currently lives on
   var current = 'results';
   var opacity = 0.85;                             // shared layer opacity (header slider)
 
@@ -829,10 +1078,60 @@ HTML = r"""<!doctype html>
   Object.keys(maps).forEach(function(k){ maps[k].on('moveend zoomend', function(){ if(k===current) syncFrom(k); }); });
   document.getElementById('linkChk').addEventListener('change', function(){ linking=this.checked; if(linking) syncFrom(current); });
 
+  // ---- GetFeatureInfo: left-click a raster cell to identify it ----
+  // The map layers are raster MBTiles, so the cell attributes are fetched from
+  // the source parquet via the Python bridge (query_feature_info) on each click.
+  var fiPopup = null;
+  function fiClear(){
+    if(fiPopup){ try{ fiPopup.remove(); }catch(e){} fiPopup=null; }
+    if(fiHighlight && fiHighlightMap){ try{ fiHighlightMap.removeLayer(fiHighlight); }catch(e){} }
+    fiHighlight=null; fiHighlightMap=null;
+  }
+  function fiEsc(s){ return String(s==null?'':s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
+  function fiFmt(v){ return (typeof v==='number') ? v.toLocaleString(undefined,{maximumFractionDigits:3}) : fiEsc(v); }
+  function fiPopupHtml(info){
+    var h='<div style="min-width:140px"><div style="font-weight:600;font-size:13px;margin-bottom:1px">'+fiEsc(info.title||'Cell')+'</div>';
+    if(info.subtitle) h+='<div style="color:#777;font-size:11px;margin-bottom:5px">'+fiEsc(info.subtitle)+'</div>';
+    var m=info.metrics||[];
+    if(m.length){ h+='<table style="border-collapse:collapse;font-size:12px">';
+      for(var i=0;i<m.length;i++){
+        h+='<tr><td style="padding:1px 10px 1px 0;color:#555;vertical-align:top">'+fiEsc(m[i].label)+
+           '</td><td style="padding:1px 0;text-align:right;font-weight:500">'+fiFmt(m[i].value)+(m[i].unit?(' '+fiEsc(m[i].unit)):'')+'</td></tr>';
+      }
+      h+='</table>'; }
+    h+='</div>'; return h;
+  }
+  function fiShow(mapKey, latlng, info){
+    var m=maps[mapKey];
+    fiClear();
+    if(info.geometry){
+      try{ fiHighlight=L.geoJSON(info.geometry,{interactive:false,
+            style:{color:'#1d4ed8',weight:2,fill:false,opacity:0.95}}).addTo(m); fiHighlightMap=m; }catch(e){}
+    }
+    fiPopup=L.popup({maxWidth:340,autoPan:true}).setLatLng(latlng).setContent(fiPopupHtml(info)).openOn(m);
+  }
+  function fiQuery(mapKey, latlng, mode, layer, overlay){
+    if(!layer) return;
+    api().query_feature_info(latlng.lat, latlng.lng, mode, layer, overlay).then(function(res){
+      if(res && res.ok && res.info){ fiShow(mapKey, latlng, res.info); }
+      else {
+        fiClear();
+        fiPopup=L.popup({maxWidth:240}).setLatLng(latlng)
+          .setContent('<div style="color:#777;font-size:11px">'+fiEsc((res&&res.error)||'No cell here.')+'</div>')
+          .openOn(maps[mapKey]);
+      }
+    }).catch(function(){});
+  }
+  // Results raster → tbl_flat for the active group + overlay.
+  maps.results.on('click', function(e){ if(resTile && resGroup && resKind) fiQuery('results', e.latlng, 'results', resGroup, resKind); });
+  // Segmentation raster → the level's cells. The vector fallback keeps its own per-zone popups.
+  maps.seg.on('click', function(e){ if(segTile && segLevel && segMode) fiQuery('seg', e.latlng, 'seg', segLevel, segMode); });
+
   // ---- tabs ----
   function showTab(tab){
     var prev=current;                 // capture BEFORE switching
     current=tab;
+    fiClear();                        // drop any feature popup/highlight from the previous tab
     document.querySelectorAll('.tab').forEach(function(b){ b.classList.toggle('active', b.dataset.tab===tab); });
     document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('active'); });
     document.getElementById('view-'+tab).classList.add('active');
@@ -951,6 +1250,8 @@ HTML = r"""<!doctype html>
   function showResLayer(group, suf){
     var info=((resCatalog[group]||{}).kinds||{})[suf];
     if(!info) return;
+    resKind=suf;                       // remember active overlay for click-to-query
+    fiClear();                         // a new layer invalidates the previous popup/highlight
     if(resTile){ maps.results.removeLayer(resTile); resTile=null; }
     resTile=L.tileLayer('/tiles/'+info.name+'/{z}/{x}/{y}.png',
       {opacity:opacity, maxNativeZoom:(info.maxzoom||14), minNativeZoom:(info.minzoom||0), maxZoom:19, tms:false}).addTo(maps.results);
@@ -958,7 +1259,8 @@ HTML = r"""<!doctype html>
       try{ maps.results.fitBounds([[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]],{padding:[20,20]}); if(linking) syncFrom('results'); }catch(e){}
     }
     var d=KIND_DESC[suf]||'';
-    document.getElementById('resMsg').innerHTML='<b>'+info.label+'</b> — '+group+(d?('<br>'+d):'');
+    document.getElementById('resMsg').innerHTML='<b>'+info.label+'</b> — '+group+(d?('<br>'+d):'')+
+      '<br><span class="muted">Click a cell to identify it.</span>';
   }
   function setResKinds(group){
     var box=document.getElementById('resKinds'); box.innerHTML='';
@@ -1022,7 +1324,7 @@ HTML = r"""<!doctype html>
   var WARN_CELLS=1000000, HARD_CAP=2000000;
   function fmt(v,d){ return (v===null||v===undefined)?'–':Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}); }
   function setLoading(on){ document.getElementById('loading').style.display=on?'block':'none'; }
-  function clearSegLayers(){ if(segTile){ maps.seg.removeLayer(segTile); segTile=null; } segVec.clearLayers(); segVecGj=null; }
+  function clearSegLayers(){ if(segTile){ maps.seg.removeLayer(segTile); segTile=null; } segVec.clearLayers(); segVecGj=null; fiClear(); }
   function setMsg(t){ document.getElementById('segMsg').innerHTML=t||''; }
 
   function renderPanel(zones){
@@ -1049,7 +1351,7 @@ HTML = r"""<!doctype html>
       // fitBounds against a 0-sized map yields the wrong zoom.
       try{ maps.seg.invalidateSize(); maps.seg.fitBounds(b,{padding:[20,20]}); if(linking) syncFrom('seg'); }catch(e){}
     }
-    setMsg('Raster tiles ('+info.name+').');
+    setMsg('Raster tiles ('+info.name+'). <span class="muted">Click a cell to identify it.</span>');
     api().seg_panel(level, mode).then(function(p){ renderPanel(p.zones||[]); });
   }
 
