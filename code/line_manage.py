@@ -14,14 +14,8 @@ import os, sys, uuid, threading, locale, configparser, argparse, warnings, time,
 from pathlib import Path
 from typing import Any, Dict, Optional
 from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP
-from mesa_shared import leaflet_bundle
-from mesa_osm_tiles import (
-    OsmTileProxy,
-    build_osm_user_agent,
-    choose_cache_dir,
-    start_osm_tile_proxy as start_shared_osm_tile_proxy,
-    stop_osm_tile_proxy as stop_shared_osm_tile_proxy,
-)
+from mesa_shared import leaflet_bundle, mesa_version_label, read_config
+from mesa_osm_tiles import OsmTileProxyManager
 
 # --- pywebview config (quiet, Edge runtime preferred) ---
 os.environ['PYWEBVIEW_GUI'] = 'edgechromium'
@@ -34,7 +28,6 @@ except Exception:
     pass
 
 webview = None
-OSM_TILE_PROXY: Optional[OsmTileProxy] = None
 _LOG_BASE_DIR: Optional[Path] = None
 
 
@@ -68,61 +61,15 @@ def _log_event(message: str) -> None:
         pass
 
 
-def _mesa_version_label(cfg: configparser.ConfigParser) -> str:
-    try:
-        default = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
-        for option in ("mesa_version", "version"):
-            value = default.get(option)  # type: ignore[union-attr]
-            if value:
-                cleaned = str(value).strip().replace(" ", "_")
-                if cleaned:
-                    return cleaned
-    except Exception:
-        pass
-    return "dev"
+# Shared OSM tile proxy lifecycle; _log_event ignores the base_dir arg since it
+# reads _LOG_BASE_DIR from the module global set in run()/main().
+OSM_PROXY = OsmTileProxyManager(
+    "MESA-LineManage",
+    thread_name="mesa-line-osm-tile-proxy",
+    log=lambda _base_dir, message: _log_event(message),
+)
 
-
-def _osm_tile_cache_dir(base_dir: Path) -> Path:
-    return choose_cache_dir(
-        [
-            base_dir / "output" / "cache" / "osm_tiles",
-            base_dir / "logs" / "osm_tiles",
-        ],
-        fallback_name="mesa_osm_tiles",
-    )
-
-
-def _start_osm_tile_proxy(base_dir: Path, cfg: configparser.ConfigParser) -> OsmTileProxy:
-    global OSM_TILE_PROXY
-    if OSM_TILE_PROXY is not None:
-        return OSM_TILE_PROXY
-
-    OSM_TILE_PROXY = start_shared_osm_tile_proxy(
-        cache_dir=_osm_tile_cache_dir(base_dir),
-        user_agent=build_osm_user_agent("MESA-LineManage", _mesa_version_label(cfg)),
-        log=_log_event,
-        thread_name="mesa-line-osm-tile-proxy",
-    )
-    return OSM_TILE_PROXY
-
-
-def _stop_osm_tile_proxy() -> None:
-    global OSM_TILE_PROXY
-    proxy = OSM_TILE_PROXY
-    OSM_TILE_PROXY = None
-    stop_shared_osm_tile_proxy(proxy, log=_log_event)
-
-
-def _osm_tile_layer_url(base_dir: Path, cfg: configparser.ConfigParser) -> str:
-    try:
-        proxy = _start_osm_tile_proxy(base_dir, cfg)
-        return f"{proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
-    except Exception as exc:
-        _log_event(f"Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
-        return "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-
-
-atexit.register(_stop_osm_tile_proxy)
+atexit.register(OSM_PROXY.stop)
 
 import pandas as pd
 import geopandas as gpd
@@ -183,15 +130,8 @@ def resolve_base_dir(passed: Optional[str]) -> Path:
 
     return Path(os.path.abspath(os.path.join(here, "..")))
 
-def read_config(path: str) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser()
-    try:
-        cfg.read(path, encoding="utf-8")
-    except Exception:
-        pass
-    if "DEFAULT" not in cfg:
-        cfg["DEFAULT"] = {}
-    return cfg
+# read_config is imported from mesa_shared (it reads <base_dir>/config.ini with
+# the legacy system/config.ini fallback and tolerant inline-comment parsing).
 
 # These are set after loading config in main()
 _PARQUET_SUBDIR = "output/geoparquet"
@@ -252,9 +192,6 @@ def asset_group_parquet_path(base_dir: str) -> str:
     primary = os.path.join(gpq_dir(base_dir), TABLE_ASSET_GROUP)
     return primary
 
-def config_path(base_dir: str) -> str:
-    # FLAT layout: config.ini sits next to mesa.py
-    return os.path.join(base_dir, "config.ini")
 
 # ---------------- Data IO ----------------
 REQUIRED_COLUMNS = ["name_gis","name_user","segment_length","segment_width","description"]
@@ -818,7 +755,7 @@ class Api:
 
     def exit_app(self):
         try:
-            _stop_osm_tile_proxy()
+            OSM_PROXY.stop()
             threading.Timer(0.05, _require_webview().destroy_window).start()
         except Exception:
             os._exit(0)
@@ -1401,8 +1338,7 @@ def run(base_dir: str) -> None:
     """
     global _LOG_BASE_DIR, _PARQUET_SUBDIR, webview
     resolved = resolve_base_dir(base_dir)
-    cfg_path = config_path(resolved)
-    cfg = read_config(cfg_path)
+    cfg = read_config(resolved)
     _LOG_BASE_DIR = resolved
     _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
     api = Api(resolved, cfg)
@@ -1412,7 +1348,7 @@ def run(base_dir: str) -> None:
         HTML
         .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
-        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(resolved, cfg))
+        .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(resolved, mesa_version_label(cfg)))
     )
     window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
     try:
@@ -1433,8 +1369,7 @@ def main():
     args = parser.parse_args()
 
     base_dir = resolve_base_dir(args.original_working_directory)
-    cfg_path = config_path(base_dir)
-    cfg = read_config(cfg_path)
+    cfg = read_config(base_dir)
     global _LOG_BASE_DIR
     _LOG_BASE_DIR = base_dir
 
@@ -1450,7 +1385,7 @@ def main():
         HTML
         .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
-        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+        .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(base_dir, mesa_version_label(cfg)))
     )
     window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
 

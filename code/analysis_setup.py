@@ -10,7 +10,14 @@ shared independently of the main UI.
 
 from __future__ import annotations
 
-from mesa_shared import find_base_dir as resolve_base_dir, leaflet_bundle, choose_primary_geocode
+from mesa_shared import (
+    find_base_dir as resolve_base_dir,
+    leaflet_bundle,
+    choose_primary_geocode,
+    mesa_version_label,
+    read_config,
+    parquet_dir,
+)
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
     TABLE_ANALYSIS_GROUP as ANALYSIS_GROUP_TABLE,
@@ -37,13 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote
 import sys
-from mesa_osm_tiles import (
-    OsmTileProxy,
-    build_osm_user_agent,
-    choose_cache_dir,
-    start_osm_tile_proxy as start_shared_osm_tile_proxy,
-    stop_osm_tile_proxy as stop_shared_osm_tile_proxy,
-)
+from mesa_osm_tiles import OsmTileProxyManager
 
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -108,7 +109,6 @@ DEFAULT_PARQUET_SUBDIR = PARQUET_SUBDIR
 DEFAULT_MBTILES_SUBDIR = "output/mbtiles"
 REPORT_FILENAME_TEMPLATE = "MESA_area_analysis_report_{ts}.pdf"
 DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
-OSM_TILE_PROXY: Optional[OsmTileProxy] = None
 
 
 def debug_log(base_dir: Path, message: str) -> None:
@@ -127,85 +127,17 @@ def debug_log(base_dir: Path, message: str) -> None:
     pass
 
 
-def _mesa_version_label(cfg: configparser.ConfigParser) -> str:
-  try:
-    default = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
-    for option in ("mesa_version", "version"):
-      value = default.get(option)  # type: ignore[union-attr]
-      if value:
-        cleaned = str(value).strip().replace(" ", "_")
-        if cleaned:
-          return cleaned
-  except Exception:
-    pass
-  return "dev"
-
-
-def _osm_tile_cache_dir(base_dir: Path) -> Path:
-  return choose_cache_dir(
-    [
-      base_dir / "output" / "cache" / "osm_tiles",
-      base_dir / "logs" / "osm_tiles",
-    ],
-    fallback_name="mesa_osm_tiles",
-  )
-
-
-def _start_osm_tile_proxy(base_dir: Path, cfg: configparser.ConfigParser) -> OsmTileProxy:
-  global OSM_TILE_PROXY
-  if OSM_TILE_PROXY is not None:
-    return OSM_TILE_PROXY
-
-  OSM_TILE_PROXY = start_shared_osm_tile_proxy(
-    cache_dir=_osm_tile_cache_dir(base_dir),
-    user_agent=build_osm_user_agent("MESA-AnalysisSetup", _mesa_version_label(cfg)),
-    log=lambda msg: debug_log(base_dir, msg),
+# Shared OSM tile proxy lifecycle. debug_log already has the (base_dir, message)
+# signature the manager expects, so it can be passed straight through.
+OSM_PROXY = OsmTileProxyManager(
+    "MESA-AnalysisSetup",
     thread_name="mesa-analysis-osm-tile-proxy",
-  )
-  return OSM_TILE_PROXY
+    log=debug_log,
+)
 
-
-def _stop_osm_tile_proxy(base_dir: Optional[Path] = None) -> None:
-  global OSM_TILE_PROXY
-  proxy = OSM_TILE_PROXY
-  OSM_TILE_PROXY = None
-  stop_shared_osm_tile_proxy(
-    proxy,
-    log=(lambda msg: debug_log(base_dir, msg)) if base_dir is not None else None,
-  )
-
-
-def _osm_tile_layer_url(base_dir: Path, cfg: configparser.ConfigParser) -> str:
-  try:
-    proxy = _start_osm_tile_proxy(base_dir, cfg)
-    return f"{proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
-  except Exception as exc:
-    debug_log(base_dir, f"Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
-    return "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-
-
-
-
-def read_config(base_dir: Path) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), strict=False)
-    paths = [base_dir / "config.ini", base_dir / "system" / "config.ini"]
-    for path in paths:
-        if path.exists():
-            try:
-                cfg.read(path, encoding="utf-8")
-            except Exception:
-                cfg.read(path)
-            break
-    if "DEFAULT" not in cfg:
-        cfg["DEFAULT"] = {}
-    return cfg
-
-
-def parquet_dir(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
-    sub = cfg["DEFAULT"].get("parquet_folder", DEFAULT_PARQUET_SUBDIR)
-    folder = (base_dir / sub).resolve()
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
+# read_config and parquet_dir are imported from mesa_shared (same behaviour as
+# the former local copies: config.ini with system/config.ini fallback, and a
+# parquet_folder-aware output dir defaulting to output/geoparquet).
 
 
 def _parquet_search_dirs(base_dir: Path, cfg: configparser.ConfigParser) -> List[Path]:
@@ -1571,7 +1503,7 @@ class WebApi:
             return {"ok": False, "error": str(exc)}
 
     def exit_app(self) -> None:
-      _stop_osm_tile_proxy(self._base_dir)
+      OSM_PROXY.stop()
       threading.Timer(0.05, _require_webview().destroy_window).start()
 
 
@@ -2764,7 +2696,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
     base_dir = resolve_base_dir(args.owd)
     cfg = read_config(base_dir)
-    atexit.register(_stop_osm_tile_proxy, base_dir)
+    atexit.register(OSM_PROXY.stop)
 
     api = WebApi(base_dir, cfg)
 
@@ -2774,7 +2706,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         HTML_TEMPLATE
         .replace("__MESA_LEAFLET_HEAD__", bundle.head_block)
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
-        .replace("__MESA_OSM_TILE_URL__", _osm_tile_layer_url(base_dir, cfg))
+        .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(base_dir, mesa_version_label(cfg)))
     )
 
     window = webview.create_window(

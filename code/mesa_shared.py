@@ -90,16 +90,40 @@ def find_base_dir(cli_arg: Optional[str] = None) -> Path:
 
 
 def read_config(base_dir: Path) -> configparser.ConfigParser:
-    """Read ``config.ini`` from *base_dir*.
+    """Read ``config.ini`` from *base_dir* (flat layout), falling back to the
+    legacy ``system/config.ini`` location.
 
     Uses ``inline_comment_prefixes=(';', '#')`` and ``strict=False`` to
     tolerate the hand-edited config files used in this project.
     """
     cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), strict=False)
-    config_path = base_dir / "config.ini"
-    if config_path.exists():
-        cfg.read(config_path, encoding="utf-8")
+    for candidate in (base_dir / "config.ini", base_dir / "system" / "config.ini"):
+        if candidate.exists():
+            try:
+                cfg.read(candidate, encoding="utf-8")
+            except Exception:
+                cfg.read(candidate)
+            break
     return cfg
+
+
+def mesa_version_label(cfg: configparser.ConfigParser) -> str:
+    """Return a filesystem-safe MESA version string from config, or ``"dev"``.
+
+    Reads ``mesa_version`` (preferred) or ``version`` from ``[DEFAULT]`` and
+    normalises spaces to underscores so it is safe in a User-Agent string.
+    """
+    try:
+        default = cfg["DEFAULT"] if "DEFAULT" in cfg else {}
+        for option in ("mesa_version", "version"):
+            value = default.get(option)  # type: ignore[union-attr]
+            if value:
+                cleaned = str(value).strip().replace(" ", "_")
+                if cleaned:
+                    return cleaned
+    except Exception:
+        pass
+    return "dev"
 
 
 def parquet_dir(base_dir: Path, cfg: Optional[configparser.ConfigParser] = None) -> Path:

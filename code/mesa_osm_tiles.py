@@ -223,6 +223,76 @@ def start_osm_tile_proxy(
     return proxy
 
 
+class OsmTileProxyManager:
+    """Per-viewer lifecycle wrapper around the OSM tile proxy.
+
+    Each embedded viewer (line editor, analysis tool, …) owns one manager and
+    reuses a single proxy for the life of the process. This replaces the
+    start/stop/cache-dir/tile-URL boilerplate that was previously copy-pasted
+    into every viewer module.
+
+    ``log`` is called as ``log(base_dir, message)`` so callers can route
+    diagnostics to their existing project-root ``log.txt`` writer; it is only
+    invoked once ``base_dir`` is known (after the first ``start``/``tile_layer_url``).
+    """
+
+    def __init__(
+        self,
+        product_name: str,
+        *,
+        thread_name: str = "mesa-osm-tile-proxy",
+        log: Optional[Callable[[Path, str], None]] = None,
+        cache_subdirs: Iterable[str] = ("output/cache/osm_tiles", "logs/osm_tiles"),
+    ) -> None:
+        self._product_name = product_name
+        self._thread_name = thread_name
+        self._log = log
+        self._cache_subdirs = tuple(cache_subdirs)
+        self._proxy: Optional[OsmTileProxy] = None
+        self._base_dir: Optional[Path] = None
+
+    def _emit(self, message: str) -> None:
+        base = self._base_dir
+        if self._log is None or base is None:
+            return
+        try:
+            self._log(base, message)
+        except Exception:
+            pass
+
+    def _cache_dir(self, base_dir: Path) -> Path:
+        return choose_cache_dir(
+            [Path(base_dir) / sub for sub in self._cache_subdirs],
+            fallback_name="mesa_osm_tiles",
+        )
+
+    def start(self, base_dir: Path, version: str) -> OsmTileProxy:
+        if self._proxy is not None:
+            return self._proxy
+        self._base_dir = Path(base_dir)
+        self._proxy = start_osm_tile_proxy(
+            cache_dir=self._cache_dir(base_dir),
+            user_agent=build_osm_user_agent(self._product_name, version),
+            log=self._emit,
+            thread_name=self._thread_name,
+        )
+        return self._proxy
+
+    def stop(self) -> None:
+        proxy, self._proxy = self._proxy, None
+        stop_osm_tile_proxy(proxy, log=self._emit)
+
+    def tile_layer_url(self, base_dir: Path, version: str) -> str:
+        """Return the proxied ``{z}/{x}/{y}`` tile template, starting the proxy
+        on first use. Falls back to direct OSM tiles if the proxy fails."""
+        try:
+            proxy = self.start(base_dir, version)
+            return f"{proxy.base_url}/osm/{{z}}/{{x}}/{{y}}.png"
+        except Exception as exc:
+            self._emit(f"Failed to start OSM tile proxy, falling back to direct tiles: {exc}")
+            return "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+
 def stop_osm_tile_proxy(proxy: Optional[OsmTileProxy], log: LogFn = None) -> None:
     if proxy is None:
         return
