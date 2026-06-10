@@ -805,6 +805,12 @@ def open_data_analysis_setup():
     log_to_logfile("Launching analysis_setup subprocess")
     _launch_helper_subprocess("analysis_setup", ["--original_working_directory", original_working_directory])
 
+def open_segmentation_setup():
+    # Subprocess (not in-process): segmentation_run bundles heavy compute libs
+    # (scikit-learn/libpysal/spopt/hdbscan) that must stay out of mesa.exe.
+    log_to_logfile("Launching segmentation_setup subprocess")
+    _launch_helper_subprocess("segmentation_setup", ["--original_working_directory", original_working_directory])
+
 def open_data_analysis_presentation():
     log_to_logfile("Launching analysis_present")
     _launch_helper("analysis_present", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
@@ -813,6 +819,15 @@ def edit_lines():
     chosen_base = _preferred_lines_base_dir()
     log_to_logfile(f"Launching line_manage with base_dir={chosen_base}")
     _launch_helper_subprocess("line_manage", ["--original_working_directory", chosen_base])
+
+
+def open_special_focus():
+    """Configure → 'Special focus': one window hosting the Lines and Analysis
+    setup tools as in-place button-tabs (like the Maps window). Replaces the two
+    former Configure cards. The combined window lives in its own subprocess
+    (special_focus.py) so its embedded apps' heavy deps stay out of mesa.exe."""
+    log_to_logfile("Launching special_focus subprocess")
+    _launch_helper_subprocess("special_focus", ["--original_working_directory", original_working_directory])
 
 
 # ---------------------------------------------------------------------
@@ -3353,14 +3368,14 @@ class MesaMainWindow(QMainWindow):
             ("Configure (step 2)", "Tune parameters/study areas before running heavy jobs.", [
                 ("Parameters", edit_processing_setup,
                  "Adjust weights, thresholds and other processing rules."),
-                ("Lines", edit_lines,
-                 "Import and edit lines (transport, rivers, utilities, etc)."),
-                ("Analysis", open_data_analysis_setup,
-                 "Define analysis groups and study area polygons."),
+                ("Special focus", open_special_focus,
+                 "Lines and Analysis setup, grouped in one popup."),
             ]),
             ("Process (step 3)", "Execute the automated steps that build fresh outputs.", [
                 ("Process", open_process_all,
                  "Runs area, line, and analysis processing."),
+                ("Classification", open_segmentation_setup,
+                 "Group polygons into types of sensitivity pattern (the \"what kind\" view, complementing the A–E classes)."),
             ]),
             ("Results (step 4)", "Open the interactive viewers and export the deliverables.", [
                 ("Maps", open_combined_map,

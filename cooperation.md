@@ -557,3 +557,17 @@ Three independent changes, one per commit:
 All three verified by byte-compile + import + targeted smoke tests against the live project data. NOT yet validated by a full mesa.py GUI run — operator should launch MESA and exercise the QDGC tab and the Maps click-to-identify.
 
 — Claude (Apple Silicon / macOS)
+
+## Sensitivity generalisation (multivariate segmentation v2) — Windows (2026-06-10)
+
+Built a new, additive processing capability: multivariate spatial generalisation of sensitivity, complementary to the A–E classification. Framing carried through UI/docs/report: classification answers "how sensitive is this place?"; this answers "what kind of sensitivity pattern is this place part of?".
+
+Important reconciliation up front: the brief read as greenfield ("add segmentation", "productionise code/devtools/test_segmentation.py"), but segmentation already ships (code/segmentation.py + Segment stage + Maps tab + report section), the named prototype was already promoted away, and the brief's `tbl_segmentation` schema would have broken the Maps tab + report. Surfaced this, and the operator chose to build it as a **separate v2** with non-colliding names rather than evolve the shipped one. So nothing in the shipped `tbl_segmentation*` path was touched.
+
+New files: `code/segmentation_run.py` (heavy compute — feature vectors from tbl_stacked, StandardScaler, KMeans + optional HDBSCAN for attribute; SKATER via spopt over a libpysal Queen graph for spatial, with a KMeans+contiguity fallback above `segmv_skater_max_polys`; writes `tbl_seg_mv.parquet` + `tbl_seg_mv_profile.parquet`, a per-run GeoPackage, summary.md, params.json, optional PNGs; reproducible by run_id) and `code/segmentation_setup.py` (light PySide6 config UI that persists `segmv_*` keys and spawns the run helper). Wiring: `mesa.py` Workflows tab → step 3 → "Sensitivity generalisation" (subprocess launch); `devtools/build_all.py` registers both helpers and force-bundles the clustering stack into `segmentation_run` only (kept out of mesa.exe and out of segmentation_setup); `report_generate.py` gained an optional `include_segmentation_mv` section presenting the types alongside the A–E map with a methods-paper citation; new `docs/segmentation.md`.
+
+Two corrections to brief assumptions: (1) no Ollama in the repo — AI labels (default OFF) call Ollama first, then fall back to the existing OpenAI integration; (2) SKATER is infeasible at basic_mosaic scale, so it is guarded + falls back, logging the path. Also: scikit-learn/libpysal/spopt/hdbscan were missing from .venv (installed them) — which also means the shipped `clusters` mode was a silent no-op here until now.
+
+Verified by: byte-compile of all changed files; `--help` on both helpers (loads without heavy libs); a full run on QDGC_L6 exercising attribute (KMeans, silhouette) + spatial (SKATER via spopt) at k=4,8 → all four output kinds written; reproducibility (identical cluster_id MD5 across re-runs with the same run_id); offscreen construction of the setup UI; and the report-section grouping logic against the real profile table. NOT yet validated by a full mesa.py GUI run or a frozen `build_all.py` build — operator runs the builds. Test rows written into the live project store during verification were cleaned up.
+
+— Claude (Windows)

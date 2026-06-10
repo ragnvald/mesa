@@ -384,6 +384,18 @@ COLLECT_DOCX = [
     "--collect-all", "docx",
 ]
 
+# Multivariate segmentation (segmentation_run) — clustering + spatial regionalisation.
+# Heavy and only needed by that one helper, so it is bundled per-helper (never into
+# mesa.exe). spopt/hdbscan are optional at runtime (lazy + graceful skip) but bundled
+# here so the frozen exe can use them when present. scipy is sklearn's heavy dependency.
+COLLECT_SKLEARN = [
+    "--collect-all", "sklearn",
+    "--collect-all", "scipy",
+    "--collect-all", "libpysal",
+    "--collect-submodules", "spopt",
+    "--collect-submodules", "hdbscan",
+]
+
 # setuptools/pkg_resources runtime deps
 #
 # PyInstaller may bundle pkg_resources (via transitive deps), which in newer
@@ -553,6 +565,7 @@ def helper_collects_for(basename: str) -> list[str]:
         "analysis_setup",
         "combined_map",
         "line_manage",
+        "special_focus",   # hosts line_manage + analysis_setup as iframe tabs
     }
     uses_webview = basename in force_webview or _imports_any_module(src, {"webview"})
 
@@ -563,6 +576,7 @@ def helper_collects_for(basename: str) -> list[str]:
     # source scanning. See learning.md "PySide6 bundling in standalone helpers".
     force_qt = {
         "analysis_setup",
+        "special_focus",   # embeds analysis_setup, which renders Qt file dialogs
     }
     uses_qt = basename in force_qt or _imports_any_module(src, {"PySide6", "PyQt5", "PyQt6"})
     uses_h3 = _imports_any_module(src, {"h3"})
@@ -600,6 +614,36 @@ def helper_collects_for(basename: str) -> list[str]:
 
     if uses_docx:
         collects += COLLECT_DOCX
+
+    # Multivariate segmentation helpers. segmentation_run lazy-imports the heavy
+    # clustering stack (auto-detected), but bundle it explicitly to be safe.
+    # segmentation_setup reaches pandas/pyarrow/GIS only *indirectly* (via
+    # `import segmentation`/`segmentation_run`), so source scanning misses them —
+    # force the data stack for it. sklearn stays out of segmentation_setup.
+    force_sklearn = {"segmentation_run"}
+    if basename in force_sklearn or _imports_any_module(src, {"sklearn", "libpysal", "spopt"}):
+        collects += COLLECT_SKLEARN
+
+    if basename in {"segmentation_setup", "segmentation_run"}:
+        if not uses_qt and basename == "segmentation_setup":
+            collects += COLLECT_PYSIDE6
+        if not uses_gis:
+            collects += COLLECT_GIS_STACK
+        if not uses_pandas:
+            collects += COLLECT_PANDAS
+        if not uses_pyarrow:
+            collects += COLLECT_PYARROW
+
+    # special_focus embeds line_manage + analysis_setup (Lines/Analysis tabs) but
+    # imports them indirectly, so source scanning misses their GIS/data stack.
+    # Qt + webview are forced via the sets above; force the data/GIS stack here.
+    if basename == "special_focus":
+        if not uses_gis:
+            collects += COLLECT_GIS_STACK
+        if not uses_pandas:
+            collects += COLLECT_PANDAS
+        if not uses_pyarrow:
+            collects += COLLECT_PYARROW
 
     return collects
 
@@ -890,6 +934,16 @@ def main() -> None:
             "analysis_setup",
             "line_manage",
             "combined_map",
+            # Configure → "Special focus": one webview window hosting line_manage
+            # and analysis_setup as iframe tabs. Embeds both apps, so it bundles
+            # their full GIS/Qt/data stack (see _collect_flags_for_helper).
+            "special_focus",
+            # Sensitivity generalisation (MESA v5+). Standalone exes so the heavy
+            # clustering stack (sklearn/scipy/libpysal/spopt/hdbscan) bundles into
+            # segmentation_run only — never into mesa.exe. segmentation_setup is the
+            # light Qt config UI that spawns the run helper.
+            "segmentation_setup",
+            "segmentation_run",
         ]
 
         # Optional helper selection:

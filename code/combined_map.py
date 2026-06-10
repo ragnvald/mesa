@@ -602,6 +602,141 @@ class _Api:
         except Exception as exc:
             return {"error": str(exc)}
 
+    # -- multivariate generalisation (Classifications tab) -------------------
+    # Polygon results from "Sensitivity generalisation" (segmentation_run.py):
+    # tbl_seg_mv (cluster_id per code) joined to tbl_geocode_object geometry.
+    # Rendered as a vector layer — there is no MBTiles pipeline for this output.
+    SEGMV_MAX_FEATURES = 250_000
+
+    def segmv_runs(self) -> list[dict]:
+        """Available (run_id, method, n_clusters) results from tbl_seg_mv, newest
+        run first. Each combination is one selectable Classifications layer."""
+        import pandas as pd
+        p = self.gpq / "tbl_seg_mv.parquet"
+        if not p.exists():
+            return []
+        try:
+            df = pd.read_parquet(p, columns=["run_id", "name_gis_geocodegroup", "method", "n_clusters"])
+        except Exception:
+            return []
+        if df.empty:
+            return []
+        combos = df.drop_duplicates(["run_id", "name_gis_geocodegroup", "method", "n_clusters"])
+        out = []
+        for _, r in combos.iterrows():
+            rid, layer = str(r["run_id"]), str(r["name_gis_geocodegroup"])
+            method, k = str(r["method"]), int(r["n_clusters"])
+            out.append({"run_id": rid, "layer": layer, "method": method, "n_clusters": k,
+                        "label": f"{rid} · {layer} · {method}"})
+        out.sort(key=lambda d: (d["run_id"], d["method"]), reverse=True)
+        return out
+
+    def _segmv_profile(self, run_id: str, method: str, k):
+        """Profile rows + legend for one result, largest area first."""
+        import pandas as pd
+        prof = self.gpq / "tbl_seg_mv_profile.parquet"
+        if not prof.exists():
+            return [], []
+        try:
+            df = pd.read_parquet(prof)
+        except Exception:
+            return [], []
+        df = df[(df["run_id"].astype(str) == str(run_id)) & (df["method"].astype(str) == str(method))]
+        if k is not None and "n_clusters" in df.columns:
+            df = df[pd.to_numeric(df["n_clusters"], errors="coerce") == k]
+        if df.empty:
+            return [], []
+        if "total_area_km2" in df.columns and df["total_area_km2"].notna().any():
+            df = df.sort_values("total_area_km2", ascending=False, na_position="last")
+        else:
+            df = df.sort_values("n_polygons", ascending=False)
+        rows, legend = [], []
+        for _, r in df.iterrows():
+            try:
+                cid = int(r.get("cluster_id"))
+            except Exception:
+                cid = -1
+            fill = seg._overview_colour(str(cid), "clusters")
+            label = str(r.get("cluster_label") or f"type {cid + 1}")
+            rows.append({
+                "cluster_label": label, "fill": fill,
+                "n_polygons": int(r["n_polygons"]) if pd.notna(r.get("n_polygons")) else 0,
+                "total_area_km2": float(r["total_area_km2"]) if pd.notna(r.get("total_area_km2")) else None,
+                "sens_mean": float(r["sens_mean"]) if pd.notna(r.get("sens_mean")) else None,
+                "top_asset_groups": str(r.get("top_asset_groups") or ""),
+            })
+            legend.append({"zone": label, "fill": fill})
+        return rows, legend
+
+    def segmv_layer(self, run_id: str, method: str, n_clusters) -> dict:
+        """Polygon GeoJSON + legend + profile for one generalisation result.
+        Geometry joined from tbl_geocode_object; fill colour per cluster id
+        (qualitative palette, reused from the Segmentation clusters view)."""
+        import pandas as pd
+        try:
+            import geopandas as gpd
+        except Exception as exc:
+            return {"error": str(exc)}
+        p = self.gpq / "tbl_seg_mv.parquet"
+        go = self.gpq / "tbl_geocode_object.parquet"
+        if not p.exists() or not go.exists():
+            return {"error": "No classification results found. Run Classification first."}
+        try:
+            k = int(n_clusters)
+        except Exception:
+            k = None
+        try:
+            df = pd.read_parquet(p)
+        except Exception as exc:
+            return {"error": str(exc)}
+        m = df[(df["run_id"].astype(str) == str(run_id)) & (df["method"].astype(str) == str(method))]
+        if k is not None and "n_clusters" in m.columns:
+            m = m[pd.to_numeric(m["n_clusters"], errors="coerce") == k]
+        m = m[m["cluster_id"].notna()]
+        if "no_data" in m.columns:
+            m = m[~m["no_data"].astype(bool)]
+        if m.empty:
+            return {"geojson": {"type": "FeatureCollection", "features": []}, "legend": [], "profile": []}
+        if len(m) > self.SEGMV_MAX_FEATURES:
+            return {"too_large": True, "features": int(len(m)), "max_features": self.SEGMV_MAX_FEATURES}
+        layer = str(m["name_gis_geocodegroup"].iloc[0])
+        try:
+            geo = gpd.read_parquet(go, columns=["code", "geometry"],
+                                   filters=[("name_gis_geocodegroup", "=", layer)])
+        except Exception:
+            geo = gpd.read_parquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
+            geo = geo[geo["name_gis_geocodegroup"].astype(str) == layer][["code", "geometry"]]
+        geo["code"] = geo["code"].astype(str)
+        m = m.copy(); m["code"] = m["code"].astype(str)
+        gdf = gpd.GeoDataFrame(m.merge(geo, on="code", how="inner"),
+                               geometry="geometry", crs=getattr(geo, "crs", None))
+        if gdf.empty:
+            return {"geojson": {"type": "FeatureCollection", "features": []}, "legend": [], "profile": []}
+        try:
+            if gdf.crs is not None and "4326" not in str(gdf.crs):
+                gdf = gdf.to_crs(4326)
+        except Exception:
+            pass
+        feats = []
+        for _, r in gdf.iterrows():
+            geom = r.geometry
+            if geom is None or geom.is_empty:
+                continue
+            try:
+                cid = int(r.get("cluster_id"))
+            except Exception:
+                cid = -1
+            feats.append({"type": "Feature", "geometry": geom.__geo_interface__,
+                          "properties": {
+                              "code": str(r.get("code", "") or ""),
+                              "cluster_id": cid,
+                              "cluster_label": str(r.get("cluster_label") or f"type {cid + 1}"),
+                              "sens_mean": float(r.get("sens_mean")) if pd.notna(r.get("sens_mean")) else None,
+                              "fill": seg._overview_colour(str(cid), "clusters")}})
+        profile, legend = self._segmv_profile(run_id, method, k)
+        return {"geojson": {"type": "FeatureCollection", "features": feats},
+                "legend": legend, "profile": profile, "layer": layer}
+
     # -- GetFeatureInfo (click-to-query) -------------------------------------
     # Even though the displayed layers are raster MBTiles, the underlying cell
     # data lives in parquet. A left-click sends lat/lng here; we point-in-polygon
@@ -840,7 +975,7 @@ HTML = r"""<!doctype html>
   .view{position:absolute;inset:0;display:none}
   .view.active{display:block}
   .map{position:absolute;inset:0;background:#ddd}
-  #view-seg.active, #view-results.active, #view-asset.active{display:grid;grid-template-columns:1fr 340px}
+  #view-seg.active, #view-results.active, #view-asset.active, #view-class.active{display:grid;grid-template-columns:1fr 340px}
   .map-wrap{position:relative;height:100%}
   /* floating layer-control panel over the map (frees the right column) */
   .mapctl{position:absolute;top:10px;right:10px;z-index:1000;background:rgba(250,246,238,.96);
@@ -853,8 +988,8 @@ HTML = r"""<!doctype html>
   .mapctl-arrow{font-size:13px;line-height:1}
   .mapctl.collapsed .mapctl-body{display:none}
   .mapctl.collapsed{max-width:none}
-  #seg-panel, #res-panel, #asset-panel{border-left:2px solid #cbb791;padding:12px;overflow:auto;background:#faf6ee}
-  #seg-panel h2, #res-panel h2, #asset-panel h2{font-size:14px;margin:0 0 8px;color:#5c4a2f}
+  #seg-panel, #res-panel, #asset-panel, #class-panel{border-left:2px solid #cbb791;padding:12px;overflow:auto;background:#faf6ee}
+  #seg-panel h2, #res-panel h2, #asset-panel h2, #class-panel h2{font-size:14px;margin:0 0 8px;color:#5c4a2f}
   .assetlist{max-height:240px;overflow:auto;margin:4px 0}
   .assetlist label{display:flex;align-items:center;gap:6px;margin:2px 0;font-size:12px;cursor:pointer}
   .assetlist .sw{flex:0 0 auto}
@@ -867,8 +1002,8 @@ HTML = r"""<!doctype html>
   th,td{border-bottom:1px solid #e3d7be;padding:3px 4px;text-align:right}
   th:first-child,td:first-child{text-align:left}
   th{color:#715a36;font-weight:600}
-  #segZones thead th{cursor:pointer;user-select:none;white-space:nowrap}
-  #segZones thead th:hover{color:#3f3528}
+  #segZones thead th, #classTable thead th{cursor:pointer;user-select:none;white-space:nowrap}
+  #segZones thead th:hover, #classTable thead th:hover{color:#3f3528}
   tfoot td{font-weight:600;border-top:1px solid #cbb791}
   .sw{display:inline-block;width:12px;height:12px;border:1px solid #b9a87f;vertical-align:middle;margin-right:6px}
   .muted{color:#8a7c63}
@@ -883,6 +1018,7 @@ HTML = r"""<!doctype html>
   <div id="bar">
     <button class="tab active" data-tab="results">Overview</button>
     <button class="tab" data-tab="seg">Segmentation</button>
+    <button class="tab" data-tab="class">Classifications</button>
     <button class="tab" data-tab="asset">Assets</button>
     <span id="spacer"></span>
     <label id="opwrap">Opacity <input type="range" id="opacity" min="0" max="100" value="85"></label>
@@ -987,6 +1123,39 @@ HTML = r"""<!doctype html>
         </div>
       </div>
     </div>
+    <div class="view" id="view-class">
+      <div class="map-wrap">
+        <div class="map" id="map-class"></div>
+        <div id="classLoading" class="stub" style="display:none">Building view…</div>
+        <div class="mapctl">
+          <div class="mapctl-hd"><span>Layers</span><span class="mapctl-arrow">▾</span></div>
+          <div class="mapctl-body">
+            <div class="ctlrow"><b>Run</b><br><select id="classRun"></select></div>
+            <div class="ctlrow"><b>Basemap</b><br>
+              <select id="classBasemap">
+                <option value="osm">OpenStreetMap</option>
+                <option value="topo">OpenTopoMap</option>
+                <option value="sat">Satellite (Esri)</option>
+              </select></div>
+            <div id="classMsg" class="muted"></div>
+          </div>
+        </div>
+      </div>
+      <div id="class-panel">
+        <h2>Classifications</h2>
+        <div class="info">
+          <p>Polygon results from <b>Classification</b>. Each colour is a
+             <b>type</b> of sensitivity pattern — <i>“what kind of place is this?”</i> —
+             complementary to the A–E sensitivity classes. Pick a run on the map, then
+             click a polygon to identify it.</p>
+        </div>
+        <div class="row"><b>Legend</b><div id="classLegend" class="muted">–</div></div>
+        <div class="row"><b>Types</b> <span class="muted">(largest area first)</span>
+          <table id="classTable"><thead><tr><th data-key="cluster_label">Type</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="sens_mean">Sens</th><th data-key="top_asset_groups" style="text-align:left">Top asset groups</th></tr></thead>
+          <tbody></tbody></table>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -1008,7 +1177,7 @@ HTML = r"""<!doctype html>
      opts:{maxZoom:19, attribution:'Esri, Maxar, Earthstar Geographics'}}
   ];
   function mkMap(id, opts){ opts=opts||{}; opts.zoomControl=true; var m=L.map(id,opts); m.setView([0,0],2); return m; }
-  var maps = {asset:mkMap('map-asset',{preferCanvas:true}), results:mkMap('map-results'), seg:mkMap('map-seg')};
+  var maps = {asset:mkMap('map-asset',{preferCanvas:true}), results:mkMap('map-results'), seg:mkMap('map-seg'), class:mkMap('map-class',{preferCanvas:true})};
   var baseLayer={};
   function setBasemap(key, id){
     var def=BASEMAPS[0], i;
@@ -1018,17 +1187,19 @@ HTML = r"""<!doctype html>
     baseLayer[key]=L.tileLayer(def.url, o).addTo(maps[key]);
     baseLayer[key].bringToBack();
   }
-  setBasemap('asset','osm'); setBasemap('results','osm'); setBasemap('seg','osm');
+  setBasemap('asset','osm'); setBasemap('results','osm'); setBasemap('seg','osm'); setBasemap('class','osm');
   (function(){
     var rb=document.getElementById('resBasemap'); if(rb) rb.addEventListener('change', function(){ setBasemap('results', this.value); });
     var sb=document.getElementById('segBasemap'); if(sb) sb.addEventListener('change', function(){ setBasemap('seg', this.value); });
     var ab=document.getElementById('assetBasemap'); if(ab) ab.addEventListener('change', function(){ setBasemap('asset', this.value); });
+    var cb=document.getElementById('classBasemap'); if(cb) cb.addEventListener('change', function(){ setBasemap('class', this.value); });
   })();
   var segVec = L.geoJSON(null).addTo(maps.seg);   // vector fallback layer
   var segVecGj = null;                            // inner styled vector layer (for opacity)
   var segTile = null;                              // raster tile layer
   var resTile = null;                              // overview index raster layer
   var segOverlay = null;                           // line-segments vector overlay (Overview tab)
+  var classVecGj = null;                           // Classifications (seg_mv) vector layer (for opacity)
   var assetLayers = {};                            // gid -> asset L.geoJSON layer
   var resKind = null;                              // active Overview overlay suffix (for click-to-query)
   var fiHighlight = null;                          // GetFeatureInfo: clicked-cell outline overlay
@@ -1041,6 +1212,7 @@ HTML = r"""<!doctype html>
     if(segTile) segTile.setOpacity(opacity);
     if(segVecGj) segVecGj.setStyle({fillOpacity: opacity*0.9});
     if(segOverlay) segOverlay.setStyle({fillOpacity: opacity*0.9});
+    if(classVecGj) classVecGj.setStyle({fillOpacity: opacity*0.9});
     for(var k in assetLayers){ if(assetLayers[k]) assetLayers[k].setStyle({fillOpacity: opacity*0.9}); }
   }
   // ---- collapsible floating layer panels ----
@@ -1159,6 +1331,7 @@ HTML = r"""<!doctype html>
     if(tab==='seg' && !segLoaded) initSeg();
     if(tab==='results' && !resLoaded) initResults();
     if(tab==='asset' && !assetLoaded) initAssets();
+    if(tab==='class' && !classLoaded) initClass();
   }
   document.querySelectorAll('.tab').forEach(function(b){ b.addEventListener('click', function(){ showTab(this.dataset.tab); }); });
   document.getElementById('exit').addEventListener('click', function(){
@@ -1475,6 +1648,91 @@ HTML = r"""<!doctype html>
     });
   }
 
+  // ---- classifications (sensitivity generalisation) tab ----
+  var classLoaded=false, classRuns=[], classVec=L.geoJSON(null).addTo(maps.class);
+  // Types table sort state (legend keeps server order; only the table reorders).
+  var classProfileData=[], classSort={key:null, dir:1};
+  function classSetLoading(on){ var e=document.getElementById('classLoading'); if(e) e.style.display=on?'block':'none'; }
+  function classMsg(t){ document.getElementById('classMsg').innerHTML=t||''; }
+  function clearClassLayers(){ classVec.clearLayers(); classVecGj=null; }
+  function renderClassPanel(legend, profile){
+    var leg=document.getElementById('classLegend'); leg.innerHTML='';
+    if(!legend || !legend.length){ leg.innerHTML='<span class="muted">–</span>'; }
+    else legend.forEach(function(z){ var d=document.createElement('div');
+      d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+z.zone; leg.appendChild(d); });
+    classProfileData = profile ? profile.slice() : [];
+    renderClassRows();
+  }
+  function renderClassRows(){
+    var tb=document.querySelector('#classTable tbody'); tb.innerHTML='';
+    var rows=classProfileData.slice();
+    if(classSort.key){
+      var k=classSort.key, dir=classSort.dir, txt=(k==='cluster_label'||k==='top_asset_groups');
+      rows.sort(function(a,b){
+        var va=a[k], vb=b[k];
+        if(txt){ return String(va==null?'':va).localeCompare(String(vb==null?'':vb))*dir; }
+        va=(va==null||isNaN(va))?-Infinity:Number(va); vb=(vb==null||isNaN(vb))?-Infinity:Number(vb);
+        return (va<vb?-1:va>vb?1:0)*dir;
+      });
+    }
+    rows.forEach(function(p){
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td>'+p.cluster_label+'</td><td>'+fmt(p.total_area_km2,2)+'</td><td>'+fmt(p.n_polygons,0)+
+                   '</td><td>'+fmt(p.sens_mean,1)+'</td><td style="text-align:left">'+(p.top_asset_groups||'')+'</td>';
+      tb.appendChild(tr);
+    });
+    document.querySelectorAll('#classTable thead th').forEach(function(th){
+      var base=th.getAttribute('data-label');
+      if(base===null){ base=th.textContent; th.setAttribute('data-label', base); }
+      th.textContent = (th.dataset.key===classSort.key) ? base+(classSort.dir>0?' ▲':' ▼') : base;
+    });
+  }
+  (function(){
+    var thead=document.querySelector('#classTable thead');
+    if(!thead) return;
+    thead.addEventListener('click', function(e){
+      var th=e.target.closest('th'); if(!th || !th.dataset.key) return;
+      var k=th.dataset.key, txt=(k==='cluster_label'||k==='top_asset_groups');
+      // New column: text ascending, numbers descending (largest first); same
+      // column: flip direction.
+      if(classSort.key===k){ classSort.dir=-classSort.dir; }
+      else { classSort.key=k; classSort.dir=txt?1:-1; }
+      renderClassRows();
+    });
+  })();
+  function loadClass(run){
+    if(!run) return;
+    clearClassLayers(); classMsg('Loading…'); classSetLoading(true);
+    api().segmv_layer(run.run_id, run.method, run.n_clusters).then(function(res){
+      classSetLoading(false);
+      if(!res || res.error){ classMsg((res&&res.error)||'Could not load results.'); renderClassPanel([],[]); return; }
+      if(res.too_large){ classMsg('This result has '+Number(res.features).toLocaleString()+
+        ' polygons — too many to draw as vectors (cap '+Number(res.max_features).toLocaleString()+').'); renderClassPanel([],[]); return; }
+      var gj=L.geoJSON(res.geojson, {
+        style:function(f){ return {fillColor:f.properties.fill,color:'#555',weight:0.3,fillOpacity:opacity*0.9}; },
+        onEachFeature:function(f,lyr){ var p=f.properties;
+          lyr.bindPopup('<b>'+(p.cluster_label||'type')+'</b><br>Cell: '+(p.code||'')+
+                        '<br>Mean sensitivity: '+fmt(p.sens_mean,2)); }
+      });
+      classVecGj=gj; classVec.addLayer(gj);
+      try{ maps.class.invalidateSize(); maps.class.fitBounds(gj.getBounds(),{padding:[20,20]}); if(linking) syncFrom('class'); }catch(e){}
+      classMsg(res.layer ? ('<b>'+res.layer+'</b> · click a polygon to identify it.') : 'Click a polygon to identify it.');
+      renderClassPanel(res.legend||[], res.profile||[]);
+    });
+  }
+  function initClass(){
+    classLoaded=true;
+    api().segmv_runs().then(function(runs){
+      classRuns=runs||[];
+      var sel=document.getElementById('classRun');
+      if(!classRuns.length){ classMsg('No classification results yet. Run <b>Classification</b> '+
+        '(Workflows tab → Process), then reopen this map.'); renderClassPanel([],[]); return; }
+      classRuns.forEach(function(r,i){ var o=document.createElement('option'); o.value=String(i); o.text=r.label; sel.appendChild(o); });
+      sel.addEventListener('change', function(){ loadClass(classRuns[+this.value]); });
+      loadClass(classRuns[0]);
+    });
+  }
+
   // Overview is the default active tab — init it once the bridge is ready.
   window.addEventListener('pywebviewready', function(){
     if(!resLoaded) initResults();
@@ -1499,7 +1757,7 @@ def run(base: str | None = None) -> None:
         q = "tab=" + tab + (("&sort=" + srt) if srt else "")
         url = url + ("&" if "?" in url else "?") + q
     window = webview.create_window(
-        title="MESA maps (Assets / Overview / Segmentation)",
+        title="MESA maps (Assets / Overview / Segmentation / Classifications)",
         url=url,
         js_api=api,
         width=1360, height=860, resizable=True,

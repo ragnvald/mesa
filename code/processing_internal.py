@@ -3772,12 +3772,18 @@ def backfill_tbl_stacked(config_file: Path,
 
 def segment_tbl_stacked(config_file: Path,
                         *, cfg: configparser.ConfigParser | None = None,
-                        layers_override: list[str] | None = None) -> None:
+                        layers_override: list[str] | None = None,
+                        mode_override: str | None = None,
+                        n_clusters_override: int | None = None) -> None:
     """Optional Segment stage: build tbl_segmentation from tbl_stacked, one slim
     partition per geocode layer, plus a tiny tbl_segmentation_profiles table.
 
     layers_override: explicit list of geocode categories to segment (from the GUI
     picker). When given it wins over the config segment_geocode_layer key.
+
+    mode_override / n_clusters_override: GUI-chosen segment mode (signatures |
+    clusters | both) and cluster count. When given they win over the config
+    segment_mode / segment_n_clusters keys; None/blank/0 fall back to config.
 
     The heavy per-layer read + clustering runs inside spawned workers (one
     geocode layer per task) so the orchestrator never materialises a large
@@ -3803,12 +3809,12 @@ def segment_tbl_stacked(config_file: Path,
                    "[segment] Skipped: no tbl_stacked on disk. Run Intersect first.")
         return
 
-    # Options (config-driven).
-    mode = _strip_inline_comments(
+    # Options: GUI override wins over config; blank/None falls back to config.
+    mode = (str(mode_override).strip().lower() if mode_override else "") or _strip_inline_comments(
         cfg_local["DEFAULT"].get("segment_mode", "signatures") or "signatures").lower()
     if mode not in ("signatures", "clusters", "both"):
         mode = "signatures"
-    n_clusters = cfg_get_int(cfg_local, "segment_n_clusters", 0)
+    n_clusters = int(n_clusters_override) if n_clusters_override else cfg_get_int(cfg_local, "segment_n_clusters", 0)
     spatial_method = _strip_inline_comments(
         cfg_local["DEFAULT"].get("segment_spatial_method", "agglomerative") or "agglomerative").lower()
     layer_sel = _strip_inline_comments(
@@ -3927,6 +3933,8 @@ def run_processing_pipeline(config_file: Path,
                             run_backfill: bool = True,
                             run_segment: bool = False,
                             segment_layers: list[str] | None = None,
+                            segment_mode: str = "",
+                            segment_n_clusters: int = 0,
                             cleanup_slivers: bool = True):
     """Stages can be skipped independently. Soft validation: each stage that
     depends on a previous output checks the artifact on disk and skips with a
@@ -4057,7 +4065,9 @@ def run_processing_pipeline(config_file: Path,
         seg_enabled_cfg = cfg_get_int(cfg, "segment_enabled", 0) == 1
         if run_segment or seg_enabled_cfg:
             log_to_gui(log_widget, "[Stage 3c] Segmenting geocode layers (tbl_segmentation)…")
-            segment_tbl_stacked(config_file, cfg=cfg, layers_override=segment_layers)
+            segment_tbl_stacked(config_file, cfg=cfg, layers_override=segment_layers,
+                                mode_override=segment_mode or None,
+                                n_clusters_override=segment_n_clusters or None)
             update_progress(97)
         else:
             log_to_gui(log_widget, "[Stage 3c] Segment skipped (optional; not enabled).")
@@ -4862,6 +4872,8 @@ def run_headless(original_working_directory_arg: str | None = None,
                  run_backfill: bool = True,
                  run_segment: bool = False,
                  segment_layers: list[str] | None = None,
+                 segment_mode: str = "",
+                 segment_n_clusters: int = 0,
                  cleanup_slivers: bool = True) -> None:
     """Entry point for headless processing (callable from other modules).
 
@@ -4925,6 +4937,8 @@ def run_headless(original_working_directory_arg: str | None = None,
                                 run_backfill=run_backfill,
                                 run_segment=run_segment,
                                 segment_layers=segment_layers,
+                                segment_mode=segment_mode,
+                                segment_n_clusters=segment_n_clusters,
                                 cleanup_slivers=cleanup_slivers)
     finally:
         _external_log_fn = None

@@ -4343,6 +4343,7 @@ def generate_report(base_dir: str,
                     include_lines_and_segments: bool = True,
                     include_segmentation: bool = False,
                     segmentation_layers: list | None = None,
+                    include_segmentation_mv: bool = False,
                     report_geocode_groups: list | None = None,
                     include_atlas_maps: bool | None = None,
                     include_analysis_presentation: bool = False,
@@ -5131,6 +5132,78 @@ def generate_report(base_dir: str,
                                 f"{float(r['sens_mean']):.2f}",
                                 f"{float(r['mean_n_assets']):.1f}",
                             ])
+                        order_list.append(('table', tbl))
+                    order_list.append(('new_page', None))
+
+        # Optional multivariate "sensitivity generalisation" section (segmentation
+        # v2, tbl_seg_mv_*). Additive and self-contained: presents *types* of
+        # sensitivity pattern alongside the A–E sensitivity classes for the same
+        # area, framed as the "what kind of sensitivity" view vs the "how sensitive"
+        # view. Skips cleanly when no v2 run exists. Does not touch the shipped
+        # tbl_segmentation* section above. See docs/segmentation.md.
+        _seg_mv_path = os.path.join(str(gpq_dir), "tbl_seg_mv_profile.parquet")
+        if include_segmentation_mv and os.path.exists(_seg_mv_path):
+            try:
+                mv = pd.read_parquet(_seg_mv_path)
+            except Exception as exc:
+                mv = None
+                write_to_log(f"Sensitivity-generalisation section skipped (read failed): {exc}", base_dir)
+            if mv is not None and not mv.empty:
+                # Most recent run per layer keeps the report focused.
+                if "run_id" in mv.columns:
+                    latest = mv.sort_values("run_id").groupby(
+                        "name_gis_geocodegroup")["run_id"].last().to_dict()
+                    mv = mv[mv.apply(lambda r: r["run_id"] == latest.get(
+                        r["name_gis_geocodegroup"]), axis=1)]
+                order_list.append(('heading(2)', "Sensitivity generalisation"))
+                order_list.append(('text',
+                    "The A–E sensitivity classes above answer <b>“how sensitive is this place?”</b> — a "
+                    "level of intensity, scored one polygon at a time. This section answers a different, "
+                    "complementary question: <b>“what kind of sensitivity pattern is this place part of?”</b> "
+                    "It groups polygons by the full multivariate profile of the assets stacked beneath them "
+                    "into a configurable number of sensitivity <i>types</i> (composition / character), "
+                    "optionally as spatially-contiguous regions. The two views are meant to be read together. "
+                    "Method reference: see the methods paper, section <i>“Generalisation of sensitivity "
+                    "patterns”</i> (Frelat-style decomposition; Blaschke-style OBIA analogy)."))
+                order_list.append(('rule', None))
+
+                def _fmt_mv_area(v) -> str:
+                    try:
+                        f = float(v)
+                        return f"{f:,.2f}" if f == f else "–"
+                    except (TypeError, ValueError):
+                        return "–"
+
+                has_ai = "description_ai" in mv.columns and mv["description_ai"].notna().any()
+                for layer in sorted(mv["name_gis_geocodegroup"].astype(str).unique()):
+                    lp = mv[mv["name_gis_geocodegroup"].astype(str) == layer]
+                    if lp.empty:
+                        continue
+                    order_list.append(('heading(3)', f"Sensitivity types – {layer}"))
+                    # One sub-table per (method, n_clusters) combination.
+                    combos = (lp[["method", "n_clusters"]].drop_duplicates()
+                              .sort_values(["method", "n_clusters"]).values.tolist())
+                    for method, k in combos:
+                        mp = lp[(lp["method"].astype(str) == str(method)) &
+                                (lp["n_clusters"] == k)]
+                        if "total_area_km2" in mp.columns and mp["total_area_km2"].notna().any():
+                            mp = mp.sort_values("total_area_km2", ascending=False, na_position="last")
+                        order_list.append(('heading(4)', f"{method} — {int(k)} types"))
+                        header = ["Type", "Polygons", "Area (km²)", "Mean sens.", "Top asset groups"]
+                        if has_ai:
+                            header.append("Description")
+                        tbl = [header]
+                        for _, r in mp.iterrows():
+                            row = [
+                                str(r.get("cluster_label", "")),
+                                f"{int(r['n_polygons']):,}",
+                                _fmt_mv_area(r.get("total_area_km2")),
+                                f"{float(r.get('sens_mean', 0)):.2f}",
+                                str(r.get("top_asset_groups", "") or ""),
+                            ]
+                            if has_ai:
+                                row.append(str(r.get("description_ai", "") or ""))
+                            tbl.append(row)
                         order_list.append(('table', tbl))
                     order_list.append(('new_page', None))
 

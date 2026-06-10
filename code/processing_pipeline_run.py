@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QProgressBar,
     QFrame, QSizePolicy, QRadioButton, QButtonGroup, QMessageBox,
+    QComboBox, QSpinBox,
 )
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
@@ -106,6 +107,10 @@ class ProcessPlan:
     run_analysis: bool
     # Geocode categories to segment (empty -> stage default = basic_mosaic).
     segment_layers: tuple = ()
+    # Segment mode override ("" -> config segment_mode) and cluster count
+    # (0 -> config segment_n_clusters / stage auto).
+    segment_mode: str = ""
+    segment_n_clusters: int = 0
 
     @property
     def run_data(self) -> bool:
@@ -559,6 +564,8 @@ def run_data_process(
     run_backfill: bool = True,
     run_segment: bool = False,
     segment_layers: list | None = None,
+    segment_mode: str = "",
+    segment_n_clusters: int = 0,
     cleanup_slivers: bool = True,
 ) -> None:
     """Run the data-processing pipeline.
@@ -600,6 +607,8 @@ def run_data_process(
             run_backfill=bool(run_backfill),
             run_segment=bool(run_segment),
             segment_layers=list(segment_layers) if segment_layers else None,
+            segment_mode=str(segment_mode or ""),
+            segment_n_clusters=int(segment_n_clusters or 0),
             cleanup_slivers=bool(cleanup_slivers),
         )
         stop_pulse.set()
@@ -1800,6 +1809,8 @@ def run_selected(
                     run_backfill=bool(plan.run_backfill),
                     run_segment=bool(plan.run_segment),
                     segment_layers=list(plan.segment_layers) if plan.segment_layers else None,
+                    segment_mode=str(plan.segment_mode or ""),
+                    segment_n_clusters=int(plan.segment_n_clusters or 0),
                     cleanup_slivers=bool(plan.cleanup_slivers),
                 )
             except Exception as exc:
@@ -2018,19 +2029,20 @@ class ProcessRunnerWindow(QMainWindow):
         grid = QGridLayout(grid_widget)
         grid.setContentsMargins(10, 0, 10, 0)
 
-        # Two-column layout:
-        #   Left column (cols 0-1): ALL process/stage items (Prep / Intersect /
-        #     Flatten / Backfill / Segment / Tiles / Lines / Analysis) + status.
-        #   Right column (cols 3-4): Options (sliver/explode, segment geocodes).
-        #   Col 2: visual gap.
-        # Stage labels are prefixed "1." .. "7." so the operator can see at a
-        # glance which stage runs first and can pick a sensible re-run cutoff
-        # after a parameter-only change (start at "3. Flatten").
-        grid.setColumnMinimumWidth(2, 24)
-        # col 1 (left status) holds the long "Parameter cutoff…" hint, so give
-        # it more share than col 4 whose hints are all short ("Re-renders…").
-        grid.setColumnStretch(1, 2)
-        grid.setColumnStretch(4, 1)
+        # Four-column layout (compact — no per-stage hint column, so the dialog
+        # stays short on small laptop screens):
+        #   col 0: all stages 1-8 (Prep → Analysis) in one column
+        #   col 1: visual gap
+        #   col 2: Options A (explode/sliver, segment geocodes)
+        #   col 3: Options B (segment mode + zones k)
+        # A blocked stage shows its reason as a checkbox tooltip; the one message
+        # worth shouting — "existing tiles will be DELETED" — lives in a
+        # full-width label below the grid (self._lbl_tiles). Stage labels keep
+        # their "1.".."8." prefixes so the run order stays legible.
+        grid.setColumnMinimumWidth(1, 24)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 1)
 
         # Row 0: master "Process" checkbox (cascades to data sub-stages + tiles).
         # Status cells stay empty when a stage is ready (the enabled checkbox
@@ -2040,23 +2052,27 @@ class ProcessRunnerWindow(QMainWindow):
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
-        grid.addWidget(self._cb_data_master, 0, 0, 1, 2)
+        grid.addWidget(self._cb_data_master, 0, 0)
         master_status = "" if avail_data.available else (
             "; ".join(avail_data.reasons) if avail_data.reasons else "Missing inputs")
         if master_status:
             self._cb_data_master.setToolTip(master_status)
 
-        # Flatten options stacked vertically below the master row, spanning
-        # the whole grid so they sit clearly under the master.
-        opts_col = QVBoxLayout()
-        opts_col.setContentsMargins(0, 0, 0, 0)
-        opts_col.setSpacing(2)
+        # Options split across two columns to the right of the stages.
+        #   A: flatten flags (explode / slivers) + segment geocodes
+        #   B: segment mode + zones (k)
+        opts_col_a = QVBoxLayout()
+        opts_col_a.setContentsMargins(0, 0, 0, 0)
+        opts_col_a.setSpacing(2)
+        opts_col_b = QVBoxLayout()
+        opts_col_b.setContentsMargins(0, 0, 0, 0)
+        opts_col_b.setSpacing(2)
         self._cb_data_explode = QCheckBox("Split MultiPolygons in tbl_flat")
         self._cb_data_explode.setChecked(False)
-        opts_col.addWidget(self._cb_data_explode)
+        opts_col_a.addWidget(self._cb_data_explode)
         self._cb_cleanup_slivers = QCheckBox("Drop sliver cells (<1 m²)")
         self._cb_cleanup_slivers.setChecked(True)
-        opts_col.addWidget(self._cb_cleanup_slivers)
+        opts_col_a.addWidget(self._cb_cleanup_slivers)
 
         # Segment (stage 5): which geocode categories to build tbl_segmentation for.
         # Enumerated from tbl_geocode_group; basic_mosaic checked by default,
@@ -2073,72 +2089,133 @@ class ProcessRunnerWindow(QMainWindow):
         if _cats:
             _seglbl = QLabel("Segment geocodes:")
             _seglbl.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
-            opts_col.addWidget(_seglbl)
+            opts_col_a.addWidget(_seglbl)
             # basic_mosaic first
             _cats = sorted(_cats, key=lambda c: (c != "basic_mosaic", c))
+            # Keep column A at most 8 widgets tall (explode + slivers + label
+            # already use 3); spill any further geocode checkboxes into column B
+            # so a long geocode list doesn't run the middle column off the dialog.
+            _MAX_COL_A = 8
+            _col_a_count = 3
             for _c in _cats:
                 _scb = QCheckBox(_c)
                 _scb.setChecked(_c == "basic_mosaic")
-                opts_col.addWidget(_scb)
+                if _col_a_count < _MAX_COL_A:
+                    opts_col_a.addWidget(_scb)
+                    _col_a_count += 1
+                else:
+                    opts_col_b.addWidget(_scb)
                 self._chk_seg_geocats[_c] = _scb
 
-        opts_host = QWidget()
-        opts_host.setLayout(opts_col)
+        # Segment mode: signatures (deterministic typology) vs clustering
+        # (algorithmic k-zone calculation) vs both. Surfaced here so clustering
+        # is reachable without editing config.ini; the chosen value overrides
+        # the config segment_mode for this run. See code/segmentation.py.
+        try:
+            _cfg_mode = (self._cfg["DEFAULT"].get("segment_mode", "signatures")
+                         or "signatures").split("#", 1)[0].strip().lower()
+        except Exception:
+            _cfg_mode = "signatures"
+        try:
+            _cfg_k = int((self._cfg["DEFAULT"].get("segment_n_clusters", "0")
+                          or "0").split("#", 1)[0].strip())
+        except Exception:
+            _cfg_k = 0
+        _modelbl = QLabel("Segment mode:")
+        _modelbl.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
+        opts_col_b.addWidget(_modelbl)
+        self._cmb_seg_mode = QComboBox()
+        # (label, value) — value is what the stage expects.
+        for _txt, _val in (("Signatures (typology)", "signatures"),
+                           ("Clustering (k zones)", "clusters"),
+                           ("Both", "both")):
+            self._cmb_seg_mode.addItem(_txt, _val)
+        _mode_idx = self._cmb_seg_mode.findData(
+            _cfg_mode if _cfg_mode in ("signatures", "clusters", "both") else "signatures")
+        self._cmb_seg_mode.setCurrentIndex(max(0, _mode_idx))
+        opts_col_b.addWidget(self._cmb_seg_mode)
+        _krow = QHBoxLayout()
+        _krow.setContentsMargins(0, 0, 0, 0)
+        _klbl = QLabel("Zones (k):")
+        _klbl.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        _krow.addWidget(_klbl)
+        self._spn_seg_k = QSpinBox()
+        self._spn_seg_k.setRange(0, 40)  # 0 = auto (stage picks 8)
+        self._spn_seg_k.setValue(_cfg_k if 0 <= _cfg_k <= 40 else 0)
+        self._spn_seg_k.setToolTip("Number of clusters for clustering mode. 0 = auto (8).")
+        _krow.addWidget(self._spn_seg_k)
+        _krow.addStretch(1)
+        _kwrap = QWidget()
+        _kwrap.setLayout(_krow)
+        opts_col_b.addWidget(_kwrap)
 
-        # Left column: data sub-stages. The status column shows a short
-        # purpose hint when the stage is ready (so the operator can see at a
-        # glance which stages are pure geometry and which carry parameter
-        # values), and the missing-inputs reason when it isn't.
-        def _mk_sub(row, text, default_checked, ready_hint, avail=None, status_override=None):
+        def _sync_seg_k():
+            # k only matters when clustering is involved.
+            self._spn_seg_k.setEnabled(
+                self._cmb_seg_mode.currentData() in ("clusters", "both"))
+        self._cmb_seg_mode.currentIndexChanged.connect(_sync_seg_k)
+        _sync_seg_k()
+
+        opts_col_a.addStretch(1)
+        opts_col_b.addStretch(1)
+        opts_a_host = QWidget(); opts_a_host.setLayout(opts_col_a)
+        opts_b_host = QWidget(); opts_b_host.setLayout(opts_col_b)
+
+        # Stage checkboxes — no status column. A blocked stage carries its
+        # reason as a tooltip; ready stages need no hint (keeps the dialog short).
+        # Each stage column is its own top-packed VBox so a tall Options column
+        # never spreads the checkboxes apart vertically.
+        def _mk_sub(parent_layout, text, default_checked, avail=None):
             av = avail if avail is not None else avail_data
             cb = QCheckBox("    " + text)  # indent for visual hierarchy
             cb.setEnabled(av.available)
             cb.setChecked(default_checked and av.available)
-            grid.addWidget(cb, row, 0)
-            if status_override is not None:
-                status = status_override
-            elif av.available:
-                status = ready_hint
-            else:
-                status = "; ".join(av.reasons) if getattr(av, "reasons", None) else "Missing inputs"
-            lbl = QLabel(status)
-            lbl.setWordWrap(True)
-            lbl.setProperty("normal_text", status)
-            grid.addWidget(lbl, row, 1)
-            return cb, lbl
+            if not av.available:
+                cb.setToolTip("; ".join(av.reasons) if getattr(av, "reasons", None)
+                              else "Missing inputs")
+            parent_layout.addWidget(cb)
+            return cb
 
-        # All process/stage items live in the LEFT column (rows 1-8).
-        self._cb_prep, _      = _mk_sub(1, "1. Prep (workspace, status)",
-                                        avail_data.available, "Geometry stage")
-        self._cb_intersect, _ = _mk_sub(2, "2. Intersect (build tbl_stacked)",
-                                        avail_data.available, "Geometry stage")
-        self._cb_flatten, _   = _mk_sub(3, "3. Flatten (build tbl_flat)",
-                                        avail_data.available,
-                                        "Parameter cutoff — start here after parameter changes")
-        self._cb_backfill, _  = _mk_sub(4, "4. Backfill (area_m2 → tbl_stacked)",
-                                        avail_data.available, "Geometry stage")
-        self._cb_segment, _   = _mk_sub(5, "5. Segment (build tbl_segmentation)",
-                                        avail_data.available,
-                                        "Overlap-signature typology / zones from tbl_stacked")
+        def _stage_col():
+            c = QVBoxLayout()
+            c.setContentsMargins(0, 0, 0, 0)
+            c.setSpacing(2)
+            return c
 
-        tiles_status = "Run Flatten (or full data) first" if not tiles_flat_exists else None
-        self._cb_tiles, self._lbl_tiles = _mk_sub(
-            6, "6. Tiles processing (MBTiles)", tiles_default,
-            "Re-renders from tbl_flat", avail=avail_tiles, status_override=tiles_status)
-        self._cb_lines, _ = _mk_sub(
-            7, "7. Lines processing (segments)", avail_lines.available,
-            "Re-aggregates from tbl_flat", avail=avail_lines)
-        self._cb_analysis, _ = _mk_sub(
-            8, "8. Analysis processing (study areas)", avail_analysis.available,
-            "Consumes tbl_flat", avail=avail_analysis)
+        # col 0: all stages 1-8 stacked in a single column.
+        stage_col = _stage_col()
+        self._cb_prep      = _mk_sub(stage_col, "1. Prep (workspace, status)", avail_data.available)
+        self._cb_intersect = _mk_sub(stage_col, "2. Intersect (build tbl_stacked)", avail_data.available)
+        self._cb_flatten   = _mk_sub(stage_col, "3. Flatten (build tbl_flat)", avail_data.available)
+        self._cb_backfill  = _mk_sub(stage_col, "4. Backfill (area_m2 → tbl_stacked)", avail_data.available)
+        self._cb_segment   = _mk_sub(stage_col, "5. Segment (build tbl_segmentation)", avail_data.available)
+        self._cb_tiles     = _mk_sub(stage_col, "6. Tiles processing (MBTiles)", tiles_default, avail=avail_tiles)
+        if not tiles_flat_exists:
+            self._cb_tiles.setToolTip("Run Flatten (or full data) first")
+        self._cb_lines     = _mk_sub(stage_col, "7. Lines processing (segments)",
+                                     avail_lines.available, avail=avail_lines)
+        self._cb_analysis  = _mk_sub(stage_col, "8. Analysis processing (study areas)",
+                                     avail_analysis.available, avail=avail_analysis)
+        stage_col.addStretch(1)
+        stage_host = QWidget(); stage_host.setLayout(stage_col)
 
-        # Options live in the RIGHT column (col 3-4), beside the stage list, so
-        # the left column is purely process/stage items and the right is options.
+        grid.addWidget(stage_host, 1, 0, Qt.AlignTop)
+
+        # Options: two content columns to the right of the stages.
         opts_label = QLabel("Options")
         opts_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
-        grid.addWidget(opts_label, 0, 3, 1, 2)
-        grid.addWidget(opts_host, 1, 3, 8, 2)
+        grid.addWidget(opts_label, 0, 2)
+        grid.addWidget(opts_a_host, 1, 2, Qt.AlignTop)
+        grid.addWidget(opts_b_host, 1, 3, Qt.AlignTop)
         layout.addWidget(grid_widget)
+
+        # The one dynamic status line kept from the old hint column: a full-width
+        # warning shown when leaving Tiles unchecked would delete existing tiles
+        # (driven by _sync_tiles_warning). Empty/blank otherwise.
+        self._lbl_tiles = QLabel("")
+        self._lbl_tiles.setWordWrap(True)
+        self._lbl_tiles.setProperty("normal_text", "")
+        layout.addWidget(self._lbl_tiles)
 
         # ----- Master <-> sub cascade -----
         # Use `clicked` (fires only on user interaction, not setCheckState) so
@@ -2501,6 +2578,8 @@ class ProcessRunnerWindow(QMainWindow):
                     run_backfill=self._cb_backfill.isChecked(),
                     run_segment=self._cb_segment.isChecked(),
                     segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
+                    segment_mode=str(self._cmb_seg_mode.currentData() or ""),
+                    segment_n_clusters=int(self._spn_seg_k.value()),
                     explode_flat_multipolygons=self._cb_data_explode.isChecked(),
                     cleanup_slivers=self._cb_cleanup_slivers.isChecked(),
                     run_tiles=self._cb_tiles.isChecked(),
@@ -2517,6 +2596,8 @@ class ProcessRunnerWindow(QMainWindow):
                     run_backfill=data_on,
                     run_segment=data_on,
                     segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
+                    segment_mode=str(self._cmb_seg_mode.currentData() or ""),
+                    segment_n_clusters=int(self._spn_seg_k.value()),
                     explode_flat_multipolygons=False,
                     cleanup_slivers=True,
                     run_tiles=self._avail_tiles.available and (data_on or self._tiles_flat_exists),
