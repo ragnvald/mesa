@@ -918,14 +918,22 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             con = sqlite3.connect(f"file:{db.resolve()}?mode=ro&immutable=1", uri=True, timeout=5.0)
             cur = con.cursor()
-            tms_row = (1 << z) - 1 - y
+            # Leaflet (tms:false) requests XYZ rows; map to the file's storage scheme.
+            # MESA's tiles_create_raster writes TMS (Y origin south, metadata scheme=tms),
+            # so flip. Honour the declared scheme rather than falling back to the raw row:
+            # a raw-Y lookup against a TMS db hits the vertical *mirror* of a real row and
+            # paints a flipped ghost copy of the data. See learning.md "Mirror-ghost tiles".
+            scheme = "tms"
+            try:
+                r = cur.execute("SELECT value FROM metadata WHERE name='scheme'").fetchone()
+                if r and str(r[0]).strip().lower() in ("xyz", "tms"):
+                    scheme = str(r[0]).strip().lower()
+            except Exception:
+                pass
+            tile_row = y if scheme == "xyz" else (1 << z) - 1 - y
             row = cur.execute(
                 "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                (z, x, tms_row)).fetchone()
-            if not row:
-                row = cur.execute(
-                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                    (z, x, y)).fetchone()
+                (z, x, tile_row)).fetchone()
             if not row:
                 self._png(BLANK_PNG)
                 return

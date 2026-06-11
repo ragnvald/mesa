@@ -286,19 +286,24 @@ class _MBTilesHandler(BaseHTTPRequestHandler):
                 con = sqlite3.connect(db_path, check_same_thread=False)
                 self.connections[db_path] = con
 
-            tms_y = (1 << z) - 1 - y
             cur = con.cursor()
+            # Map Leaflet's XYZ row to the file's storage scheme and do ONE lookup.
+            # MESA writes TMS (metadata scheme=tms); never fall back to the raw Y row -
+            # against a TMS db that hits the vertical mirror of a real row and paints a
+            # flipped ghost copy. See learning.md "Mirror-ghost tiles".
+            scheme = "tms"
+            try:
+                r = cur.execute("SELECT value FROM metadata WHERE name='scheme'").fetchone()
+                if r and str(r[0]).strip().lower() in ("xyz", "tms"):
+                    scheme = str(r[0]).strip().lower()
+            except Exception:
+                pass
+            tile_row = y if scheme == "xyz" else (1 << z) - 1 - y
             cur.execute(
                 "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                (z, x, tms_y),
+                (z, x, tile_row),
             )
             row = cur.fetchone()
-            if not row:
-                cur.execute(
-                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                    (z, x, y),
-                )
-                row = cur.fetchone()
             if not row:
                 self.send_response(204)
                 self.end_headers()

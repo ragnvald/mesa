@@ -752,21 +752,23 @@ class _MesaHandler(BaseHTTPRequestHandler):
                 pass
             cur = con.cursor()
 
-            # Try 1: Standard MBTiles TMS row (y is XYZ from Leaflet, flip to TMS row)
-            tms_row = (1 << z) - 1 - y
+            # Map Leaflet's XYZ row to the file's storage scheme and do ONE lookup.
+            # MESA writes TMS (metadata scheme=tms); never fall back to the raw Y row -
+            # against a TMS db that hits the vertical mirror of a real row and paints a
+            # flipped ghost copy. See learning.md "Mirror-ghost tiles".
+            scheme = "tms"
+            try:
+                r = cur.execute("SELECT value FROM metadata WHERE name='scheme'").fetchone()
+                if r and str(r[0]).strip().lower() in ("xyz", "tms"):
+                    scheme = str(r[0]).strip().lower()
+            except Exception:
+                pass
+            tile_row = y if scheme == "xyz" else (1 << z) - 1 - y
             cur.execute(
                 "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                (z, x, tms_row),
+                (z, x, tile_row),
             )
             row = cur.fetchone()
-
-            # Try 2: XYZ fallback (some generators store raw y)
-            if not row:
-                cur.execute(
-                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                    (z, x, y),
-                )
-                row = cur.fetchone()
 
             if not row:
                 if MBTILES_DEBUG_GUARD:
