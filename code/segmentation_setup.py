@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""segmentation_setup.py — Sensitivity generalisation (setup / config UI).
+"""segmentation_setup.py — Classification (setup / config UI).
 
 PURPOSE
-    Configure and launch the multivariate sensitivity-generalisation segmentation
-    (the "what kind of sensitivity pattern is this place part of?" view that
-    complements the A–E "how sensitive is this place?" classification). Lets the
-    operator choose the geocode layer, number of classes (single or list),
-    method (attribute / spatial / both), an optional pressure filter, the
-    feature-vector composition, and a minimum-area sliver filter; persists the
-    choices to config.ini (segmv_* keys) and optionally runs the heavy helper.
+    Configure and launch the Classification clustering (the "what kind of
+    sensitivity pattern is this place part of?" view that complements the A–E
+    "how sensitive is this place?" classification). Cells are clustered by the
+    shape of their (importance, susceptibility) histogram. Lets the operator
+    choose the geocode layer, the k range searched by BIC, the histogram
+    transform (Hellinger/CLR), the coverage-feature weight, and a minimum-area
+    sliver filter; persists the choices to config.ini (segmv_* keys) and
+    optionally runs the heavy helper.
 
 INPUTS
     output/geoparquet/tbl_geocode_group, tbl_geocode_object  (layer list)
@@ -28,7 +29,7 @@ CALLS
     code/segmentation_run.py (params_from_config, detect_pressure_columns, the
     subprocess run), code/segmentation.py (list_geocode_layers),
     code/mesa_shared.py (find_base_dir, read_config, parquet_dir),
-    asset_manage.apply_shared_stylesheet.
+    ui_style.apply_shared_stylesheet (GIS-free shared Qt look-and-feel).
 
 NOTES
     MESA v5+ feature. Lightweight — imports no heavy compute libs (sklearn etc.);
@@ -50,29 +51,19 @@ import mesa_shared
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox, QRadioButton,
-    QButtonGroup, QSpinBox, QMessageBox, QSizePolicy, QProgressBar, QPlainTextEdit,
+    QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox,
+    QSpinBox, QMessageBox, QProgressBar, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
 try:
-    from asset_manage import apply_shared_stylesheet
+    from ui_style import apply_shared_stylesheet
 except Exception:  # keep standalone-launchable even if the shared sheet is unavailable
     def apply_shared_stylesheet(_app):  # type: ignore
         return None
 
 import segmentation as _seg
 import segmentation_run as _run
-
-FEATURE_LABELS = [
-    ("sum", "Sensitivity sum"),
-    ("mean", "Sensitivity mean"),
-    ("max", "Sensitivity max"),
-    ("std", "Sensitivity std-dev"),
-    ("depth", "Stack depth (row count)"),
-    ("group_sums", "Per-asset-group sensitivity sums"),
-    ("dominant", "Dominant asset group (one-hot)"),
-]
 
 
 def _shared_window_icon(base_dir: Path):
@@ -113,7 +104,19 @@ def _update_config(cfg_path: str, **kwargs) -> None:
             found = True
             break
         if not found:
-            lines.append(f"{key} = {value}\n")
+            # Insert into the [DEFAULT] section, not EOF: appending at EOF can land
+            # inside a later section (e.g. [VALID_VALUES]), where the key is invisible
+            # to cfg["DEFAULT"].get(). Find the end of the DEFAULT block.
+            insert_at, in_default = len(lines), False
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith("["):
+                    if in_default:
+                        insert_at = i
+                        break
+                    if s.lower() == "[default]":
+                        in_default = True
+            lines.insert(insert_at, f"{key} = {value}\n")
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -218,9 +221,11 @@ class SegmentationSetupWindow(QMainWindow):
         self._cmb_layer.setCurrentIndex(idx if idx >= 0 else 0)
         form.addWidget(self._cmb_layer, r, 1)
 
-        form.addWidget(QLabel("Number of classes:"), r, 2, Qt.AlignRight)
-        self._txt_k = QLineEdit(",".join(map(str, self._params.n_clusters)))
-        self._txt_k.setPlaceholderText("single value or comma-separated list, e.g. 4,8,16")
+        form.addWidget(QLabel("k range (BIC search):"), r, 2, Qt.AlignRight)
+        self._txt_k = QLineEdit(f"{self._params.k_min}-{self._params.k_max}")
+        self._txt_k.setPlaceholderText("min-max, e.g. 2-15")
+        self._txt_k.setToolTip("A Gaussian Mixture is fit for every k in this range; "
+                               "the best is chosen automatically by minimum BIC.")
         form.addWidget(self._txt_k, r, 3); r += 1
 
         # The single-control rows below span the field columns (1–3) so they fill
@@ -228,38 +233,44 @@ class SegmentationSetupWindow(QMainWindow):
         form.setColumnStretch(1, 1)
         form.setColumnStretch(3, 1)
 
-        # Method
-        form.addWidget(QLabel("Method:"), r, 0, Qt.AlignRight)
-        method_row = QHBoxLayout()
-        self._rb_attr = QRadioButton("Attribute (typology)")
-        self._rb_spatial = QRadioButton("Spatial (contiguous)")
-        self._rb_both = QRadioButton("Both")
-        grp = QButtonGroup(self)
-        for rb in (self._rb_attr, self._rb_spatial, self._rb_both):
-            grp.addButton(rb); method_row.addWidget(rb)
-        {"attribute": self._rb_attr, "spatial": self._rb_spatial,
-         "both": self._rb_both}.get(self._params.method, self._rb_attr).setChecked(True)
-        mw = QWidget(); mw.setLayout(method_row)
-        form.addWidget(mw, r, 1, 1, 3); r += 1
+        # Histogram transform + coverage weight on one row.
+        form.addWidget(QLabel("Histogram transform:"), r, 0, Qt.AlignRight)
+        self._cmb_transform = QComboBox()
+        self._cmb_transform.addItem("Hellinger (recommended)", userData="hellinger")
+        self._cmb_transform.addItem("CLR (centred log-ratio)", userData="clr")
+        ti = self._cmb_transform.findData((self._params.transform or "hellinger"))
+        self._cmb_transform.setCurrentIndex(ti if ti >= 0 else 0)
+        self._cmb_transform.setToolTip(
+            "How the (importance, susceptibility) proportions are transformed before "
+            "clustering. Hellinger (√p) handles zeros without pseudocounts; CLR is the "
+            "compositional alternative.")
+        form.addWidget(self._cmb_transform, r, 1)
 
-        # Plain-language explanation of the two clustering methods (and "Both").
+        form.addWidget(QLabel("Coverage weight:"), r, 2, Qt.AlignRight)
+        self._txt_cov = QLineEdit(str(self._params.coverage_weight))
+        self._txt_cov.setPlaceholderText("0 disables; 1.0 default")
+        self._txt_cov.setToolTip(
+            "Weight of the standardised coverage/intensity feature (overlap depth) "
+            "appended to the histogram. 0 clusters on histogram shape only.")
+        form.addWidget(self._txt_cov, r, 3); r += 1
+
+        # Plain-language explanation of the method.
         method_help = QLabel(
-            "<b>Attribute (typology)</b> — groups polygons by how similar their "
-            "sensitivity profile is, ignoring location. Two places with the same "
-            "pattern get the same type even when far apart; types can appear as "
-            "scattered patches (KMeans on the feature vector).<br>"
-            "<b>Spatial (contiguous)</b> — same similarity, but with a geography "
-            "constraint so each type forms connected regions on the map (SKATER "
-            "regionalisation, or a KMeans + contiguity fallback). Better for zoning "
-            "and map-reading.<br>"
-            "<b>Both</b> — runs each method and writes a separate result so you can "
-            "compare the typology and the regions side by side.")
+            "Cells are grouped by the <b>shape</b> of their (importance, susceptibility) "
+            "histogram, so a place dominated by high-importance / low-susceptibility "
+            "assets separates from a high-susceptibility / low-importance one even when "
+            "their A–E sensitivity code is identical. The number of types is chosen "
+            "automatically by BIC over the k range; per-cell certainty (p_max, entropy) "
+            "is kept for the map.")
         method_help.setWordWrap(True)
         method_help.setStyleSheet("color: #6a5533; font-size: 9pt;")
         form.addWidget(method_help, r, 1, 1, 3); r += 1
 
-        # Pressure filter
-        form.addWidget(QLabel("Pressure filter:"), r, 0, Qt.AlignRight)
+        # Pressure filter — only shown when tbl_stacked actually has pressure
+        # columns. With just the aggregate option there's nothing to choose, so the
+        # combo is kept (as a data holder for _collect_values) but the row is not
+        # added to the form. The canonical MESA stack has no pressure column, so
+        # this row is usually absent.
         self._cmb_pressure = QComboBox()
         self._cmb_pressure.addItem("All pressures (aggregate)", userData="")
         try:
@@ -268,9 +279,11 @@ class SegmentationSetupWindow(QMainWindow):
             press = []
         for pc in press:
             self._cmb_pressure.addItem(pc, userData=pc)
-        if not press:
-            self._cmb_pressure.setToolTip("No pressure column in tbl_stacked — only aggregate is available.")
-        form.addWidget(self._cmb_pressure, r, 1, 1, 3); r += 1
+        if press:
+            form.addWidget(QLabel("Pressure filter:"), r, 0, Qt.AlignRight)
+            form.addWidget(self._cmb_pressure, r, 1, 1, 3); r += 1
+        else:
+            self._cmb_pressure.hide()
 
         # Min area
         form.addWidget(QLabel("Min polygon area (m²):"), r, 0, Qt.AlignRight)
@@ -281,23 +294,6 @@ class SegmentationSetupWindow(QMainWindow):
         self._spn_area.setValue(int(self._params.min_area_m2 or 0))
         self._spn_area.setToolTip("Drop slivers below this area before clustering (0 = keep all).")
         form.addWidget(self._spn_area, r, 1, 1, 3); r += 1
-
-        # Feature composition — checkboxes in a multi-column grid (the window is
-        # wide enough that a single column wastes horizontal space).
-        feat_group = QGroupBox("Feature composition (per polygon)")
-        feat_lay = QGridLayout(feat_group)
-        feat_lay.setHorizontalSpacing(16)
-        feat_lay.setVerticalSpacing(2)
-        self._feat_checks: dict[str, QCheckBox] = {}
-        n_cols = 3
-        for i, (key, label) in enumerate(FEATURE_LABELS):
-            cb = QCheckBox(label)
-            cb.setChecked(key in self._params.features)
-            feat_lay.addWidget(cb, i // n_cols, i % n_cols)
-            self._feat_checks[key] = cb
-        for c in range(n_cols):
-            feat_lay.setColumnStretch(c, 1)
-        layout.addWidget(feat_group)
 
         # AI toggle
         self._cb_ai = QCheckBox("Generate AI plain-language descriptions per class (optional, off by default)")
@@ -314,16 +310,16 @@ class SegmentationSetupWindow(QMainWindow):
 
         layout.addStretch()
 
-        # Buttons
+        # Buttons: Run now + Save settings to the far left, Exit bottom-right.
         btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        self._save_btn = QPushButton("Save settings")
-        self._save_btn.clicked.connect(self._on_save)
-        btn_row.addWidget(self._save_btn)
         self._run_btn = QPushButton("Run now")
         self._run_btn.setProperty("role", "primary")
         self._run_btn.clicked.connect(self._on_run_now)
         btn_row.addWidget(self._run_btn)
+        self._save_btn = QPushButton("Save settings")
+        self._save_btn.clicked.connect(self._on_save)
+        btn_row.addWidget(self._save_btn)
+        btn_row.addStretch()
         exit_btn = QPushButton("Exit")
         exit_btn.clicked.connect(self.close)
         btn_row.addWidget(exit_btn)
@@ -331,26 +327,33 @@ class SegmentationSetupWindow(QMainWindow):
 
     # -- helpers ---------------------------------------------------------
     def _collect(self) -> dict:
-        method = ("both" if self._rb_both.isChecked()
-                  else "spatial" if self._rb_spatial.isChecked() else "attribute")
-        feats = [k for k, _ in FEATURE_LABELS if self._feat_checks[k].isChecked()] or ["sum"]
-        k_raw = self._txt_k.text().strip() or "8"
+        k_raw = self._txt_k.text().strip() or "2-15"
+        cov = (self._txt_cov.text().strip() or "1.0")
         return {
             "segmv_geocode_layer": self._cmb_layer.currentText(),
-            "segmv_n_clusters": k_raw,
-            "segmv_method": method,
+            "segmv_k_range": k_raw,
+            "segmv_transform": self._cmb_transform.currentData() or "hellinger",
+            "segmv_coverage_weight": cov,
             "segmv_pressure": self._cmb_pressure.currentData() or "",
-            "segmv_features": ",".join(feats),
             "segmv_min_area_m2": int(self._spn_area.value()),
             "segmv_ai_enabled": "1" if self._cb_ai.isChecked() else "0",
         }
 
     def _validate_k(self) -> bool:
-        raw = self._txt_k.text().strip()
-        vals = [x for x in raw.replace(";", ",").split(",") if x.strip()]
-        if not vals or not all(x.strip().isdigit() and int(x) >= 2 for x in vals):
-            QMessageBox.warning(self, "Invalid class count",
-                                "Enter a single integer ≥ 2 or a comma-separated list, e.g. 4,8,16.")
+        raw = self._txt_k.text().strip().replace(":", "-")
+        parts = [p for p in raw.split("-") if p.strip()]
+        ok = len(parts) in (1, 2) and all(p.strip().isdigit() and int(p) >= 2 for p in parts)
+        if ok and len(parts) == 2 and int(parts[0]) > int(parts[1]):
+            ok = False
+        if not ok:
+            QMessageBox.warning(self, "Invalid k range",
+                                "Enter a range like 2-15 (or a single integer ≥ 2).")
+            return False
+        try:
+            float(self._txt_cov.text().strip() or "1.0")
+        except ValueError:
+            QMessageBox.warning(self, "Invalid coverage weight",
+                                "Coverage weight must be a number (e.g. 0, 1.0, 2.5).")
             return False
         return True
 
@@ -374,9 +377,9 @@ class SegmentationSetupWindow(QMainWindow):
         args = [
             "--original_working_directory", str(self._base_dir),
             "--layer", vals["segmv_geocode_layer"],
-            "--n-clusters", str(vals["segmv_n_clusters"]),
-            "--method", vals["segmv_method"],
-            "--features", vals["segmv_features"],
+            "--k-range", str(vals["segmv_k_range"]),
+            "--transform", vals["segmv_transform"],
+            "--coverage-weight", str(vals["segmv_coverage_weight"]),
             "--min-area-m2", str(vals["segmv_min_area_m2"]),
         ]
         if vals["segmv_pressure"]:

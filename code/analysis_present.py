@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, Signal, QObject
 
-from asset_manage import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet
 from mesa_shared import find_base_dir as resolve_base_dir
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
@@ -1694,12 +1694,11 @@ class ComparisonWindow(QMainWindow):
         # Compact Exit button in tab bar corner
         exit_btn = QPushButton("Exit")
         exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
             QPushButton#CornerExitButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 8pt;
-                padding: 2px 14px; margin: 2px 6px;
+                border-radius: 7px; color: #453621; font-weight: 500;
+                padding: 6px 16px; min-width: 80px;
             }
             QPushButton#CornerExitButton:hover { background: #e1d1ae; }
             QPushButton#CornerExitButton:pressed { background: #d4c094; }

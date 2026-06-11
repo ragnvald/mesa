@@ -71,6 +71,24 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "", str(name))
 
 
+# Sequential ramp for the Classification "Certainty" layer (p_max in [0,1]):
+# pale yellow (uncertain) → deep green (confident). YlGn-style stops.
+_CERT_STOPS = [(0.0, (255, 255, 229)), (0.5, (120, 198, 121)), (1.0, (0, 90, 50))]
+
+
+def _certainty_colour(p) -> str:
+    """Hex colour for a posterior certainty p_max in [0,1]; grey when unknown."""
+    if p is None:
+        return "#cccccc"
+    t = max(0.0, min(1.0, float(p)))
+    for (t0, c0), (t1, c1) in zip(_CERT_STOPS, _CERT_STOPS[1:]):
+        if t <= t1 or t1 == _CERT_STOPS[-1][0]:
+            f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            rgb = tuple(int(round(a + (b - a) * f)) for a, b in zip(c0, c1))
+            return "#%02x%02x%02x" % rgb
+    return "#006837"
+
+
 def _mbtiles_meta(path: Path) -> dict:
     out = {"bounds": None, "minzoom": None, "maxzoom": None, "format": "image/png"}
     try:
@@ -609,30 +627,29 @@ class _Api:
     SEGMV_MAX_FEATURES = 250_000
 
     def segmv_runs(self) -> list[dict]:
-        """Available (run_id, method, n_clusters) results from tbl_seg_mv, newest
-        run first. Each combination is one selectable Classifications layer."""
+        """Available (run_id, layer) Classification results from tbl_seg_mv, newest
+        run first. Each is one selectable Classifications layer."""
         import pandas as pd
         p = self.gpq / "tbl_seg_mv.parquet"
         if not p.exists():
             return []
         try:
-            df = pd.read_parquet(p, columns=["run_id", "name_gis_geocodegroup", "method", "n_clusters"])
+            df = pd.read_parquet(p, columns=["run_id", "name_gis_geocodegroup"])
         except Exception:
             return []
         if df.empty:
             return []
-        combos = df.drop_duplicates(["run_id", "name_gis_geocodegroup", "method", "n_clusters"])
+        combos = df.drop_duplicates(["run_id", "name_gis_geocodegroup"])
         out = []
         for _, r in combos.iterrows():
             rid, layer = str(r["run_id"]), str(r["name_gis_geocodegroup"])
-            method, k = str(r["method"]), int(r["n_clusters"])
-            out.append({"run_id": rid, "layer": layer, "method": method, "n_clusters": k,
-                        "label": f"{rid} · {layer} · {method}"})
-        out.sort(key=lambda d: (d["run_id"], d["method"]), reverse=True)
+            out.append({"run_id": rid, "layer": layer, "label": f"{rid} · {layer}"})
+        out.sort(key=lambda d: d["run_id"], reverse=True)
         return out
 
-    def _segmv_profile(self, run_id: str, method: str, k):
-        """Profile rows + legend for one result, largest area first."""
+    def _segmv_profile(self, run_id: str):
+        """Profile rows + legend for one run, largest area first. Each row carries
+        the cluster fingerprint (25-bin mean histogram) for the report heatmap."""
         import pandas as pd
         prof = self.gpq / "tbl_seg_mv_profile.parquet"
         if not prof.exists():
@@ -641,15 +658,14 @@ class _Api:
             df = pd.read_parquet(prof)
         except Exception:
             return [], []
-        df = df[(df["run_id"].astype(str) == str(run_id)) & (df["method"].astype(str) == str(method))]
-        if k is not None and "n_clusters" in df.columns:
-            df = df[pd.to_numeric(df["n_clusters"], errors="coerce") == k]
+        df = df[df["run_id"].astype(str) == str(run_id)]
         if df.empty:
             return [], []
         if "total_area_km2" in df.columns and df["total_area_km2"].notna().any():
             df = df.sort_values("total_area_km2", ascending=False, na_position="last")
         else:
             df = df.sort_values("n_polygons", ascending=False)
+        hist_cols = [c for c in df.columns if c.startswith("h_i")]
         rows, legend = [], []
         for _, r in df.iterrows():
             try:
@@ -662,16 +678,19 @@ class _Api:
                 "cluster_label": label, "fill": fill,
                 "n_polygons": int(r["n_polygons"]) if pd.notna(r.get("n_polygons")) else 0,
                 "total_area_km2": float(r["total_area_km2"]) if pd.notna(r.get("total_area_km2")) else None,
-                "sens_mean": float(r["sens_mean"]) if pd.notna(r.get("sens_mean")) else None,
+                "mean_importance": float(r["mean_importance"]) if pd.notna(r.get("mean_importance")) else None,
+                "mean_susceptibility": float(r["mean_susceptibility"]) if pd.notna(r.get("mean_susceptibility")) else None,
+                "mean_coverage_index": float(r["mean_coverage_index"]) if pd.notna(r.get("mean_coverage_index")) else None,
                 "top_asset_groups": str(r.get("top_asset_groups") or ""),
+                "fingerprint": [float(r[c]) for c in hist_cols] if hist_cols else [],
             })
             legend.append({"zone": label, "fill": fill})
         return rows, legend
 
-    def segmv_layer(self, run_id: str, method: str, n_clusters) -> dict:
-        """Polygon GeoJSON + legend + profile for one generalisation result.
-        Geometry joined from tbl_geocode_object; fill colour per cluster id
-        (qualitative palette, reused from the Segmentation clusters view)."""
+    def segmv_layer(self, run_id: str, *_legacy) -> dict:
+        """Polygon GeoJSON + legend + profile for one Classification run. Each
+        feature carries both a categorical Types fill (per cluster id) and a
+        sequential Certainty fill (per p_max), plus the fields the tooltip shows."""
         import pandas as pd
         try:
             import geopandas as gpd
@@ -682,19 +701,11 @@ class _Api:
         if not p.exists() or not go.exists():
             return {"error": "No classification results found. Run Classification first."}
         try:
-            k = int(n_clusters)
-        except Exception:
-            k = None
-        try:
             df = pd.read_parquet(p)
         except Exception as exc:
             return {"error": str(exc)}
-        m = df[(df["run_id"].astype(str) == str(run_id)) & (df["method"].astype(str) == str(method))]
-        if k is not None and "n_clusters" in m.columns:
-            m = m[pd.to_numeric(m["n_clusters"], errors="coerce") == k]
+        m = df[df["run_id"].astype(str) == str(run_id)]
         m = m[m["cluster_id"].notna()]
-        if "no_data" in m.columns:
-            m = m[~m["no_data"].astype(bool)]
         if m.empty:
             return {"geojson": {"type": "FeatureCollection", "features": []}, "legend": [], "profile": []}
         if len(m) > self.SEGMV_MAX_FEATURES:
@@ -726,14 +737,19 @@ class _Api:
                 cid = int(r.get("cluster_id"))
             except Exception:
                 cid = -1
+            pmax = float(r.get("p_max")) if pd.notna(r.get("p_max")) else None
             feats.append({"type": "Feature", "geometry": geom.__geo_interface__,
                           "properties": {
                               "code": str(r.get("code", "") or ""),
                               "cluster_id": cid,
                               "cluster_label": str(r.get("cluster_label") or f"type {cid + 1}"),
-                              "sens_mean": float(r.get("sens_mean")) if pd.notna(r.get("sens_mean")) else None,
-                              "fill": seg._overview_colour(str(cid), "clusters")}})
-        profile, legend = self._segmv_profile(run_id, method, k)
+                              "p_max": pmax,
+                              "entropy": float(r.get("entropy")) if pd.notna(r.get("entropy")) else None,
+                              "coverage_index": int(r.get("coverage_index")) if pd.notna(r.get("coverage_index")) else None,
+                              "top_bins": str(r.get("top_bins") or ""),
+                              "fill": seg._overview_colour(str(cid), "clusters"),
+                              "cert_fill": _certainty_colour(pmax)}})
+        profile, legend = self._segmv_profile(run_id)
         return {"geojson": {"type": "FeatureCollection", "features": feats},
                 "legend": legend, "profile": profile, "layer": layer}
 
@@ -1131,6 +1147,11 @@ HTML = r"""<!doctype html>
           <div class="mapctl-hd"><span>Layers</span><span class="mapctl-arrow">▾</span></div>
           <div class="mapctl-body">
             <div class="ctlrow"><b>Run</b><br><select id="classRun"></select></div>
+            <div class="ctlrow"><b>Colour by</b><br>
+              <select id="classColour">
+                <option value="types">Types</option>
+                <option value="certainty">Certainty (p_max)</option>
+              </select></div>
             <div class="ctlrow"><b>Basemap</b><br>
               <select id="classBasemap">
                 <option value="osm">OpenStreetMap</option>
@@ -1151,7 +1172,7 @@ HTML = r"""<!doctype html>
         </div>
         <div class="row"><b>Legend</b><div id="classLegend" class="muted">–</div></div>
         <div class="row"><b>Types</b> <span class="muted">(largest area first)</span>
-          <table id="classTable"><thead><tr><th data-key="cluster_label">Type</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="sens_mean">Sens</th><th data-key="top_asset_groups" style="text-align:left">Top asset groups</th></tr></thead>
+          <table id="classTable"><thead><tr><th data-key="cluster_label">Type</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="mean_importance">Imp</th><th data-key="mean_susceptibility">Sus</th><th data-key="mean_coverage_index">Cov</th><th data-key="top_asset_groups" style="text-align:left">Top asset groups</th></tr></thead>
           <tbody></tbody></table>
         </div>
       </div>
@@ -1652,14 +1673,28 @@ HTML = r"""<!doctype html>
   var classLoaded=false, classRuns=[], classVec=L.geoJSON(null).addTo(maps.class);
   // Types table sort state (legend keeps server order; only the table reorders).
   var classProfileData=[], classSort={key:null, dir:1};
+  var classColourMode='types', classLegendData=[];
+  function classFill(f){ var p=f.properties||{};
+    return (classColourMode==='certainty') ? (p.cert_fill||'#cccccc') : (p.fill||'#cccccc'); }
+  function classStyle(f){ return {fillColor:classFill(f),color:'#555',weight:0.3,fillOpacity:opacity*0.9}; }
   function classSetLoading(on){ var e=document.getElementById('classLoading'); if(e) e.style.display=on?'block':'none'; }
   function classMsg(t){ document.getElementById('classMsg').innerHTML=t||''; }
   function clearClassLayers(){ classVec.clearLayers(); classVecGj=null; }
-  function renderClassPanel(legend, profile){
-    var leg=document.getElementById('classLegend'); leg.innerHTML='';
-    if(!legend || !legend.length){ leg.innerHTML='<span class="muted">–</span>'; }
-    else legend.forEach(function(z){ var d=document.createElement('div');
+  function updateClassLegend(){
+    var leg=document.getElementById('classLegend'); if(!leg) return; leg.innerHTML='';
+    if(classColourMode==='certainty'){
+      leg.innerHTML='<div style="height:12px;width:150px;border:1px solid #999;'+
+        'background:linear-gradient(to right,#ffffe5,#78c679,#005a32)"></div>'+
+        '<div class="muted" style="font-size:11px">less ⟶ more certain (p_max)</div>';
+      return;
+    }
+    if(!classLegendData.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
+    classLegendData.forEach(function(z){ var d=document.createElement('div');
       d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+z.zone; leg.appendChild(d); });
+  }
+  function renderClassPanel(legend, profile){
+    classLegendData = legend ? legend.slice() : [];
+    updateClassLegend();
     classProfileData = profile ? profile.slice() : [];
     renderClassRows();
   }
@@ -1678,7 +1713,8 @@ HTML = r"""<!doctype html>
     rows.forEach(function(p){
       var tr=document.createElement('tr');
       tr.innerHTML='<td>'+p.cluster_label+'</td><td>'+fmt(p.total_area_km2,2)+'</td><td>'+fmt(p.n_polygons,0)+
-                   '</td><td>'+fmt(p.sens_mean,1)+'</td><td style="text-align:left">'+(p.top_asset_groups||'')+'</td>';
+                   '</td><td>'+fmt(p.mean_importance,1)+'</td><td>'+fmt(p.mean_susceptibility,1)+'</td><td>'+fmt(p.mean_coverage_index,1)+
+                   '</td><td style="text-align:left">'+(p.top_asset_groups||'')+'</td>';
       tb.appendChild(tr);
     });
     document.querySelectorAll('#classTable thead th').forEach(function(th){
@@ -1703,16 +1739,19 @@ HTML = r"""<!doctype html>
   function loadClass(run){
     if(!run) return;
     clearClassLayers(); classMsg('Loading…'); classSetLoading(true);
-    api().segmv_layer(run.run_id, run.method, run.n_clusters).then(function(res){
+    api().segmv_layer(run.run_id).then(function(res){
       classSetLoading(false);
       if(!res || res.error){ classMsg((res&&res.error)||'Could not load results.'); renderClassPanel([],[]); return; }
       if(res.too_large){ classMsg('This result has '+Number(res.features).toLocaleString()+
         ' polygons — too many to draw as vectors (cap '+Number(res.max_features).toLocaleString()+').'); renderClassPanel([],[]); return; }
       var gj=L.geoJSON(res.geojson, {
-        style:function(f){ return {fillColor:f.properties.fill,color:'#555',weight:0.3,fillOpacity:opacity*0.9}; },
+        style:classStyle,
         onEachFeature:function(f,lyr){ var p=f.properties;
+          var pm=(p.p_max==null)?'–':(Math.round(p.p_max*100)+'%');
           lyr.bindPopup('<b>'+(p.cluster_label||'type')+'</b><br>Cell: '+(p.code||'')+
-                        '<br>Mean sensitivity: '+fmt(p.sens_mean,2)); }
+                        '<br>Certainty (p_max): '+pm+
+                        '<br>Coverage (overlaps): '+(p.coverage_index==null?'–':p.coverage_index)+
+                        '<br>Top (imp×sus) bins: '+(p.top_bins||'–')); }
       });
       classVecGj=gj; classVec.addLayer(gj);
       try{ maps.class.invalidateSize(); maps.class.fitBounds(gj.getBounds(),{padding:[20,20]}); if(linking) syncFrom('class'); }catch(e){}
@@ -1722,6 +1761,10 @@ HTML = r"""<!doctype html>
   }
   function initClass(){
     classLoaded=true;
+    var csel=document.getElementById('classColour');
+    if(csel && !csel._wired){ csel._wired=true; csel.addEventListener('change', function(){
+      classColourMode=this.value; updateClassLegend();
+      if(classVecGj){ try{ classVecGj.setStyle(classStyle); }catch(e){} } }); }
     api().segmv_runs().then(function(runs){
       classRuns=runs||[];
       var sel=document.getElementById('classRun');

@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-from asset_manage import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet
 
 import argparse
 import atexit

@@ -1,56 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""segmentation_run.py — Multivariate spatial generalisation of sensitivity.
+"""segmentation_run.py — Classification engine (sensitivity-pattern clustering).
 
-PURPOSE
-    Additive, complementary view to MESA's univariate A–E sensitivity
-    classification. The classification answers "how sensitive is this place?"
-    (a level/intensity, one polygon at a time, neighbour-blind). This helper
-    answers "what kind of sensitivity pattern is this place part of?" — it
-    operates on the *stacked* per-asset profile of each polygon and groups
-    polygons into a configurable number of sensitivity *types* (composition /
-    character), optionally as spatially-contiguous regions. See the methods
-    paper section "Generalisation of sensitivity patterns" (Frelat-style
-    decomposition; Blaschke-style OBIA analogy) and docs/segmentation.md.
+WHAT THIS DOES
+    Groups geocode cells by the *shape* of their sensitivity composition in the
+    (importance, susceptibility) plane, rather than by the A–E sensitivity product.
+    Sensitivity is a many-to-one product of importance × susceptibility, so a cell
+    holding an (importance 5, susceptibility 1) asset and one holding (importance 1,
+    susceptibility 5) carry the *same* code yet describe very different places. This
+    engine clusters directly on the joint (importance, susceptibility) histogram, so
+    those two cells can land in different types. See the wiki page
+    "Segmentation and clustering".
 
-INPUTS  (output/geoparquet/, read at runtime — columns inspected, not assumed)
-    tbl_stacked            per-asset rows per polygon (read partition-by-partition
-                           with a pyarrow name_gis_geocodegroup filter — never
-                           materialised whole; see CLAUDE.md / learning.md
-                           "Parent-side memory in the pipeline").
-    tbl_geocode_object     polygon geometries (join key: code) + full code list.
-    tbl_geocode_group      geocode-layer catalogue.
-    tbl_asset_group        asset-category labels for cluster profiling.
-    config.ini             segmv_* keys (see segmentation_setup.py).
-
-OUTPUTS
-    output/geoparquet/tbl_seg_mv.parquet          one row per (code, method,
-                                                  n_clusters, run_id) — ZSTD-3.
-    output/geoparquet/tbl_seg_mv_profile.parquet  one row per (run_id, method,
-                                                  n_clusters, cluster_id) — ZSTD-3.
-    output/segmentation_mv/<run_id>/segmentation_results.gpkg  one layer per
-                                                  (method, n_clusters) for QGIS.
-    output/segmentation_mv/<run_id>/summary.md    parameters, methods + path run,
-                                                  quality metrics, profile table.
-    output/segmentation_mv/<run_id>/*.png         optional per-result maps (off
-                                                  by default).
+METHOD (count-based, area-weighted aggregation)
+    Per cell: a normalised histogram over the (importance, susceptibility) bins
+    (counts of overlapping asset rows, → proportions), plus a coverage/intensity
+    index (stack depth). Per-asset intersection areas are not persisted upstream, so
+    within a cell each overlap is weighted equally; cross-cell comparability comes
+    from area-weighting at the cluster-aggregation step (cell area_m2 IS available).
+    The histogram is Hellinger- (or CLR-) transformed, an optional standardised
+    coverage feature is appended, and Gaussian Mixture Models are fit for every k in
+    a range; k is chosen by minimum BIC. Soft posteriors give per-cell certainty
+    (p_max, entropy). Results are validated against the deterministic signatures
+    (tbl_segmentation) with ARI and NMI.
 
 CALLED BY
-    code/segmentation_setup.py ("Run now"), the mesa.exe launcher, or directly
-    from a terminal:  python code/segmentation_run.py --original_working_directory <dir>
+    mesa.exe launcher / Classification setup (subprocess), or standalone:
+      python code/segmentation_run.py --original_working_directory <dir>
 
-CALLS
-    code/segmentation.py (list_geocode_layers, _read_layer_stacked pattern),
-    code/mesa_shared.py (find_base_dir, read_config, parquet_dir).
-    Heavy libs (scikit-learn, libpysal, spopt, hdbscan) are imported lazily.
+OUTPUTS (geometry-free; join to tbl_geocode_object on `code` at render time)
+    output/geoparquet/tbl_seg_mv.parquet          per-cell assignments + certainty
+    output/geoparquet/tbl_seg_mv_profile.parquet  per-cluster fingerprint + stats
+    output/segmentation_mv/<run_id>/              summary.md, GeoPackage, params.json,
+                                                  optional PNG fingerprints/maps
 
-NOTES
-    MESA v5+ feature. CPU-only, no GPU. Does NOT touch the shipped tbl_segmentation*
-    tables, the Segment pipeline stage, the Maps Segmentation tab, or the existing
-    report section — it lives in its own tbl_seg_mv* namespace. spopt/hdbscan are
-    optional; a missing one degrades gracefully (SKATER → KMeans+contiguity
-    fallback; HDBSCAN method skipped). Reproducible: a fixed run_id + fixed seeds
-    reproduce identical cluster assignments.
+MEMORY DISCIPLINE (see CLAUDE.md + learning.md "Parent-side memory in the pipeline")
+    Reads tbl_stacked one layer at a time with a pyarrow filter; never materialises
+    the whole stack. The heavy compute libs (scikit-learn) are imported lazily.
 """
 from __future__ import annotations
 
@@ -77,14 +63,16 @@ COL_LAYER = "name_gis_geocodegroup"
 COL_SENS = "sensitivity"
 COL_SENS_CODE = "sensitivity_code"
 COL_AREA = "area_m2"
+COL_IMP = "importance"
+COL_SUS = "susceptibility"
 COL_GROUP_ID = "ref_asset_group"        # FK to tbl_asset_group.id
 COL_GROUP_NAME = "name_gis_assetgroup"  # human-ish label carried in tbl_stacked
 
 # Equal-area CRS for honest km² (matches segmentation.py).
 EQUAL_AREA_EPSG = 6933
 
-DEFAULT_FEATURES = ("sum", "mean", "max", "std", "depth", "group_sums")
-ALL_FEATURES = ("sum", "mean", "max", "std", "depth", "group_sums", "dominant")
+# Fallback valuation scale when config has none.
+DEFAULT_SCALE = (1, 2, 3, 4, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +99,6 @@ def make_logger(base_dir: Path):
         try:
             print(line, flush=True)
         except Exception:
-            # Last-resort: write bytes directly so a console-encoding quirk never
-            # crashes a run (the file copy below is always UTF-8 regardless).
             try:
                 sys.stdout.buffer.write((line + "\n").encode("utf-8", "replace"))
                 sys.stdout.flush()
@@ -135,10 +121,9 @@ def _section(log, title: str) -> None:
 
 
 def make_progress(total: int):
-    """Return an emitter for machine-readable progress markers the Classification
-    setup GUI parses to drive its bar. Lines look like
-    '@@SEGMV_PROGRESS <done> <total> <label>'. Harmless when run standalone — just
-    extra stdout lines the user (or nothing) reads."""
+    """Emit machine-readable progress markers the Classification setup GUI parses
+    to drive its bar: '@@SEGMV_PROGRESS <done> <total> <label>'. Harmless when run
+    standalone."""
     state = {"done": 0, "total": max(1, int(total))}
 
     def _emit(label: str = "", advance: int = 1, done: Optional[int] = None) -> None:
@@ -156,37 +141,58 @@ def make_progress(total: int):
 # Parameters
 # ---------------------------------------------------------------------------
 class Params:
-    """Full, reproducible parameter set for one run. Serialised into every
-    output row and into summary.md so a run_id round-trips to identical output."""
+    """Full, reproducible parameter set for one run. Serialised into params.json
+    and summary.md so a run_id round-trips to identical output."""
 
     def __init__(self, **kw):
         self.run_id: str = kw.get("run_id") or datetime.now().strftime("%Y-%m-%d_%H%M%S")
         self.layer: str = kw.get("layer") or ""          # resolved later if blank
-        self.n_clusters: list[int] = list(kw.get("n_clusters") or [8])
-        self.method: str = (kw.get("method") or "attribute").lower()  # attribute|spatial|both
+        self.k_min: int = int(kw.get("k_min") or 2)
+        self.k_max: int = int(kw.get("k_max") or 15)
+        self.transform: str = (kw.get("transform") or "hellinger").lower()  # hellinger|clr
+        self.coverage_weight: float = float(kw.get("coverage_weight", 1.0))
         self.pressure: str = kw.get("pressure") or ""    # "" / "all" = aggregate
-        self.features: list[str] = list(kw.get("features") or DEFAULT_FEATURES)
         self.min_area_m2: float = float(kw.get("min_area_m2") or 0.0)
-        self.skater_max_polys: int = int(kw.get("skater_max_polys") or 50_000)
         self.ai_enabled: bool = bool(kw.get("ai_enabled") or False)
         self.ollama_url: str = kw.get("ollama_url") or "http://localhost:11434/api/generate"
         self.ollama_model: str = kw.get("ollama_model") or "mistral"
         self.make_png: bool = bool(kw.get("make_png") or False)
         self.seed: int = int(kw.get("seed") or 42)
+        if self.k_max < self.k_min:
+            self.k_min, self.k_max = self.k_max, self.k_min
+        self.k_min = max(2, self.k_min)
+        if self.transform not in ("hellinger", "clr"):
+            self.transform = "hellinger"
 
-    def methods_to_run(self) -> list[str]:
-        if self.method == "both":
-            return ["attribute", "spatial"]
-        return [self.method]
+    def k_values(self) -> list[int]:
+        return list(range(self.k_min, self.k_max + 1))
 
     def as_dict(self) -> dict:
         return {
-            "run_id": self.run_id, "layer": self.layer, "n_clusters": self.n_clusters,
-            "method": self.method, "pressure": self.pressure, "features": self.features,
-            "min_area_m2": self.min_area_m2, "skater_max_polys": self.skater_max_polys,
+            "run_id": self.run_id, "layer": self.layer,
+            "k_range": f"{self.k_min}-{self.k_max}",
+            "transform": self.transform, "coverage_weight": self.coverage_weight,
+            "pressure": self.pressure, "min_area_m2": self.min_area_m2,
             "ai_enabled": self.ai_enabled, "ollama_model": self.ollama_model,
             "make_png": self.make_png, "seed": self.seed,
         }
+
+
+def _parse_k_range(raw, default=(2, 15)) -> tuple[int, int]:
+    """Parse 'min-max' (or a single int) into (k_min, k_max)."""
+    if raw is None:
+        return default
+    if isinstance(raw, (tuple, list)) and len(raw) == 2:
+        return int(raw[0]), int(raw[1])
+    s = str(raw).strip()
+    for sep in ("-", ":", ".."):
+        if sep in s:
+            a, _, b = s.partition(sep)
+            if a.strip().isdigit() and b.strip().isdigit():
+                return int(a), int(b)
+    if s.isdigit():
+        return int(s), int(s)
+    return default
 
 
 def params_from_config(cfg, **overrides) -> Params:
@@ -197,30 +203,21 @@ def params_from_config(cfg, **overrides) -> Params:
         except Exception:
             return default
 
-    n_raw = overrides.get("n_clusters") or g("segmv_n_clusters", "8")
-    if isinstance(n_raw, str):
-        n_list = [int(x) for x in n_raw.replace(";", ",").split(",") if x.strip().isdigit()] or [8]
-    else:
-        n_list = list(n_raw)
-
-    feat_raw = overrides.get("features") or g("segmv_features", ",".join(DEFAULT_FEATURES))
-    if isinstance(feat_raw, str):
-        feats = [f.strip() for f in feat_raw.split(",") if f.strip() in ALL_FEATURES] or list(DEFAULT_FEATURES)
-    else:
-        feats = list(feat_raw)
-
     def _truthy(v):
         return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    k_raw = overrides.get("k_range") if overrides.get("k_range") is not None else g("segmv_k_range", "2-15")
+    k_min, k_max = _parse_k_range(k_raw)
 
     return Params(
         run_id=overrides.get("run_id"),
         layer=overrides.get("layer") if overrides.get("layer") is not None else g("segmv_geocode_layer", ""),
-        n_clusters=n_list,
-        method=overrides.get("method") or g("segmv_method", "attribute"),
+        k_min=k_min, k_max=k_max,
+        transform=overrides.get("transform") or g("segmv_transform", "hellinger"),
+        coverage_weight=(overrides.get("coverage_weight") if overrides.get("coverage_weight") is not None
+                         else g("segmv_coverage_weight", "1.0")),
         pressure=overrides.get("pressure") if overrides.get("pressure") is not None else g("segmv_pressure", ""),
-        features=feats,
         min_area_m2=overrides.get("min_area_m2") if overrides.get("min_area_m2") is not None else g("segmv_min_area_m2", "0"),
-        skater_max_polys=overrides.get("skater_max_polys") or g("segmv_skater_max_polys", "50000"),
         ai_enabled=overrides.get("ai_enabled") if overrides.get("ai_enabled") is not None else _truthy(g("segmv_ai_enabled", "0")),
         ollama_url=overrides.get("ollama_url") or g("segmv_ollama_url", "http://localhost:11434/api/generate"),
         ollama_model=overrides.get("ollama_model") or g("segmv_ollama_model", "mistral"),
@@ -229,13 +226,32 @@ def params_from_config(cfg, **overrides) -> Params:
     )
 
 
+def valuation_scale(cfg) -> list[int]:
+    """The registered importance/susceptibility scale (shared), from
+    config.ini [VALID_VALUES] valid_input. Falls back to 1..5. Both axes use it."""
+    try:
+        raw = cfg["VALID_VALUES"]["valid_input"]
+        vals = sorted({int(x.strip()) for x in str(raw).split(",") if x.strip().lstrip("-").isdigit()})
+        vals = [v for v in vals if 0 <= v <= 9999]
+        return vals or list(DEFAULT_SCALE)
+    except Exception:
+        return list(DEFAULT_SCALE)
+
+
 # ---------------------------------------------------------------------------
 # Input reads
 # ---------------------------------------------------------------------------
+def _stacked_source(gpq: Path) -> Optional[str]:
+    d, f = Path(gpq) / "tbl_stacked", Path(gpq) / "tbl_stacked.parquet"
+    if d.exists():
+        return str(d)
+    if f.exists():
+        return str(f)
+    return None
+
+
 def detect_pressure_columns(gpq: Path) -> list[str]:
-    """Return tbl_stacked columns that look like a pressure identifier. The
-    canonical MESA stack has none today, so this is usually empty — the setup
-    UI then offers only 'all pressures (aggregate)'."""
+    """tbl_stacked columns that look like a pressure identifier (usually none)."""
     import pyarrow.dataset as ds
     src = _stacked_source(gpq)
     if src is None:
@@ -247,30 +263,41 @@ def detect_pressure_columns(gpq: Path) -> list[str]:
     return [n for n in names if "pressure" in n.lower()]
 
 
-def _stacked_source(gpq: Path) -> Optional[str]:
-    d, f = Path(gpq) / "tbl_stacked", Path(gpq) / "tbl_stacked.parquet"
-    if d.exists():
-        return str(d)
-    if f.exists():
-        return str(f)
-    return None
+def _asset_group_valuation(gpq: Path):
+    """ref_asset_group → (importance, susceptibility) lookup from tbl_asset_group,
+    used to backfill rows where tbl_stacked didn't materialise the numeric fields."""
+    import pandas as pd
+    p = Path(gpq) / "tbl_asset_group.parquet"
+    if not p.exists():
+        return pd.DataFrame(columns=[COL_GROUP_ID, COL_IMP, COL_SUS])
+    try:
+        df = pd.read_parquet(p)
+    except Exception:
+        return pd.DataFrame(columns=[COL_GROUP_ID, COL_IMP, COL_SUS])
+    if "id" in df.columns and COL_GROUP_ID not in df.columns:
+        df = df.rename(columns={"id": COL_GROUP_ID})
+    keep = [c for c in (COL_GROUP_ID, COL_IMP, COL_SUS) if c in df.columns]
+    df = df[keep].copy()
+    if COL_GROUP_ID in df.columns:
+        df[COL_GROUP_ID] = df[COL_GROUP_ID].astype(str)
+    return df
 
 
 def read_layer_stacked(gpq: Path, layer: str, pressure: str, log) -> "object":
-    """Partitioned, filtered read of tbl_stacked for one layer. Mirrors
-    segmentation.py:_read_layer_stacked (memory discipline) but also pulls the
-    asset-group columns needed for the multivariate feature vector."""
+    """Partitioned, filtered read of tbl_stacked for one layer. Returns a DataFrame
+    with code, importance, susceptibility (backfilled from tbl_asset_group where the
+    stack didn't materialise them) and ref_asset_group for top-group naming."""
     import pandas as pd
     import pyarrow.dataset as ds
 
     src = _stacked_source(gpq)
-    cols = [COL_CODE, COL_LAYER, COL_SENS, COL_SENS_CODE, COL_AREA, COL_GROUP_ID, COL_GROUP_NAME]
+    base_cols = [COL_CODE, COL_LAYER, COL_IMP, COL_SUS, COL_GROUP_ID, COL_GROUP_NAME]
     if src is None:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=base_cols)
 
     dataset = ds.dataset(src, format="parquet")
     present = set(dataset.schema.names)
-    wanted = [c for c in cols if c in present]
+    wanted = [c for c in base_cols if c in present]
     press_cols = [c for c in present if "pressure" in c.lower()]
     if pressure and pressure.lower() not in ("", "all") and press_cols:
         wanted = list(dict.fromkeys(wanted + press_cols))
@@ -278,7 +305,6 @@ def read_layer_stacked(gpq: Path, layer: str, pressure: str, log) -> "object":
     try:
         df = dataset.to_table(columns=wanted, filter=flt).to_pandas()
     except Exception:
-        # Robust to a corrupt partition: re-read file-by-file, skip bad ones.
         srcp = Path(src)
         files = sorted(srcp.glob("*.parquet")) if srcp.is_dir() else [srcp]
         frames, skipped = [], []
@@ -293,17 +319,33 @@ def read_layer_stacked(gpq: Path, layer: str, pressure: str, log) -> "object":
                 f"{', '.join(skipped[:5])} — re-run Intersect to rebuild.")
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=wanted)
 
+    if df.empty:
+        return df
+    df[COL_CODE] = df[COL_CODE].astype(str)
+    if COL_GROUP_ID in df.columns:
+        df[COL_GROUP_ID] = df[COL_GROUP_ID].astype(str)
+
     # Optional pressure filter (only if a pressure column actually exists).
     if pressure and pressure.lower() not in ("", "all") and press_cols:
         pc = press_cols[0]
         df = df[df[pc].astype(str) == str(pressure)]
 
-    df[COL_SENS] = pd.to_numeric(df.get(COL_SENS), errors="coerce").fillna(0.0).astype("float64")
-    if COL_AREA in df.columns:
-        df[COL_AREA] = pd.to_numeric(df[COL_AREA], errors="coerce")
-    df[COL_CODE] = df[COL_CODE].astype(str)
-    if COL_GROUP_ID in df.columns:
-        df[COL_GROUP_ID] = df[COL_GROUP_ID].astype(str)
+    # Backfill importance/susceptibility from tbl_asset_group when missing/blank.
+    need_imp = COL_IMP not in df.columns or pd.to_numeric(df.get(COL_IMP), errors="coerce").isna().all()
+    need_sus = COL_SUS not in df.columns or pd.to_numeric(df.get(COL_SUS), errors="coerce").isna().all()
+    if (need_imp or need_sus) and COL_GROUP_ID in df.columns:
+        lut = _asset_group_valuation(gpq)
+        if not lut.empty:
+            df = df.merge(lut, on=COL_GROUP_ID, how="left", suffixes=("", "_grp"))
+            for col in (COL_IMP, COL_SUS):
+                gcol = f"{col}_grp"
+                if gcol in df.columns:
+                    base = pd.to_numeric(df.get(col), errors="coerce") if col in df.columns else None
+                    grp = pd.to_numeric(df[gcol], errors="coerce")
+                    df[col] = grp if base is None else base.fillna(grp)
+                    df.drop(columns=[gcol], inplace=True)
+    for col in (COL_IMP, COL_SUS):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce")
     return df
 
 
@@ -340,74 +382,6 @@ def asset_group_labels(gpq: Path) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Feature matrix
-# ---------------------------------------------------------------------------
-def build_feature_matrix(stacked, all_codes, features: list[str], log):
-    """Aggregate stacked rows into one fixed-length vector per polygon.
-
-    Returns (feat_df, no_data_mask, sens_mean, group_sum_cols) where feat_df is
-    indexed by code over *all_codes*. Empty-stack polygons are zero rows flagged
-    in no_data_mask."""
-    import numpy as np
-    import pandas as pd
-
-    feat = pd.DataFrame(index=pd.Index(all_codes, name=COL_CODE))
-
-    if stacked is None or stacked.empty:
-        log("No stacked rows for this layer — every polygon is no_data.")
-        feat["sens_sum"] = 0.0
-        no_data = pd.Series(True, index=feat.index)
-        return feat, no_data, pd.Series(0.0, index=feat.index), []
-
-    grp = stacked.groupby(COL_CODE)[COL_SENS]
-    agg = pd.DataFrame({
-        "sens_sum": grp.sum(),
-        "sens_mean": grp.mean(),
-        "sens_max": grp.max(),
-        "sens_std": grp.std().fillna(0.0),
-        "depth": stacked.groupby(COL_CODE).size().astype("float64"),
-    })
-
-    group_sum_cols: list[str] = []
-    if "group_sums" in features and COL_GROUP_ID in stacked.columns:
-        piv = (stacked.pivot_table(index=COL_CODE, columns=COL_GROUP_ID,
-                                   values=COL_SENS, aggfunc="sum", fill_value=0.0))
-        piv.columns = [f"grp_{c}" for c in piv.columns]
-        group_sum_cols = list(piv.columns)
-        agg = agg.join(piv, how="left")
-
-    if "dominant" in features and COL_GROUP_ID in stacked.columns:
-        dom = (stacked.groupby([COL_CODE, COL_GROUP_ID])[COL_SENS].sum()
-               .reset_index().sort_values(COL_SENS, ascending=False)
-               .drop_duplicates(COL_CODE).set_index(COL_CODE)[COL_GROUP_ID])
-        oh = pd.get_dummies(dom, prefix="dom").astype("float64")
-        agg = agg.join(oh, how="left")
-
-    # Select the requested scalar aggregates (group_sums/dominant handled above).
-    scalar_map = {"sum": "sens_sum", "mean": "sens_mean", "max": "sens_max",
-                  "std": "sens_std", "depth": "depth"}
-    keep = [scalar_map[f] for f in features if f in scalar_map]
-    keep += group_sum_cols + [c for c in agg.columns if c.startswith("dom_")]
-    keep = [c for c in dict.fromkeys(keep) if c in agg.columns] or ["sens_sum"]
-    agg = agg[keep]
-
-    feat = feat.join(agg, how="left")
-    no_data = feat[keep[0]].isna() if keep else pd.Series(True, index=feat.index)
-    # Per-cell mean sensitivity carried for report colouring (0 where no_data).
-    sens_mean = feat["sens_mean"] if "sens_mean" in feat.columns else (
-        stacked.groupby(COL_CODE)[COL_SENS].mean().reindex(feat.index))
-    sens_mean = sens_mean.fillna(0.0)
-    feat = feat.fillna(0.0)
-    log(f"Feature matrix: {feat.shape[0]} polygons × {feat.shape[1]} features "
-        f"({int(no_data.sum())} no_data) — columns: {', '.join(keep[:8])}"
-        + (" …" if len(keep) > 8 else ""))
-    return feat, no_data.fillna(True), sens_mean, group_sum_cols
-
-
-# ---------------------------------------------------------------------------
-# Geometry / contiguity
-# ---------------------------------------------------------------------------
 def read_layer_geometry(gpq: Path, layer: str, codes):
     """GeoDataFrame (code, geometry) for the given codes, in the file's native CRS."""
     import geopandas as gpd
@@ -419,14 +393,9 @@ def read_layer_geometry(gpq: Path, layer: str, codes):
     return g.drop_duplicates(COL_CODE).set_index(COL_CODE)
 
 
-def per_code_area_km2(stacked, geom_gdf):
-    """km² per code: prefer backfilled area_m2 in stacked (constant per code →
-    max), fall back to equal-area geometry area."""
+def per_code_area_km2(gpq: Path, layer: str, geom_gdf):
+    """km² per code from the geocode geometry in an equal-area CRS."""
     import pandas as pd
-    if stacked is not None and not stacked.empty and COL_AREA in stacked.columns \
-            and stacked[COL_AREA].notna().any():
-        a = stacked.groupby(COL_CODE)[COL_AREA].max() / 1e6
-        return a
     try:
         g = geom_gdf.to_crs(EQUAL_AREA_EPSG)
         return (g.geometry.area / 1e6)
@@ -435,233 +404,216 @@ def per_code_area_km2(stacked, geom_gdf):
 
 
 # ---------------------------------------------------------------------------
-# Clustering
+# Histograms over the (importance, susceptibility) plane
 # ---------------------------------------------------------------------------
-def _scale(X):
-    from sklearn.preprocessing import StandardScaler
-    return StandardScaler().fit_transform(X.to_numpy(dtype=float))
-
-
-def fit_attribute(Xdf, k: int, seed: int, log):
-    """KMeans on standardised features. Returns (labels, method_label, metrics)."""
+def _nearest_index(values, scale_arr):
+    """Map each value to the index of the nearest scale level; NaN → -1."""
     import numpy as np
-    from sklearn.cluster import KMeans
-    Xs = _scale(Xdf)
-    k = max(2, min(int(k), len(Xdf) - 1)) if len(Xdf) > 2 else 1
-    km = KMeans(n_clusters=k, n_init=10, random_state=seed)
-    labels = km.fit_predict(Xs)
-    metrics = {}
-    try:
-        from sklearn.metrics import silhouette_score
-        if 1 < k < len(Xdf):
-            metrics["silhouette"] = round(float(silhouette_score(Xs, labels)), 4)
-    except Exception:
-        pass
-    metrics["inertia"] = round(float(getattr(km, "inertia_", float("nan"))), 2)
-    return np.asarray(labels), f"kmeans_k{k}", metrics
+    vals = np.asarray(values, dtype="float64")
+    out = np.full(vals.shape, -1, dtype="int64")
+    ok = ~np.isnan(vals)
+    if ok.any():
+        out[ok] = np.abs(vals[ok][:, None] - scale_arr[None, :]).argmin(axis=1)
+    return out
 
 
-def fit_hdbscan(Xdf, log):
-    """Optional emergent-count clustering. Returns None if hdbscan missing."""
-    try:
-        import hdbscan
-    except Exception:
-        log("HDBSCAN unavailable — skipping emergent-count comparison.")
-        return None
-    import numpy as np
-    Xs = _scale(Xdf)
-    cl = hdbscan.HDBSCAN(min_cluster_size=max(5, len(Xdf) // 200))
-    labels = cl.fit_predict(Xs)  # -1 = noise
-    n = len(set(labels) - {-1})
-    return np.asarray(labels), f"hdbscan_n{n}", {"emergent_clusters": n}
+def hist_columns(scale: list[int]) -> list[str]:
+    """Column names for the joint histogram, importance-major order."""
+    return [f"h_i{i}_s{s}" for i in scale for s in scale]
 
 
-def _queen_weights(geom_gdf, log):
-    """Queen contiguity over the geometries. Returns (w, ordered_codes) or None."""
-    try:
-        from libpysal.weights import Queen
-    except Exception:
-        log("libpysal unavailable — cannot build contiguity graph.")
-        return None
-    try:
-        g = geom_gdf.reset_index()
-        w = Queen.from_dataframe(g, ids=g[COL_CODE].tolist(), use_index=False)
-        return w, g[COL_CODE].tolist()
-    except Exception as exc:
-        log(f"Queen weights failed: {exc}")
-        return None
+def build_histograms(stacked, all_codes, scale: list[int], log):
+    """Per-cell normalised (importance, susceptibility) histogram + stack depth.
 
-
-def fit_spatial(Xdf, k: int, geom_gdf, skater_max: int, seed: int, log):
-    """Spatial+attribute regionalisation. SKATER (spopt) when feasible, else
-    KMeans + post-hoc contiguity enforcement. Always logs which path ran."""
-    import numpy as np
-    n = len(Xdf)
-    use_skater = n <= skater_max
-    if not use_skater:
-        log(f"SKATER skipped: {n} polygons > segmv_skater_max_polys={skater_max}. "
-            f"Using KMeans + contiguity fallback.")
-    if use_skater:
-        try:
-            from spopt.region import Skater
-            from sklearn.preprocessing import StandardScaler
-            wq = _queen_weights(geom_gdf, log)
-            if wq is None:
-                raise RuntimeError("no contiguity graph")
-            w, ordered = wq
-            g = geom_gdf.reindex(ordered).copy()
-            cols = list(Xdf.columns)
-            Xs = StandardScaler().fit_transform(Xdf.reindex(ordered).to_numpy(dtype=float))
-            for i, c in enumerate(cols):
-                g[c] = Xs[:, i]
-            k_eff = max(2, min(int(k), n - 1))
-            model = Skater(g, w, cols, n_clusters=k_eff,
-                           floor=1, trace=False, islands="increase")
-            model.solve()
-            labels = np.asarray(model.labels_)
-            # Re-align to Xdf index order.
-            lbl = {c: int(l) for c, l in zip(ordered, labels)}
-            out = np.array([lbl.get(c, -1) for c in Xdf.index], dtype=int)
-            log(f"SKATER ran (spopt) for k={k_eff}.")
-            return out, f"skater_k{k_eff}", {"path": "skater", "objective": _spatial_objective(Xdf, out)}
-        except Exception as exc:
-            log(f"SKATER path failed ({exc}); falling back to KMeans + contiguity.")
-
-    # Fallback: attribute KMeans, then merge non-contiguous fragments.
-    labels, _, _ = fit_attribute(Xdf, k, seed, log)
-    labels = _enforce_contiguity(labels, Xdf.index.tolist(), geom_gdf, log)
-    return labels, f"kmeans_contig_k{int(max(labels)+1) if len(labels) else 0}", {
-        "path": "kmeans_contiguity", "objective": _spatial_objective(Xdf, labels)}
-
-
-def _spatial_objective(Xdf, labels) -> float:
-    """Within-cluster sum of squared deviations on standardised features (lower
-    = tighter). A SKATER-style coherence proxy comparable across methods."""
-    import numpy as np
-    try:
-        Xs = _scale(Xdf)
-        total = 0.0
-        for lab in set(labels):
-            if lab < 0:
-                continue
-            m = labels == lab
-            if m.sum() == 0:
-                continue
-            total += float(((Xs[m] - Xs[m].mean(axis=0)) ** 2).sum())
-        return round(total, 2)
-    except Exception:
-        return float("nan")
-
-
-def _enforce_contiguity(labels, codes, geom_gdf, log):
-    """Merge each non-contiguous cluster fragment into its majority neighbour.
-    Keeps the largest connected component per label; reassigns the rest."""
-    import numpy as np
-    wq = _queen_weights(geom_gdf, log)
-    if wq is None:
-        log("Contiguity enforcement skipped (no graph) — labels left as-is.")
-        return np.asarray(labels)
-    w, ordered = wq
-    pos = {c: i for i, c in enumerate(codes)}
-    lab = {c: int(labels[pos[c]]) for c in codes if c in pos}
-    neigh = w.neighbors
-
-    # Connected components within each label via BFS over same-label neighbours.
-    seen, comp_of, comps = set(), {}, []
-    for c in ordered:
-        if c in seen or c not in lab:
-            continue
-        stack, comp = [c], []
-        seen.add(c)
-        while stack:
-            u = stack.pop()
-            comp.append(u)
-            for v in neigh.get(u, []):
-                if v not in seen and v in lab and lab[v] == lab[u]:
-                    seen.add(v)
-                    stack.append(v)
-        cid = len(comps)
-        comps.append(comp)
-        for u in comp:
-            comp_of[u] = cid
-
-    # For each label, keep its biggest component; reassign smaller ones.
-    from collections import defaultdict, Counter
-    by_label = defaultdict(list)
-    for cid, comp in enumerate(comps):
-        by_label[lab[comp[0]]].append(cid)
-    keep = set()
-    for _label, cids in by_label.items():
-        keep.add(max(cids, key=lambda i: len(comps[i])))
-
-    changed = 0
-    for cid, comp in enumerate(comps):
-        if cid in keep:
-            continue
-        # majority label among boundary neighbours not in this component
-        votes = Counter()
-        for u in comp:
-            for v in neigh.get(u, []):
-                if comp_of.get(v) != cid:
-                    votes[lab[v]] += 1
-        if votes:
-            new = votes.most_common(1)[0][0]
-            for u in comp:
-                lab[u] = new
-            changed += len(comp)
-    if changed:
-        log(f"Contiguity enforcement reassigned {changed} polygon(s) in fragments.")
-    return np.asarray([lab[c] for c in codes])
-
-
-# ---------------------------------------------------------------------------
-# Profiles
-# ---------------------------------------------------------------------------
-def build_profiles(params, method_label, n_clusters, codes, labels, no_data,
-                   stacked, sens_mean, area_km2, group_labels, log):
-    """One profile row per cluster: stats, top-3 asset groups, count, area."""
+    Returns (prop_df, depth, no_data) where prop_df is indexed by code over
+    *all_codes* (rows summing to 1, or 0 for no_data) with one column per (i,s) bin,
+    depth is the overlap count per code, and no_data flags empty-stack cells."""
     import numpy as np
     import pandas as pd
 
+    cols = hist_columns(scale)
+    nv = len(scale)
+    idx = pd.Index(all_codes, name=COL_CODE)
+
+    if stacked is None or stacked.empty:
+        log("No stacked rows for this layer — every polygon is no_data.")
+        prop = pd.DataFrame(0.0, index=idx, columns=cols)
+        return prop, pd.Series(0, index=idx), pd.Series(True, index=idx)
+
+    scale_arr = np.asarray(scale, dtype="float64")
+    df = stacked[[COL_CODE, COL_IMP, COL_SUS]].copy()
+    ii = _nearest_index(df[COL_IMP].to_numpy(), scale_arr)
+    si = _nearest_index(df[COL_SUS].to_numpy(), scale_arr)
+    keep = (ii >= 0) & (si >= 0)
+    df = df.loc[keep].copy()
+    df["_bin"] = ii[keep] * nv + si[keep]            # importance-major, matches hist_columns
+    df[COL_CODE] = df[COL_CODE].astype(str)
+
+    # Counts per (code, bin) → wide proportions.
+    ct = (df.groupby([COL_CODE, "_bin"]).size().unstack(fill_value=0)
+          .reindex(columns=range(nv * nv), fill_value=0))
+    ct.columns = cols
+    ct = ct.reindex(idx, fill_value=0)
+    depth = ct.sum(axis=1).astype("int64")
+    no_data = depth <= 0
+    denom = depth.replace(0, 1)
+    prop = ct.div(denom, axis=0).astype("float64")
+    log(f"Histograms: {len(idx)} cells × {len(cols)} bins "
+        f"({int(no_data.sum())} no_data); scale {scale[0]}..{scale[-1]} ({nv}×{nv}).")
+    return prop, depth, no_data
+
+
+# ---------------------------------------------------------------------------
+# Transform + GMM clustering (BIC-selected k, soft assignments)
+# ---------------------------------------------------------------------------
+def _transform(prop_df, kind: str):
+    """Hellinger (sqrt) or CLR on histogram proportions. Returns an ndarray."""
+    import numpy as np
+    P = prop_df.to_numpy(dtype="float64")
+    if kind == "clr":
+        eps = 1e-6
+        L = np.log(P + eps)
+        return L - L.mean(axis=1, keepdims=True)
+    return np.sqrt(P)  # Hellinger; handles zeros without pseudocounts
+
+
+def fit_gmm_bic(Xfit, k_values, seed, log):
+    """Fit diagonal-covariance GMMs for every k, pick min-BIC. Returns
+    (labels, proba, best_k, bic_table). Deterministic for a fixed seed."""
+    import warnings
+    import numpy as np
+    from sklearn.exceptions import ConvergenceWarning
+    from sklearn.mixture import GaussianMixture
+
+    n = Xfit.shape[0]
+    ks = [k for k in k_values if 1 < k < n] or [min(2, max(1, n - 1))]
+    best = None
+    bic_table = []
+    for k in ks:
+        gm = GaussianMixture(n_components=k, covariance_type="diag",
+                             random_state=seed, n_init=5, reg_covar=1e-6)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=ConvergenceWarning)
+            gm.fit(Xfit)
+        bic = float(gm.bic(Xfit))
+        bic_table.append((k, round(bic, 2)))
+        log(f"  k={k:>3}  BIC={bic:,.1f}")
+        if best is None or bic < best[1]:
+            best = (k, bic, gm)
+    best_k, _best_bic, gm = best
+    proba = gm.predict_proba(Xfit)
+    labels = proba.argmax(axis=1)
+    log(f"Selected k={best_k} by minimum BIC.")
+    return np.asarray(labels), proba, best_k, bic_table
+
+
+def _posterior_stats(proba):
+    """p_max and Shannon entropy (nats) of each cell's posterior vector."""
+    import numpy as np
+    p = np.clip(proba, 1e-12, 1.0)
+    p_max = proba.max(axis=1)
+    entropy = -(proba * np.log(p)).sum(axis=1)
+    return p_max, entropy
+
+
+# ---------------------------------------------------------------------------
+# Validation against the deterministic signatures
+# ---------------------------------------------------------------------------
+def validate_against_signatures(gpq: Path, layer: str, assign_df, log) -> dict:
+    """ARI + NMI between GMM cluster labels and the Segment signatures for the same
+    cells. Returns {} when tbl_segmentation for the layer is unavailable."""
+    import pandas as pd
+    try:
+        import segmentation as _seg
+        from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+    except Exception:
+        return {}
+    part = Path(gpq) / "tbl_segmentation" / f"{_seg._safe_layer_name(layer)}.parquet"
+    if not part.exists():
+        log("Signatures table (tbl_segmentation) not found for this layer — "
+            "run the Segment sub-stage to enable ARI/NMI validation.")
+        return {}
+    try:
+        sig = pd.read_parquet(part, columns=[COL_CODE, "signature"])
+    except Exception:
+        return {}
+    sig[COL_CODE] = sig[COL_CODE].astype(str)
+    a = assign_df[[COL_CODE, "cluster_id"]].dropna(subset=["cluster_id"]).copy()
+    a[COL_CODE] = a[COL_CODE].astype(str)
+    m = a.merge(sig, on=COL_CODE, how="inner")
+    m = m[m["signature"].astype(str) != ""]
+    if len(m) < 2 or m["cluster_id"].nunique() < 2 or m["signature"].nunique() < 2:
+        return {}
+    sig_codes = m["signature"].astype("category").cat.codes.to_numpy()
+    clu = m["cluster_id"].astype(int).to_numpy()
+    return {
+        "ari": round(float(adjusted_rand_score(sig_codes, clu)), 4),
+        "nmi": round(float(normalized_mutual_info_score(sig_codes, clu)), 4),
+        "n": int(len(m)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Profiles (per-cluster fingerprint)
+# ---------------------------------------------------------------------------
+def build_profiles(params, best_k, all_codes, labels, no_data, prop_df, depth,
+                   stacked, area_km2, mean_imp, mean_sus, group_labels, scale, log):
+    """One profile row per cluster: area-weighted mean histogram (fingerprint),
+    area-weighted mean importance/susceptibility, mean coverage, area + count, and
+    top-3 asset groups."""
+    import numpy as np
+    import pandas as pd
+
+    cols = hist_columns(scale)
     rows = []
-    fit_mask = ~no_data.reindex(codes).fillna(True).to_numpy()
+    code_idx = pd.Index(all_codes, name=COL_CODE)
+    fit_mask = ~no_data.reindex(code_idx).fillna(True).to_numpy()
     label_arr = np.asarray(labels)
 
-    # Per-(code) dominant-group contribution for top-3 naming.
+    ar = (area_km2.reindex(code_idx).fillna(0.0).to_numpy()
+          if area_km2 is not None else np.zeros(len(code_idx)))
+    dp = depth.reindex(code_idx).fillna(0).to_numpy()
+    mi = mean_imp.reindex(code_idx).to_numpy()
+    ms = mean_sus.reindex(code_idx).to_numpy()
+    P = prop_df.reindex(code_idx)[cols].to_numpy()
+
     grp_contrib = None
     if stacked is not None and not stacked.empty and COL_GROUP_ID in stacked.columns:
-        grp_contrib = stacked.groupby([COL_CODE, COL_GROUP_ID])[COL_SENS].sum()
-
-    sm = sens_mean.reindex(codes).fillna(0.0).to_numpy()
-    ar = area_km2.reindex(codes).fillna(0.0).to_numpy() if area_km2 is not None else np.zeros(len(codes))
+        grp_contrib = stacked.groupby([COL_CODE, COL_GROUP_ID]).size()
 
     for lab in sorted(set(label_arr.tolist())):
         sel = (label_arr == lab) & fit_mask
         if sel.sum() == 0:
             continue
-        sub_codes = [c for c, s in zip(codes, sel) if s]
-        s_vals = sm[sel]
+        sub_codes = [c for c, s in zip(all_codes, sel) if s]
+        w = ar[sel]
+        wsum = float(w.sum())
+        if wsum <= 0:                      # area unavailable → equal weights
+            w = np.ones(int(sel.sum())); wsum = float(w.sum())
+        fp = (P[sel] * w[:, None]).sum(axis=0) / wsum     # area-weighted mean histogram
         top3 = []
         if grp_contrib is not None:
             sub = grp_contrib[grp_contrib.index.get_level_values(0).isin(sub_codes)]
             if not sub.empty:
                 agg = sub.groupby(level=1).sum().sort_values(ascending=False).head(3)
                 top3 = [group_labels.get(str(gid), str(gid)) for gid in agg.index]
-        rows.append({
+        row = {
             "run_id": params.run_id,
             "name_gis_geocodegroup": params.layer,
-            "method": method_label,
-            "n_clusters": int(n_clusters),
+            "n_clusters": int(best_k),
             "cluster_id": int(lab),
-            "cluster_label": (f"noise" if lab == -1 else f"type {int(lab)+1}"),
+            "cluster_label": f"type {int(lab) + 1}",
             "n_polygons": int(sel.sum()),
             "total_area_km2": round(float(ar[sel].sum()), 4),
-            "sens_mean": round(float(s_vals.mean()), 4) if len(s_vals) else 0.0,
-            "sens_max": round(float(s_vals.max()), 4) if len(s_vals) else 0.0,
-            "sens_std": round(float(s_vals.std()), 4) if len(s_vals) else 0.0,
+            "mean_importance": round(float(np.nansum(mi[sel] * w) / wsum), 3),
+            "mean_susceptibility": round(float(np.nansum(ms[sel] * w) / wsum), 3),
+            "mean_coverage_index": round(float((dp[sel] * w).sum() / wsum), 3),
             "top_asset_groups": ", ".join(top3),
             "description_ai": None,
-        })
+        }
+        for c, v in zip(cols, fp):
+            row[c] = round(float(v), 6)
+        rows.append(row)
     return rows
 
 
@@ -670,14 +622,15 @@ def build_profiles(params, method_label, n_clusters, codes, labels, no_data,
 # ---------------------------------------------------------------------------
 def _ai_context(profile_row) -> str:
     return (
-        f"This is a sensitivity-pattern type from a spatial generalisation of an "
-        f"environmental sensitivity analysis. Cluster '{profile_row['cluster_label']}' "
-        f"covers {profile_row['n_polygons']} polygons ({profile_row['total_area_km2']} km²). "
-        f"Mean sensitivity {profile_row['sens_mean']} (max {profile_row['sens_max']}, "
-        f"std {profile_row['sens_std']}). Dominant asset groups: "
-        f"{profile_row['top_asset_groups'] or 'none'}. "
-        f"Write ONE short plain-language paragraph (<=60 words) describing what kind of "
-        f"area this represents for a spatial planner. No preamble."
+        f"This is a sensitivity-pattern type from a classification of an environmental "
+        f"sensitivity analysis, clustered in the (importance, susceptibility) plane. "
+        f"Type '{profile_row['cluster_label']}' covers {profile_row['n_polygons']} cells "
+        f"({profile_row['total_area_km2']} km²), area-weighted mean importance "
+        f"{profile_row['mean_importance']} and susceptibility {profile_row['mean_susceptibility']}, "
+        f"mean overlap depth {profile_row['mean_coverage_index']}. Dominant asset groups: "
+        f"{profile_row['top_asset_groups'] or 'none'}. Write ONE short plain-language "
+        f"paragraph (<=60 words) describing what kind of area this is for a spatial "
+        f"planner. No preamble."
     )
 
 
@@ -696,8 +649,6 @@ def _ollama_describe(prompt: str, url: str, model: str, log) -> Optional[str]:
 
 
 def _openai_describe(prompt: str, base_dir: Path, log) -> Optional[str]:
-    """Fallback to the existing OpenAI integration if a key is configured.
-    Reuses asset_map_view's key resolution pattern (env / config / secrets)."""
     try:
         key = (os.environ.get("OPENAI_API_KEY") or "").strip()
         if not key:
@@ -747,8 +698,15 @@ def _write_parquet_coexist(path: Path, new_df, run_id: str, log):
     if path.exists():
         try:
             old = pd.read_parquet(path)
-            old = old[old.get("run_id").astype(str) != str(run_id)] if "run_id" in old.columns else old
-            new_df = pd.concat([old, new_df], ignore_index=True)
+            # Schema migration: prior Classification runs used a different engine and
+            # column set. Mixing schemas would yield a half-NaN union table, so when
+            # the columns no longer match we replace the file rather than merge.
+            if set(old.columns) != set(new_df.columns):
+                log(f"{path.name}: schema changed since the previous engine — "
+                    f"replacing {len(old)} obsolete row(s) from earlier runs.")
+            else:
+                old = old[old.get("run_id").astype(str) != str(run_id)] if "run_id" in old.columns else old
+                new_df = pd.concat([old, new_df], ignore_index=True)
         except Exception as exc:
             log(f"WARNING: could not merge existing {path.name} ({exc}); overwriting run rows only.")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -756,107 +714,166 @@ def _write_parquet_coexist(path: Path, new_df, run_id: str, log):
     log(f"Wrote {path.name}: {len(new_df)} total row(s).")
 
 
-def export_gpkg(out_dir: Path, results, geom_by_code, log):
-    """One GPKG layer per (method, n_clusters): polygons + cluster_id."""
+def export_gpkg(out_dir: Path, assign_df, geom_by_code, log):
+    """A single GPKG layer: polygons + cluster_id/label/certainty."""
     import geopandas as gpd
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    gpkg = out_dir / "segmentation_results.gpkg"
-    wrote = 0
-    for r in results:
-        df = r["assignments"]  # code, cluster_id, cluster_label, no_data, sens_mean
-        try:
-            g = geom_by_code.join(df.set_index("code"), how="inner").reset_index()
-            gdf = gpd.GeoDataFrame(g, geometry="geometry", crs=geom_by_code.crs)
-            layer_name = f"{r['method_label']}"[:60]
-            gdf.to_file(gpkg, layer=layer_name, driver="GPKG")
-            wrote += 1
-        except Exception as exc:
-            log(f"WARNING: GPKG layer for {r['method_label']} failed ({exc}).")
-    if wrote:
-        log(f"Wrote {gpkg.name}: {wrote} layer(s).")
+    gpkg = out_dir / "classification_results.gpkg"
+    try:
+        g = geom_by_code.join(assign_df.set_index(COL_CODE), how="inner").reset_index()
+        gdf = gpd.GeoDataFrame(g, geometry="geometry", crs=geom_by_code.crs)
+        gdf.to_file(gpkg, layer="classification", driver="GPKG")
+        log(f"Wrote {gpkg.name}.")
+    except Exception as exc:
+        log(f"WARNING: GPKG export failed ({exc}).")
     return gpkg
 
 
-def write_summary_md(out_dir: Path, params, results, log):
+def write_summary_md(out_dir: Path, params, best_k, bic_table, profiles, validation,
+                     scale, log):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    lines = ["# Sensitivity generalisation — run summary", "",
+    lines = ["# Classification — run summary", "",
              f"- **run_id**: `{params.run_id}`",
              f"- **geocode layer**: {params.layer}",
-             f"- **method(s)**: {params.method}",
-             f"- **cluster counts**: {', '.join(map(str, params.n_clusters))}",
+             f"- **k range**: {params.k_min}–{params.k_max}  → **chosen k = {best_k}** (min BIC)",
+             f"- **transform**: {params.transform}",
+             f"- **coverage weight**: {params.coverage_weight}",
+             f"- **valuation scale**: {scale[0]}..{scale[-1]} ({len(scale)}×{len(scale)} bins)",
              f"- **pressure filter**: {params.pressure or 'all (aggregate)'}",
-             f"- **features**: {', '.join(params.features)}",
              f"- **min polygon area (m²)**: {params.min_area_m2}",
              f"- **seed**: {params.seed}", "",
-             "This run answers *\"what kind of sensitivity pattern is this place part "
-             "of?\"* — complementary to the A–E *\"how sensitive is this place?\"* "
-             "classification. See methods paper, \"Generalisation of sensitivity patterns\".",
-             ""]
-    for r in results:
-        lines.append(f"## {r['method_label']}")
-        m = r.get("metrics", {})
-        if m:
-            lines.append("Quality metrics: " + ", ".join(f"{k}={v}" for k, v in m.items()))
-            lines.append("")
-        lines.append("| Cluster | Polygons | Area km² | Mean sens | Top asset groups | AI description |")
-        lines.append("|---|---:|---:|---:|---|---|")
-        for p in r["profiles"]:
-            lines.append(f"| {p['cluster_label']} | {p['n_polygons']} | {p['total_area_km2']} | "
-                         f"{p['sens_mean']} | {p['top_asset_groups']} | {p.get('description_ai') or ''} |")
-        lines.append("")
+             "Cells are clustered by the *shape* of their (importance, susceptibility) "
+             "histogram — answering *\"what kind of sensitivity pattern is this place "
+             "part of?\"*, complementary to the A–E *\"how sensitive is this place?\"* "
+             "classification.", ""]
+
+    lines += ["## Model selection (BIC per k)", "", "| k | BIC |", "|---:|---:|"]
+    for k, bic in bic_table:
+        mark = "  ← chosen" if k == best_k else ""
+        lines.append(f"| {k} | {bic:,.1f}{mark} |")
+    lines.append("")
+
+    lines += ["## Validation against signatures", ""]
+    if validation:
+        lines.append(f"- **Adjusted Rand Index (ARI)**: {validation['ari']}")
+        lines.append(f"- **Normalised Mutual Information (NMI)**: {validation['nmi']}  "
+                     f"(over {validation['n']} cells)")
+        agree = "high" if validation["nmi"] >= 0.5 else ("moderate" if validation["nmi"] >= 0.2 else "low")
+        if agree == "low":
+            interp = ("Low agreement: the clustering sees structure the A–E sensitivity "
+                      "categories do not capture.")
+        elif agree == "high":
+            interp = ("High agreement: the sensitivity categories already capture most of "
+                      "this structure.")
+        else:
+            interp = ("Moderate agreement: the clustering partly overlaps the sensitivity "
+                      "categories but adds distinctions of its own.")
+        lines += ["", interp, ""]
+    else:
+        lines += ["_Signatures (tbl_segmentation) unavailable for this layer — run the "
+                  "Segment sub-stage to enable ARI/NMI._", ""]
+
+    lines += ["## Types", "",
+              "| Type | Cells | Area km² | Mean imp | Mean sus | Coverage | Top asset groups | AI |",
+              "|---|---:|---:|---:|---:|---:|---|---|"]
+    for p in profiles:
+        lines.append(
+            f"| {p['cluster_label']} | {p['n_polygons']} | {p['total_area_km2']} | "
+            f"{p['mean_importance']} | {p['mean_susceptibility']} | {p['mean_coverage_index']} | "
+            f"{p['top_asset_groups']} | {p.get('description_ai') or ''} |")
+    lines.append("")
     path = out_dir / "summary.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     log(f"Wrote {path.name}.")
     return path
 
 
-def write_png_maps(out_dir: Path, results, geom_by_code, log):
+def _fingerprint_png(ax, fp_vec, scale):
+    """Draw a cluster's mean histogram as a scale×scale heatmap (importance rows,
+    susceptibility columns) onto a matplotlib axis."""
+    import numpy as np
+    nv = len(scale)
+    grid = np.asarray(fp_vec, dtype="float64").reshape(nv, nv)  # rows=importance, cols=susceptibility
+    ax.imshow(grid, cmap="magma", origin="lower", vmin=0.0,
+              vmax=max(1e-6, float(grid.max())), aspect="equal")
+    ax.set_xticks(range(nv)); ax.set_xticklabels(scale, fontsize=7)
+    ax.set_yticks(range(nv)); ax.set_yticklabels(scale, fontsize=7)
+    ax.set_xlabel("susceptibility", fontsize=7)
+    ax.set_ylabel("importance", fontsize=7)
+
+
+def write_png_outputs(out_dir: Path, profiles, assign_df, geom_by_code, scale, log):
+    """Per-type fingerprint heatmaps (always) + a categorical Types map (if geometry)."""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import geopandas as gpd
+        import numpy as np
     except Exception as exc:
-        log(f"PNG maps skipped (matplotlib/geopandas unavailable: {exc}).")
+        log(f"PNG output skipped (matplotlib unavailable: {exc}).")
         return
     out_dir = Path(out_dir)
-    for r in results:
-        try:
-            df = r["assignments"]
-            g = geom_by_code.join(df.set_index("code"), how="inner").reset_index()
-            gdf = gpd.GeoDataFrame(g, geometry="geometry", crs=geom_by_code.crs)
-            ax = gdf.plot(column="cluster_id", categorical=True, legend=True, figsize=(8, 8))
-            ax.set_axis_off()
-            ax.set_title(r["method_label"])
-            fig = ax.get_figure()
-            fig.savefig(out_dir / f"{r['method_label']}.png", dpi=120, bbox_inches="tight")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cols = hist_columns(scale)
+
+    # Fingerprint grid: one small heatmap per type.
+    try:
+        n = len(profiles)
+        if n:
+            ncol = min(5, n)
+            nrow = (n + ncol - 1) // ncol
+            fig, axes = plt.subplots(nrow, ncol, figsize=(2.2 * ncol, 2.4 * nrow), squeeze=False)
+            for i, p in enumerate(profiles):
+                ax = axes[i // ncol][i % ncol]
+                _fingerprint_png(ax, [p[c] for c in cols], scale)
+                ax.set_title(p["cluster_label"], fontsize=8)
+            for j in range(n, nrow * ncol):
+                axes[j // ncol][j % ncol].axis("off")
+            fig.suptitle("Type fingerprints — mean (importance, susceptibility) histogram", fontsize=10)
+            fig.tight_layout()
+            fig.savefig(out_dir / "fingerprints.png", dpi=130)
             plt.close(fig)
-        except Exception as exc:
-            log(f"PNG for {r['method_label']} failed ({exc}).")
+            log("Wrote fingerprints.png.")
+    except Exception as exc:
+        log(f"Fingerprint PNG failed ({exc}).")
+
+    # Categorical Types map.
+    try:
+        import geopandas as gpd
+        g = geom_by_code.join(assign_df.set_index(COL_CODE), how="inner").reset_index()
+        gdf = gpd.GeoDataFrame(g, geometry="geometry", crs=geom_by_code.crs)
+        ax = gdf.plot(column="cluster_label", categorical=True, legend=True, figsize=(8, 8))
+        ax.set_axis_off(); ax.set_title("Classification — types")
+        ax.get_figure().savefig(out_dir / "types_map.png", dpi=120, bbox_inches="tight")
+        plt.close(ax.get_figure())
+        log("Wrote types_map.png.")
+    except Exception as exc:
+        log(f"Types map PNG failed ({exc}).")
 
 
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 def run_segmentation(base_dir, params: Params, log=None) -> dict:
-    """Execute one segmentation run. Returns a small result dict (paths + counts)."""
+    """Execute one classification run. Returns a small result dict (paths + counts)."""
+    import numpy as np
     import pandas as pd
 
     base_dir = Path(base_dir)
     log = log or make_logger(base_dir)
     cfg = mesa_shared.read_config(base_dir)
     gpq = mesa_shared.parquet_dir(base_dir, cfg)
+    scale = valuation_scale(cfg)
 
-    _section(log, f"Sensitivity generalisation — run_id {params.run_id}")
+    _section(log, f"Classification — run_id {params.run_id}")
     log(f"Parameters: {json.dumps(params.as_dict())}")
 
-    # Resolve layer (blank → basic_mosaic if present, else first available).
     import segmentation as _seg
     layers = _seg.list_geocode_layers(gpq)
     if not layers:
-        log("No geocode layers found — nothing to segment.")
+        log("No geocode layers found — nothing to classify.")
         return {"ok": False, "reason": "no layers"}
     if not params.layer:
         params.layer = "basic_mosaic" if "basic_mosaic" in layers else layers[0]
@@ -865,26 +882,21 @@ def run_segmentation(base_dir, params: Params, log=None) -> dict:
         return {"ok": False, "reason": "layer not found"}
     log(f"Operating on layer: {params.layer}")
 
-    # Progress milestones: read inputs, build features, one per (method × k) fit,
-    # write outputs. The GUI maps these onto its bar; standalone runs ignore them.
-    total_steps = len(params.methods_to_run()) * len(params.n_clusters) + 3
+    total_steps = len(params.k_values()) + 4
     progress = make_progress(total_steps)
     progress("Reading inputs", done=0)
 
-    # Inputs.
     stacked = read_layer_stacked(gpq, params.layer, params.pressure, log)
     all_codes = list(layer_codes(gpq, params.layer))
     if not all_codes:
-        # Fall back to codes present in the stack.
         all_codes = sorted(stacked[COL_CODE].unique().tolist()) if not stacked.empty else []
     if not all_codes:
         log("No polygons for this layer.")
         return {"ok": False, "reason": "no polygons"}
     group_labels = asset_group_labels(gpq)
 
-    # Optional min-area sliver filter (basic_mosaic). Drops tiny polygons up front.
     geom = read_layer_geometry(gpq, params.layer, all_codes)
-    area_km2 = per_code_area_km2(stacked, geom)
+    area_km2 = per_code_area_km2(gpq, params.layer, geom)
     if params.min_area_m2 and params.min_area_m2 > 0 and not area_km2.empty:
         keep_codes = set(area_km2[area_km2 * 1e6 >= params.min_area_m2].index.astype(str))
         before = len(all_codes)
@@ -892,64 +904,73 @@ def run_segmentation(base_dir, params: Params, log=None) -> dict:
         log(f"Min-area filter (≥{params.min_area_m2:.0f} m²): kept {len(all_codes)}/{before} polygons.")
         geom = geom.loc[geom.index.intersection(all_codes)]
 
-    progress("Building feature vectors")
-    feat, no_data, sens_mean, _gcols = build_feature_matrix(stacked, all_codes, params.features, log)
+    progress("Building histograms")
+    prop_df, depth, no_data = build_histograms(stacked, all_codes, scale, log)
 
-    # Fit set excludes no_data polygons.
+    # Per-cell mean importance/susceptibility (for area-weighted profile stats).
+    if stacked is not None and not stacked.empty:
+        mean_imp = stacked.groupby(COL_CODE)[COL_IMP].mean()
+        mean_sus = stacked.groupby(COL_CODE)[COL_SUS].mean()
+    else:
+        mean_imp = pd.Series(dtype="float64")
+        mean_sus = pd.Series(dtype="float64")
+
     fit_codes = [c for c, nd in zip(all_codes, no_data.to_numpy()) if not nd]
     if len(fit_codes) < 2:
         log("Fewer than 2 polygons with stacked data — cannot cluster.")
         return {"ok": False, "reason": "insufficient data"}
-    Xfit = feat.loc[fit_codes]
-    geom_fit = geom.loc[geom.index.intersection(fit_codes)]
 
-    results = []
-    for method in params.methods_to_run():
-        for k in params.n_clusters:
-            _section(log, f"method={method}  k={k}")
-            if method == "attribute":
-                labels, mlabel, metrics = fit_attribute(Xfit, k, params.seed, log)
-            elif method == "spatial":
-                labels, mlabel, metrics = fit_spatial(
-                    Xfit, k, geom_fit, params.skater_max_polys, params.seed, log)
-            else:
-                log(f"Unknown method '{method}', skipping.")
-                continue
+    # Feature matrix: transformed histogram + optional standardised coverage feature.
+    Xhist = _transform(prop_df.loc[fit_codes], params.transform)
+    feat_blocks = [Xhist]
+    if params.coverage_weight and params.coverage_weight != 0:
+        from sklearn.preprocessing import StandardScaler
+        cov = depth.reindex(fit_codes).to_numpy(dtype="float64").reshape(-1, 1)
+        cov_z = StandardScaler().fit_transform(cov) * float(params.coverage_weight)
+        feat_blocks.append(cov_z)
+    Xfit = np.hstack(feat_blocks)
+    log(f"Feature matrix: {Xfit.shape[0]} cells × {Xfit.shape[1]} dims "
+        f"(transform={params.transform}, coverage_weight={params.coverage_weight}).")
 
-            # Assignments over ALL codes (no_data → NaN cluster).
-            assign = pd.DataFrame({"code": all_codes})
-            lab_map = {c: int(l) for c, l in zip(fit_codes, labels)}
-            assign["cluster_id"] = assign["code"].map(lab_map)
-            assign["no_data"] = assign["code"].map(lambda c: bool(no_data.get(c, True)))
-            assign["cluster_label"] = assign["cluster_id"].map(
-                lambda v: ("type %d" % (int(v) + 1)) if pd.notna(v) and v >= 0
-                else ("noise" if v == -1 else None))
-            assign["sens_mean"] = assign["code"].map(sens_mean.to_dict()).fillna(0.0)
-            assign["method"] = mlabel
-            assign["n_clusters"] = int(k)
-            assign["run_id"] = params.run_id
+    _section(log, f"GMM model selection (k = {params.k_min}..{params.k_max}, diag, n_init=5)")
+    labels_fit, proba, best_k, bic_table = fit_gmm_bic(Xfit, params.k_values(), params.seed, log)
+    p_max_fit, entropy_fit = _posterior_stats(proba)
+    for _k in params.k_values():
+        progress(f"Fitted models")
 
-            profiles = build_profiles(params, mlabel, k, all_codes, assign["cluster_id"].to_numpy(),
-                                      no_data, stacked, sens_mean, area_km2, group_labels, log)
-            results.append({"method": method, "method_label": mlabel, "k": k,
-                            "metrics": metrics, "assignments": assign, "profiles": profiles})
-            log(f"{mlabel}: {assign['cluster_id'].notna().sum()} polygons assigned, "
-                f"{len(profiles)} cluster(s). metrics={metrics}")
-            progress(f"Clustered {mlabel}")
+    # Assignments over ALL codes (no_data → null cluster).
+    lab_map = {c: int(v) for c, v in zip(fit_codes, labels_fit)}
+    pmax_map = {c: float(v) for c, v in zip(fit_codes, p_max_fit)}
+    ent_map = {c: float(v) for c, v in zip(fit_codes, entropy_fit)}
+    assign = pd.DataFrame({COL_CODE: all_codes})
+    assign["cluster_id"] = assign[COL_CODE].map(lab_map)
+    assign["cluster_label"] = assign["cluster_id"].map(
+        lambda v: f"type {int(v) + 1}" if pd.notna(v) else "no_data")
+    assign["p_max"] = assign[COL_CODE].map(pmax_map)
+    assign["entropy"] = assign[COL_CODE].map(ent_map)
+    assign["coverage_index"] = assign[COL_CODE].map(depth.to_dict()).fillna(0).astype("int64")
+    assign["top_bins"] = assign[COL_CODE].map(_top_bins_series(prop_df.reindex(all_codes), scale).to_dict())
+    assign["name_gis_geocodegroup"] = params.layer
+    assign["run_id"] = params.run_id
 
-    if not results:
-        return {"ok": False, "reason": "no results"}
+    validation = validate_against_signatures(gpq, params.layer, assign, log)
+    if validation:
+        log(f"Validation vs signatures: ARI={validation['ari']} NMI={validation['nmi']} "
+            f"(n={validation['n']}).")
 
-    # Optional AI descriptions per cluster.
-    for r in results:
-        r["profiles"] = add_ai_descriptions(r["profiles"], params, base_dir, log)
+    progress("Building profiles")
+    profiles = build_profiles(params, best_k, all_codes, assign["cluster_id"].to_numpy(),
+                              no_data, prop_df, depth, stacked, area_km2,
+                              mean_imp, mean_sus, group_labels, scale, log)
+    profiles = add_ai_descriptions(profiles, params, base_dir, log)
+    log(f"Clustered into {best_k} type(s); {int((~no_data).sum())} cells assigned.")
 
     # ---- Write tables ----
     _section(log, "Writing outputs")
-    seg_df = pd.concat([r["assignments"] for r in results], ignore_index=True)
-    if "name_gis_geocodegroup" not in seg_df.columns:
-        seg_df.insert(1, "name_gis_geocodegroup", params.layer)
-    prof_df = pd.DataFrame([p for r in results for p in r["profiles"]])
+    seg_cols = [COL_CODE, "name_gis_geocodegroup", "run_id", "cluster_id",
+                "cluster_label", "p_max", "entropy", "coverage_index", "top_bins"]
+    seg_df = assign[seg_cols].copy()
+    prof_df = pd.DataFrame(profiles)
     _write_parquet_coexist(gpq / "tbl_seg_mv.parquet", seg_df, params.run_id, log)
     _write_parquet_coexist(gpq / "tbl_seg_mv_profile.parquet", prof_df, params.run_id, log)
 
@@ -961,11 +982,11 @@ def run_segmentation(base_dir, params: Params, log=None) -> dict:
             geom4326 = geom.to_crs(4326)
     except Exception:
         pass
-    export_gpkg(out_dir, results, geom4326, log)
-    write_summary_md(out_dir, params, results, log)
+    export_gpkg(out_dir, assign[[COL_CODE, "cluster_id", "cluster_label", "p_max",
+                                 "entropy", "coverage_index"]], geom4326, log)
+    write_summary_md(out_dir, params, best_k, bic_table, profiles, validation, scale, log)
     if params.make_png:
-        write_png_maps(out_dir, results, geom4326, log)
-    # Persist the exact parameter set for reproducibility / re-runs.
+        write_png_outputs(out_dir, profiles, assign[[COL_CODE, "cluster_label"]], geom4326, scale, log)
     try:
         (out_dir / "params.json").write_text(json.dumps(params.as_dict(), indent=2), encoding="utf-8")
     except Exception:
@@ -973,17 +994,40 @@ def run_segmentation(base_dir, params: Params, log=None) -> dict:
 
     progress("Finished", done=total_steps)
     _section(log, "Done")
-    log(f"run_id={params.run_id}  results={len(results)}  output={out_dir}")
-    return {"ok": True, "run_id": params.run_id, "results": len(results),
-            "out_dir": str(out_dir), "layer": params.layer}
+    log(f"run_id={params.run_id}  k={best_k}  output={out_dir}")
+    return {"ok": True, "run_id": params.run_id, "k": best_k,
+            "out_dir": str(out_dir), "layer": params.layer,
+            "validation": validation}
+
+
+def _top_bins_series(prop_df, scale, top=3):
+    """Compact 'iMPxSUS:prop' top-N string per cell for the Maps tooltip."""
+    import numpy as np
+    import pandas as pd
+    cols = hist_columns(scale)
+    nv = len(scale)
+    P = prop_df[cols].to_numpy(dtype="float64")
+    out = []
+    for row in P:
+        if not np.any(row > 0):
+            out.append("")
+            continue
+        order = np.argsort(row)[::-1][:top]
+        parts = []
+        for b in order:
+            if row[b] <= 0:
+                continue
+            imp = scale[b // nv]; sus = scale[b % nv]
+            parts.append(f"{imp}×{sus}:{row[b]:.2f}")
+        out.append("; ".join(parts))
+    return pd.Series(out, index=prop_df.index)
 
 
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
 def run(base_dir: str, master=None, **params):
-    """In-process entry (kept for symmetry with other helpers; this helper is
-    normally launched as a subprocess so its heavy deps stay out of mesa.exe)."""
+    """In-process entry (kept for symmetry; normally launched as a subprocess)."""
     bd = Path(mesa_shared.find_base_dir(base_dir))
     cfg = mesa_shared.read_config(bd)
     p = params_from_config(cfg, **params)
@@ -991,15 +1035,14 @@ def run(base_dir: str, master=None, **params):
 
 
 def _parse_args(argv):
-    ap = argparse.ArgumentParser(description="MESA — Sensitivity generalisation (run)")
+    ap = argparse.ArgumentParser(description="MESA — Classification (run)")
     ap.add_argument("--original_working_directory", required=False, default=None)
     ap.add_argument("--layer", default=None, help="geocode layer (blank = basic_mosaic/first)")
-    ap.add_argument("--n-clusters", dest="n_clusters", default=None, help="int or list, e.g. 4,8,16")
-    ap.add_argument("--method", default=None, choices=[None, "attribute", "spatial", "both"])
+    ap.add_argument("--k-range", dest="k_range", default=None, help="min-max, e.g. 2-15")
+    ap.add_argument("--transform", default=None, choices=[None, "hellinger", "clr"])
+    ap.add_argument("--coverage-weight", dest="coverage_weight", default=None)
     ap.add_argument("--pressure", default=None)
-    ap.add_argument("--features", default=None, help="comma list of: " + ",".join(ALL_FEATURES))
     ap.add_argument("--min-area-m2", dest="min_area_m2", default=None)
-    ap.add_argument("--skater-max-polys", dest="skater_max_polys", default=None)
     ap.add_argument("--ai", dest="ai_enabled", action="store_true", default=None)
     ap.add_argument("--png", dest="make_png", action="store_true", default=None)
     ap.add_argument("--run-id", dest="run_id", default=None, help="reuse to reproduce a run")

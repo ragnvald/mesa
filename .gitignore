@@ -59,3 +59,10 @@ run_flatten_only.py
 devtools/dissolve_clusters.py
 devtools/signature_analysis.py
 devtools/test_segmentation.py
+
+# --- local working-tree noise (2026-06-11) ---
+# Local build / capture logs.
+build_win_log.txt
+capture_log.txt
+# Classification run outputs.
+output/segmentation_mv/

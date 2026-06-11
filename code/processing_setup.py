@@ -79,7 +79,7 @@ from PySide6.QtCore import Qt, Signal, QObject
 
 import webbrowser
 
-from asset_manage import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet
 
 
 # -------------------------------
@@ -915,8 +915,8 @@ class SetupWindow(QMainWindow):
         _corner_css = """
             QPushButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 8pt;
-                padding: 2px 8px; margin: 1px 2px; min-width: 0;
+                border-radius: 7px; color: #453621; font-weight: 500;
+                padding: 6px 16px; margin: 1px 2px; min-width: 80px;
             }
             QPushButton:hover { background: #e1d1ae; }
             QPushButton:pressed { background: #d4c094; }

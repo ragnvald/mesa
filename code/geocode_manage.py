@@ -3111,7 +3111,7 @@ def format_qdgc_level_size_list(levels: list[int]) -> str:
 # =====================================================================
 # Shared stylesheet (same warm palette as mesa.py / asset_manage.py)
 # =====================================================================
-from asset_manage import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet
 
 
 # =====================================================================
@@ -3194,12 +3194,11 @@ class GeocodeManagerWindow(QMainWindow):
         # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
         exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
             QPushButton#CornerExitButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 8pt;
-                padding: 2px 14px; margin: 2px 6px;
+                border-radius: 7px; color: #453621; font-weight: 500;
+                padding: 6px 16px; min-width: 80px;
             }
             QPushButton#CornerExitButton:hover { background: #e1d1ae; }
             QPushButton#CornerExitButton:pressed { background: #d4c094; }

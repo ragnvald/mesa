@@ -392,16 +392,6 @@ def _parquet_row_count(parquet_path: str | None) -> int | None:
         except Exception:
             return None
 
-def _preferred_lines_base_dir() -> str:
-    try:
-        gpq_path = Path(_detect_geoparquet_dir()).resolve()
-        base_candidate = gpq_path.parent.parent
-        if (base_candidate / "config.ini").exists():
-            return str(base_candidate)
-    except Exception:
-        pass
-    return original_working_directory
-
 # ---------------------------------------------------------------------
 # Status helpers (reads GeoParquet)
 # ---------------------------------------------------------------------
@@ -801,10 +791,6 @@ def open_present_files():
     log_to_logfile("Launching report_generate")
     _launch_helper("report_generate", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
-def open_data_analysis_setup():
-    log_to_logfile("Launching analysis_setup subprocess")
-    _launch_helper_subprocess("analysis_setup", ["--original_working_directory", original_working_directory])
-
 def open_segmentation_setup():
     # Subprocess (not in-process): segmentation_run bundles heavy compute libs
     # (scikit-learn/libpysal/spopt/hdbscan) that must stay out of mesa.exe.
@@ -814,12 +800,6 @@ def open_segmentation_setup():
 def open_data_analysis_presentation():
     log_to_logfile("Launching analysis_present")
     _launch_helper("analysis_present", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
-
-def edit_lines():
-    chosen_base = _preferred_lines_base_dir()
-    log_to_logfile(f"Launching line_manage with base_dir={chosen_base}")
-    _launch_helper_subprocess("line_manage", ["--original_working_directory", chosen_base])
-
 
 def open_special_focus():
     """Configure → 'Special focus': one window hosting the Lines and Analysis
@@ -3189,12 +3169,11 @@ class MesaMainWindow(QMainWindow):
         # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
         exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setFixedHeight(24)
         exit_btn.setStyleSheet("""
             QPushButton#CornerExitButton {
                 background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621; font-size: 8pt;
-                padding: 2px 14px; margin: 2px 6px;
+                border-radius: 7px; color: #453621; font-weight: 500;
+                padding: 6px 16px; min-width: 80px;
             }
             QPushButton#CornerExitButton:hover { background: #e1d1ae; }
             QPushButton#CornerExitButton:pressed { background: #d4c094; }

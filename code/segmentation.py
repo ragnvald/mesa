@@ -7,9 +7,12 @@ devtools/signature_analysis.py) into a reusable, pipeline-grade module. Two mode
 
   signatures  — deterministic typology: each polygon is labelled by the *set* of
                 MESA sensitivity codes (A..E) its overlapping assets carry, e.g.
-                "B+C+D+E". No tuning, fully reproducible, cheap. The default.
-  clusters    — algorithmic segmentation (KMeans, optionally spatially contiguous
-                Agglomerative-ward with Queen adjacency). Optional, heavier.
+                "B+C+D+E". No tuning, fully reproducible, cheap. The only mode.
+
+Algorithmic clustering used to live here too, but the Classification tool
+(code/segmentation_run.py) now owns that — it clusters in the (importance,
+susceptibility) plane, which signatures deliberately do not. Signatures remain the
+deterministic reference the Classification clustering is validated against (ARI/NMI).
 
 MEMORY DISCIPLINE (see CLAUDE.md + learning.md "Parent-side memory in the pipeline")
     The heavy per-layer read happens here, and this module is meant to run *inside a
@@ -182,85 +185,6 @@ def _signatures_for_layer(stacked):
     return out
 
 
-def _cluster_for_layer(gpq_dir: Path, layer: str, sig_df, n_clusters: int,
-                       spatial_method: str):
-    """Optional algorithmic clustering. Returns (cluster_series, method_label) or
-    (None, "") if dependencies/inputs are unavailable. Cluster id is aligned to
-    sig_df.index (the polygon `code` order)."""
-    try:
-        import numpy as np
-        import pandas as pd
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.cluster import KMeans
-    except Exception:
-        return None, ""
-
-    # Feature matrix from the signature stats — cheap and dependency-light:
-    # n_assets, sens_mean, and one indicator column per code present.
-    feats = pd.DataFrame(index=sig_df.index)
-    feats["n_assets"] = sig_df["n_assets"].astype(float)
-    feats["sens_mean"] = sig_df["sens_mean"].astype(float)
-    for c in VALID_CODES:
-        feats[f"has_{c}"] = sig_df["signature"].str.contains(c, regex=False).astype(float)
-    if len(feats) < max(2, n_clusters):
-        return None, ""
-
-    X = StandardScaler().fit_transform(feats.to_numpy(dtype=float))
-    k = int(n_clusters) if n_clusters and n_clusters > 0 else 8
-    k = max(2, min(k, len(feats)))
-
-    method = (spatial_method or "agglomerative").lower()
-    if method == "agglomerative":
-        labels = _agglomerative_queen(gpq_dir, layer, sig_df.index, X, k)
-        if labels is not None:
-            return pd.Series(labels, index=sig_df.index, name="cluster_id"), f"agglomerative_ward_k{k}"
-    # Fallback / explicit attribute-only KMeans.
-    km = KMeans(n_clusters=k, n_init=10, random_state=42)
-    labels = km.fit_predict(X)
-    return pd.Series(labels, index=sig_df.index, name="cluster_id"), f"kmeans_k{k}"
-
-
-def _agglomerative_queen(gpq_dir: Path, layer: str, code_index, X, k: int):
-    """Spatially-contiguous Agglomerative-ward using Queen adjacency. Returns a
-    label array aligned to code_index, or None if geopandas/libpysal missing or
-    the polygon set does not line up."""
-    try:
-        import numpy as np
-        import geopandas as gpd
-        from libpysal.weights import Queen
-        from sklearn.cluster import AgglomerativeClustering
-    except Exception:
-        return None
-    try:
-        poly = gpd.read_parquet(
-            Path(gpq_dir) / "tbl_geocode_object.parquet",
-            columns=["code", "geometry", "name_gis_geocodegroup"],
-            filters=[("name_gis_geocodegroup", "=", layer)],
-        )
-    except Exception:
-        return None
-    if poly.empty:
-        return None
-    poly["code"] = poly["code"].astype(str)
-    poly = poly.drop_duplicates(subset=["code"]).set_index("code")
-    # Align polygons to the feature rows; bail out if they don't match.
-    try:
-        poly = poly.loc[list(code_index)]
-    except Exception:
-        return None
-    try:
-        try:
-            w = Queen.from_dataframe(poly.reset_index(), use_index=False)
-        except TypeError:
-            w = Queen.from_dataframe(poly.reset_index())
-        connectivity = w.sparse.tocsr()
-        model = AgglomerativeClustering(n_clusters=int(k), linkage="ward",
-                                        connectivity=connectivity)
-        return model.fit_predict(X)
-    except Exception:
-        return None
-
-
 def segment_layer(gpq_dir, layer: str, *, mode: str = "signatures",
                   n_clusters: int = 0, spatial_method: str = "agglomerative",
                   log_fn=None) -> dict:
@@ -300,19 +224,13 @@ def segment_layer(gpq_dir, layer: str, *, mode: str = "signatures",
     out["cluster_id"] = pd.NA
     out["cluster_method"] = pd.NA
 
+    # Algorithmic clustering moved to the Classification tool (segmentation_run.py).
+    # Segment is signatures-only; cluster_id/cluster_method stay null for schema
+    # stability. A caller still requesting "clusters"/"both" gets signatures.
     method_label = ""
     if mode in ("clusters", "both"):
-        cluster_series, method_label = _cluster_for_layer(
-            gpq_dir, layer, sig_df, n_clusters, spatial_method)
-        if cluster_series is not None:
-            out = out.merge(cluster_series.rename("cluster_id_new"),
-                            left_on="code", right_index=True, how="left")
-            out["cluster_id"] = pd.to_numeric(out["cluster_id_new"], errors="coerce").astype("Int64")
-            out = out.drop(columns=["cluster_id_new"])
-            out["cluster_method"] = method_label
-            _log(f"[segment] layer '{layer}': clustered with {method_label}")
-        else:
-            _log(f"[segment] layer '{layer}': clustering unavailable — signatures only")
+        _log(f"[segment] layer '{layer}': 'clusters' mode retired — see the "
+             f"Classification tool; writing signatures only.")
 
     for c in OUTPUT_COLUMNS:
         if c not in out.columns:

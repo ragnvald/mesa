@@ -385,15 +385,13 @@ COLLECT_DOCX = [
 ]
 
 # Multivariate segmentation (segmentation_run) — clustering + spatial regionalisation.
-# Heavy and only needed by that one helper, so it is bundled per-helper (never into
-# mesa.exe). spopt/hdbscan are optional at runtime (lazy + graceful skip) but bundled
-# here so the frozen exe can use them when present. scipy is sklearn's heavy dependency.
+# Heavy and only needed by segmentation_run, so it is bundled per-helper (never into
+# mesa.exe). The Classification engine uses Gaussian Mixture Models (sklearn) on the
+# (importance, susceptibility) histogram; scipy is sklearn's heavy dependency. The old
+# spatial-clustering stack (libpysal/spopt/hdbscan) is no longer used and is dropped.
 COLLECT_SKLEARN = [
     "--collect-all", "sklearn",
     "--collect-all", "scipy",
-    "--collect-all", "libpysal",
-    "--collect-submodules", "spopt",
-    "--collect-submodules", "hdbscan",
 ]
 
 # setuptools/pkg_resources runtime deps
@@ -450,6 +448,12 @@ MAIN_COLLECTS = [
     "--collect-all", "docx",
     # H3 geospatial indexing (geocode_manage)
     "--collect-all", "h3",
+    # Excel I/O: pandas.read_excel/to_excel lazily import openpyxl (+ et_xmlfile),
+    # which PyInstaller's static analysis misses — without these, loading the asset
+    # vulnerability settings.xlsx in processing_setup fails silently in the frozen
+    # app. openpyxl must be >= 3.1.5 (pandas refuses older); see requirements_*.txt.
+    "--collect-submodules", "openpyxl",
+    "--hidden-import", "et_xmlfile",
 ]
 MAIN_EXCLUDES = [
     "--exclude-module", "cupy",
@@ -617,9 +621,14 @@ def helper_collects_for(basename: str) -> list[str]:
 
     # Multivariate segmentation helpers. segmentation_run lazy-imports the heavy
     # clustering stack (auto-detected), but bundle it explicitly to be safe.
-    # segmentation_setup reaches pandas/pyarrow/GIS only *indirectly* (via
+    # segmentation_setup reaches pandas/pyarrow only *indirectly* (via
     # `import segmentation`/`segmentation_run`), so source scanning misses them —
-    # force the data stack for it. sklearn stays out of segmentation_setup.
+    # force the data stack for it. GIS and sklearn stay OUT of segmentation_setup:
+    # everything its config UI calls (list_geocode_layers, detect_pressure_columns,
+    # params_from_config) reads parquet via pandas/pyarrow only, never geopandas;
+    # the clustering + GIS work runs solely in the spawned segmentation_run.exe.
+    # They're explicitly excluded below to override PyInstaller's static discovery
+    # of the lazy imports nested inside segmentation_run.py's functions.
     force_sklearn = {"segmentation_run"}
     if basename in force_sklearn or _imports_any_module(src, {"sklearn", "libpysal", "spopt"}):
         collects += COLLECT_SKLEARN
@@ -627,7 +636,7 @@ def helper_collects_for(basename: str) -> list[str]:
     if basename in {"segmentation_setup", "segmentation_run"}:
         if not uses_qt and basename == "segmentation_setup":
             collects += COLLECT_PYSIDE6
-        if not uses_gis:
+        if not uses_gis and basename == "segmentation_run":
             collects += COLLECT_GIS_STACK
         if not uses_pandas:
             collects += COLLECT_PANDAS
@@ -644,6 +653,25 @@ def helper_collects_for(basename: str) -> list[str]:
             collects += COLLECT_PANDAS
         if not uses_pyarrow:
             collects += COLLECT_PYARROW
+
+    # Footprint trim: drop libs a helper pulls only via lazy in-function imports
+    # that never execute in THAT exe (they run in a spawned sibling process).
+    # PyInstaller's static analysis bundles them anyway, so exclude explicitly.
+    helper_exclude_modules = {
+        # The light Classification config UI imports `segmentation_run` (for config
+        # parsing + pressure detection), whose clustering stack runs ONLY in the
+        # spawned segmentation_run.exe — never here. Since the shared Qt stylesheet
+        # now comes from the GIS-free ui_style module (not asset_manage), the GIS
+        # stack also has no module-level path into this exe and can be dropped too:
+        # the only GIS use is lazy, inside segmentation_run funcs that run in the
+        # spawned process. ~250 MB (GIS) + clustering trimmed.
+        "segmentation_setup": [
+            "sklearn", "scipy", "libpysal", "spopt", "hdbscan",
+            "geopandas", "fiona", "shapely", "pyproj", "pyogrio",
+        ],
+    }
+    for _mod in helper_exclude_modules.get(basename, []):
+        collects += ["--exclude-module", _mod]
 
     return collects
 
@@ -681,6 +709,31 @@ if CLEAN_BUILD:
 # ---------------------------------------------------------------------------
 # Build steps
 # ---------------------------------------------------------------------------
+def _strip_exclude_module(flags: list[str], module: str) -> list[str]:
+    """Drop every consecutive `--exclude-module <module>` pair from a flag list."""
+    out: list[str] = []
+    i = 0
+    while i < len(flags):
+        if flags[i] == "--exclude-module" and i + 1 < len(flags) and flags[i + 1] == module:
+            i += 2
+            continue
+        out.append(flags[i])
+        i += 1
+    return out
+
+
+def _helper_needs_scipy(basename: str, src: str) -> bool:
+    """Helpers that bundle the sklearn stack also need a WORKING scipy. scipy is in
+    the default HELPER_EXCLUDES (it's dead weight in the GIS/UI helpers), but pairing
+    `--exclude-module scipy` with COLLECT_SKLEARN's `--collect-all scipy` copies
+    scipy's .py files while pruning its compiled extensions (e.g. _ccallback_c.pyd),
+    yielding a half-broken scipy that crashes at `import sklearn`. So for these
+    helpers the exclude must be removed. See learning.md."""
+    return basename in {"segmentation_run"} or _imports_any_module(
+        src, {"sklearn", "libpysal", "spopt", "scipy"}
+    )
+
+
 def build_helper(basename: str) -> None:
     pyfile = CODE_DIR / f"{basename}.py"
     if not pyfile.exists():
@@ -701,7 +754,12 @@ def build_helper(basename: str) -> None:
 
     # Ensure Tcl/Tk data is bundled (some helpers may still need it indirectly).
     icon_path = resolve_app_icon()
-    args = FLAGS_HELPER + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + extra_collects + [
+    base_flags = FLAGS_HELPER
+    if _helper_needs_scipy(basename, _read_helper_source(basename)):
+        # COLLECT_SKLEARN bundles scipy for this helper; the default scipy exclude
+        # would half-strip it (compiled extensions pruned) and crash sklearn.
+        base_flags = _strip_exclude_module(FLAGS_HELPER, "scipy")
+    args = base_flags + tcltk_data_args() + hidden_imports + helper_collects_for(basename) + extra_collects + [
         "--name", basename,
         "--distpath", str(TOOLS_DIST),
         "--workpath", str(BUILD_FOLDER_ROOT / f"{basename}_build"),
@@ -931,12 +989,13 @@ def main() -> None:
             # analysis_present) are now bundled inside mesa.exe as hidden imports
             # and run in-process - no separate exe needed.
             "tiles_create_raster",
-            "analysis_setup",
-            "line_manage",
             "combined_map",
-            # Configure → "Special focus": one webview window hosting line_manage
-            # and analysis_setup as iframe tabs. Embeds both apps, so it bundles
-            # their full GIS/Qt/data stack (see _collect_flags_for_helper).
+            # Configure → "Special focus": one webview window that EMBEDS
+            # line_manage + analysis_setup as iframe tabs (it imports those modules).
+            # So the standalone line_manage.exe / analysis_setup.exe are no longer
+            # built — special_focus is their single packaged entry point, bundling
+            # both apps' GIS/Qt/webview stack ONCE (~430 MB) instead of two exes
+            # (~630 MB). See _collect_flags_for_helper.
             "special_focus",
             # Sensitivity generalisation (MESA v5+). Standalone exes so the heavy
             # clustering stack (sklearn/scipy/libpysal/spopt/hdbscan) bundles into

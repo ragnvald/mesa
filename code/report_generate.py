@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from asset_manage import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet
 
 import geopandas as gpd
 import pandas as pd
@@ -5155,17 +5155,21 @@ def generate_report(base_dir: str,
                         "name_gis_geocodegroup")["run_id"].last().to_dict()
                     mv = mv[mv.apply(lambda r: r["run_id"] == latest.get(
                         r["name_gis_geocodegroup"]), axis=1)]
-                order_list.append(('heading(2)', "Sensitivity generalisation"))
+                order_list.append(('heading(2)', "Classification (sensitivity types)"))
                 order_list.append(('text',
                     "The A–E sensitivity classes above answer <b>“how sensitive is this place?”</b> — a "
                     "level of intensity, scored one polygon at a time. This section answers a different, "
                     "complementary question: <b>“what kind of sensitivity pattern is this place part of?”</b> "
-                    "It groups polygons by the full multivariate profile of the assets stacked beneath them "
-                    "into a configurable number of sensitivity <i>types</i> (composition / character), "
-                    "optionally as spatially-contiguous regions. The two views are meant to be read together. "
-                    "Method reference: see the methods paper, section <i>“Generalisation of sensitivity "
-                    "patterns”</i> (Frelat-style decomposition; Blaschke-style OBIA analogy)."))
+                    "Cells are grouped by the <i>shape</i> of their (importance, susceptibility) histogram, "
+                    "so a place dominated by high-importance / low-susceptibility assets forms a different "
+                    "<b>type</b> from a high-susceptibility / low-importance one even when their A–E "
+                    "sensitivity code is identical. The number of types is chosen automatically by BIC. "
+                    "Each type's <i>fingerprint</i> below is its mean histogram in the importance × "
+                    "susceptibility plane."))
                 order_list.append(('rule', None))
+
+                hist_cols = [c for c in mv.columns if str(c).startswith("h_i")]
+                nv = int(round(len(hist_cols) ** 0.5)) or 5
 
                 def _fmt_mv_area(v) -> str:
                     try:
@@ -5174,37 +5178,77 @@ def generate_report(base_dir: str,
                     except (TypeError, ValueError):
                         return "–"
 
+                def _fingerprint_png_for_layer(lp_df, layer_name):
+                    """Grid of small importance×susceptibility heatmaps, one per type."""
+                    if not hist_cols:
+                        return None
+                    try:
+                        import matplotlib
+                        matplotlib.use("Agg")
+                        import matplotlib.pyplot as plt
+                        import numpy as np
+                    except Exception:
+                        return None
+                    recs = lp_df.to_dict("records")
+                    n = len(recs)
+                    if not n:
+                        return None
+                    ncol = min(5, n)
+                    nrow = (n + ncol - 1) // ncol
+                    fig, axes = plt.subplots(nrow, ncol, figsize=(1.9 * ncol, 2.1 * nrow), squeeze=False)
+                    for i, rec in enumerate(recs):
+                        ax = axes[i // ncol][i % ncol]
+                        grid = np.array([float(rec.get(c, 0) or 0) for c in hist_cols]).reshape(nv, nv)
+                        ax.imshow(grid, cmap="magma", origin="lower", vmin=0.0,
+                                  vmax=max(1e-6, float(grid.max())), aspect="equal")
+                        ax.set_title(str(rec.get("cluster_label", "")), fontsize=8)
+                        ax.set_xticks(range(nv)); ax.set_xticklabels(range(1, nv + 1), fontsize=6)
+                        ax.set_yticks(range(nv)); ax.set_yticklabels(range(1, nv + 1), fontsize=6)
+                        ax.set_xlabel("sus", fontsize=6); ax.set_ylabel("imp", fontsize=6)
+                    for j in range(n, nrow * ncol):
+                        axes[j // ncol][j % ncol].axis("off")
+                    fig.tight_layout()
+                    out = output_subpath(base_dir, "tmp", f"segmv_fp_{_safe_name(str(layer_name))}.png")
+                    try:
+                        fig.savefig(str(out), dpi=130)
+                    finally:
+                        plt.close(fig)
+                    return str(out)
+
                 has_ai = "description_ai" in mv.columns and mv["description_ai"].notna().any()
                 for layer in sorted(mv["name_gis_geocodegroup"].astype(str).unique()):
                     lp = mv[mv["name_gis_geocodegroup"].astype(str) == layer]
                     if lp.empty:
                         continue
-                    order_list.append(('heading(3)', f"Sensitivity types – {layer}"))
-                    # One sub-table per (method, n_clusters) combination.
-                    combos = (lp[["method", "n_clusters"]].drop_duplicates()
-                              .sort_values(["method", "n_clusters"]).values.tolist())
-                    for method, k in combos:
-                        mp = lp[(lp["method"].astype(str) == str(method)) &
-                                (lp["n_clusters"] == k)]
-                        if "total_area_km2" in mp.columns and mp["total_area_km2"].notna().any():
-                            mp = mp.sort_values("total_area_km2", ascending=False, na_position="last")
-                        order_list.append(('heading(4)', f"{method} — {int(k)} types"))
-                        header = ["Type", "Polygons", "Area (km²)", "Mean sens.", "Top asset groups"]
+                    if "total_area_km2" in lp.columns and lp["total_area_km2"].notna().any():
+                        lp = lp.sort_values("total_area_km2", ascending=False, na_position="last")
+                    k_types = (int(lp["n_clusters"].iloc[0])
+                               if "n_clusters" in lp.columns and pd.notna(lp["n_clusters"].iloc[0])
+                               else len(lp))
+                    order_list.append(('heading(3)', f"Sensitivity types – {layer} ({k_types} types)"))
+                    header = ["Type", "Cells", "Area (km²)", "Mean imp.", "Mean sus.", "Coverage",
+                              "Top asset groups"]
+                    if has_ai:
+                        header.append("Description")
+                    tbl = [header]
+                    for _, r in lp.iterrows():
+                        row = [
+                            str(r.get("cluster_label", "")),
+                            f"{int(r['n_polygons']):,}" if pd.notna(r.get("n_polygons")) else "–",
+                            _fmt_mv_area(r.get("total_area_km2")),
+                            f"{float(r.get('mean_importance', 0) or 0):.2f}",
+                            f"{float(r.get('mean_susceptibility', 0) or 0):.2f}",
+                            f"{float(r.get('mean_coverage_index', 0) or 0):.2f}",
+                            str(r.get("top_asset_groups", "") or ""),
+                        ]
                         if has_ai:
-                            header.append("Description")
-                        tbl = [header]
-                        for _, r in mp.iterrows():
-                            row = [
-                                str(r.get("cluster_label", "")),
-                                f"{int(r['n_polygons']):,}",
-                                _fmt_mv_area(r.get("total_area_km2")),
-                                f"{float(r.get('sens_mean', 0)):.2f}",
-                                str(r.get("top_asset_groups", "") or ""),
-                            ]
-                            if has_ai:
-                                row.append(str(r.get("description_ai", "") or ""))
-                            tbl.append(row)
-                        order_list.append(('table', tbl))
+                            row.append(str(r.get("description_ai", "") or ""))
+                        tbl.append(row)
+                    order_list.append(('table', tbl))
+                    fp_png = _fingerprint_png_for_layer(lp, layer)
+                    if fp_png:
+                        order_list.append(('image',
+                            (f"Type fingerprints – {layer} (importance × susceptibility)", fp_png)))
                     order_list.append(('new_page', None))
 
         if atlas_pages:
