@@ -1,6 +1,6 @@
 # MESA sample data packages
 
-Three self-contained, ready-to-import asset packages with reasonable importance/susceptibility parameters and deliberately overlapping geometry.
+Four self-contained, ready-to-import asset packages with reasonable importance/susceptibility parameters and deliberately overlapping geometry.
 
 - **coastal zone** — 8 asset groups (`coastal_zone/coastal_zone.gpkg` + `coastal_zone/settings.xlsx`)
 - **river system** — 10 asset groups (`river_system/river_system.gpkg` + `river_system/settings.xlsx`)

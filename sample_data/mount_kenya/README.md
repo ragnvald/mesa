@@ -24,4 +24,4 @@ Region: **Mount Kenya, Kenya (equatorial afro-alpine massif)**. Synthetic, delib
 | Trekking route | 2 | 3 | 6 | D |
 | Logging concession | 4 | 3 | 12 | C |
 
-Groups overlap by design, so stacked cells carry a mix of (importance, susceptibility) pairs — giving the Classification tool real histogram depth to cluster on.
+Each group is scattered across the area as a few organic patches plus outer satellites, overlapping other groups at shared hotspots — so stacked cells carry a mix of (importance, susceptibility) pairs, giving the Classification tool real histogram depth to cluster on.

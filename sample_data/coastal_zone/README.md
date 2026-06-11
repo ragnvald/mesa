@@ -22,4 +22,4 @@ Region: **Zanzibar Channel, Tanzania (tropical coast)**. Synthetic, deliberately
 | Aquaculture | 2 | 2 | 4 | E |
 | Shipping lane | 2 | 1 | 2 | E |
 
-Groups overlap by design, so stacked cells carry a mix of (importance, susceptibility) pairs — giving the Classification tool real histogram depth to cluster on.
+Each group is scattered across the area as a few organic patches plus outer satellites, overlapping other groups at shared hotspots — so stacked cells carry a mix of (importance, susceptibility) pairs, giving the Classification tool real histogram depth to cluster on.
