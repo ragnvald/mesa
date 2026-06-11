@@ -99,8 +99,8 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit,
     QDialog,
 )
-from PySide6.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QColor, QPalette, QDesktopServices
-from PySide6.QtCore import Qt, QTimer, QUrl, QSize, QObject, Signal
+from PySide6.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QColor, QDesktopServices
+from PySide6.QtCore import Qt, QTimer, QUrl, QObject, Signal
 
 import subprocess
 import webbrowser
@@ -468,13 +468,13 @@ def get_status(geoparquet_dir):
         append_status("+" if has_asset_group_rows else "-",
                       f"Asset layers imported: {asset_group_count}" if has_asset_group_rows else
                       "Assets are missing. Use the Assets button to import and register asset groups.",
-                      "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data-step-1")
 
         geocode_group_count = read_table_and_count('tbl_geocode_group')
         append_status("+" if geocode_group_count is not None else "/",
                       f"Geocode layers: {geocode_group_count}" if geocode_group_count is not None else
                       "Geocodes are missing. Import assets by pressing the Assets button.",
-                      "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data-step-1")
 
         lines_original_count = read_table_and_count('tbl_lines_original')
         lines_processed_count = read_table_and_count('tbl_lines')
@@ -482,17 +482,17 @@ def get_status(geoparquet_dir):
         append_status("+" if visible_lines_count is not None else "/",
                   f"Lines: {visible_lines_count}" if visible_lines_count is not None else
                   "Lines are missing. Import or initiate lines if you want to use the line feature.",
-                  "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
+                  "https://github.com/ragnvald/mesa/wiki/User-interface#process-step-3")
 
         symbol, message = read_setup_status()
-        append_status(symbol, message, "https://github.com/ragnvald/mesa/wiki/User-interface#configure-analysis")
+        append_status(symbol, message, "https://github.com/ragnvald/mesa/wiki/User-interface#configure-step-2")
 
         flat_original_count = read_table_and_count('tbl_flat')
         append_status("+" if flat_original_count is not None else "-",
                       "Processing complete. Use Show maps or open the QGIS project."
                       if flat_original_count is not None else
                       "Processing incomplete. Press Process area.",
-                      "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#process-step-3")
 
         atlas_count = read_table_and_count('tbl_atlas')
         append_status("+" if atlas_count is not None else "/",
@@ -507,7 +507,7 @@ def get_status(geoparquet_dir):
                   f"Segments are in place with {segments_flat_count} segments along {lines_count_label} lines."
                       if segments_flat_count is not None else
                       "Segments are missing. Import or initiate lines if you want to use the line feature.",
-                      "https://github.com/ragnvald/mesa/wiki/User-interface#run-processing")
+                      "https://github.com/ragnvald/mesa/wiki/User-interface#process-step-3")
 
         return pd.DataFrame(status_list)
     except Exception as e:
@@ -3335,8 +3335,10 @@ class MesaMainWindow(QMainWindow):
         grid.setSpacing(12)
         layout.addLayout(grid, stretch=1)
 
+        _WIKI = "https://github.com/ragnvald/mesa/wiki"
         workflow_sections = [
-            ("Prepare data (step 1)", "Import or create new data and generate supporting geometries.", [
+            ("Prepare data (step 1)", "Import or create new data and generate supporting geometries.",
+             f"{_WIKI}/User-interface#prepare-data-step-1", [
                 ("Assets", open_assets,
                  "Import assets and edit asset groups in one tool."),
                 ("Geocodes", geocodes_grids,
@@ -3344,19 +3346,22 @@ class MesaMainWindow(QMainWindow):
                 ("Atlas", make_atlas,
                  "Create/import atlas polygons and edit atlas page metadata in one tool."),
             ]),
-            ("Configure (step 2)", "Tune parameters/study areas before running heavy jobs.", [
+            ("Configure (step 2)", "Tune parameters/study areas before running heavy jobs.",
+             f"{_WIKI}/User-interface#configure-step-2", [
                 ("Parameters", edit_processing_setup,
                  "Adjust weights, thresholds and other processing rules."),
                 ("Special focus", open_special_focus,
                  "Lines and Analysis setup, grouped in one popup."),
             ]),
-            ("Process (step 3)", "Execute the automated steps that build fresh outputs.", [
+            ("Process (step 3)", "Execute the automated steps that build fresh outputs.",
+             f"{_WIKI}/User-interface#process-step-3", [
                 ("Process", open_process_all,
                  "Runs area, line, and analysis processing."),
                 ("Classification", open_segmentation_setup,
                  "Group polygons into types of sensitivity pattern (the \"what kind\" view, complementing the A–E classes)."),
             ]),
-            ("Results (step 4)", "Open the interactive viewers and export the deliverables.", [
+            ("Results (step 4)", "Open the interactive viewers and export the deliverables.",
+             f"{_WIKI}/User-interface#results-step-4", [
                 ("Maps", open_combined_map,
                  "Assets, results overview and segmentation in one tabbed window with linked zoom & pan."),
                 ("Compare study areas", open_data_analysis_presentation,
@@ -3366,15 +3371,24 @@ class MesaMainWindow(QMainWindow):
             ]),
         ]
 
-        for col_idx, (title, description, actions) in enumerate(workflow_sections):
+        for col_idx, (title, description, wiki_url, actions) in enumerate(workflow_sections):
             group = QGroupBox(title)
             group_layout = QVBoxLayout(group)
             group_layout.setSpacing(4)
 
+            # Description + a wiki info-icon (same widget as the Status tab) so each
+            # workflow step links to its User-interface guide section.
+            desc_row = QHBoxLayout()
+            desc_row.setContentsMargins(0, 0, 0, 0)
+            desc_row.setSpacing(6)
             desc = QLabel(description)
             desc.setStyleSheet("font-size: 9pt; color: #6a5533; font-weight: 500;")
             desc.setWordWrap(True)
-            group_layout.addWidget(desc)
+            desc_row.addWidget(desc, 1)
+            _info = _InfoCircleLabel(wiki_url)
+            _info.setToolTip("Open this step's guide in the wiki")
+            desc_row.addWidget(_info, 0, Qt.AlignTop)
+            group_layout.addLayout(desc_row)
 
             group_layout.addSpacing(6)
 
@@ -4166,7 +4180,15 @@ class MesaMainWindow(QMainWindow):
             "<b>Save all</b> to apply them."
         )
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        _intro_row = QHBoxLayout()
+        _intro_row.setContentsMargins(0, 0, 0, 0)
+        _intro_row.setSpacing(6)
+        _intro_row.addWidget(intro, 1)
+        _cfg_info = _InfoCircleLabel(
+            "https://github.com/ragnvald/mesa/wiki/User-interface#config-tab")
+        _cfg_info.setToolTip("Open the Config tab guide in the wiki")
+        _intro_row.addWidget(_cfg_info, 0, Qt.AlignTop)
+        layout.addLayout(_intro_row)
 
         self._config_status_label = QLabel("")
         self._config_status_label.setProperty("role", "muted")

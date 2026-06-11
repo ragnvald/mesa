@@ -61,7 +61,7 @@ import multiprocessing as mp
 import traceback
 import warnings
 from pathlib import Path
-from typing import Union, Optional, List, Tuple
+from typing import Optional, List, Tuple
 
 import numpy as np
 import geopandas as gpd
@@ -71,7 +71,7 @@ from shapely.geometry import (
     Polygon, MultiPolygon, GeometryCollection, LineString, MultiLineString, box
 )
 from shapely.geometry import mapping as shp_mapping
-from shapely.ops import linemerge, polygonize, unary_union
+from shapely.ops import polygonize, unary_union
 from shapely import wkb as shp_wkb
 from shapely.prepared import prep
 

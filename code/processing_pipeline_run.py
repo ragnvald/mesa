@@ -2107,54 +2107,20 @@ class ProcessRunnerWindow(QMainWindow):
                     opts_col_b.addWidget(_scb)
                 self._chk_seg_geocats[_c] = _scb
 
-        # Segment mode: signatures (deterministic typology) vs clustering
-        # (algorithmic k-zone calculation) vs both. Surfaced here so clustering
-        # is reachable without editing config.ini; the chosen value overrides
-        # the config segment_mode for this run. See code/segmentation.py.
-        try:
-            _cfg_mode = (self._cfg["DEFAULT"].get("segment_mode", "signatures")
-                         or "signatures").split("#", 1)[0].strip().lower()
-        except Exception:
-            _cfg_mode = "signatures"
-        try:
-            _cfg_k = int((self._cfg["DEFAULT"].get("segment_n_clusters", "0")
-                          or "0").split("#", 1)[0].strip())
-        except Exception:
-            _cfg_k = 0
-        _modelbl = QLabel("Segment mode:")
-        _modelbl.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
-        opts_col_b.addWidget(_modelbl)
-        self._cmb_seg_mode = QComboBox()
-        # (label, value) — value is what the stage expects.
-        for _txt, _val in (("Signatures (typology)", "signatures"),
-                           ("Clustering (k zones)", "clusters"),
-                           ("Both", "both")):
-            self._cmb_seg_mode.addItem(_txt, _val)
-        _mode_idx = self._cmb_seg_mode.findData(
-            _cfg_mode if _cfg_mode in ("signatures", "clusters", "both") else "signatures")
-        self._cmb_seg_mode.setCurrentIndex(max(0, _mode_idx))
-        opts_col_b.addWidget(self._cmb_seg_mode)
-        _krow = QHBoxLayout()
-        _krow.setContentsMargins(0, 0, 0, 0)
-        _klbl = QLabel("Zones (k):")
-        _klbl.setStyleSheet("color: #6a5533; font-size: 9pt;")
-        _krow.addWidget(_klbl)
-        self._spn_seg_k = QSpinBox()
-        self._spn_seg_k.setRange(0, 40)  # 0 = auto (stage picks 8)
-        self._spn_seg_k.setValue(_cfg_k if 0 <= _cfg_k <= 40 else 0)
-        self._spn_seg_k.setToolTip("Number of clusters for clustering mode. 0 = auto (8).")
-        _krow.addWidget(self._spn_seg_k)
-        _krow.addStretch(1)
-        _kwrap = QWidget()
-        _kwrap.setLayout(_krow)
-        opts_col_b.addWidget(_kwrap)
-
-        def _sync_seg_k():
-            # k only matters when clustering is involved.
-            self._spn_seg_k.setEnabled(
-                self._cmb_seg_mode.currentData() in ("clusters", "both"))
-        self._cmb_seg_mode.currentIndexChanged.connect(_sync_seg_k)
-        _sync_seg_k()
+        # Segment is signatures-only: a deterministic overlap-signature typology.
+        # The former algorithmic clustering ("Clustering"/"Both") was retired and
+        # replaced by the Classification tool (Configure -> Classification). No mode
+        # to choose here anymore. See code/segmentation.py and learning.md.
+        _segnote = QLabel(
+            "Segment mode: Signatures (overlap typology).\n"
+            "Algorithmic clustering moved to the Classification tool.")
+        _segnote.setWordWrap(True)
+        _segnote.setToolTip(
+            "Segment groups cells by the set of A–E sensitivity codes that co-occur in "
+            "them — deterministic and tuning-free. For pattern-based types of place use "
+            "Configure → Classification (the Classifications tab in Maps).")
+        _segnote.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
+        opts_col_b.addWidget(_segnote)
 
         opts_col_a.addStretch(1)
         opts_col_b.addStretch(1)
@@ -2578,8 +2544,8 @@ class ProcessRunnerWindow(QMainWindow):
                     run_backfill=self._cb_backfill.isChecked(),
                     run_segment=self._cb_segment.isChecked(),
                     segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
-                    segment_mode=str(self._cmb_seg_mode.currentData() or ""),
-                    segment_n_clusters=int(self._spn_seg_k.value()),
+                    segment_mode="signatures",   # Segment is signatures-only (clusters retired)
+                    segment_n_clusters=0,
                     explode_flat_multipolygons=self._cb_data_explode.isChecked(),
                     cleanup_slivers=self._cb_cleanup_slivers.isChecked(),
                     run_tiles=self._cb_tiles.isChecked(),
@@ -2596,8 +2562,8 @@ class ProcessRunnerWindow(QMainWindow):
                     run_backfill=data_on,
                     run_segment=data_on,
                     segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
-                    segment_mode=str(self._cmb_seg_mode.currentData() or ""),
-                    segment_n_clusters=int(self._spn_seg_k.value()),
+                    segment_mode="signatures",   # Segment is signatures-only (clusters retired)
+                    segment_n_clusters=0,
                     explode_flat_multipolygons=False,
                     cleanup_slivers=True,
                     run_tiles=self._avail_tiles.available and (data_on or self._tiles_flat_exists),

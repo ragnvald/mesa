@@ -8,8 +8,11 @@ their packaged exe. See learning.md "Stylesheet import dragged GIS into helpers"
 """
 
 import os
+import webbrowser
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtWidgets import QLabel
 
 # =====================================================================
 # Shared stylesheet (same warm palette as mesa.py)
@@ -332,3 +335,33 @@ def apply_shared_stylesheet(app) -> None:
     """Apply ASSET_STYLESHEET plus generated indicator images to a QApplication."""
     css = ASSET_STYLESHEET + _generate_indicator_stylesheet()
     app.setStyleSheet(css)
+
+
+class InfoCircleLabel(QLabel):
+    """Small painted 'i' circle that opens a URL in the browser on click.
+
+    Shared so helper windows (Classification setup, etc.) match the main window's
+    Status-tab info icons. Mirrors mesa._InfoCircleLabel (same palette/size).
+    """
+
+    def __init__(self, url: str, tooltip: str = "Open in browser", parent=None):
+        super().__init__(parent)
+        self._url = url
+        self.setFixedSize(20, 20)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(tooltip)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor("#9b7c3d"), 1.5))
+        p.setBrush(QBrush(QColor("#faf6ee")))
+        p.drawEllipse(2, 2, 15, 15)
+        p.setPen(QColor("#715a36"))
+        p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        p.drawText(self.rect(), Qt.AlignCenter, "i")
+        p.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._url:
+            webbrowser.open(self._url)

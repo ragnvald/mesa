@@ -37,8 +37,6 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
 from ui_style import apply_shared_stylesheet
 
-import traceback as _traceback
-
 
 # ----------------------------
 # Globals

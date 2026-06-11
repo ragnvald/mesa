@@ -978,11 +978,10 @@ def main() -> None:
             # - analysis_setup      : webview-based UI, cannot run in-process
             # - line_manage         : webview-based UI, cannot run in-process
             # - combined_map        : webview-based unified Maps window (Overview +
-            #                         Segmentation + Assets). Replaces the two former
-            #                         viewers asset_map_view + map_overview, so the
-            #                         compiled product ships one GIS-heavy map exe
-            #                         instead of two. Those two .py files remain on
-            #                         disk as reference but are no longer built.
+            #                         Segmentation + Assets). Replaced the two former
+            #                         viewers asset_map_view + map_overview (since
+            #                         removed), so the compiled product ships one
+            #                         GIS-heavy map exe instead of two.
             #
             # The 7 former helpers (geocode_manage, asset_manage, atlas_manage,
             # processing_setup, processing_pipeline_run, report_generate,

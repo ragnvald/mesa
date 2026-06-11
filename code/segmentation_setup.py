@@ -57,10 +57,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 
 try:
-    from ui_style import apply_shared_stylesheet
+    from ui_style import apply_shared_stylesheet, InfoCircleLabel
 except Exception:  # keep standalone-launchable even if the shared sheet is unavailable
     def apply_shared_stylesheet(_app):  # type: ignore
         return None
+    InfoCircleLabel = None  # type: ignore
 
 import segmentation as _seg
 import segmentation_run as _run
@@ -200,7 +201,20 @@ class SegmentationSetupWindow(QMainWindow):
             "part of?”</i>")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #5c4a2f; font-size: 9pt;")
-        layout.addWidget(intro)
+        # Intro + a wiki info-icon (same widget as the main window) linking to the
+        # Classification reference page.
+        _intro_row = QHBoxLayout()
+        _intro_row.setContentsMargins(0, 0, 0, 0)
+        _intro_row.setSpacing(6)
+        _intro_row.addWidget(intro, 1)
+        if InfoCircleLabel is not None:
+            _intro_row.addWidget(
+                InfoCircleLabel(
+                    "https://github.com/ragnvald/mesa/wiki/"
+                    "Segmentation-and-clustering#3-classification-segmentation_runpy",
+                    "Open the Classification guide in the wiki"),
+                0, Qt.AlignTop)
+        layout.addLayout(_intro_row)
 
         form = QGridLayout()
         form.setHorizontalSpacing(12)

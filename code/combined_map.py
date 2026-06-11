@@ -1140,6 +1140,18 @@ HTML = r"""<!doctype html>
       </div>
       <div id="seg-panel">
         <h2>Segmentation</h2>
+        <div class="info">
+          <p>Zones from the <b>Segment</b> sub-stage. The <b>Mode</b> selector picks how
+             cells are grouped:</p>
+          <p><b>Signatures</b> — the deterministic, tuning-free typology: cells share a
+             zone when they carry the <i>same set</i> of sensitivity codes that co-occur
+             in them (e.g. <code>B+C+D+E</code>), coloured on the A–E ramp. This is the
+             live mode.</p>
+          <p><b>Clusters</b> — a retired algorithmic mode, shown only for older projects
+             that still have cluster results. For pattern-based <i>types</i> of place use
+             the <b>Classifications</b> tab instead.</p>
+          <p>Pick a level and mode, then click a cell to identify it.</p>
+        </div>
         <div class="row"><b>Legend</b><div id="segLegend" class="muted">–</div></div>
         <div class="row"><b>Zones</b> <span class="muted">(largest area first)</span>
           <table id="segZones"><thead><tr><th data-key="zone">Zone</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="sens_mean">Sens</th><th data-key="mean_n_assets">Assets</th></tr></thead>
