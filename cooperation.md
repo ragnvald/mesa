@@ -571,3 +571,21 @@ Two corrections to brief assumptions: (1) no Ollama in the repo — AI labels (d
 Verified by: byte-compile of all changed files; `--help` on both helpers (loads without heavy libs); a full run on QDGC_L6 exercising attribute (KMeans, silhouette) + spatial (SKATER via spopt) at k=4,8 → all four output kinds written; reproducibility (identical cluster_id MD5 across re-runs with the same run_id); offscreen construction of the setup UI; and the report-section grouping logic against the real profile table. NOT yet validated by a full mesa.py GUI run or a frozen `build_all.py` build — operator runs the builds. Test rows written into the live project store during verification were cleaned up.
 
 — Claude (Windows)
+
+## Classification map: raster rendering + Certainty layer — Apple Silicon / macOS (2026-06-21)
+
+Started from "check the logs for classifications. All ok?" and grew into a focused set of Classification-map fixes, all additive.
+
+Diagnosis first: the segmv classification runs themselves were fine (15 types, healthy ARI/NMI). Two log issues surfaced — a truncated `tbl_stacked` partition (interrupted write; not repairable, fixed by re-running Intersect) and Ollama 404s because `segmv_ollama_model` defaulted to `mistral`, which was never installed. Changed it to `gemma3:4b` (a model the operator actually has).
+
+The "too many polygons" message on the Classification map was **not** a clustering failure — it was the per-cell feature count. basic_mosaic has 9M cells; the map's vector cap is 250k. The intuitive fix (dissolve to 15 class polygons) was measured and rejected: clustering yields salt-and-pepper patches, so a dissolved boundary is 100+ MB of GeoJSON even heavily simplified (H3_R9: 858k verts / 36 MB, floor ~170k verts at 1 km tolerance). Chose raster MBTiles instead — the same mechanism MESA already uses for seg_clusters.
+
+Work landed (commit 3034c69):
+- `tiles_create_raster.py`: build segmv Classification rasters in a **dedicated pool from the full geocode grid** (`tbl_geocode_object`), not `tbl_flat` — because 638,777 of basic_mosaic's 661,463 no-data cells are absent from tbl_flat, so a tbl_flat-driven renderer leaves white holes. Two mbtiles per run (`<slug>_segmv_<run>` Types + `_cert` Certainty). Render branch generalised to `mode in _G_COLORS_BY_MODE`.
+- Certainty (p_max): the diag-GMM posterior saturates (median 1.0, 97% ≥0.999; entropy confirms), so the ramp is contrast-stretched to 0.95–1.0 and the legend says so ("marginal differences near full confidence"); no-data cells painted grey.
+- `combined_map.py`: raster path for >250k layers (vector kept for ≤250k with per-cell identify); "Colour by" swaps Types/Certainty tile layers; fixed Link zoom & pan on the Classifications tab (fitBounds was overriding the linked view).
+- Wiki: documented the Classifications map in `User-interface.md` (separate mesa.wiki commit 5a63b95) with two screenshot TODOs the operator will capture from PC.
+
+Verified by byte-compile + targeted smoke builds on H3_R4 (vector path) and H3_R9 (raster): server returns raster/raster_cert, both mbtiles valid PNG/TMS, certainty raster shows 579 distinct ramp colours (was ~1) and 34.7% grey pixels matching H3_R9's 34.9% no-data cells. NOT yet validated by a full mesa.py GUI run — operator must re-run the **Tiles** stage in the GUI to generate basic_mosaic's two segmv rasters, then reopen the Classification map. Also still open from the logs: the corrupt `tbl_stacked` partition (re-run Intersect to clear).
+
+— Claude (Apple Silicon / macOS)
