@@ -674,14 +674,57 @@ def _openai_describe(prompt: str, base_dir: Path, log) -> Optional[str]:
         return None
 
 
+def _ollama_status(url: str, model: str, timeout: float = 2.0) -> str:
+    """Fast liveness/model probe. Returns 'ok', 'down' (no server answering),
+    or 'no_model' (server up but `model` not pulled). One quick check up front
+    avoids a 60s-per-cluster urlopen timeout when Ollama is unavailable."""
+    try:
+        import urllib.request
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        tags_url = urlunsplit((parts.scheme, parts.netloc, "/api/tags", "", ""))
+        with urllib.request.urlopen(tags_url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return "down"
+    names = [str(m.get("name", "")) for m in (data.get("models") or [])]
+    base = (model or "").split(":")[0]
+    if any(n == model or n.split(":")[0] == base for n in names):
+        return "ok"
+    return "no_model"
+
+
+def _openai_available(base_dir: Path) -> bool:
+    if (os.environ.get("OPENAI_API_KEY") or "").strip():
+        return True
+    try:
+        return (Path(base_dir) / "secrets" / "openai.key").exists()
+    except Exception:
+        return False
+
+
 def add_ai_descriptions(profile_rows, params, base_dir, log):
     if not params.ai_enabled or not profile_rows:
         return profile_rows
+
+    # Quiet no-AI fallback: probe the backends once. If neither Ollama nor an
+    # OpenAI key is available, log a single line and leave descriptions null —
+    # never hammer a dead endpoint with one timing-out call per cluster.
+    status = _ollama_status(params.ollama_url, params.ollama_model)
+    use_ollama = status == "ok"
+    use_openai = _openai_available(base_dir)
+    if not use_ollama and not use_openai:
+        reason = (f"Ollama not reachable at {params.ollama_url}" if status == "down"
+                  else f"Ollama model '{params.ollama_model}' not installed")
+        log(f"AI descriptions skipped: {reason}, and no OpenAI key. "
+            f"Leaving descriptions null.")
+        return profile_rows
+
     _section(log, "AI cluster descriptions")
     for row in profile_rows:
         prompt = _ai_context(row)
-        txt = _ollama_describe(prompt, params.ollama_url, params.ollama_model, log)
-        if not txt:
+        txt = _ollama_describe(prompt, params.ollama_url, params.ollama_model, log) if use_ollama else None
+        if not txt and use_openai:
             txt = _openai_describe(prompt, base_dir, log)
         row["description_ai"] = txt
     return profile_rows
