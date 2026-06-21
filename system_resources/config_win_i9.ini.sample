@@ -1,0 +1,204 @@
+# =====================================================================
+# MESA performance profile: Windows i9-11950H + 128 GB RAM
+# =====================================================================
+#
+# Reference profile for an Intel i9-11950H mobile-workstation desktop:
+#   - 8 physical cores / 16 logical (SMT enabled)
+#   - 11th gen Tiger Lake, 2.6 GHz base / ~5.0 GHz turbo (mobile silicon)
+#   - 128 GB DDR4-3200 (dual channel, ~50 GB/s aggregate bandwidth)
+#   - Discrete GPU or Intel iGPU (separate memory, NOT unified)
+#   - Modern NVMe SSD assumed
+#
+# How to use:
+#   1. Copy this file to the project root, replacing/merging with the
+#      existing config.ini. Keep your local [A]-[E] bins and
+#      [VALID_VALUES] section if you have customised them.
+#   2. The values below assume the latest processing_internal.py with the
+#      per-stage worker caps (flatten_max_workers, flatten_small_max_workers,
+#      backfill_max_workers, tiles_max_workers, stage2_worker_overhead_multiplier).
+#   3. Re-run the pipeline. The first Stage 2 launch will log lines like
+#         [workers] RAM avail ~110 GB -> budget ~93 GB ... => 14 workers
+#      Confirm that the chosen worker count is what you expect.
+#
+# Key differences from the Apple M4 Max baseline:
+#   - mem_target_frac = 0.85   (no unified-memory GPU competing for RAM)
+#   - auto_workers_max = 14    (8C/16T -> 14 leaves 2 logical for OS/UI)
+#   - approx_gb_per_worker = 6.0 (Windows pickle overhead is higher than mac)
+#   - cell_size = 6000         (smaller chunks balance the heavy-tail problem)
+#   - flatten_max_workers = 6  (128 GB easily fits 6 x 12 GB large-flatten workers)
+#   - mosaic_auto_worker_max = 14, mosaic_auto_worker_fraction = 0.75
+#
+# Memory math sanity check:
+#   - Stage 2: 14 workers * ~6 GB pickle + 14 GB driver = ~98 GB peak.
+#     With 128 GB total and mem_target_frac=0.85 = 109 GB budget, fits.
+#   - Flatten large phase: 6 workers * 12 GB = 72 GB. Comfortable.
+#   - Backfill auto: ~10-12 workers * 2 GB = 24 GB. Trivial.
+#   - Tiles auto: 8 workers * 3 GB = 24 GB. Trivial.
+#
+# This profile is conservative on the i9 because Tiger Lake mobile cores
+# sustain only ~3.5-4 GHz under load (versus the 5.0 GHz turbo headline).
+# If your specific desktop case has stronger sustained cooling and shows
+# headroom, you can push auto_workers_max to 16 and chunk_size down to
+# 18000 for finer load balance.
+
+[DEFAULT]
+input_folder_asset              = input/asset
+input_folder_geocode            = input/geocode
+input_folder_lines              = input/lines
+input_folder_atlas              = input/atlas
+input_folder_evaluate_landuse   = input/evaluate_landuse
+input_folder_images             = input/images
+output_folder                   = output/
+gpkg_file                       = output/mesa.gpkg
+mosaic_coverage_union           = true
+
+mesa_version                    = 5.0 beta 2026-04-11
+
+# OpenAI-key used for intelligent processing
+openai_api_key_file             = secrets/openai.key
+
+# Asset lines and points minimum buffer as we do not relate to arealess features.
+default_line_buffer_m           = 10
+default_point_buffer_m          = 10
+
+# MBtileset zoom levels.
+tiles_minzoom                   = 6
+tiles_maxzoom                   = 12
+
+# ---------------------------------------------------------------------
+# Worker pool - generic
+# ---------------------------------------------------------------------
+# 0 = auto. Final worker count is still capped by the RAM budget below
+# and by CPU count.
+max_workers                     = 0
+h3_max_cells                    = 20000000
+
+# ---------------------------------------------------------------------
+# Per-stage worker caps (require recent processing_internal.py)
+# ---------------------------------------------------------------------
+# Large-partition flatten phase. 6 fits comfortably in 128 GB
+# (6 * 12 GB = 72 GB) while keeping memory pressure mild.
+flatten_max_workers             = 6
+# Small-partition flatten phase. Auto -> RAM-budget capped at ~10 workers.
+flatten_small_max_workers       = 0
+# Disk-size threshold (MB) used to split partitions into "large" and "small" phases.
+flatten_large_partition_mb      = 50
+# Per-worker RAM estimate for the large flatten phase. 12 GB is conservative.
+flatten_approx_gb_per_worker    = 12.0
+# Backfill of area_m2 to tbl_stacked partitions. I/O-bound, scales wide.
+backfill_max_workers            = 0
+# MBtiles raster generation. Auto -> CPU/2 capped by RAM.
+tiles_max_workers               = 0
+tiles_approx_gb_per_worker      = 3.0
+# Stage 2 worker estimate multiplier. 1.0 matches actual observed RSS on
+# this workload; the historical 1.5 is too conservative on Windows too.
+stage2_worker_overhead_multiplier = 1.0
+
+# ---------------------------------------------------------------------
+# Basic mosaic performance knobs
+# ---------------------------------------------------------------------
+mosaic_force_serial             = false
+mosaic_workers                  = 0
+mosaic_auto_worker_fraction     = 0.75
+mosaic_auto_worker_min          = 1
+mosaic_auto_worker_max          = 14
+mosaic_auto_worker_mem_gb       = 1.5
+mosaic_parallel_extract         = true
+mosaic_extract_chunk_size       = 1000
+mosaic_task_order               = heavy_first
+mosaic_extract_pool_chunksize   = 1
+mosaic_extract_maxtasksperchild = 20
+mosaic_line_union_batch         = 4000
+mosaic_line_union_max_partials  = 16
+mosaic_coverage_union_batch     = 500
+mosaic_faces_flush_batch        = 250000
+mosaic_tile_grid                = 3x3
+mosaic_tile_overlap_m           = 10
+
+# ---------------------------------------------------------------------
+# Stage 2 / Stage 3 knobs
+# ---------------------------------------------------------------------
+tiles_progress_every            = 1000
+# Slightly higher than mac default (420) - 128 GB lets us hold more geocodes
+# per chunk before splitting kicks in, which reduces per-chunk overhead.
+geocode_soft_limit              = 500
+asset_soft_limit                = 100000
+# Per-worker RAM estimate. Windows pickle overhead is meaningful, hence 6.0.
+approx_gb_per_worker            = 6.0
+# Fraction of available RAM to treat as usable budget. Higher than mac
+# (0.70) because there is no unified-memory GPU competing for RAM.
+mem_target_frac                 = 0.85
+heartbeat_secs                  = 60
+# Same chunk count as the mac baseline.
+chunk_size                      = 22000
+# Smaller cell_size = more, smaller chunks = better load balance across
+# 14 workers. The straggler tail problem hurts more on a wider pool.
+cell_size                       = 6000
+
+# ---------------------------------------------------------------------
+# Reports / atlases / projections (unchanged from baseline)
+# ---------------------------------------------------------------------
+report_basemap_mode             = xyz
+report_inset_border_color       = #1f1f1f
+report_inset_border_lw          = 1.2
+report_inset_shadow_alpha       = 0.18
+report_inset_shadow_dx          = 0.006
+report_inset_shadow_dy          = 0.008
+
+atlas_lon_size_km               = 100
+atlas_lat_size_km               = 100
+atlas_overlap_percent           = 10
+
+segment_width                   = 600
+segment_length                  = 1000
+
+area_projection_epsg            = 3035
+working_projection_epsg         = 4326
+output_projection_epsg          = 4326
+
+# ---------------------------------------------------------------------
+# Auto worker plan
+# ---------------------------------------------------------------------
+auto_workers_min                = 1
+# 8C/16T -> use up to 14 logical, leave 2 for OS/UI/background apps.
+auto_workers_max                = 14
+target_geocodes_per_chunk       = 4200
+chunk_backlog_multiplier        = 3.5
+chunk_cells_min                 = 2
+chunk_cells_max                 = 72
+chunk_overshoot_factor          = 1.15
+
+# ---------------------------------------------------------------------
+# Sensitivity bins (A..E) - SAME AS BASELINE
+# Keep these in sync with your project, not with hardware.
+# ---------------------------------------------------------------------
+[A]
+range                           = 21-25
+description                     = Very high
+category_colour                 = #bd0026
+
+[B]
+range                           = 16-20
+description                     = High
+category_colour                 = #f03b20
+
+[C]
+range                           = 11-15
+description                     = Moderate
+category_colour                 = #fd8d3c
+
+[D]
+range                           = 6-10
+description                     = Low
+category_colour                 = #fecc5c
+
+[E]
+range                           = 1-5
+description                     = Very low
+category_colour                 = #ffffb2
+
+[VALID_VALUES]
+valid_input                     = 1,2,3,4,5
+category_colour_unknown         = #BDBDBD
+index_importance_weights        = 1,2,5,5,10
+index_sensitivity_weights       = 10,10,10,10,10,10,10,10,10,10,10,10,10,10

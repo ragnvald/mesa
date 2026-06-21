@@ -66,3 +66,10 @@ build_win_log.txt
 capture_log.txt
 # Classification run outputs.
 output/segmentation_mv/
+
+# --- GIS shapefile sidecars + locks (2026-06-21) ---
+# Spatial-index sidecars and ArcGIS lock files — same class as the ignored
+# .shp/.dbf/.prj/.shx/.cpg parts, just missed earlier.
+*.sbn
+*.sbx
+*.lock
