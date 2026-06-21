@@ -792,8 +792,9 @@ def open_present_files():
     _launch_helper("report_generate", ["--original_working_directory", original_working_directory], base_dir=original_working_directory)
 
 def open_segmentation_setup():
-    # Subprocess (not in-process): segmentation_run bundles heavy compute libs
-    # (scikit-learn/libpysal/spopt/hdbscan) that must stay out of mesa.exe.
+    # Config-only popup (Configure → Classification): writes segmv_* to config.ini.
+    # The clustering itself runs as the Classification stage of Process (step 3).
+    # Launched as a subprocess for isolation, matching the other helper windows.
     log_to_logfile("Launching segmentation_setup subprocess")
     _launch_helper_subprocess("segmentation_setup", ["--original_working_directory", original_working_directory])
 
@@ -3350,15 +3351,15 @@ class MesaMainWindow(QMainWindow):
              f"{_WIKI}/User-interface#configure-step-2", [
                 ("Parameters", edit_processing_setup,
                  "Adjust weights, thresholds and other processing rules."),
+                ("Classification", open_segmentation_setup,
+                 "Set up the \"what kind\" sensitivity-pattern typology; it runs automatically during Process."),
                 ("Special focus", open_special_focus,
                  "Lines and Analysis setup, grouped in one popup."),
             ]),
             ("Process (step 3)", "Execute the automated steps that build fresh outputs.",
              f"{_WIKI}/User-interface#process-step-3", [
                 ("Process", open_process_all,
-                 "Runs area, line, and analysis processing."),
-                ("Classification", open_segmentation_setup,
-                 "Group polygons into types of sensitivity pattern (the \"what kind\" view, complementing the A–E classes)."),
+                 "Runs area, classification, line, and analysis processing."),
             ]),
             ("Results (step 4)", "Open the interactive viewers and export the deliverables.",
              f"{_WIKI}/User-interface#results-step-4", [

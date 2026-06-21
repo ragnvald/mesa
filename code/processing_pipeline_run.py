@@ -105,6 +105,11 @@ class ProcessPlan:
     run_tiles: bool
     run_lines: bool
     run_analysis: bool
+    # Classification (segmv) runs segmentation_run between data and tiles, so a
+    # single Process pass produces tbl_seg_mv before the Tiles stage rasterises
+    # it. Defaulted so the three keyword call sites stay explicit. See
+    # learning.md "Classification map: dissolve doesn't scale".
+    run_classification: bool = False
     # Geocode categories to segment (empty -> stage default = basic_mosaic).
     segment_layers: tuple = ()
     # Segment mode override ("" -> config segment_mode) and cluster count
@@ -251,6 +256,27 @@ def detect_tiles_processing(base_dir: Path, cfg: configparser.ConfigParser) -> P
     flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
     if not flat_exists:
         return ProcessAvailability(True, ["tbl_flat.parquet missing (run data first)"])
+
+    return ProcessAvailability(True, [])
+
+
+def detect_classification_processing(base_dir: Path, cfg: configparser.ConfigParser) -> ProcessAvailability:
+    """Classification (segmv) is available when the helper is present AND a
+    geocode layer is configured (Configure → Classification writes
+    segmv_geocode_layer). tbl_stacked is produced by Intersect, so a missing
+    one is only a soft reason — a full Process pass builds it before this stage."""
+    runner_path, _is_exe = _find_classification_runner(base_dir)
+    if not runner_path:
+        return ProcessAvailability(False, ["Missing: segmentation_run helper"])
+
+    layer = str(cfg["DEFAULT"].get("segmv_geocode_layer", "")).strip()
+    if not layer:
+        return ProcessAvailability(False, ["Classification not configured (Configure → Classification)"])
+
+    gpq = parquet_dir(base_dir, cfg)
+    stacked_exists = _exists_any([gpq / "tbl_stacked", gpq / "tbl_stacked.parquet"])
+    if not stacked_exists:
+        return ProcessAvailability(True, ["tbl_stacked missing (run Intersect/data first)"])
 
     return ProcessAvailability(True, [])
 
@@ -424,8 +450,9 @@ def _start_progress_pulse(
     return stop_event, t
 
 
-def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
-    """Find tiles_create_raster (returns path, is_executable)."""
+def _find_helper_runner(base_dir: Path, stem: str) -> tuple[Path | None, bool]:
+    """Locate a helper (`<stem>.exe` when frozen, else `<stem>.py`) across the
+    known install/source layouts. Returns (path, is_executable)."""
     frozen = bool(getattr(sys, "frozen", False))
 
     def _dedup(paths: Iterable[Path | None]) -> list[Path]:
@@ -446,19 +473,19 @@ def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
 
     exe_candidates = _dedup(
         [
-            base_dir / "tools" / "tiles_create_raster.exe",
-            base_dir / "tiles_create_raster.exe",
-            base_dir / "code" / "tiles_create_raster.exe",
-            base_dir / "system" / "tiles_create_raster.exe",
-            Path(sys.executable).resolve().parent / "tiles_create_raster.exe" if frozen else None,
+            base_dir / "tools" / f"{stem}.exe",
+            base_dir / f"{stem}.exe",
+            base_dir / "code" / f"{stem}.exe",
+            base_dir / "system" / f"{stem}.exe",
+            Path(sys.executable).resolve().parent / f"{stem}.exe" if frozen else None,
         ]
     )
     py_candidates = _dedup(
         [
-            base_dir / "tiles_create_raster.py",
-            base_dir / "system" / "tiles_create_raster.py",
-            base_dir / "code" / "tiles_create_raster.py",
-            (Path(__file__).resolve().parent / "tiles_create_raster.py") if "__file__" in globals() else None,
+            base_dir / f"{stem}.py",
+            base_dir / "system" / f"{stem}.py",
+            base_dir / "code" / f"{stem}.py",
+            (Path(__file__).resolve().parent / f"{stem}.py") if "__file__" in globals() else None,
         ]
     )
 
@@ -489,6 +516,16 @@ def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
         return exe_path, True
 
     return None, False
+
+
+def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
+    """Find tiles_create_raster (returns path, is_executable)."""
+    return _find_helper_runner(base_dir, "tiles_create_raster")
+
+
+def _find_classification_runner(base_dir: Path) -> tuple[Path | None, bool]:
+    """Find segmentation_run, the headless Classification (segmv) helper."""
+    return _find_helper_runner(base_dir, "segmentation_run")
 
 
 def run_tiles_process(
@@ -545,6 +582,56 @@ def run_tiles_process(
     progress_fn(97.0)
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "TILES PROCESS COMPLETED")
+
+
+def run_classification_process(
+    base_dir: Path,
+    cfg: configparser.ConfigParser,
+    log_fn: Callable[[str], None],
+    progress_fn: Callable[[float], None],
+) -> None:
+    """Run the Classification (segmv) helper headlessly. Reads tbl_stacked,
+    writes tbl_seg_mv*; must run after data and before Tiles (which rasterises
+    tbl_seg_mv). Parameters come from config.ini segmv_* keys set in
+    Configure → Classification — nothing is passed beyond the working dir."""
+    progress_fn(0.0)
+    progress_fn(5.0)
+    _log_line(base_dir, log_fn, "CLASSIFICATION PROCESS START")
+
+    runner_path, is_exe = _find_classification_runner(base_dir)
+    if not runner_path:
+        _log_line(base_dir, log_fn, "ERROR: segmentation_run helper not found")
+        raise RuntimeError("Missing segmentation_run helper")
+
+    args = [str(runner_path)] if is_exe else [sys.executable, str(runner_path)]
+    args += ["--original_working_directory", str(base_dir)]
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["MESA_BASE_DIR"] = str(base_dir)
+
+    stop_pulse, pulse_thread = _start_progress_pulse(
+        progress_fn,
+        start=10.0,
+        cap=92.0,
+        step=1.5,
+        interval_s=0.8,
+    )
+    try:
+        code = _run_subprocess_streaming(base_dir, log_fn, args, env=env, line_prefix="[segmv]")
+        if code != 0:
+            raise RuntimeError(f"Classification failed (exit={code})")
+    finally:
+        stop_pulse.set()
+        try:
+            pulse_thread.join(timeout=0.2)
+        except Exception:
+            pass
+
+    progress_fn(97.0)
+    progress_fn(100.0)
+    _log_line(base_dir, log_fn, "CLASSIFICATION PROCESS COMPLETED")
 
 
 # ---------------------------------------------------------------------------
@@ -1566,7 +1653,7 @@ def run_analysis_process(
 # ---------------------------------------------------------------------------
 
 
-_STAGE_NAMES: tuple[str, ...] = ("data", "tiles", "lines", "analysis")
+_STAGE_NAMES: tuple[str, ...] = ("data", "classification", "tiles", "lines", "analysis")
 
 # First-run fallback. Units are arbitrary but proportional to typical wall
 # clock seconds, tuned from observed MESA runs (tiles is the dominant stage,
@@ -1574,6 +1661,7 @@ _STAGE_NAMES: tuple[str, ...] = ("data", "tiles", "lines", "analysis")
 # real run, observed durations from tbl_stage_runtime replace these.
 _DEFAULT_STAGE_WEIGHTS: dict[str, float] = {
     "data": 600.0,
+    "classification": 240.0,
     "tiles": 1200.0,
     "lines": 180.0,
     "analysis": 300.0,
@@ -1664,6 +1752,7 @@ def run_selected(
 ) -> None:
     selected = [
         ("data", plan.run_data),
+        ("classification", plan.run_classification),
         ("tiles", plan.run_tiles),
         ("lines", plan.run_lines),
         ("analysis", plan.run_analysis),
@@ -1758,7 +1847,7 @@ def run_selected(
 
     ranges: dict[str, tuple[float, float]] = {}
     cursor = 0.0
-    for name in ["data", "tiles", "lines", "analysis"]:
+    for name in ["data", "classification", "tiles", "lines", "analysis"]:
         if name not in active:
             continue
         w = max(0.0, float(weights.get(name, 1.0)))
@@ -1820,6 +1909,31 @@ def run_selected(
                     had_errors = True
             finally:
                 _record_stage("data", _started_iso, _t0, _err)
+
+        _bail_if_cancelled()
+        if plan.run_classification:
+            _t0 = time.monotonic()
+            _started_iso = _now_iso()
+            _err = False
+            try:
+                s, e = ranges.get("classification", (0.0, 100.0))
+                _log_line(base_dir, log_fn, f"[Process] Progress range classification: {s:.1f}% -> {e:.1f}%")
+                gpq = parquet_dir(base_dir, cfg)
+                if not _exists_any([gpq / "tbl_stacked", gpq / "tbl_stacked.parquet"]):
+                    # Soft skip: classification needs tbl_stacked (from Intersect).
+                    # Honour a partial rerun rather than failing the whole batch.
+                    _log_line(base_dir, log_fn,
+                              "Classification: skipped - tbl_stacked is missing. "
+                              "Run Intersect (or Data processing end-to-end) first.")
+                else:
+                    run_classification_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
+            except Exception as exc:
+                if not _is_cancelled():
+                    _err = True
+                    _log_line(base_dir, log_fn, f"ERROR: classification failed: {exc}")
+                    had_errors = True
+            finally:
+                _record_stage("classification", _started_iso, _t0, _err)
 
         _bail_if_cancelled()
         if plan.run_tiles:
@@ -1987,6 +2101,7 @@ class ProcessRunnerWindow(QMainWindow):
 
         # Availability
         avail_data = detect_data_processing(base_dir, cfg)
+        avail_classification = detect_classification_processing(base_dir, cfg)
         avail_tiles = detect_tiles_processing(base_dir, cfg)
         avail_lines = detect_lines_processing(base_dir, cfg)
         avail_analysis = detect_analysis_processing(base_dir, cfg)
@@ -1994,14 +2109,18 @@ class ProcessRunnerWindow(QMainWindow):
         gpq = parquet_dir(base_dir, cfg)
         tiles_flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
         tiles_default = bool(avail_tiles.available and (tiles_flat_exists or avail_data.available))
+        stacked_exists = _exists_any([gpq / "tbl_stacked", gpq / "tbl_stacked.parquet"])
+        classification_default = bool(avail_classification.available and (stacked_exists or avail_data.available))
 
         # Stash availability for the Normal-mode worker, which builds a plan
         # straight from these instead of reading checkbox state.
         self._avail_data = avail_data
+        self._avail_classification = avail_classification
         self._avail_tiles = avail_tiles
         self._avail_lines = avail_lines
         self._avail_analysis = avail_analysis
         self._tiles_flat_exists = tiles_flat_exists
+        self._stacked_exists = stacked_exists
 
         # Mode selector: Normal hides the checkbox grid and runs everything
         # available in one click. Advanced shows the per-stage checkboxes.
@@ -2031,7 +2150,7 @@ class ProcessRunnerWindow(QMainWindow):
 
         # Four-column layout (compact — no per-stage hint column, so the dialog
         # stays short on small laptop screens):
-        #   col 0: all stages 1-8 (Prep → Analysis) in one column
+        #   col 0: all stages 1-9 (Prep → Analysis) in one column
         #   col 1: visual gap
         #   col 2: Options A (explode/sliver, segment geocodes)
         #   col 3: Options B (segment mode + zones k)
@@ -2048,7 +2167,7 @@ class ProcessRunnerWindow(QMainWindow):
         # Status cells stay empty when a stage is ready (the enabled checkbox
         # is signal enough); when something blocks the stage we show the
         # reason instead, so the column only fills up with words worth reading.
-        self._cb_data_master = QCheckBox("Process (1. Prep → 6. Tiles)")
+        self._cb_data_master = QCheckBox("Process (1. Prep → 7. Tiles)")
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
@@ -2148,19 +2267,21 @@ class ProcessRunnerWindow(QMainWindow):
             c.setSpacing(2)
             return c
 
-        # col 0: all stages 1-8 stacked in a single column.
+        # col 0: all stages 1-9 stacked in a single column.
         stage_col = _stage_col()
         self._cb_prep      = _mk_sub(stage_col, "1. Prep (workspace, status)", avail_data.available)
         self._cb_intersect = _mk_sub(stage_col, "2. Intersect (build tbl_stacked)", avail_data.available)
         self._cb_flatten   = _mk_sub(stage_col, "3. Flatten (build tbl_flat)", avail_data.available)
         self._cb_backfill  = _mk_sub(stage_col, "4. Backfill (area_m2 → tbl_stacked)", avail_data.available)
         self._cb_segment   = _mk_sub(stage_col, "5. Segment (build tbl_segmentation)", avail_data.available)
-        self._cb_tiles     = _mk_sub(stage_col, "6. Tiles processing (MBTiles)", tiles_default, avail=avail_tiles)
+        self._cb_classification = _mk_sub(stage_col, "6. Classification (segmv → tbl_seg_mv)",
+                                          classification_default, avail=avail_classification)
+        self._cb_tiles     = _mk_sub(stage_col, "7. Tiles processing (MBTiles)", tiles_default, avail=avail_tiles)
         if not tiles_flat_exists:
             self._cb_tiles.setToolTip("Run Flatten (or full data) first")
-        self._cb_lines     = _mk_sub(stage_col, "7. Lines processing (segments)",
+        self._cb_lines     = _mk_sub(stage_col, "8. Lines processing (segments)",
                                      avail_lines.available, avail=avail_lines)
-        self._cb_analysis  = _mk_sub(stage_col, "8. Analysis processing (study areas)",
+        self._cb_analysis  = _mk_sub(stage_col, "9. Analysis processing (study areas)",
                                      avail_analysis.available, avail=avail_analysis)
         stage_col.addStretch(1)
         stage_host = QWidget(); stage_host.setLayout(stage_col)
@@ -2187,7 +2308,8 @@ class ProcessRunnerWindow(QMainWindow):
         # Use `clicked` (fires only on user interaction, not setCheckState) so
         # programmatic updates don't recurse - no guard flag needed.
         sub_cbs = [self._cb_prep, self._cb_intersect, self._cb_flatten,
-                   self._cb_backfill, self._cb_segment, self._cb_tiles]
+                   self._cb_backfill, self._cb_segment, self._cb_classification,
+                   self._cb_tiles]
 
         def _on_master_clicked():
             state = self._cb_data_master.checkState()
@@ -2548,6 +2670,7 @@ class ProcessRunnerWindow(QMainWindow):
                     segment_n_clusters=0,
                     explode_flat_multipolygons=self._cb_data_explode.isChecked(),
                     cleanup_slivers=self._cb_cleanup_slivers.isChecked(),
+                    run_classification=self._cb_classification.isChecked(),
                     run_tiles=self._cb_tiles.isChecked(),
                     run_lines=self._cb_lines.isChecked(),
                     run_analysis=self._cb_analysis.isChecked(),
@@ -2566,6 +2689,7 @@ class ProcessRunnerWindow(QMainWindow):
                     segment_n_clusters=0,
                     explode_flat_multipolygons=False,
                     cleanup_slivers=True,
+                    run_classification=self._avail_classification.available and (data_on or self._stacked_exists),
                     run_tiles=self._avail_tiles.available and (data_on or self._tiles_flat_exists),
                     run_lines=self._avail_lines.available,
                     run_analysis=self._avail_analysis.available,
@@ -2669,6 +2793,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep zero-area / sub-1-m^2 sliver rows in tbl_flat (default: drop them)",
     )
+    p.add_argument("--no-classification", action="store_true", help="Skip Classification (segmv -> tbl_seg_mv). Runs by default when configured.")
     p.add_argument("--no-tiles", action="store_true", help="Do not run raster tiles (MBTiles) after data processing")
     p.add_argument("--no-lines", action="store_true", help="Do not run lines processing")
     p.add_argument("--no-analysis", action="store_true", help="Do not run analysis processing")
@@ -2763,6 +2888,7 @@ def main() -> None:
     cfg = read_config(base_dir)
 
     avail_data = detect_data_processing(base_dir, cfg)
+    avail_classification = detect_classification_processing(base_dir, cfg)
     avail_lines = detect_lines_processing(base_dir, cfg)
     avail_analysis = detect_analysis_processing(base_dir, cfg)
 
@@ -2775,6 +2901,7 @@ def main() -> None:
         run_segment=data_on and not bool(args.no_segment),
         explode_flat_multipolygons=bool(args.explode_flat_multipolygons),
         cleanup_slivers=not bool(args.no_cleanup_slivers),
+        run_classification=avail_classification.available and not bool(args.no_classification),
         run_tiles=data_on and not bool(args.no_tiles),
         run_lines=avail_lines.available and not bool(args.no_lines),
         run_analysis=avail_analysis.available and not bool(args.no_analysis),
@@ -2783,6 +2910,7 @@ def main() -> None:
     if args.list:
         print("Base dir:", base_dir)
         print("Data:", "OK" if avail_data.available else "NO", "; ".join(avail_data.reasons))
+        print("Classification:", "OK" if avail_classification.available else "NO", "; ".join(avail_classification.reasons))
         print("Lines:", "OK" if avail_lines.available else "NO", "; ".join(avail_lines.reasons))
         print("Analysis:", "OK" if avail_analysis.available else "NO", "; ".join(avail_analysis.reasons))
         return
@@ -2799,6 +2927,8 @@ def main() -> None:
             selected.append("data:backfill")
         if default_plan.run_segment:
             selected.append("data:segment")
+        if default_plan.run_classification:
+            selected.append("classification")
         if default_plan.run_tiles:
             selected.append("tiles")
         if default_plan.run_lines:

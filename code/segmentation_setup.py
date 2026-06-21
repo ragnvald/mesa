@@ -3,14 +3,18 @@
 """segmentation_setup.py — Classification (setup / config UI).
 
 PURPOSE
-    Configure and launch the Classification clustering (the "what kind of
-    sensitivity pattern is this place part of?" view that complements the A–E
-    "how sensitive is this place?" classification). Cells are clustered by the
-    shape of their (importance, susceptibility) histogram. Lets the operator
-    choose the geocode layer, the k range searched by BIC, the histogram
-    transform (Hellinger/CLR), the coverage-feature weight, and a minimum-area
-    sliver filter; persists the choices to config.ini (segmv_* keys) and
-    optionally runs the heavy helper.
+    Configure the Classification clustering (the "what kind of sensitivity
+    pattern is this place part of?" view that complements the A–E "how sensitive
+    is this place?" classification). Cells are clustered by the shape of their
+    (importance, susceptibility) histogram. Lets the operator choose the geocode
+    layer, the k range searched by BIC, the histogram transform (Hellinger/CLR),
+    the coverage-feature weight, and a minimum-area sliver filter, then persists
+    the choices to config.ini (segmv_* keys).
+
+    Config-only: this window no longer runs the helper. Classification runs as a
+    stage of the main Process pass (processing_pipeline_run, between Data and
+    Tiles), which reads these segmv_* keys. See learning.md
+    "Classification map: dissolve doesn't scale".
 
 INPUTS
     output/geoparquet/tbl_geocode_group, tbl_geocode_object  (layer list)
@@ -18,30 +22,28 @@ INPUTS
     config.ini                                               (segmv_* defaults)
 
 OUTPUTS
-    config.ini segmv_* keys (comment-preserving write). On "Run now", spawns
-    segmentation_run as a subprocess (see its OUTPUTS).
+    config.ini segmv_* keys (comment-preserving write). No compute is launched
+    here — the pipeline's Classification stage consumes these keys.
 
 CALLED BY
-    mesa.exe launcher (Workflows tab → "Sensitivity generalisation"), or
+    mesa.exe launcher (Workflows tab → Configure → "Classification"), or
     standalone:  python code/segmentation_setup.py --original_working_directory <dir>
 
 CALLS
-    code/segmentation_run.py (params_from_config, detect_pressure_columns, the
-    subprocess run), code/segmentation.py (list_geocode_layers),
+    code/segmentation_run.py (params_from_config, detect_pressure_columns),
+    code/segmentation.py (list_geocode_layers),
     code/mesa_shared.py (find_base_dir, read_config, parquet_dir),
     ui_style.apply_shared_stylesheet (GIS-free shared Qt look-and-feel).
 
 NOTES
     MESA v5+ feature. Lightweight — imports no heavy compute libs (sklearn etc.);
-    those live only in segmentation_run, which is launched as a separate process.
-    Writes only segmv_* config keys + the new tbl_seg_mv* tables via the run
-    helper; never touches the shipped tbl_segmentation* namespace.
+    those live only in segmentation_run, which the pipeline spawns. Writes only
+    segmv_* config keys; never touches the shipped tbl_segmentation* namespace.
 """
 from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -52,9 +54,9 @@ import mesa_shared
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox,
-    QSpinBox, QMessageBox, QProgressBar, QPlainTextEdit,
+    QSpinBox, QMessageBox,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt
 
 try:
     from ui_style import apply_shared_stylesheet, InfoCircleLabel
@@ -122,40 +124,6 @@ def _update_config(cfg_path: str, **kwargs) -> None:
         f.writelines(lines)
 
 
-class _ProcReader(QThread):
-    """Reads a subprocess' merged stdout line-by-line off the GUI thread and
-    relays each line; emits the exit code when the stream closes."""
-
-    line = Signal(str)
-    done = Signal(int)
-
-    def __init__(self, popen):
-        super().__init__()
-        self._p = popen
-
-    def run(self):
-        out = self._p.stdout
-        try:
-            if out is not None:
-                for raw in iter(out.readline, b""):
-                    s = raw.decode("utf-8", "replace").rstrip("\r\n")
-                    if s:
-                        self.line.emit(s)
-        except Exception:
-            pass
-        finally:
-            try:
-                if out is not None:
-                    out.close()
-            except Exception:
-                pass
-        try:
-            rc = self._p.wait()
-        except Exception:
-            rc = -1
-        self.done.emit(int(rc if rc is not None else -1))
-
-
 class SegmentationSetupWindow(QMainWindow):
     def __init__(self, base_dir: Path):
         super().__init__()
@@ -164,11 +132,9 @@ class SegmentationSetupWindow(QMainWindow):
         self._cfg = mesa_shared.read_config(self._base_dir)
         self._gpq = mesa_shared.parquet_dir(self._base_dir, self._cfg)
         self._params = _run.params_from_config(self._cfg)
-        self._popen = None    # the running segmentation_run subprocess (Popen)
-        self._reader = None   # background stdout reader thread
 
         self.setWindowTitle("MESA – Classification (setup)")
-        self.resize(900, 700)
+        self.resize(900, 560)
         icon = _shared_window_icon(self._base_dir)
         if not icon.isNull():
             self.setWindowIcon(icon)
@@ -178,20 +144,6 @@ class SegmentationSetupWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
-
-        # Run output up top: a compact live log, the progress bar right under it,
-        # then the settings below.
-        self._log_view = QPlainTextEdit()
-        self._log_view.setReadOnly(True)
-        self._log_view.setMinimumHeight(84)
-        self._log_view.setMaximumHeight(120)
-        self._log_view.setPlaceholderText("Run output appears here…")
-        layout.addWidget(self._log_view)
-
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        layout.addWidget(self._progress)
 
         intro = QLabel(
             "Group polygons into <b>types</b> of sensitivity pattern (composition / "
@@ -324,13 +276,11 @@ class SegmentationSetupWindow(QMainWindow):
 
         layout.addStretch()
 
-        # Buttons: Run now + Save settings to the far left, Exit bottom-right.
+        # Config-only: Save settings to the far left, Exit bottom-right. The
+        # clustering itself runs as the Classification stage of Process (step 3).
         btn_row = QHBoxLayout()
-        self._run_btn = QPushButton("Run now")
-        self._run_btn.setProperty("role", "primary")
-        self._run_btn.clicked.connect(self._on_run_now)
-        btn_row.addWidget(self._run_btn)
         self._save_btn = QPushButton("Save settings")
+        self._save_btn.setProperty("role", "primary")
         self._save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(self._save_btn)
         btn_row.addStretch()
@@ -376,130 +326,12 @@ class SegmentationSetupWindow(QMainWindow):
             return False
         try:
             _update_config(self._config_file, **self._collect())
-            self._status.setText("Settings saved to config.ini.")
+            self._status.setText(
+                "Settings saved. Classification runs as part of Process (step 3).")
             return True
         except Exception as exc:
             self._status.setText(f"Could not save settings: {exc}")
             return False
-
-    def _on_run_now(self):
-        if self._reader is not None and self._reader.isRunning():
-            return  # a run is already in flight
-        if not self._on_save():
-            return
-        vals = self._collect()
-        args = [
-            "--original_working_directory", str(self._base_dir),
-            "--layer", vals["segmv_geocode_layer"],
-            "--k-range", str(vals["segmv_k_range"]),
-            "--transform", vals["segmv_transform"],
-            "--coverage-weight", str(vals["segmv_coverage_weight"]),
-            "--min-area-m2", str(vals["segmv_min_area_m2"]),
-        ]
-        if vals["segmv_pressure"]:
-            args += ["--pressure", vals["segmv_pressure"]]
-        if vals["segmv_ai_enabled"] == "1":
-            args += ["--ai"]
-        self._start_process(args)
-
-    # -- run as a monitored subprocess (progress bar + live log) ----------
-    def _run_command(self, args: list[str]):
-        """(program, arguments) for segmentation_run — the frozen exe when packaged,
-        else this Python interpreter on the script. Heavy compute (sklearn etc.)
-        stays in that separate process; this window only watches it."""
-        if getattr(sys, "frozen", False):
-            exe = Path(sys.executable).resolve().parent / "segmentation_run.exe"
-            return str(exe), list(args)
-        script = str(Path(__file__).resolve().parent / "segmentation_run.py")
-        return (sys.executable or "python"), [script, *args]
-
-    def _start_process(self, args: list[str]) -> None:
-        program, full_args = self._run_command(args)
-        cmd = [program, *full_args]
-        # CREATE_NO_WINDOW stops a console window from flashing up for the helper:
-        # a windowed parent launching this console-mode child otherwise gets a
-        # fresh console allocated (redirecting stdout to a pipe doesn't prevent it,
-        # and PySide6 lacks QProcess's CreateProcess-flags modifier). Popen + a
-        # reader thread gives us that flag and keeps the live log working.
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
-
-        self._run_btn.setEnabled(False)
-        self._save_btn.setEnabled(False)
-        self._progress.setRange(0, 0)   # busy until the first progress marker arrives
-        self._progress.setValue(0)
-        self._log_view.clear()
-        self._status.setText("Running classification…")
-
-        try:
-            self._popen = subprocess.Popen(
-                cmd, cwd=str(self._base_dir),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                creationflags=creationflags)
-        except Exception as exc:
-            self._popen = None
-            self._progress.setRange(0, 100)
-            self._progress.setValue(0)
-            self._status.setText(f"Could not start the classification helper: {exc}")
-            self._run_btn.setEnabled(True)
-            self._save_btn.setEnabled(True)
-            return
-
-        self._reader = _ProcReader(self._popen)
-        self._reader.line.connect(self._handle_line)
-        self._reader.done.connect(self._on_proc_done)
-        self._reader.start()
-
-    _PROGRESS_TOKEN = "@@SEGMV_PROGRESS"
-
-    def _handle_line(self, line: str) -> None:
-        if self._PROGRESS_TOKEN in line:
-            self._apply_progress(line)
-        elif line.strip():
-            self._append_log(line)
-
-    def _apply_progress(self, line: str) -> None:
-        try:
-            payload = line.split(self._PROGRESS_TOKEN, 1)[1].strip()
-            parts = payload.split(None, 2)
-            done, total = int(parts[0]), max(1, int(parts[1]))
-            label = parts[2] if len(parts) > 2 else ""
-            self._progress.setRange(0, total)
-            self._progress.setValue(min(done, total))
-            pct = int(round(done * 100 / total))
-            self._status.setText(f"Running classification… {pct}%" + (f" — {label}" if label else ""))
-        except Exception:
-            pass  # malformed marker: ignore, the bar just stays where it was
-
-    def _append_log(self, line: str) -> None:
-        self._log_view.appendPlainText(line)
-        sb = self._log_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def _on_proc_done(self, code: int) -> None:
-        if code == 0:
-            self._progress.setRange(0, 100)
-            self._progress.setValue(100)
-            self._status.setText(
-                "Done — results saved to output/segmentation_mv/. "
-                "Open Maps → Classifications to view them.")
-        else:
-            self._progress.setRange(0, 100)
-            self._status.setText(f"Run failed (exit code {code}). See the log above.")
-        self._run_btn.setEnabled(True)
-        self._save_btn.setEnabled(True)
-
-    def closeEvent(self, event):
-        try:
-            if self._popen is not None and self._popen.poll() is None:
-                self._popen.kill()
-        except Exception:
-            pass
-        try:
-            if self._reader is not None and self._reader.isRunning():
-                self._reader.wait(2000)
-        except Exception:
-            pass
-        super().closeEvent(event)
 
 
 def run(base_dir: str, master=None):
