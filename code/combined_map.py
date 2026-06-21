@@ -74,13 +74,16 @@ def _safe_name(name: str) -> str:
 # Sequential ramp for the Classification "Certainty" layer (p_max in [0,1]):
 # pale yellow (uncertain) → deep green (confident). YlGn-style stops.
 _CERT_STOPS = [(0.0, (255, 255, 229)), (0.5, (120, 198, 121)), (1.0, (0, 90, 50))]
+# Contrast stretch: p_max saturates near 1.0 (diag-GMM overconfidence), so spread the ramp over
+# [_CERT_LO, 1.0]. MUST match tiles_create_raster._CERT_LO. See learning.md "p_max saturates".
+_CERT_LO = 0.95
 
 
 def _certainty_colour(p) -> str:
-    """Hex colour for a posterior certainty p_max in [0,1]; grey when unknown."""
+    """Hex colour for a posterior certainty p_max, contrast-stretched over [_CERT_LO,1.0]; grey when unknown."""
     if p is None:
         return "#cccccc"
-    t = max(0.0, min(1.0, float(p)))
+    t = (max(_CERT_LO, min(1.0, float(p))) - _CERT_LO) / (1.0 - _CERT_LO)
     for (t0, c0), (t1, c1) in zip(_CERT_STOPS, _CERT_STOPS[1:]):
         if t <= t1 or t1 == _CERT_STOPS[-1][0]:
             f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
@@ -708,9 +711,27 @@ class _Api:
         m = m[m["cluster_id"].notna()]
         if m.empty:
             return {"geojson": {"type": "FeatureCollection", "features": []}, "legend": [], "profile": []}
-        if len(m) > self.SEGMV_MAX_FEATURES:
-            return {"too_large": True, "features": int(len(m)), "max_features": self.SEGMV_MAX_FEATURES}
         layer = str(m["name_gis_geocodegroup"].iloc[0])
+        if len(m) > self.SEGMV_MAX_FEATURES:
+            # Too many cells to ship as vector GeoJSON (a dissolved boundary would be
+            # 100+ MB). If the Tiles stage rasterised this run, draw it as a raster
+            # tile layer; otherwise tell the user to run the Tiles stage.
+            name = f"{_safe_name(layer)}_segmv_{run_id}"
+            path = _mbtiles_dir() / f"{name}.mbtiles"
+            profile, legend = self._segmv_profile(run_id)
+            if path.exists():
+                meta = _mbtiles_meta(path)
+                out = {"raster": {"name": name, "bounds": meta["bounds"],
+                                  "minzoom": meta["minzoom"], "maxzoom": meta["maxzoom"]},
+                       "legend": legend, "profile": profile, "layer": layer}
+                cert_path = _mbtiles_dir() / f"{name}_cert.mbtiles"
+                if cert_path.exists():
+                    cmeta = _mbtiles_meta(cert_path)
+                    out["raster_cert"] = {"name": f"{name}_cert", "bounds": cmeta["bounds"],
+                                          "minzoom": cmeta["minzoom"], "maxzoom": cmeta["maxzoom"]}
+                return out
+            return {"too_large": True, "features": int(len(m)),
+                    "max_features": self.SEGMV_MAX_FEATURES, "layer": layer}
         try:
             geo = gpd.read_parquet(go, columns=["code", "geometry"],
                                    filters=[("name_gis_geocodegroup", "=", layer)])
@@ -1241,6 +1262,7 @@ HTML = r"""<!doctype html>
   var resTile = null;                              // overview index raster layer
   var segOverlay = null;                           // line-segments vector overlay (Overview tab)
   var classVecGj = null;                           // Classifications (seg_mv) vector layer (for opacity)
+  var classTile = null;                            // Classifications raster tile layer (big layers)
   var assetLayers = {};                            // gid -> asset L.geoJSON layer
   var resKind = null;                              // active Overview overlay suffix (for click-to-query)
   var fiHighlight = null;                          // GetFeatureInfo: clicked-cell outline overlay
@@ -1254,6 +1276,7 @@ HTML = r"""<!doctype html>
     if(segVecGj) segVecGj.setStyle({fillOpacity: opacity*0.9});
     if(segOverlay) segOverlay.setStyle({fillOpacity: opacity*0.9});
     if(classVecGj) classVecGj.setStyle({fillOpacity: opacity*0.9});
+    if(classTile) classTile.setOpacity(opacity);
     for(var k in assetLayers){ if(assetLayers[k]) assetLayers[k].setStyle({fillOpacity: opacity*0.9}); }
   }
   // ---- collapsible floating layer panels ----
@@ -1693,19 +1716,44 @@ HTML = r"""<!doctype html>
   var classLoaded=false, classRuns=[], classVec=L.geoJSON(null).addTo(maps.class);
   // Types table sort state (legend keeps server order; only the table reorders).
   var classProfileData=[], classSort={key:null, dir:1};
-  var classColourMode='types', classLegendData=[];
+  var classColourMode='types', classLegendData=[], classRaster=null;
   function classFill(f){ var p=f.properties||{};
     return (classColourMode==='certainty') ? (p.cert_fill||'#cccccc') : (p.fill||'#cccccc'); }
   function classStyle(f){ return {fillColor:classFill(f),color:'#555',weight:0.3,fillOpacity:opacity*0.9}; }
   function classSetLoading(on){ var e=document.getElementById('classLoading'); if(e) e.style.display=on?'block':'none'; }
   function classMsg(t){ document.getElementById('classMsg').innerHTML=t||''; }
-  function clearClassLayers(){ classVec.clearLayers(); classVecGj=null; }
+  function clearClassLayers(){ classVec.clearLayers(); classVecGj=null;
+    if(classTile){ maps.class.removeLayer(classTile); classTile=null; } classRaster=null; }
+  // Pick the Types or Certainty raster for the current Colour-by mode and (re)draw it.
+  function applyClassRaster(){
+    if(!classRaster) return;
+    var info=(classColourMode==='certainty' && classRaster.certainty) ? classRaster.certainty : classRaster.types;
+    if(classTile){ maps.class.removeLayer(classTile); classTile=null; }
+    classTile=L.tileLayer('/tiles/'+info.name+'/{z}/{x}/{y}.png',
+      {opacity:opacity, maxNativeZoom:(info.maxzoom||14), minNativeZoom:(info.minzoom||0),
+       maxZoom:19, tms:false}).addTo(maps.class);
+  }
+  function showClassTiles(types, certainty, layer){
+    clearClassLayers();
+    classRaster={types:types, certainty:certainty||null, layer:layer};
+    applyClassRaster();
+    var info=types;
+    if(info.bounds && info.bounds.length===4){
+      var b=[[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]];
+      // When linked, keep the synced view from the previous tab; only auto-fit when unlinked.
+      try{ maps.class.invalidateSize(); if(linking){ syncFrom('class'); } else { maps.class.fitBounds(b,{padding:[20,20]}); } }catch(e){}
+    }
+    var note=certainty ? '' : ' (Certainty needs a Tiles re-run)';
+    classMsg('<b>'+(layer||'')+'</b> · raster view'+note+'; per-cell identify unavailable.');
+  }
   function updateClassLegend(){
     var leg=document.getElementById('classLegend'); if(!leg) return; leg.innerHTML='';
     if(classColourMode==='certainty'){
       leg.innerHTML='<div style="height:12px;width:150px;border:1px solid #999;'+
         'background:linear-gradient(to right,#ffffe5,#78c679,#005a32)"></div>'+
-        '<div class="muted" style="font-size:11px">less ⟶ more certain (p_max)</div>';
+        '<div class="muted" style="font-size:11px">p_max 0.95 ⟶ 1.0 <i>(strukket)</i></div>'+
+        '<div class="muted" style="font-size:11px">marginale forskjeller nær full sikkerhet</div>'+
+        '<div class="muted" style="font-size:11px"><span class="sw" style="background:#cccccc"></span>ingen data (ingen overlapp)</div>';
       return;
     }
     if(!classLegendData.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
@@ -1762,8 +1810,10 @@ HTML = r"""<!doctype html>
     api().segmv_layer(run.run_id).then(function(res){
       classSetLoading(false);
       if(!res || res.error){ classMsg((res&&res.error)||'Could not load results.'); renderClassPanel([],[]); return; }
+      if(res.raster){ showClassTiles(res.raster, res.raster_cert, res.layer); renderClassPanel(res.legend||[], res.profile||[]); return; }
       if(res.too_large){ classMsg('This result has '+Number(res.features).toLocaleString()+
-        ' polygons — too many to draw as vectors (cap '+Number(res.max_features).toLocaleString()+').'); renderClassPanel([],[]); return; }
+        ' cells — too many to draw as vectors (cap '+Number(res.max_features).toLocaleString()+'). '+
+        'Run the <b>Tiles</b> stage to generate a classification raster for this layer.'); renderClassPanel([],[]); return; }
       var gj=L.geoJSON(res.geojson, {
         style:classStyle,
         onEachFeature:function(f,lyr){ var p=f.properties;
@@ -1774,7 +1824,7 @@ HTML = r"""<!doctype html>
                         '<br>Top (imp×sus) bins: '+(p.top_bins||'–')); }
       });
       classVecGj=gj; classVec.addLayer(gj);
-      try{ maps.class.invalidateSize(); maps.class.fitBounds(gj.getBounds(),{padding:[20,20]}); if(linking) syncFrom('class'); }catch(e){}
+      try{ maps.class.invalidateSize(); if(linking){ syncFrom('class'); } else { maps.class.fitBounds(gj.getBounds(),{padding:[20,20]}); } }catch(e){}
       classMsg(res.layer ? ('<b>'+res.layer+'</b> · click a polygon to identify it.') : 'Click a polygon to identify it.');
       renderClassPanel(res.legend||[], res.profile||[]);
     });
@@ -1784,7 +1834,8 @@ HTML = r"""<!doctype html>
     var csel=document.getElementById('classColour');
     if(csel && !csel._wired){ csel._wired=true; csel.addEventListener('change', function(){
       classColourMode=this.value; updateClassLegend();
-      if(classVecGj){ try{ classVecGj.setStyle(classStyle); }catch(e){} } }); }
+      if(classVecGj){ try{ classVecGj.setStyle(classStyle); }catch(e){} }
+      if(classRaster){ try{ applyClassRaster(); }catch(e){} } }); }
     api().segmv_runs().then(function(runs){
       classRuns=runs||[];
       var sel=document.getElementById('classRun');

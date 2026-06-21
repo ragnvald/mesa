@@ -243,6 +243,28 @@ def hex_to_rgba(hex_color: Optional[str], alpha: float) -> Tuple[int, int, int, 
     a = int(max(0.0, min(1.0, float(alpha))) * 255)
     return (r, g, b, a)
 
+# Certainty (p_max) ramp — MUST match combined_map._certainty_colour / _CERT_STOPS / _CERT_LO
+# so the Classification map's Certainty raster and vector views are coloured identically.
+# Contrast stretch: diag-GMM posteriors saturate near 1.0 (97%+ of cells are ≥0.999), so the
+# ramp is spread over [_CERT_LO, 1.0] — only the top band carries visible structure. Cells below
+# _CERT_LO clamp to the light end. The legend states the stretched range so this reads as
+# "marginal differences near full confidence", not a full 0..1 certainty scale.
+_CERT_STOPS = [(0.0, (255, 255, 229)), (0.5, (120, 198, 121)), (1.0, (0, 90, 50))]
+_CERT_LO = 0.95
+
+def cert_rgba(p: Optional[float], alpha: float) -> Tuple[int, int, int, int]:
+    """RGBA for a posterior certainty p_max, contrast-stretched over [_CERT_LO,1.0]; grey when in-run but unknown."""
+    a = int(round(max(0.0, min(1.0, float(alpha))) * 255))
+    if p is None or (isinstance(p, float) and p != p):
+        return (204, 204, 204, a)
+    t = (max(_CERT_LO, min(1.0, float(p))) - _CERT_LO) / (1.0 - _CERT_LO)
+    for (t0, c0), (t1, c1) in zip(_CERT_STOPS, _CERT_STOPS[1:]):
+        if t <= t1:
+            f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            r, g, b = (int(round(x + (y - x) * f)) for x, y in zip(c0, c1))
+            return (r, g, b, a)
+    return (0, 90, 50, a)
+
 def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.70) -> Tuple[int,int,int,int]:
     """Linear light->dark blue; missing -> transparent."""
     if v is None or not np.isfinite(v):
@@ -579,10 +601,10 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
                     except Exception:
                         v = None
                 fill_rgba = index_layer_color(v, gradient)
-            elif mode.startswith("seg_"):
-                # Categorical segmentation layers: per-feature RGBA precomputed
-                # in main() (signature ramp / cluster palette). Cells with no
-                # segmentation get a transparent colour and are skipped.
+            elif mode in _G_COLORS_BY_MODE:
+                # Categorical layers (seg_signatures, seg_clusters, segmv): per-feature
+                # RGBA precomputed in main() (signature ramp / cluster palette). Cells
+                # with no value get a transparent colour and are skipped.
                 colors = _G_COLORS_BY_MODE.get(mode)
                 try:
                     fill_rgba = colors[i] if colors is not None else (0, 0, 0, 0)
@@ -1139,6 +1161,83 @@ def main():
             if "seg_clusters" in colors_by_mode:
                 log(f"  → building {slug}_seg_clusters.mbtiles …")
                 _run_layer(f"{slug}_seg_clusters", "seg_clusters", 0.0, 0.0)
+
+        # --- Classification (segmv) rasters: rendered from the FULL geocode grid ---
+        # tbl_seg_mv covers every geocode cell, but tbl_flat (the gdf above) omits cells
+        # with no asset overlap (~7% of basic_mosaic). To paint those no-data cells grey on
+        # the Certainty raster — instead of leaving white holes — segmv is rendered from
+        # tbl_geocode_object geometry in a dedicated pool, after the shared pool is freed.
+        # Two mbtiles per run (Types + a p_max Certainty ramp), named per run_id so each run
+        # is independently viewable. The salt-and-pepper cluster patches make a dissolved
+        # vector boundary explode to 100+ MB of GeoJSON, so raster is the only viable form.
+        segmv_part = gpq_dir() / "tbl_seg_mv.parquet"
+        go_part = gpq_dir() / "tbl_geocode_object.parquet"
+        if segmv_part.exists() and go_part.exists():
+            try:
+                import segmentation as _segmod
+                scols = ["run_id", "name_gis_geocodegroup", "code", "cluster_id"]
+                has_pmax = "p_max" in pq.ParquetFile(segmv_part).schema_arrow.names
+                if has_pmax:
+                    scols.append("p_max")
+                mv = pd.read_parquet(segmv_part, columns=scols)
+                mv = mv[(mv["name_gis_geocodegroup"].astype(str) == gv) & mv["cluster_id"].notna()]
+                if not mv.empty:
+                    run_id = str(mv["run_id"].astype(str).max())   # newest run (timestamp)
+                    mv = mv[mv["run_id"].astype(str) == run_id]
+                    clu_by_code = dict(zip(mv["code"].astype(str), mv["cluster_id"]))
+                    pmax_by_code = dict(zip(mv["code"].astype(str), mv["p_max"])) if has_pmax else {}
+                    sgeo = gpd.read_parquet(go_part, columns=["code", "geometry"],
+                                            filters=[("name_gis_geocodegroup", "=", gv)])
+                    if sgeo.crs is not None and str(sgeo.crs).upper() not in ("EPSG:4326", "WGS84", "EPSG: 4326"):
+                        sgeo = sgeo.to_crs("EPSG:4326")
+                    sgeo = maybe_swap_xy(sgeo)
+                    sgeo = sgeo[sgeo.geometry.notna()]
+                    nodata_cert = hex_to_rgba("#cccccc", sens_alpha)
+                    clu_colors, cert_colors = [], []
+                    for c in sgeo["code"].astype(str).values:
+                        cid = clu_by_code.get(c)
+                        if cid is None or (isinstance(cid, float) and cid != cid):
+                            clu_colors.append((0, 0, 0, 0))    # Types: transparent (no cluster)
+                            cert_colors.append(nodata_cert)    # Certainty: grey (no data)
+                        else:
+                            clu_colors.append(hex_to_rgba(_segmod._overview_colour(f"cluster {int(cid)}", "clusters"), sens_alpha))
+                            cert_colors.append(cert_rgba(pmax_by_code.get(c), sens_alpha))
+                    s_modes = [(f"{slug}_segmv_{run_id}", "segmv", clu_colors)]
+                    if has_pmax:
+                        s_modes.append((f"{slug}_segmv_{run_id}_cert", "segmv_cert", cert_colors))
+                    s_colors = {mode: cols for (_, mode, cols) in s_modes}
+                    log(f"  → classification tiles enabled for '{gv}' (run {run_id}, full grid {len(sgeo):,} cells)")
+                    s_geoms = list(sgeo.geometry.values)
+                    s_minx, s_miny, s_maxx, s_maxy = sgeo.total_bounds
+                    s_bounds = (float(s_minx), float(clamp_lat(s_miny)), float(s_maxx), float(clamp_lat(s_maxy)))
+                    try:
+                        s_sindex = sgeo.sindex
+                    except Exception:
+                        s_sindex = None
+                    s_tasks = plan_tile_tasks(s_bounds, args.minzoom, args.maxzoom, s_sindex, sgeo)
+                    s_init = (s_geoms, [], {}, {}, stroke_rgba, args.stroke_width, s_colors)
+                    with ctx.Pool(processes=procs, initializer=_worker_init, initargs=s_init) as spool:
+                        for nm, mode, _cols in s_modes:
+                            out_path = out_dir / f"{nm}.mbtiles"
+                            in_q = mp.Queue(maxsize=1000); done_q = mp.Queue()
+                            wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
+                            wp.start()
+                            in_q.put(("__INIT__", nm, int(args.minzoom), int(args.maxzoom), s_bounds))
+                            ltasks = [(z, x, y, idx, mode, 0.0, 0.0) for (z, x, y, idx) in s_tasks]
+                            written = 0
+                            log(f"  → building {nm}.mbtiles …")
+                            for i, out in enumerate(spool.imap_unordered(_render_one_tile, ltasks, chunksize=64), 1):
+                                if out is not None:
+                                    in_q.put(out); written += 1
+                                if i % tiles_progress_every == 0 or i == len(ltasks):
+                                    log(f"[progress] {nm}: {i}/{len(ltasks)}")
+                            in_q.put("__CLOSE__")
+                            status = done_q.get()
+                            if status[0] != "ok":
+                                raise RuntimeError(f"Writer failed: {status[1] if len(status)>1 else 'unknown'}")
+                            log(f"    {nm}: tiles written {written:,} / scheduled {len(ltasks):,} → {out_path}")
+            except Exception as exc:
+                log(f"  → classification tiles skipped for '{gv}': {exc}")
 
     log("All done.")
 
