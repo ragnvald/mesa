@@ -233,6 +233,26 @@ def _fi_seg_info(row, level, mode):
     }
 
 
+def _fi_class_info(row, level):
+    """Classification (segmv) cell: the type plus its per-cell certainty and bins."""
+    cid = row.get("cluster_id")
+    label = row.get("cluster_label")
+    try:
+        title = str(label) if label not in (None, "") else f"Type {int(cid) + 1}"
+    except Exception:
+        title = str(label or "Type")
+    fields = [
+        ("Certainty (p_max)", "p_max", lambda v: f"{round(float(v) * 100)}%", None),
+        ("Coverage (overlaps)", "coverage_index", None, None),
+        ("Top (imp×sus) bins", "top_bins", None, None),
+    ]
+    return {
+        "title": title,
+        "subtitle": f"{level} · Classification",
+        "metrics": _fi_metrics(row, fields),
+    }
+
+
 def _fi_json_ready(v):
     try:
         import numpy as _np
@@ -837,6 +857,50 @@ class _Api:
         self._fi_cache[key] = gdf
         return gdf
 
+    def _fi_load_class(self, layer: str, run_id: str):
+        """4326 cells for one Classification run+layer (tbl_seg_mv joined to geocode
+        geometry), cached. Drives hover-identify on the Classifications raster."""
+        key = ("class", str(layer), str(run_id))
+        if key in self._fi_cache:
+            return self._fi_cache[key]
+        import geopandas as gpd
+        import pandas as pd
+        import pyarrow.parquet as pq
+        gdf = None
+        try:
+            p = self.gpq / "tbl_seg_mv.parquet"
+            go = self.gpq / "tbl_geocode_object.parquet"
+            if p.exists() and go.exists():
+                want = ["run_id", "name_gis_geocodegroup", "code", "cluster_id",
+                        "cluster_label", "p_max", "coverage_index", "top_bins"]
+                have = set(pq.ParquetFile(p).schema_arrow.names)
+                cols = [c for c in want if c in have]
+                mv = pd.read_parquet(p, columns=cols,
+                                     filters=[("name_gis_geocodegroup", "=", str(layer))])
+                mv = mv[mv["cluster_id"].notna()]
+                if run_id:
+                    mv = mv[mv["run_id"].astype(str) == str(run_id)]
+                if not mv.empty:
+                    mv = mv.copy(); mv["code"] = mv["code"].astype(str)
+                    try:
+                        geo = gpd.read_parquet(go, columns=["code", "geometry"],
+                                               filters=[("name_gis_geocodegroup", "=", str(layer))])
+                    except Exception:
+                        geo = gpd.read_parquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
+                        geo = geo[geo["name_gis_geocodegroup"].astype(str) == str(layer)][["code", "geometry"]]
+                    geo["code"] = geo["code"].astype(str)
+                    gdf = gpd.GeoDataFrame(mv.merge(geo, on="code", how="inner"),
+                                           geometry="geometry", crs=getattr(geo, "crs", None))
+                    try:
+                        if gdf.crs is not None and "4326" not in str(gdf.crs):
+                            gdf = gdf.to_crs(4326)
+                    except Exception:
+                        pass
+        except Exception:
+            gdf = None
+        self._fi_cache[key] = gdf
+        return gdf
+
     def _fi_point_lookup(self, gdf, lng: float, lat: float):
         from shapely.geometry import Point
         pt = Point(float(lng), float(lat))
@@ -869,7 +933,10 @@ class _Api:
         try:
             if not layer:
                 return {"ok": False, "error": "No active layer."}
-            gdf = self._fi_load(str(mode), str(layer))
+            if str(mode) == "class":
+                gdf = self._fi_load_class(str(layer), str(overlay or ""))
+            else:
+                gdf = self._fi_load(str(mode), str(layer))
             if gdf is None or gdf.empty:
                 return {"ok": False, "error": "No queryable data for this layer."}
             try:
@@ -880,6 +947,8 @@ class _Api:
                 return {"ok": False, "error": "No cell at that location."}
             if str(mode) == "results":
                 info = _fi_results_info(row, str(overlay or "sensitivity_max"), str(layer))
+            elif str(mode) == "class":
+                info = _fi_class_info(row, str(layer))
             else:
                 info = _fi_seg_info(row, str(layer), str(overlay or "signatures"))
             geom = row.geometry
@@ -1010,6 +1079,8 @@ HTML = r"""<!doctype html>
   #opwrap{display:flex;align-items:center;gap:6px;margin-right:12px;font-size:12px;color:#3f3528}
   #opacity{width:120px;accent-color:#9b7c3d}
   #linkwrap{display:flex;align-items:center;gap:6px;margin-right:8px;font-size:12px;color:#3f3528}
+  #linkwrap.disabled{opacity:.45;cursor:not-allowed}
+  #linkwrap.disabled input{cursor:not-allowed}
   .info{font-size:11px;color:#5c4a2f;background:#f3ecdf;border:1px solid #e3d7be;border-radius:5px;padding:8px;margin:8px 0;line-height:1.35}
   .info p{margin:0 0 5px}
   #exit,#export{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;padding:6px 12px;border-radius:6px;cursor:pointer}
@@ -1020,7 +1091,7 @@ HTML = r"""<!doctype html>
   .view{position:absolute;inset:0;display:none}
   .view.active{display:block}
   .map{position:absolute;inset:0;background:#ddd}
-  #view-seg.active, #view-results.active, #view-asset.active, #view-class.active{display:grid;grid-template-columns:1fr 340px}
+  #view-seg.active, #view-results.active, #view-asset.active, #view-class.active{display:grid;grid-template-columns:1fr 476px}
   .map-wrap{position:relative;height:100%}
   /* floating layer-control panel over the map (frees the right column) */
   .mapctl{position:absolute;top:10px;right:10px;z-index:1000;background:rgba(250,246,238,.96);
@@ -1051,9 +1122,23 @@ HTML = r"""<!doctype html>
   #segZones thead th:hover, #classTable thead th:hover{color:#3f3528}
   tfoot td{font-weight:600;border-top:1px solid #cbb791}
   .sw{display:inline-block;width:12px;height:12px;border:1px solid #b9a87f;vertical-align:middle;margin-right:6px}
+  /* Segmentation legend: swatch | combination label | full-width A–E composition bar,
+     with a 0–100% scale header so the equal-width cells read as relative shares. */
+  #segLegend .legrow, #segLegend .legscale{display:grid;grid-template-columns:14px 84px 1fr;align-items:center;gap:6px;margin:2px 0}
+  #segLegend .legrow .sw{margin-right:0;flex:0 0 auto}
+  #segLegend .leglbl{font-size:12px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .catbar{display:flex;height:11px;border:1px solid #b9a87f;overflow:hidden}
+  .catcell{height:100%}
+  #segLegend .legscale{font-size:10px;color:#8a7c63;margin-bottom:1px}
+  #segLegend .legscale-axis{display:flex;justify-content:space-between}
   .muted{color:#8a7c63}
   .stub{position:absolute;top:14px;left:14px;z-index:500;background:#fff;border:1px solid #ccc;
         border-radius:6px;padding:8px 12px;box-shadow:0 1px 6px rgba(0,0,0,.15)}
+  /* hover readout pinned to the map (Classifications raster identify) */
+  .maphover{position:absolute;top:10px;left:50px;z-index:600;background:rgba(255,255,255,.94);
+        border:1px solid #b9a87f;border-radius:5px;padding:5px 9px;font-size:12px;color:#3f3528;
+        box-shadow:0 1px 5px rgba(0,0,0,.18);pointer-events:none;max-width:300px}
+  .maphover b{color:#5c4a2f}
   #loading{position:absolute;top:50%;left:40%;background:#fff;border:1px solid #ccc;border-radius:6px;
            padding:10px 16px;box-shadow:0 2px 8px rgba(0,0,0,.2);display:none;z-index:1000}
   #segMsg{font-size:12px;color:#666;margin-top:6px}
@@ -1183,6 +1268,7 @@ HTML = r"""<!doctype html>
     <div class="view" id="view-class">
       <div class="map-wrap">
         <div class="map" id="map-class"></div>
+        <div id="classHover" class="maphover" style="display:none"></div>
         <div id="classLoading" class="stub" style="display:none">Building view…</div>
         <div class="mapctl">
           <div class="mapctl-hd"><span>Layers</span><span class="mapctl-arrow">▾</span></div>
@@ -1318,11 +1404,12 @@ HTML = r"""<!doctype html>
     try{
       var src=maps[srcKey], c=src.getCenter(), z=src.getZoom();
       Object.keys(maps).forEach(function(k){
-        if(k!==srcKey){ try{ maps[k].setView(c,z,{animate:false}); }catch(e){} }
+        // Assets never participates: opening an asset auto-zooms to its own extent.
+        if(k!==srcKey && k!=='asset'){ try{ maps[k].setView(c,z,{animate:false}); }catch(e){} }
       });
     } finally { syncing=false; }   // never leave the guard stuck (would block all linking)
   }
-  Object.keys(maps).forEach(function(k){ maps[k].on('moveend zoomend', function(){ if(k===current) syncFrom(k); }); });
+  Object.keys(maps).forEach(function(k){ maps[k].on('moveend zoomend', function(){ if(k===current && k!=='asset') syncFrom(k); }); });
   document.getElementById('linkChk').addEventListener('change', function(){ linking=this.checked; if(linking) syncFrom(current); });
 
   // ---- GetFeatureInfo: left-click a raster cell to identify it ----
@@ -1382,11 +1469,16 @@ HTML = r"""<!doctype html>
     document.querySelectorAll('.tab').forEach(function(b){ b.classList.toggle('active', b.dataset.tab===tab); });
     document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('active'); });
     document.getElementById('view-'+tab).classList.add('active');
+    // Assets auto-zooms to each layer's extent, so it can't honour Link zoom & pan —
+    // grey the toggle out there and don't sync into/out of it.
+    var lk=document.getElementById('linkChk'), lw=document.getElementById('linkwrap');
+    if(lk) lk.disabled=(tab==='asset');
+    if(lw) lw.classList.toggle('disabled', tab==='asset');
     var m=maps[tab];
     setTimeout(function(){
       m.invalidateSize();
       // When linked, copy the view from the PREVIOUSLY active map to this one.
-      if(linking && prev && prev!==tab){
+      if(linking && prev && prev!==tab && tab!=='asset' && prev!=='asset'){
         syncing=true;
         m.setView(maps[prev].getCenter(), maps[prev].getZoom(), {animate:false});
         syncing=false;
@@ -1478,10 +1570,13 @@ HTML = r"""<!doctype html>
       }
       var lyr=L.geoJSON(fc, {
         style:function(){ return {color:'#444',weight:0.4,fillColor:g.color,fillOpacity:opacity*0.9}; },
-        onEachFeature:function(f,l){ l.bindPopup('<b>'+g.label+'</b><br>id '+(f.properties.id||'')); }
+        onEachFeature:function(f,l){ l.bindPopup('<b>'+g.label+'</b><br>id '+(f.properties.id||''));
+          l.on('mouseover', function(){ try{ this.setStyle({weight:2.5,color:'#1d4ed8'}); if(this.bringToFront) this.bringToFront(); }catch(e){} });
+          l.on('mouseout', function(){ try{ this.setStyle({color:'#444',weight:0.4,fillColor:g.color,fillOpacity:opacity*0.9}); }catch(e){} }); }
       }).addTo(maps.asset);
       assetLayers[gid]=lyr;
-      try{ maps.asset.invalidateSize(); maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); if(linking) syncFrom('asset'); }catch(e){}
+      // Assets does not drive Link zoom & pan; it always frames its own layer extent.
+      try{ maps.asset.invalidateSize(); maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); }catch(e){}
     });
   }
 
@@ -1579,21 +1674,20 @@ HTML = r"""<!doctype html>
   // only the table reorders when a header is clicked.
   var segZonesData=[], segSort={key:null, dir:1};
 
-  function renderPanel(zones){
-    var leg=document.getElementById('segLegend'); leg.innerHTML='';
-    segZonesData = zones ? zones.slice() : [];
-    document.querySelector('#segZones tbody').innerHTML='';
-    if(!zones || !zones.length){ leg.innerHTML='<span class="muted">–</span>'; renderSegRows(); return; }
-    zones.forEach(function(z){
-      var d=document.createElement('div'); d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+z.zone; leg.appendChild(d);
-    });
-    // Devtools: apply a one-time initial sort so the screenshot shows the arrow.
-    if(START_SORT && !segSort.key){ segSort={key:START_SORT, dir:(START_SORT==='zone')?1:-1}; }
-    renderSegRows();
+  // A–E sensitivity-code colours — mirror segmentation._RAMP so the legend's
+  // composition bar matches the signature fill computed server-side.
+  var SEG_RAMP={A:'#b2182b',B:'#ef8a62',C:'#c8c8c8',D:'#67a9cf',E:'#2166ac'};
+  // Equal-width composition bar: one cell per A–E code in the signature (e.g. A+B+C
+  // → three equal cells), in the signature's own order. Empty for non-signature zones.
+  function segCatBar(zone){
+    if(!zone) return '';
+    var codes=String(zone).split('+').filter(function(c){ return SEG_RAMP[c]; });
+    if(!codes.length) return '';
+    var w=(100/codes.length).toFixed(4);
+    var cells=codes.map(function(c){ return '<span class="catcell" title="'+c+'" style="width:'+w+'%;background:'+SEG_RAMP[c]+'"></span>'; }).join('');
+    return '<span class="catbar">'+cells+'</span>';
   }
-
-  function renderSegRows(){
-    var tb=document.querySelector('#segZones tbody'); tb.innerHTML='';
+  function sortedSegZones(){
     var rows=segZonesData.slice();
     if(segSort.key){
       var k=segSort.key, dir=segSort.dir;
@@ -1604,6 +1698,37 @@ HTML = r"""<!doctype html>
         return (va<vb?-1:va>vb?1:0)*dir;
       });
     }
+    return rows;
+  }
+  function renderSegLegend(){
+    var leg=document.getElementById('segLegend'); leg.innerHTML='';
+    if(!segZonesData.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
+    var rows=sortedSegZones();
+    if(rows.some(function(z){ return segCatBar(z.zone)!==''; })){
+      var hd=document.createElement('div'); hd.className='legscale';
+      hd.innerHTML='<span></span><span></span><span class="legscale-axis"><span>0%</span><span>50%</span><span>100%</span></span>';
+      leg.appendChild(hd);
+    }
+    rows.forEach(function(z){
+      var d=document.createElement('div'); d.className='legrow';
+      d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+
+                  '<span class="leglbl" title="'+z.zone+'">'+z.zone+'</span>'+
+                  segCatBar(z.zone);
+      leg.appendChild(d);
+    });
+  }
+  function renderPanel(zones){
+    segZonesData = zones ? zones.slice() : [];
+    document.querySelector('#segZones tbody').innerHTML='';
+    // Devtools: apply a one-time initial sort so the screenshot shows the arrow.
+    if(START_SORT && !segSort.key){ segSort={key:START_SORT, dir:(START_SORT==='zone')?1:-1}; }
+    renderSegLegend();
+    renderSegRows();
+  }
+
+  function renderSegRows(){
+    var tb=document.querySelector('#segZones tbody'); tb.innerHTML='';
+    var rows=sortedSegZones();
     rows.forEach(function(z){
       var tr=document.createElement('tr');
       tr.innerHTML='<td>'+z.zone+'</td><td>'+fmt(z.total_area_km2,2)+'</td><td>'+fmt(z.n_polygons,0)+'</td><td>'+fmt(z.sens_mean,1)+'</td><td>'+fmt(z.mean_n_assets,1)+'</td>';
@@ -1626,7 +1751,7 @@ HTML = r"""<!doctype html>
       // the zone name, descending for the numeric metrics (largest first).
       if(segSort.key===k){ segSort.dir=-segSort.dir; }
       else { segSort.key=k; segSort.dir=(k==='zone')?1:-1; }
-      renderSegRows();
+      renderSegLegend(); renderSegRows();
     });
   })();
 
@@ -1717,13 +1842,35 @@ HTML = r"""<!doctype html>
   // Types table sort state (legend keeps server order; only the table reorders).
   var classProfileData=[], classSort={key:null, dir:1};
   var classColourMode='types', classLegendData=[], classRaster=null;
+  var classLayer=null, classRunId=null, classHoverTimer=null, classHoverHL=null;   // raster hover-identify state
+  function classHideHover(){ var h=document.getElementById('classHover'); if(h) h.style.display='none';
+    if(classHoverHL){ try{ maps.class.removeLayer(classHoverHL); }catch(e){} classHoverHL=null; } }
+  // Hover-identify on the Classifications raster: point-in-polygon on the server, shown
+  // in a pinned readout plus a highlighted cell outline (a cursor-following popup per
+  // mousemove would be janky + heavy).
+  function classHover(latlng){
+    if(!classRaster || !classLayer || !classRunId) return;   // raster only; vector uses a Leaflet tooltip
+    api().query_feature_info(latlng.lat, latlng.lng, 'class', classLayer, classRunId).then(function(res){
+      var h=document.getElementById('classHover'); if(!h) return;
+      if(res && res.ok && res.info){
+        var info=res.info, m=info.metrics||[], extra='';
+        for(var i=0;i<m.length;i++){ if(String(m[i].label||'').indexOf('Certainty')===0){ extra=' · '+m[i].value; break; } }
+        h.innerHTML='<b>'+fiEsc(info.title||'Type')+'</b><span class="muted">'+fiEsc(extra)+'</span>';
+        h.style.display='block';
+        if(classHoverHL){ try{ maps.class.removeLayer(classHoverHL); }catch(e){} classHoverHL=null; }
+        if(info.geometry){ try{ classHoverHL=L.geoJSON(info.geometry,{interactive:false,
+          style:{color:'#1d4ed8',weight:2,fill:false,opacity:0.95}}).addTo(maps.class); }catch(e){} }
+      } else { classHideHover(); }
+    }).catch(function(){});
+  }
   function classFill(f){ var p=f.properties||{};
     return (classColourMode==='certainty') ? (p.cert_fill||'#cccccc') : (p.fill||'#cccccc'); }
   function classStyle(f){ return {fillColor:classFill(f),color:'#555',weight:0.3,fillOpacity:opacity*0.9}; }
   function classSetLoading(on){ var e=document.getElementById('classLoading'); if(e) e.style.display=on?'block':'none'; }
   function classMsg(t){ document.getElementById('classMsg').innerHTML=t||''; }
   function clearClassLayers(){ classVec.clearLayers(); classVecGj=null;
-    if(classTile){ maps.class.removeLayer(classTile); classTile=null; } classRaster=null; }
+    if(classTile){ maps.class.removeLayer(classTile); classTile=null; } classRaster=null;
+    if(classHoverTimer){ clearTimeout(classHoverTimer); classHoverTimer=null; } classHideHover(); }
   // Pick the Types or Certainty raster for the current Colour-by mode and (re)draw it.
   function applyClassRaster(){
     if(!classRaster) return;
@@ -1744,7 +1891,7 @@ HTML = r"""<!doctype html>
       try{ maps.class.invalidateSize(); if(linking){ syncFrom('class'); } else { maps.class.fitBounds(b,{padding:[20,20]}); } }catch(e){}
     }
     var note=certainty ? '' : ' (Certainty needs a Tiles re-run)';
-    classMsg('<b>'+(layer||'')+'</b> · raster view'+note+'; per-cell identify unavailable.');
+    classMsg('<b>'+(layer||'')+'</b> · raster view'+note+'; hover a cell to identify it.');
   }
   function updateClassLegend(){
     var leg=document.getElementById('classLegend'); if(!leg) return; leg.innerHTML='';
@@ -1807,9 +1954,11 @@ HTML = r"""<!doctype html>
   function loadClass(run){
     if(!run) return;
     clearClassLayers(); classMsg('Loading…'); classSetLoading(true);
+    classRunId=run.run_id; classLayer=null;
     api().segmv_layer(run.run_id).then(function(res){
       classSetLoading(false);
       if(!res || res.error){ classMsg((res&&res.error)||'Could not load results.'); renderClassPanel([],[]); return; }
+      classLayer=res.layer||null;
       if(res.raster){ showClassTiles(res.raster, res.raster_cert, res.layer); renderClassPanel(res.legend||[], res.profile||[]); return; }
       if(res.too_large){ classMsg('This result has '+Number(res.features).toLocaleString()+
         ' cells — too many to draw as vectors (cap '+Number(res.max_features).toLocaleString()+'). '+
@@ -1818,6 +1967,10 @@ HTML = r"""<!doctype html>
         style:classStyle,
         onEachFeature:function(f,lyr){ var p=f.properties;
           var pm=(p.p_max==null)?'–':(Math.round(p.p_max*100)+'%');
+          // Hover tooltip + outline highlight (mouseover) + click popup for the full detail.
+          lyr.bindTooltip((p.cluster_label||'type')+' · '+pm, {sticky:true, direction:'top', opacity:0.92});
+          lyr.on('mouseover', function(){ try{ this.setStyle({weight:2.5,color:'#1d4ed8'}); if(this.bringToFront) this.bringToFront(); }catch(e){} });
+          lyr.on('mouseout', function(){ try{ this.setStyle(classStyle(f)); }catch(e){} });
           lyr.bindPopup('<b>'+(p.cluster_label||'type')+'</b><br>Cell: '+(p.code||'')+
                         '<br>Certainty (p_max): '+pm+
                         '<br>Coverage (overlaps): '+(p.coverage_index==null?'–':p.coverage_index)+
@@ -1836,6 +1989,12 @@ HTML = r"""<!doctype html>
       classColourMode=this.value; updateClassLegend();
       if(classVecGj){ try{ classVecGj.setStyle(classStyle); }catch(e){} }
       if(classRaster){ try{ applyClassRaster(); }catch(e){} } }); }
+    if(!maps.class._hoverWired){ maps.class._hoverWired=true;
+      // Raster hover-identify (debounced); the vector path uses Leaflet tooltips instead.
+      maps.class.on('mousemove', function(e){ if(!classRaster) return;
+        if(classHoverTimer) clearTimeout(classHoverTimer);
+        var ll=e.latlng; classHoverTimer=setTimeout(function(){ classHover(ll); }, 130); });
+      maps.class.on('mouseout', function(){ if(classHoverTimer) clearTimeout(classHoverTimer); classHideHover(); }); }
     api().segmv_runs().then(function(runs){
       classRuns=runs||[];
       var sel=document.getElementById('classRun');
