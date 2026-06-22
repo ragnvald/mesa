@@ -589,3 +589,23 @@ Work landed (commit 3034c69):
 Verified by byte-compile + targeted smoke builds on H3_R4 (vector path) and H3_R9 (raster): server returns raster/raster_cert, both mbtiles valid PNG/TMS, certainty raster shows 579 distinct ramp colours (was ~1) and 34.7% grey pixels matching H3_R9's 34.9% no-data cells. NOT yet validated by a full mesa.py GUI run — operator must re-run the **Tiles** stage in the GUI to generate basic_mosaic's two segmv rasters, then reopen the Classification map. Also still open from the logs: the corrupt `tbl_stacked` partition (re-run Intersect to clear).
 
 — Claude (Apple Silicon / macOS)
+
+## QGIS project: add Segmentation + Classification rasters — Apple Silicon / macOS (2026-06-22)
+
+`qgis/mesa.qgz` was behind the pipeline — its **Raster data** group only carried the old index/asset rasters and nothing from Segmentation or Classification (segmv). Added three pre-rendered mbtiles layers to that group, raster-first per the brief:
+
+- **Segmentation (signatures)** -> `basic_mosaic_seg_signatures.mbtiles`
+- **Classification - Types** -> `basic_mosaic_segmv_2026-06-20_214734.mbtiles`
+- **Classification - Certainty (p_max)** -> `basic_mosaic_segmv_2026-06-20_214734_cert.mbtiles`
+
+How: the mbtiles layers are a generic `singlebandcolordata` renderer over RGBA PNG tiles — the colour/legend is baked into the tiles, so the renderer is identical for every MESA mbtiles. Cloned the existing `basic_mosaic_index_owa` layer (extent/CRS/pipe all reusable) and wired each new layer into all five sections that key off a layer id: `<maplayer>`, `<layer-tree-layer>` (bottom of Raster data group), `<custom-order>`, the legacy `<legend>`, and `<layerorder>`. Cloned blocks + targeted id/datasource/layername swaps, ElementTree-validated before repackaging the .qgz (kept the bundled `qRWjzQ_styles.db` untouched). New layers ship `checked="Qt::Unchecked"` to match the other rasters (operator toggles them on). Backup of the pre-edit qgz at `/tmp/mesa.qgz.bak`.
+
+Verified: archive round-trips and the qgs parses from inside it; all 10 mbtiles datasources (incl. the 3 new) resolve to real files under `output/mbtiles/`. NOT opened in a live QGIS yet — operator should open `qgis/mesa.qgz` and tick the three new layers.
+
+**Run-id coupling caveat:** the two Classification datasources hardcode the current run's timestamped filename (`..._214734...`). seg_signatures has a stable name and is durable; the segmv pair points at *this* run, so after a re-run of Classification+Tiles produces a new `..._<newrun>.mbtiles` the operator must repoint those two datasources (or we add a stable `..._segmv_latest.mbtiles` alias in `tiles_create_raster.py` — offered as a follow-up, not done).
+
+— Claude (Apple Silicon / macOS)
+
+**Update (same day):** resolved the run-id coupling before the operator's full run. `tiles_create_raster.py` now writes a stable `<slug>_segmv_latest[_cert].mbtiles` alias (best-effort `shutil.copyfile` after each segmv mbtiles; wrapped so it can never break the Tiles stage), and `qgis/mesa.qgz`'s two Classification layers were repointed at `basic_mosaic_segmv_latest[_cert].mbtiles`. Seeded the aliases from the current run so the project is valid immediately; tonight's full run overwrites them with fresh tiles. Net: the QGIS project stays sound across re-runs with no manual repointing. py_compile + qgz round-trip + all 10 datasources resolve.
+
+— Claude (Apple Silicon / macOS)

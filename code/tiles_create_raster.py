@@ -1236,6 +1236,18 @@ def main():
                             if status[0] != "ok":
                                 raise RuntimeError(f"Writer failed: {status[1] if len(status)>1 else 'unknown'}")
                             log(f"    {nm}: tiles written {written:,} / scheduled {len(ltasks):,} → {out_path}")
+                            # Stable alias (<slug>_segmv_latest[_cert].mbtiles) so static
+                            # consumers like qgis/mesa.qgz need not track the per-run
+                            # timestamp. Best-effort: must never break the Tiles stage.
+                            try:
+                                import shutil
+                                alias = out_dir / (f"{slug}_segmv_latest_cert.mbtiles"
+                                                   if mode == "segmv_cert"
+                                                   else f"{slug}_segmv_latest.mbtiles")
+                                shutil.copyfile(out_path, alias)
+                                log(f"    {nm}: stable alias → {alias.name}")
+                            except Exception as exc:
+                                log(f"    {nm}: alias copy skipped: {exc}")
             except Exception as exc:
                 log(f"  → classification tiles skipped for '{gv}': {exc}")
 
