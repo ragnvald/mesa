@@ -532,6 +532,13 @@ def main() -> None:
         HelperCapture("combined_map_segmentation", ["code/combined_map.py"], "mesa maps", 60.0,
                       env={"MESA_DEVTOOLS_MAP": "seg:sens_mean"},
                       out_filename="ui_combined_map_segmentation.png"),
+        # Classifications tab via the same devtools hook (MESA_DEVTOOLS_MAP=class
+        # -> ?tab=class -> showTab('class')). Needs a project with a Classification
+        # run (and, for large layers like basic_mosaic, the segmv rasters built by
+        # the Tiles stage); otherwise the tab shows "No classification results found".
+        HelperCapture("combined_map_classifications", ["code/combined_map.py"], "mesa maps", 60.0,
+                      env={"MESA_DEVTOOLS_MAP": "class"},
+                      out_filename="ui_class_map_types.png"),
         HelperCapture("report_generate", ["code/report_generate.py", "--original_working_directory", str(repo)], "report generator", 35.0),
         HelperCapture("analysis_setup", ["code/analysis_setup.py", "--original_working_directory", str(repo)], "area analysis", 40.0),
         HelperCapture("analysis_present", ["code/analysis_present.py", "--original_working_directory", str(repo)], "comparison", 40.0),
