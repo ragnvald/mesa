@@ -1860,7 +1860,12 @@ def _intersect_pool_init(asset_df, geom_types, parts_dir, asset_soft_limit, geoc
         pass
 
 def _intersection_worker(args):
-    idx, geocode_chunk = args
+    idx, geocode_chunk = args[0], args[1]
+    # Parent may ship a per-chunk pre-filtered asset subset (3-tuple) so workers no
+    # longer each hold the full asset_df (~5.76 GB). Fall back to the broadcast global
+    # for a 2-tuple. Both paths are result-identical (same sindex bbox query, just
+    # relocated). See learning.md "intersect per-worker memory".
+    pool_assets = args[2] if len(args) > 2 else _POOL_ASSETS
     logs = []
 
     def write_parts(gdf):
@@ -1920,11 +1925,11 @@ def _intersection_worker(args):
 
     def join_geocode_assets(geocode_gdf):
         if geocode_gdf.empty:
-            return gpd.GeoDataFrame(geometry=[], crs=_POOL_ASSETS.crs)
+            return gpd.GeoDataFrame(geometry=[], crs=pool_assets.crs)
 
         minx, miny, maxx, maxy = geocode_gdf.total_bounds
-        candidate_idx = list(_POOL_ASSETS.sindex.intersection((minx, miny, maxx, maxy)))
-        asset_subset = _POOL_ASSETS.iloc[candidate_idx] if candidate_idx else _POOL_ASSETS.iloc[:0]
+        candidate_idx = list(pool_assets.sindex.intersection((minx, miny, maxx, maxy)))
+        asset_subset = pool_assets.iloc[candidate_idx] if candidate_idx else pool_assets.iloc[:0]
 
         if len(asset_subset) > _ASSET_SOFT_LIMIT and len(geocode_gdf) > 1:
             logs.append(f"Chunk {idx}: {len(asset_subset):,} candidate assets for {len(geocode_gdf)} geocodes — splitting geocodes pre-emptively.")
@@ -1939,10 +1944,10 @@ def _intersection_worker(args):
             if res_right is not None and not res_right.empty:
                 parts.append(res_right)
             if not parts:
-                return gpd.GeoDataFrame(geometry=[], crs=_POOL_ASSETS.crs)
+                return gpd.GeoDataFrame(geometry=[], crs=pool_assets.crs)
             out = pd.concat(parts, ignore_index=True)
             gc.collect()
-            return gpd.GeoDataFrame(out, geometry='geometry', crs=_POOL_ASSETS.crs)
+            return gpd.GeoDataFrame(out, geometry='geometry', crs=pool_assets.crs)
 
         if len(geocode_gdf) > _GEOCODE_SOFT_LIMIT:
             logs.append(f"Chunk {idx}: geocode subset size {len(geocode_gdf)} > {_GEOCODE_SOFT_LIMIT}; splitting.")
@@ -1957,10 +1962,10 @@ def _intersection_worker(args):
             if res_right is not None and not res_right.empty:
                 parts.append(res_right)
             if not parts:
-                return gpd.GeoDataFrame(geometry=[], crs=_POOL_ASSETS.crs)
+                return gpd.GeoDataFrame(geometry=[], crs=pool_assets.crs)
             out = pd.concat(parts, ignore_index=True)
             gc.collect()
-            return gpd.GeoDataFrame(out, geometry='geometry', crs=_POOL_ASSETS.crs)
+            return gpd.GeoDataFrame(out, geometry='geometry', crs=pool_assets.crs)
 
         results_list = []
         for gt in _POOL_TYPES:
@@ -2013,10 +2018,10 @@ def _intersection_worker(args):
                     raise
 
         if not results_list:
-            return gpd.GeoDataFrame(geometry=[], crs=_POOL_ASSETS.crs)
+            return gpd.GeoDataFrame(geometry=[], crs=pool_assets.crs)
         combined = pd.concat(results_list, ignore_index=True)
         gc.collect()
-        return gpd.GeoDataFrame(combined, geometry='geometry', crs=_POOL_ASSETS.crs)
+        return gpd.GeoDataFrame(combined, geometry='geometry', crs=pool_assets.crs)
 
     try:
         final_gdf = join_geocode_assets(geocode_chunk)
@@ -2238,13 +2243,20 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
             assets = assets.merge(groups[keep], left_on='ref_asset_group', right_on='id', how='left')
 
     est_worker_gb, est_data_gb = _estimate_worker_memory_gb(assets, geocodes, cfg)
-    effective_worker_gb = max(0.5, approx_gb_per_worker)
-    if est_worker_gb:
-        effective_worker_gb = max(effective_worker_gb, est_worker_gb)
-        try:
-            log_to_gui(log_widget, f"Memory estimate: data ~{est_data_gb:.2f} GB; using ~{effective_worker_gb:.2f} GB/worker cap.")
-        except Exception:
-            pass
+    # Intersect ships per-chunk asset SUBSETS to workers (see intersect_assets_geocodes),
+    # so a worker holds only its chunk's assets (~0.27 GB measured on basic_mosaic), NOT the
+    # full ~5.76 GB layer. Size workers from a bounded per-chunk estimate, decoupled from the
+    # full-data estimate (est_worker_gb ~8 GB) that otherwise caps to ~3 workers. Conservative
+    # default 1.5 GB ≈ 5x the observed peak; raise via intersect_prefilter_worker_gb if a
+    # denser project OOMs. See learning.md "intersect per-worker memory".
+    prefilter_worker_gb = cfg_get_float(cfg, "intersect_prefilter_worker_gb", 1.5)
+    effective_worker_gb = max(0.5, prefilter_worker_gb)
+    try:
+        log_to_gui(log_widget, f"Memory estimate: data ~{(est_data_gb or 0):.2f} GB; pre-filter "
+                               f"per-worker ~{effective_worker_gb:.2f} GB/worker "
+                               f"(full-broadcast would be ~{(est_worker_gb or 0):.2f} GB).")
+    except Exception:
+        pass
 
     update_progress(20)
     _ = assets.sindex; _ = geocodes.sindex
@@ -4766,10 +4778,28 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                 force=False,
             )
         except Exception: pass
-    files = []; written = 0; error_msg = None; iterable = ((i, ch) for i, ch in enumerate(chunks, start=1))
+    # Parent-side per-chunk asset pre-filter: ship each worker only the assets whose
+    # bbox touches its chunk (the same sindex query the worker used to run on the full
+    # broadcast layer), so workers no longer each hold the ~5.76 GB asset_df. Boundary-
+    # spanning assets are included in every chunk their bbox touches; each geocode lives
+    # in exactly one chunk, so every geocode×asset pair is still computed exactly once
+    # → identical output, far lower per-worker RSS. Subsets are built lazily as tasks are
+    # pulled, so parent memory stays bounded. See learning.md "intersect per-worker memory".
+    _asx = asset_data.sindex
+    def _chunk_tasks():
+        for i, ch in enumerate(chunks, start=1):
+            try:
+                cand = list(_asx.intersection(tuple(ch.total_bounds)))
+                sub = asset_data.iloc[cand] if cand else asset_data.iloc[:0]
+            except Exception:
+                sub = asset_data
+            yield (i, ch, sub)
+    files = []; written = 0; error_msg = None
+    iterable = _chunk_tasks()
     if _mp_allowed() and max_workers > 1:
         ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(processes=max_workers, initializer=_intersect_pool_init, initargs=(asset_data, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
+        # asset_df=None: workers receive their subset per task, not the full layer.
+        with ctx.Pool(processes=max_workers, initializer=_intersect_pool_init, initargs=(None, geom_types, str(tmp_parts), asset_soft_limit, geocode_soft_limit)) as pool:
             panic_state["pool"] = pool
             try:
                 for (idx, nrows, paths, err, logs) in pool.imap_unordered(_intersection_worker, iterable):
