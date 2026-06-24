@@ -127,9 +127,9 @@ except Exception:
 # -----------------------------------------------------------------------------
 
 try:
-    import fiona
+    import pyogrio
 except Exception:
-    fiona = None
+    pyogrio = None
 
 # Optional: make_valid (Shapely >=2)
 try:
@@ -674,11 +674,11 @@ def import_geocodes_from_folder(input_folder: Path, working_epsg: int) -> tuple[
             log_to_gui(f"Geocodes: processing {fp.name} ({i}/{max(1, len(files))})")
 
         if fp.suffix.lower() == ".gpkg":
-            if fiona is None:
-                log_to_gui("Cannot list layers: fiona not available. Install fiona to import .gpkg.", "ERROR")
+            if pyogrio is None:
+                log_to_gui("Cannot list layers: pyogrio not available. Install pyogrio to import .gpkg.", "ERROR")
                 continue
             try:
-                for layer in fiona.listlayers(fp):
+                for layer in (str(r[0]) for r in pyogrio.list_layers(fp)):
                     gdf = _read_and_reproject_vector(fp, layer, working_epsg)
                     _process_layer(gdf, layer)
             except Exception as e:

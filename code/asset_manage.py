@@ -16,7 +16,7 @@ import time
 import warnings
 from pathlib import Path
 
-import fiona
+import pyogrio
 import geopandas as gpd
 import pandas as pd
 from shapely import wkb as _shp_wkb
@@ -1031,7 +1031,7 @@ class AssetManagerWindow(QMainWindow):
             self._update_progress(5 + 85 * (i / max(1, len(files))))
             if fp.suffix.lower() == ".gpkg":
                 try:
-                    layers = fiona.listlayers(fp)
+                    layers = [str(r[0]) for r in pyogrio.list_layers(fp)]
                 except Exception:
                     layers = []
                 for layer in layers:

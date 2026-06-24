@@ -5,7 +5,7 @@ Raster MBTiles generator (PNG) from tbl_flat.parquet — no GDAL/Tippecanoe.
 Per group in name_gis_geocodegroup, produces seven MBTiles:
     <group>_sensitivity_max.mbtiles    (colors from config.ini [A]..[E], uses sensitivity_code_max with numeric fallback)
   <group>_groupstotal.mbtiles        (light->dark blue, linear ramp of asset_groups_total per group)
-  <group>_assetstotal.mbtiles        (light->dark blue, linear ramp of assets_overlap_total per group)
+  <group>_assetstotal.mbtiles        (light->dark blue, log ramp of assets_overlap_total per group)
   <group>_importance_max.mbtiles     (discrete green ramp for importance_max 1..5)
     <group>_index_owa.mbtiles          (1..100 gradient from the OWA index)
 
@@ -23,7 +23,7 @@ Usage examples:
 
 INDEX_GRADIENT_STEPS = 100  # number of discrete colors for 1..100 index layers
 
-import argparse, math, os, sqlite3, re, multiprocessing as mp, sys, io
+import argparse, json, math, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Iterable
 
@@ -265,12 +265,18 @@ def cert_rgba(p: Optional[float], alpha: float) -> Tuple[int, int, int, int]:
             return (r, g, b, a)
     return (0, 90, 50, a)
 
-def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.70) -> Tuple[int,int,int,int]:
-    """Linear light->dark blue; missing -> transparent."""
+def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.70,
+                   scale: str="linear") -> Tuple[int,int,int,int]:
+    """Light->dark blue with linear or log1p normalization; missing -> transparent."""
     if v is None or not np.isfinite(v):
         return (0, 0, 0, 0)
     if vmax <= vmin:
         t = 1.0
+    elif scale == "log1p":
+        lo = math.log1p(max(0.0, float(vmin)))
+        hi = math.log1p(max(0.0, float(vmax)))
+        cur = math.log1p(max(0.0, float(v)))
+        t = max(0.0, min(1.0, (cur - lo) / (hi - lo))) if hi > lo else 1.0
     else:
         t = max(0.0, min(1.0, (float(v) - vmin) / (vmax - vmin)))
     # light #DCEBFF (220,235,255) -> dark #08306B (8,48,107)
@@ -278,6 +284,45 @@ def blue_ramp_rgba(v: Optional[float], vmin: float, vmax: float, alpha: float=0.
     g = int(round(235 + t * (48  - 235)))
     b = int(round(255 + t * (107 - 255)))
     return (r, g, b, int(max(0.0, min(1.0, alpha))*255))
+
+
+def blue_ramp_legend(vmin: float, vmax: float, scale: str="linear", steps: int=5) -> list[dict]:
+    """Return raw-value/color stops matching ``blue_ramp_rgba`` for MBTiles metadata."""
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        return []
+    count = max(2, int(steps))
+    values = []
+    for i in range(count):
+        t = i / (count - 1)
+        if vmax <= vmin:
+            raw = float(vmax)
+        elif scale == "log1p":
+            lo = math.log1p(max(0.0, float(vmin)))
+            hi = math.log1p(max(0.0, float(vmax)))
+            raw = math.expm1(lo + t * (hi - lo))
+        else:
+            raw = float(vmin) + t * (float(vmax) - float(vmin))
+        value = int(round(raw))
+        if not values or value != values[-1]:
+            values.append(value)
+    out = []
+    for value in values:
+        rgba = blue_ramp_rgba(value, vmin, vmax, alpha=1.0, scale=scale)
+        out.append({"value": value, "color": "#%02x%02x%02x" % rgba[:3]})
+    return out
+
+
+def assetstotal_vmax(values) -> float:
+    """Ramp top for assets_overlap_total. The column is extreme right-skewed
+    (max can be ~10,000x p99), so a raw-max top squashes the bulk into one colour.
+    Cap at the 99th percentile; denser cells clamp to the darkest blue. Paired with
+    the log1p scale. See learning.md "assetstotal ramp skew"."""
+    arr = np.asarray(values, dtype="float64")
+    arr = arr[np.isfinite(arr)]
+    if not arr.size:
+        return 1.0
+    v = float(np.nanpercentile(arr, 99.0))
+    return v if np.isfinite(v) else 1.0
 
 def build_index_gradient_from_palette(
     palette: Dict[str, Tuple[int,int,int,int]],
@@ -448,7 +493,8 @@ def ring_lonlat_to_pixels(ring: Iterable[Tuple[float,float]], z: int, x: int, y:
     return out
 
 # ----------------------- MBTiles writer (single process) -----------------------
-def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int, bounds: Tuple[float,float,float,float]):
+def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int,
+             bounds: Tuple[float,float,float,float], extra_metadata: Optional[Dict[str, str]]=None):
     if dbpath.exists():
         dbpath.unlink()
     con = sqlite3.connect(str(dbpath))
@@ -472,6 +518,8 @@ def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int, bounds: Tuple[
         # Tiles are stored using the MBTiles default (TMS/Y origin at the south)
         "scheme": "tms"
     }
+    if extra_metadata:
+        md.update({str(k): str(v) for k, v in extra_metadata.items()})
     cur.executemany("INSERT INTO metadata (name, value) VALUES (?,?)", list(md.items()))
     con.commit()
     return con
@@ -479,10 +527,12 @@ def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int, bounds: Tuple[
 def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
     con = None
     try:
-        # First item must be ("__INIT__", name, minzoom, maxzoom, bounds)
-        tag, name, minz, maxz, bounds = in_q.get()
+        # First item is ("__INIT__", name, minzoom, maxzoom, bounds[, metadata]).
+        init = in_q.get()
+        tag, name, minz, maxz, bounds = init[:5]
+        extra_metadata = init[5] if len(init) > 5 else None
         assert tag == "__INIT__"
-        con = mbt_init(Path(dbpath), name, minz, maxz, bounds)
+        con = mbt_init(Path(dbpath), name, minz, maxz, bounds, extra_metadata)
         cur = con.cursor()
         batch = []
         BATCH_SIZE = 300
@@ -582,7 +632,8 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
                         v = numvals[i]
                     except Exception:
                         v = None
-                fill_rgba = blue_ramp_rgba(v, float(num_min), float(num_max), alpha=alpha)
+                scale = "log1p" if mode == "assetstotal" else "linear"
+                fill_rgba = blue_ramp_rgba(v, float(num_min), float(num_max), alpha=alpha, scale=scale)
             elif mode == "importance_max":
                 imp_pal = palette.get("importance_max_colors", {})
                 v = None
@@ -735,9 +786,9 @@ def run_one_layer(group_name: str,
         mbt_name = f"{group_name}_assetstotal"
         out_path = out_dir / f"{mbt_name}.mbtiles"
         vmin = float(np.nanmin(numvals.values)) if len(numvals) else 0.0
-        vmax = float(np.nanmax(numvals.values)) if len(numvals) else 1.0
+        vmax = assetstotal_vmax(numvals.values)   # p99 cap for skew; see helper
         if not np.isfinite(vmin): vmin = 0.0
-        if not np.isfinite(vmax): vmax = 1.0
+        if not np.isfinite(vmax) or vmax <= vmin: vmax = vmin + 1.0
     elif layer_mode == "importance_max":
         numvals = pd.to_numeric(gdf.get("importance_max", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
         sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
@@ -763,7 +814,16 @@ def run_one_layer(group_name: str,
     done_q = mp.Queue()
     wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
     wp.start()
-    in_q.put(("__INIT__", mbt_name, int(minzoom), int(maxzoom), bounds))
+    scale = "log1p" if layer_mode == "assetstotal" else "linear"
+    metadata = None
+    if layer_mode in ("groupstotal", "assetstotal"):
+        metadata = {
+            "mesa_scale": scale,
+            "mesa_value_min": vmin,
+            "mesa_value_max": vmax,
+            "mesa_legend": json.dumps(blue_ramp_legend(vmin, vmax, scale=scale), separators=(",", ":")),
+        }
+    in_q.put(("__INIT__", mbt_name, int(minzoom), int(maxzoom), bounds, metadata))
 
     # Use pre-calculated tasks
     total_tiles = len(tasks)
@@ -1029,13 +1089,13 @@ def main():
             vals_by_mode["assetstotal"] = vals
             try:
                 vmin = float(np.nanmin(s.values)) if len(s) else 0.0
-                vmax = float(np.nanmax(s.values)) if len(s) else 1.0
+                vmax = assetstotal_vmax(s.values)   # p99 cap for skew; see helper
             except Exception:
                 vmin, vmax = 0.0, 1.0
             if not np.isfinite(vmin):
                 vmin = 0.0
-            if not np.isfinite(vmax):
-                vmax = 1.0
+            if not np.isfinite(vmax) or vmax <= vmin:
+                vmax = vmin + 1.0
             group_minmax["assetstotal"] = (vmin, vmax)
 
         if importance_max_available:
@@ -1105,7 +1165,19 @@ def main():
                 done_q = mp.Queue()
                 wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
                 wp.start()
-                in_q.put(("__INIT__", mbt_name, int(args.minzoom), int(args.maxzoom), bounds_c))
+                metadata = None
+                if mode in ("groupstotal", "assetstotal"):
+                    scale = "log1p" if mode == "assetstotal" else "linear"
+                    metadata = {
+                        "mesa_scale": scale,
+                        "mesa_value_min": num_min,
+                        "mesa_value_max": num_max,
+                        "mesa_legend": json.dumps(
+                            blue_ramp_legend(num_min, num_max, scale=scale),
+                            separators=(",", ":"),
+                        ),
+                    }
+                in_q.put(("__INIT__", mbt_name, int(args.minzoom), int(args.maxzoom), bounds_c, metadata))
 
                 layer_tasks = [(z, x, y, idx, mode, num_min, num_max) for (z, x, y, idx) in tasks]
                 total_tiles = len(layer_tasks)

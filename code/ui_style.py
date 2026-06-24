@@ -34,6 +34,10 @@ QTabWidget::pane {
     border-top: none;
     background: #f3ecdf;
 }
+/* macOS centers QTabBar tabs by default; force left alignment to match Windows. */
+QTabWidget::tab-bar {
+    alignment: left;
+}
 QTabBar {
     background: #e6dac2;
 }

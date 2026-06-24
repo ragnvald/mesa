@@ -93,14 +93,21 @@ def _certainty_colour(p) -> str:
 
 
 def _mbtiles_meta(path: Path) -> dict:
-    out = {"bounds": None, "minzoom": None, "maxzoom": None, "format": "image/png"}
+    out = {"bounds": None, "minzoom": None, "maxzoom": None, "format": "image/png",
+           "scale": None, "value_min": None, "value_max": None, "legend": []}
     try:
         con = sqlite3.connect(f"file:{path.resolve()}?mode=ro&immutable=1", uri=True, timeout=5.0)
         try:
-            for k in ("bounds", "minzoom", "maxzoom", "format"):
+            meta_keys = {
+                "bounds": "bounds", "minzoom": "minzoom", "maxzoom": "maxzoom",
+                "format": "format", "mesa_scale": "scale",
+                "mesa_value_min": "value_min", "mesa_value_max": "value_max",
+                "mesa_legend": "legend",
+            }
+            for k, out_key in meta_keys.items():
                 r = con.execute("SELECT value FROM metadata WHERE name=?", (k,)).fetchone()
                 if r and r[0] is not None:
-                    out[k] = r[0]
+                    out[out_key] = r[0]
         finally:
             con.close()
     except Exception:
@@ -115,6 +122,17 @@ def _mbtiles_meta(path: Path) -> dict:
             out[k] = int(out[k]) if out[k] is not None else None
         except Exception:
             out[k] = None
+    for k in ("value_min", "value_max"):
+        try:
+            out[k] = float(out[k]) if out[k] is not None else None
+        except Exception:
+            out[k] = None
+    if out["legend"]:
+        try:
+            parsed = json.loads(out["legend"])
+            out["legend"] = parsed if isinstance(parsed, list) else []
+        except Exception:
+            out["legend"] = []
     if not str(out["format"]).startswith("image/"):
         out["format"] = "image/png"
     return out
@@ -380,6 +398,8 @@ class _Api:
                     groups[grp]["kinds"][suf] = {
                         "name": stem, "label": label, "bounds": meta["bounds"],
                         "minzoom": meta["minzoom"], "maxzoom": meta["maxzoom"],
+                        "scale": meta["scale"], "value_min": meta["value_min"],
+                        "value_max": meta["value_max"], "legend": meta["legend"],
                     }
                     break
         return {"groups": groups}

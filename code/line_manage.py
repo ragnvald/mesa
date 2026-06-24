@@ -79,9 +79,9 @@ from shapely.ops import unary_union
 from shapely import wkb
 
 try:
-  import fiona
+  import pyogrio
 except Exception:
-  fiona = None
+  pyogrio = None
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -404,10 +404,10 @@ def import_lines_from_folder(
 
     for fp in files:
         if fp.suffix.lower() == ".gpkg":
-            if fiona is None:
+            if pyogrio is None:
                 continue
             try:
-                for layer in fiona.listlayers(fp):
+                for layer in (str(r[0]) for r in pyogrio.list_layers(fp)):
                     gdf = _read_and_reproject_vector(fp, layer, working_epsg)
                     _process_layer(gdf, layer)
             except Exception:
