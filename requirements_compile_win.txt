@@ -1,0 +1,25 @@
+# MESA — Windows compile/build environment, Python 3.14 (win_amd64).
+# Used by devtools/setup_venvs.bat (.venv_compile) + devtools/build_all.py.
+#
+# Installs the validated 3.14 runtime set, then the PyInstaller build toolchain
+# and the setuptools/pkg_resources shims that frozen builds load at runtime.
+#
+# fiona is intentionally absent (no cp314 wheel) — pyogrio bundles GDAL and is
+# what build_all.py now --collect-all's. See requirements_py314_win.txt.
+
+-r requirements_py314_win.txt
+
+# Build toolchain. Left unpinned so pip resolves the cp314-compatible release;
+# pin once a full build_all.py run on 3.14 confirms a working version.
+pyinstaller
+pyinstaller-hooks-contrib
+
+# setuptools/pkg_resources runtime deps needed inside frozen builds (pure-python,
+# version-flexible). Mirror build_all.py PKG_RESOURCES_HIDDEN_IMPORTS.
+jaraco.text
+jaraco.functools
+jaraco.context
+more-itertools
+platformdirs
+autocommand
+backports.tarfile

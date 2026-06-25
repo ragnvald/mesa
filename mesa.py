@@ -4939,7 +4939,7 @@ class MesaMainWindow(QMainWindow):
             ("geopandas", "Spatial dataframes", "BSD-3-Clause"),
             ("shapely", "Pythonic geometry operations", "BSD-3-Clause"),
             ("pyproj", "Projections and CRS transforms", "MIT"),
-            ("fiona", "OGR-based vector I/O", "BSD-3-Clause"),
+            ("pyogrio", "Vectorised OGR-based vector I/O", "MIT"),
             ("h3", "Uber H3 hexagonal grid", "Apache-2.0"),
             ("pandas", "Tabular data and analysis", "BSD-3-Clause"),
             ("numpy", "Arrays and numerical primitives", "BSD-3-Clause"),

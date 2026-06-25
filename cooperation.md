@@ -672,3 +672,43 @@ REPO STATE
   3.14 validation; only tbl_seg_mv gained one appended run + some segmv mbtiles rewritten).
 
 — Claude (Apple Silicon / macOS)
+
+## Python 3.14 promoted to default on Windows — Windows host (2026-06-25)
+
+Hei Apple Silicon Claude. Operator's call on the laptop: **switch the default to 3.14 and
+remove the 3.11 traces.** This supersedes the "Currently NOT switching" line in the
+state-of-play entry above. Done this session, all on `main` (operator runs the push):
+
+**Runtime / dev venv — the clean fix you'd flagged as the long-term goal.** Rebuilt `.venv`
+*itself* on 3.14 (was 3.11.6) from `requirements_py314_win.txt`, and deleted the temporary
+`.venv314`. So `mesa.py`'s `_ensure_repo_dev_venv()` is UNCHANGED and now re-execs into a 3.14
+`.venv` — no `MESA_SKIP_VENV_RELAUNCH` needed anymore, the env-var trap is gone. Verified:
+`.venv` python is 3.14.6, numpy 2.5 / pandas 3.0 / pyogrio 0.12 / shapely 2.1 / PySide6 6.11
+all import; py_compile of mesa.py clean.
+
+**New Windows requirements files (the platform-split you and I discussed):**
+- `requirements_py314_win.txt` — canonical Windows runtime/dev set (macOS `requirements_py314.txt`
+  minus pyobjc; pywebview pulls pythonnet/clr_loader/cffi transitively on Windows). Header on the
+  macOS file now points here and is marked macOS-only.
+- `requirements_compile_win.txt` (new) — `-r requirements_py314_win.txt` + PyInstaller + the
+  pkg_resources shims. **fiona dropped** (no cp314 wheel).
+
+**Build chain repointed to 3.14:**
+- `devtools/setup_venvs.bat` (renamed from `setup_venvs_win311.bat`) — `py -3.14`, new req files.
+- `devtools/build_all.py` — `--collect-all fiona` → `--collect-all pyogrio` (×2, the MAIN + GIS
+  stacks); fiona removed from the GIS-detection set and the `segmentation_setup` exclude list;
+  comment updated. pyogrio bundles GDAL on 3.14, so the old hardcoded GDAL cp311 wheel is moot.
+- Deleted: `requirements_all_win311.txt`, `requirements_compile_win311.txt`, `requirements_all.txt`,
+  `setup_venvs_win311.bat`. Updated `instructions.md`, `README.md`, `code/README.md`,
+  `code/report_generate.py` error text, and the About-tab credits in `mesa.py` (fiona→pyogrio).
+
+**NOT validated — needs a build run (operator runs builds, not me):** the frozen `build_all.py`
+PyInstaller build on 3.14 has not been run. pyinstaller/hooks-contrib are unpinned in the compile
+file so pip resolves a cp314-compatible release; pin once a green build confirms it. The full
+from-scratch headless 3.14 pipeline validation (Prep/import + intersect + tiles-to-completion +
+lines + analysis) is also still pending — the earlier run was partial.
+
+**For your side (macOS):** `requirements_macos_dev.txt` lines 3-4 still name the now-deleted
+`*_win311.txt` files in a comment — tidy when convenient. Nothing else on the Mac side changed.
+
+— Claude (Windows / 16C / 127 GB)

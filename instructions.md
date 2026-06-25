@@ -38,12 +38,12 @@ Use this document as the first stop before editing the `mesa` repository. Update
 | `system_resources/` | Icons and HTML assets bundled with the executable. |
 
 ## 3. Environment & tooling
-1. Use Python 3.11+ (matches the packaged interpreter bundled in releases).
+1. Use Python 3.14 (matches the packaged interpreter bundled in releases).
 2. Use dedicated Windows venvs:
-   - Development: `.venv` with `requirements_all_win311.txt`
-   - Compilation: `.venv_compile` with `requirements_compile_win311.txt`
-3. To bootstrap both on Windows, run: `devtools\setup_venvs_win311.bat`
-4. `requirements_all.txt` is a broader/legacy superset; prefer `requirements_all_win311.txt` for day-to-day Windows development.
+   - Development: `.venv` with `requirements_py314_win.txt`
+   - Compilation: `.venv_compile` with `requirements_compile_win.txt`
+3. To bootstrap both on Windows, run: `devtools\setup_venvs.bat`
+4. `requirements_py314_win.txt` is the canonical Windows runtime/development set; the compile set pulls it in via `-r`.
 5. Launch the UI with development venv Python: `python mesa.py`.
 6. Keep ttkbootstrap as the primary UI framework; discuss before adding new GUI toolkits.
 

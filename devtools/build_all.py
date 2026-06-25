@@ -358,7 +358,7 @@ COLLECT_PYSIDE6 = [
 COLLECT_GIS_STACK = [
     "--collect-all", "shapely",
     "--collect-all", "pyproj",
-    "--collect-all", "fiona",
+    "--collect-all", "pyogrio",
     "--collect-submodules", "geopandas",
 ]
 
@@ -440,7 +440,7 @@ MAIN_COLLECTS = [
     # Full GIS stack - required by the 7 helpers that now run in-process inside mesa.exe
     "--collect-all", "shapely",
     "--collect-all", "pyproj",
-    "--collect-all", "fiona",
+    "--collect-all", "pyogrio",
     "--collect-submodules", "geopandas",
     # Chart rendering (atlas_manage, analysis_present, report_generate)
     "--collect-all", "matplotlib",
@@ -560,7 +560,7 @@ def helper_collects_for(basename: str) -> list[str]:
     }
     uses_gis = (
         basename not in never_gis
-        and _imports_any_module(src, {"geopandas", "shapely", "fiona", "pyproj"})
+        and _imports_any_module(src, {"geopandas", "shapely", "pyogrio", "pyproj"})
     )
 
     # Some helpers depend on pywebview for their main UI. Keep these explicit so
@@ -667,7 +667,7 @@ def helper_collects_for(basename: str) -> list[str]:
         # spawned process. ~250 MB (GIS) + clustering trimmed.
         "segmentation_setup": [
             "sklearn", "scipy", "libpysal", "spopt", "hdbscan",
-            "geopandas", "fiona", "shapely", "pyproj", "pyogrio",
+            "geopandas", "shapely", "pyproj", "pyogrio",
         ],
     }
     for _mod in helper_exclude_modules.get(basename, []):
@@ -777,7 +777,7 @@ def build_main() -> None:
     start = time.perf_counter()
     log("[MAIN] Building 'mesa'...")
     # Keep the main app lean; UI launcher only needs PySide6, pandas, and pyarrow.
-    # GIS stack (geopandas/shapely/pyproj/fiona) is lazy-imported in mesa.py only when
+    # GIS stack (geopandas/shapely/pyproj/pyogrio) is lazy-imported in mesa.py only when
     # status metrics need geometry calculations, and will be loaded from system Python.
     data_args: list[str] = []
 

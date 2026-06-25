@@ -47,7 +47,7 @@ All helpers can be opened directly from Windows Explorer, but most users launch 
 Throughput depends heavily on the input data being handled. Dense geocode catalogs with many objects increase CPU, RAM, and disk requirements during processing (`data_process.exe`) and when exporting atlases or raster tiles. Using SSD storage and keeping ample free space helps the compiled tools maintain smooth minimap updates.
 
 ## Under the hood (for the curious)
-Behind each `.exe` sits a Python 3.11 script (for example `mesa.py`, `processing_pipeline_run.py`, `processing_setup.py`). PyInstaller wraps those scripts with all third-party libraries so end users never have to install Python themselves. Power users who want to automate or customize the workflow can open the matching `.py` files and run them directly, but compiled executables remain the primary delivery format.
+Behind each `.exe` sits a Python 3.14 script (for example `mesa.py`, `processing_pipeline_run.py`, `processing_setup.py`). PyInstaller wraps those scripts with all third-party libraries so end users never have to install Python themselves. Power users who want to automate or customize the workflow can open the matching `.py` files and run them directly, but compiled executables remain the primary delivery format.
 
 ## Additional resources
 - Download portal: https://zenodo.org/communities/mesatool/

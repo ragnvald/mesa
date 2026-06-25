@@ -154,15 +154,14 @@ The project is Windows-first.
 
 Recommended setup:
 
-1. Create the virtual environments with [setup_venvs_win311.bat](devtools/setup_venvs_win311.bat).
+1. Create the virtual environments with [setup_venvs.bat](devtools/setup_venvs.bat) (Python 3.14).
 2. Use `.venv` for normal development.
 3. Use `.venv_compile` for packaging work.
 4. Run the launcher with `python mesa.py`.
 
 Important requirements files:
-- [requirements_all_win311.txt](requirements_all_win311.txt): primary Windows development environment
-- [requirements_compile_win311.txt](requirements_compile_win311.txt): compile/build environment
-- [requirements_all.txt](requirements_all.txt): broader legacy superset
+- [requirements_py314_win.txt](requirements_py314_win.txt): primary Windows runtime/development environment (Python 3.14)
+- [requirements_compile_win.txt](requirements_compile_win.txt): compile/build environment (runtime set + PyInstaller)
 
 ## Build Model
 

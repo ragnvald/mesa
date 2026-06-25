@@ -1,6 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
+REM MESA Windows venv bootstrap — Python 3.14.
+REM Creates/updates the development venv (.venv) and the compile venv
+REM (.venv_compile) from the 3.14 requirements files.
+
 set "SCRIPT_PATH=%~dp0"
 set "SCRIPT_PATH=%SCRIPT_PATH:~0,-1%"
 set "REPO_ROOT=%SCRIPT_PATH%\.."
@@ -8,8 +12,8 @@ set "REPO_ROOT=%SCRIPT_PATH%\.."
 set "DEV_VENV=%REPO_ROOT%\.venv"
 set "COMPILE_VENV=%REPO_ROOT%\.venv_compile"
 
-set "DEV_REQ=%REPO_ROOT%\requirements_all_win311.txt"
-set "COMPILE_REQ=%REPO_ROOT%\requirements_compile_win311.txt"
+set "DEV_REQ=%REPO_ROOT%\requirements_py314_win.txt"
+set "COMPILE_REQ=%REPO_ROOT%\requirements_compile_win.txt"
 
 call :setup_one "%DEV_VENV%" "%DEV_REQ%" "development"
 if errorlevel 1 (
@@ -49,7 +53,7 @@ if exist "%TARGET_VENV%\Scripts\python.exe" (
   echo [MESA] Reusing %LABEL% venv: %TARGET_VENV%
 ) else (
   echo [MESA] Creating %LABEL% venv: %TARGET_VENV%
-  py -3.11 -m venv "%TARGET_VENV%"
+  py -3.14 -m venv "%TARGET_VENV%"
   if errorlevel 1 (
     echo [ERROR] Failed to create %LABEL% venv: %TARGET_VENV%
     exit /b 1

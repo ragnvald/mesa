@@ -1,15 +1,15 @@
-# MESA — Python 3.14 environment, macOS/arm64 (validated 2026-06-24).
+# MESA — Python 3.14 environment, Windows (win_amd64).
 #
-# This file is macOS-specific: it pins the pyobjc-* webview backend, which
-# does NOT install on Windows/Linux. On Windows use requirements_py314_win.txt
-# instead (same versions, pyobjc dropped — pywebview pulls EdgeChromium there).
+# Windows counterpart to requirements_py314.txt (which is macOS/arm64).
+# Same pinned versions; the only difference is the GUI webview backend:
+#   - macOS uses pyobjc-* (Cocoa/WebKit)  -> omitted here
+#   - Windows uses EdgeChromium, which pywebview pulls in transitively
+#     (pythonnet + clr_loader + cffi); no explicit pin needed.
+# All packages below ship cp314 win_amd64 wheels on PyPI. Setup:
 #
-# Exact pinned set from the .venv314 that ran a full basic_mosaic pipeline on
-# CPython 3.14 (macOS arm64). Setup on a fresh Mac:
-#
-#   python3.14 -m venv .venv314
-#   .venv314/bin/python -m pip install -U pip
-#   .venv314/bin/python -m pip install -r requirements_py314.txt
+#   py -V:3.14 -m venv .venv314
+#   .venv314\Scripts\python -m pip install -U pip
+#   .venv314\Scripts\python -m pip install -r requirements_py314_win.txt
 #
 # Notes:
 # - pyogrio replaces fiona (fiona has no cp314 wheel; pyogrio bundles GDAL and does).
@@ -47,12 +47,6 @@ pillow==12.2.0
 proxy_tools==0.1.0
 psutil==7.2.2
 pyarrow==24.0.0
-pyobjc-core==12.2.1
-pyobjc-framework-Cocoa==12.2.1
-pyobjc-framework-Quartz==12.2.1
-pyobjc-framework-Security==12.2.1
-pyobjc-framework-UniformTypeIdentifiers==12.2.1
-pyobjc-framework-WebKit==12.2.1
 pyogrio==0.12.1
 pyparsing==3.3.2
 pyproj==3.7.2
