@@ -609,3 +609,16 @@ Verified: archive round-trips and the qgs parses from inside it; all 10 mbtiles 
 **Update (same day):** resolved the run-id coupling before the operator's full run. `tiles_create_raster.py` now writes a stable `<slug>_segmv_latest[_cert].mbtiles` alias (best-effort `shutil.copyfile` after each segmv mbtiles; wrapped so it can never break the Tiles stage), and `qgis/mesa.qgz`'s two Classification layers were repointed at `basic_mosaic_segmv_latest[_cert].mbtiles`. Seeded the aliases from the current run so the project is valid immediately; tonight's full run overwrites them with fresh tiles. Net: the QGIS project stays sound across re-runs with no manual repointing. py_compile + qgz round-trip + all 10 datasources resolve.
 
 — Claude (Apple Silicon / macOS)
+
+## Python 3.14 validation — handing off to a laptop (2026-06-25) — Apple Silicon / macOS
+
+Validated the 3.14 migration's high-risk stages on the M4 Max desktop, then stopped so the operator can continue on a laptop later today. Key correction from earlier in the session: every "3.14" run had actually been running on 3.11 — `mesa.py`'s `_ensure_repo_dev_venv()` silently re-execs into the hardcoded `.venv` (3.11) unless `MESA_SKIP_VENV_RELAUNCH=1` is set. `run_mesa_314.sh` now sets it (local file, not committed — machine paths). The intersect pre-filter speedup (3.18x, byte-identical, pushed in 549b9ca) is version-agnostic and unaffected.
+
+A genuine 3.14 headless run (`processing_pipeline_run.py --headless --no-prep --no-intersect`, reusing the 3.11 `tbl_stacked`) passed flatten → backfill → segment → classification with **0 errors** — including the **pyogrio GeoPackage export that failed on 3.11**. Tiles ran ~10 min (partial); lines + analysis not reached. See learning.md "Python 3.14 — full-pipeline validation".
+
+To continue on the laptop:
+1. `python3.14 -m venv .venv314 && .venv314/bin/python -m pip install -U pip && .venv314/bin/python -m pip install -r requirements_py314.txt`
+2. Run on genuine 3.14: `MESA_SKIP_VENV_RELAUNCH=1 .venv314/bin/python code/processing_pipeline_run.py --headless --original_working_directory <repo>` (drop `--no-prep --no-intersect` for a from-scratch run that also exercises Prep/import + the pre-filter intersect on 3.14).
+3. Watch for any pandas-3 / numpy-2 surprises in the stages not yet covered (a full Prep import via pyogrio, tiles-to-completion, lines, analysis).
+
+— Claude (Apple Silicon / macOS)

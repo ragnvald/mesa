@@ -771,3 +771,14 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - Why: `pool_assets` is already scoped to the chunk bbox by the parent, so the worker's first `pool_assets.sindex.intersection(chunk.total_bounds)` rebuilt an index only to re-select everything. For non-splitting chunks (the common ~420-geocode case) this skips the entire per-chunk sindex build+query.
 - How to apply: proven set-identical to the full-broadcast path across 8 real chunks incl. a dense 323,140-row one (row counts + content match exactly). The gain is small (the mid-run "~30% per-worker" was a dense-band measurement artifact; aggregate was ~5%) but free and correct.
 - Non-regression guarantee: the 2-tuple fallback (full broadcast) still runs the sindex query; only the prefiltered top-level skips it.
+
+## Python 3.14 — full-pipeline validation (partial, all-green) (2026-06-25)
+
+- Rule: 3.14 is validated for the high-risk stages; run it via `MESA_SKIP_VENV_RELAUNCH=1` (else mesa.py re-execs into the 3.11 `.venv`). Not switching the default to 3.14 yet (operator's call).
+- Why / measured: a genuine 3.14 headless run (`.venv314`: numpy 2.5 / pandas 3.0 / pyogrio 0.12 / sklearn 1.9), reusing the 3.11-built `tbl_stacked` (`--no-prep --no-intersect`). Results, all 0 errors:
+  - **Flatten** ran its per-partition pandas-3 groupby/merge across all 1387 partitions; the RAM-throttle safety engaged correctly (7→3→1 workers as vm crossed 60%). (Final `tbl_flat` write was skipped as already-current vs the unchanged tbl_stacked, but the per-partition compute — the pandas-3 risk — executed.)
+  - **Backfill + Segment**: clean.
+  - **Classification (segmv)**: sklearn GMM (k=6..10 by BIC), pyarrow writes (appended 3,383,953 cells — matches), and CRUCIALLY the **pyogrio GeoPackage export** (`export_gpkg → gdf.to_file(driver="GPKG")`) — the exact line that threw a multi-frame Traceback on 3.11's broken pyogrio — **wrote cleanly, no Traceback**. This confirms the launcher fix → genuine 3.14 → working pyogrio resolves the segmv failure.
+  - **Tiles**: started clean, built segmv rasters across groups (basic_mosaic + H3_* + QDGC_*) for ~10 min before the operator stopped the run.
+- How to apply: **lines + analysis were not reached** (stopped during tiles) — low risk but untested; tiles only partially ran. To finish the validation: launch on 3.14 with `MESA_SKIP_VENV_RELAUNCH=1` and let tiles/lines/analysis complete. The migration's genuine unknowns (pandas-3 flatten CoW, classification, pyogrio GPKG export) are now PASSED.
+- Non-regression: validation reused the 3.11 `tbl_stacked`; only `tbl_seg_mv` (one appended run) and some segmv mbtiles were rewritten. `tbl_flat` and `tbl_stacked` untouched — the good 3.11 output is intact.
