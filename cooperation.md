@@ -622,3 +622,53 @@ To continue on the laptop:
 3. Watch for any pandas-3 / numpy-2 surprises in the stages not yet covered (a full Prep import via pyogrio, tiles-to-completion, lines, analysis).
 
 — Claude (Apple Silicon / macOS)
+
+## SESSION STATE-OF-PLAY — read this first on the laptop pickup (2026-06-25)
+
+If the operator asks "where do we continue?", read this entry + the latest learning.md
+entries and walk them through it. Full picture of the 2026-06-23..25 session:
+
+WHAT WE DID
+1. Intersect ~3.2x faster (the big win). Parent-side per-chunk asset pre-filter: each
+   worker receives only its chunk's asset subset, not the full ~5.76 GB layer. Output
+   byte-identical (91,083,233 rows / 1387 parts, exact match), memory-safe, validated at
+   full scale (3.02 h vs 9.6 h). + a sindex-rebuild tidy. Commits b71dd13, 549b9ca.
+   learning.md: "intersect per-worker memory", "validation COMPLETE", "sindex-rebuild".
+2. assetstotal map fix — was rendering as "one value" (extreme right-skew: p99=48 vs
+   max=460,829). Now p99-capped + log1p ramp + legend metadata. RE-RUN TILES to see it.
+   Commit 9496567. learning.md: "assetstotal ramp skew".
+3. Left-aligned tabs in the GUI (ui_style). Commit 9496567.
+4. Python 3.14 migration — requirements_py314.txt (29d6215), fiona->pyogrio (no cp314
+   fiona wheel), launcher fix. PARTIALLY validated: flatten (pandas-3) / backfill /
+   segment / classification + the pyogrio GeoPackage export all passed on genuine 3.14
+   with 0 errors; tiles ran ~10 min (partial); lines + analysis + a from-scratch Prep
+   import NOT yet tested. learning.md: "Python 3.14 — full-pipeline validation".
+
+CRITICAL GOTCHA
+mesa.py's _ensure_repo_dev_venv() re-execs into the hardcoded .venv (3.11) unless
+MESA_SKIP_VENV_RELAUNCH=1 is set. Every "3.14" run before that fix was actually 3.11.
+Always ps-check the interpreter, don't trust the launch command.
+
+WHERE WE CONTINUE (laptop)
+- Set up: python3.14 -m venv .venv314 && .venv314/bin/python -m pip install -U pip &&
+  .venv314/bin/python -m pip install -r requirements_py314.txt
+- Finish the 3.14 validation with a FROM-SCRATCH run (no --no-prep/--no-intersect) so it
+  also covers Prep/import-on-3.14, the pre-filter intersect on 3.14, full tiles, lines,
+  analysis: MESA_SKIP_VENV_RELAUNCH=1 .venv314/bin/python code/processing_pipeline_run.py
+  --headless --original_working_directory <repo>
+- Then decide whether to promote 3.14 to default. Currently NOT switching.
+
+OPEN FOLLOW-UPS (parked)
+- config.ini -> project/host settings store (the scoped refactor: tuning shouldn't live in
+  version control; seed from config.ini at init, carry via Data Management backups).
+- Long-term clean 3.14: rebuild .venv itself on 3.14 so no env var is needed.
+- Dependabot vulns (14) — low priority (local-only, air-gapped app); GDAL/numpy oldest.
+
+REPO STATE
+- origin/main = (this commit). Local-only, intentionally NOT committed: config.ini (host
+  tuning: max_workers=12, intersect_prefilter_worker_gb, segmv k_range/min_area),
+  input/geocode/readme.txt (CRLF churn), run_mesa_314.sh (machine paths; in the worktree).
+- The good 3.11 pipeline output is intact (tbl_flat/tbl_stacked untouched by the partial
+  3.14 validation; only tbl_seg_mv gained one appended run + some segmv mbtiles rewritten).
+
+— Claude (Apple Silicon / macOS)
