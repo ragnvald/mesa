@@ -1866,6 +1866,10 @@ def _intersection_worker(args):
     # for a 2-tuple. Both paths are result-identical (same sindex bbox query, just
     # relocated). See learning.md "intersect per-worker memory".
     pool_assets = args[2] if len(args) > 2 else _POOL_ASSETS
+    # When the parent pre-filtered (3-tuple), pool_assets IS already scoped to this chunk's
+    # bbox, so the top-level sindex query is redundant — skip it and use pool_assets directly;
+    # only the recursive sub-splits (narrower bboxes) need the sindex. See learning.md.
+    _prefiltered = len(args) > 2
     logs = []
 
     def write_parts(gdf):
@@ -1923,13 +1927,18 @@ def _intersection_worker(args):
             else:
                 raise
 
-    def join_geocode_assets(geocode_gdf):
+    def join_geocode_assets(geocode_gdf, prefiltered=False):
         if geocode_gdf.empty:
             return gpd.GeoDataFrame(geometry=[], crs=pool_assets.crs)
 
-        minx, miny, maxx, maxy = geocode_gdf.total_bounds
-        candidate_idx = list(pool_assets.sindex.intersection((minx, miny, maxx, maxy)))
-        asset_subset = pool_assets.iloc[candidate_idx] if candidate_idx else pool_assets.iloc[:0]
+        if prefiltered:
+            # pool_assets already == assets near this chunk's bbox (parent did the query);
+            # avoid rebuilding a sindex just to re-select everything.
+            asset_subset = pool_assets
+        else:
+            minx, miny, maxx, maxy = geocode_gdf.total_bounds
+            candidate_idx = list(pool_assets.sindex.intersection((minx, miny, maxx, maxy)))
+            asset_subset = pool_assets.iloc[candidate_idx] if candidate_idx else pool_assets.iloc[:0]
 
         if len(asset_subset) > _ASSET_SOFT_LIMIT and len(geocode_gdf) > 1:
             logs.append(f"Chunk {idx}: {len(asset_subset):,} candidate assets for {len(geocode_gdf)} geocodes — splitting geocodes pre-emptively.")
@@ -2024,7 +2033,7 @@ def _intersection_worker(args):
         return gpd.GeoDataFrame(combined, geometry='geometry', crs=pool_assets.crs)
 
     try:
-        final_gdf = join_geocode_assets(geocode_chunk)
+        final_gdf = join_geocode_assets(geocode_chunk, prefiltered=_prefiltered)
         if final_gdf is None or final_gdf.empty:
             return (idx, 0, None, None, logs)
         paths = write_parts(final_gdf)
