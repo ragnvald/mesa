@@ -238,6 +238,13 @@ def read_config(abs_or_rel_path: str):
     cfg.read(cfg_path, encoding="utf-8")
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
+    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
+    try:
+        from mesa_shared import apply_settings_overlay
+        from pathlib import Path as _Path
+        apply_settings_overlay(cfg, _Path(cfg_path).parent)
+    except Exception:
+        pass
     return cfg
 
 def check_and_create_folders():
@@ -2495,6 +2502,12 @@ class TuneProcessingWindow(QMainWindow):
         except Exception:
             pass
         self._build_ui()
+        # Populate "Current vs advised" on open so the window is never blank;
+        # Evaluate is read-only (nothing is written until Commit).
+        try:
+            self._evaluate_processing_tuning()
+        except Exception:
+            pass
 
     def _build_ui(self):
         central = QWidget()
