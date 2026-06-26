@@ -1424,12 +1424,11 @@ HTML = r"""<!doctype html>
     try{
       var src=maps[srcKey], c=src.getCenter(), z=src.getZoom();
       Object.keys(maps).forEach(function(k){
-        // Assets never participates: opening an asset auto-zooms to its own extent.
-        if(k!==srcKey && k!=='asset'){ try{ maps[k].setView(c,z,{animate:false}); }catch(e){} }
+        if(k!==srcKey){ try{ maps[k].setView(c,z,{animate:false}); }catch(e){} }
       });
     } finally { syncing=false; }   // never leave the guard stuck (would block all linking)
   }
-  Object.keys(maps).forEach(function(k){ maps[k].on('moveend zoomend', function(){ if(k===current && k!=='asset') syncFrom(k); }); });
+  Object.keys(maps).forEach(function(k){ maps[k].on('moveend zoomend', function(){ if(k===current) syncFrom(k); }); });
   document.getElementById('linkChk').addEventListener('change', function(){ linking=this.checked; if(linking) syncFrom(current); });
 
   // ---- GetFeatureInfo: left-click a raster cell to identify it ----
@@ -1489,16 +1488,11 @@ HTML = r"""<!doctype html>
     document.querySelectorAll('.tab').forEach(function(b){ b.classList.toggle('active', b.dataset.tab===tab); });
     document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('active'); });
     document.getElementById('view-'+tab).classList.add('active');
-    // Assets auto-zooms to each layer's extent, so it can't honour Link zoom & pan —
-    // grey the toggle out there and don't sync into/out of it.
-    var lk=document.getElementById('linkChk'), lw=document.getElementById('linkwrap');
-    if(lk) lk.disabled=(tab==='asset');
-    if(lw) lw.classList.toggle('disabled', tab==='asset');
     var m=maps[tab];
     setTimeout(function(){
       m.invalidateSize();
       // When linked, copy the view from the PREVIOUSLY active map to this one.
-      if(linking && prev && prev!==tab && tab!=='asset' && prev!=='asset'){
+      if(linking && prev && prev!==tab){
         syncing=true;
         m.setView(maps[prev].getCenter(), maps[prev].getZoom(), {animate:false});
         syncing=false;
@@ -1595,8 +1589,8 @@ HTML = r"""<!doctype html>
           l.on('mouseout', function(){ try{ this.setStyle({color:'#444',weight:0.4,fillColor:g.color,fillOpacity:opacity*0.9}); }catch(e){} }); }
       }).addTo(maps.asset);
       assetLayers[gid]=lyr;
-      // Assets does not drive Link zoom & pan; it always frames its own layer extent.
-      try{ maps.asset.invalidateSize(); maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); }catch(e){}
+      // Frame the asset's own extent; when linked, propagate that view to the other maps.
+      try{ maps.asset.invalidateSize(); maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); if(linking) syncFrom('asset'); }catch(e){}
     });
   }
 
