@@ -2,29 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-03_create_geocodes.py  —  H3 + Basic Mosaic (GeoParquet-first, flat config)
+geocode_manage.py  —  H3 + QDGC grids + Basic Mosaic (GeoParquet-first, flat config)
 
-What's new in this build (identity-preserving speedups):
-- **Clip-before-buffer** per tile: each worker clips inputs to the tile’s envelope
-  expanded by (buffer_m + epsilon) before buffering. This is mathematically equivalent
-  inside the tile (no geometry change) and cuts vertex counts massively.
-- Optional dedup of identical input geometries (safe; does not change mosaic).
-- Kept: adaptive quadtree tiling + heavy-tile split, streaming face flush, robust H3, GUI/CLI.
-- Heartbeat still shows: stage, tiles done/total, faces count, elapsed, ETA, tiles/min,
-  and total CPU/RAM aggregated across pool children (if psutil available).
-- Task scheduling defaults to INTERLEAVE for snappy early progress.
+Basic-mosaic algorithm (current): NO tiling. Asset polygons are projected to a
+metric CRS (line/point assets buffered to polygons). Boundaries are extracted and
+locally unioned per chunk in a spawn Pool; the per-chunk partials are merged by a
+parallel pairwise tree-reduction into one globally-noded edge network; that network
+is polygonized into atomic faces; faces are filtered to the coverage union and
+streamed to GeoParquet. The tree-reduction dominates wall-clock; see learning.md
+"Mosaic union reduction is spawn-bound".
 
-Config (<base>/config.ini → [DEFAULT]) knobs (defaults shown):
-  mosaic_workers = 0                         # 0 -> auto
-  mosaic_quadtree_max_feats_per_tile = 800
-  mosaic_quadtree_heavy_split_multiplier = 2.0
-  mosaic_quadtree_max_depth = 8
-  mosaic_quadtree_min_tile_m = 1000
-  mosaic_simplify_tolerance_m = 0           # keep 0 for identical output
+Config (<base>/config.ini, [DEFAULT]) knobs (defaults shown):
+  mosaic_workers = 0                         # 0 -> auto (see auto-sizing below)
+  mosaic_line_union_batch = 4000
+  mosaic_line_union_max_partials = 16
+  mosaic_coverage_union_batch = 500
+  mosaic_coverage_union = true               # false: keep coverage as STRtree, skip its union
+  mosaic_reduce_workers = 4                  # per-round parallelism of the tree reduction
+  mosaic_union_grid_size = 0.0               # >0: snap unions to this metric grid (faster, ~exact)
+  mosaic_extract_chunk_size = 2500           # smaller = better load balance, more partials
+  mosaic_extract_maxtasksperchild = 4        # legacy fallback: mosaic_pool_maxtasksperchild
+  mosaic_extract_pool_chunksize = 1          # legacy fallback: mosaic_pool_chunksize
   mosaic_faces_flush_batch = 250000
-  mosaic_pool_maxtasksperchild = 8
-  mosaic_pool_chunksize = 1
-  mosaic_task_order = interleave            # interleave | heavy_first | light_first
+  mosaic_task_order = interleave             # interleave | heavy_first | light_first
+  mosaic_force_serial = false
   heartbeat_secs = 10
 
     # Auto worker sizing (used when mosaic_workers <= 0)
@@ -33,13 +34,8 @@ Config (<base>/config.ini → [DEFAULT]) knobs (defaults shown):
     mosaic_auto_worker_max = 0                # 0 -> no upper bound
     mosaic_auto_worker_mem_gb = 1.5           # approx GB per worker before capping
 
-  # New identity-preserving speed knobs:
-  mosaic_clip_before_buffer = true
-  mosaic_clip_margin_m = 0.05               # tiny epsilon on top of buffer distance
-  mosaic_dedup_assets = true                # drop exact duplicate geometries up-front
-
   # I/O:
-  parquet_folder = output/geoparquet        # optional override for GeoParquet dir
+  parquet_folder = output/geoparquet         # optional override for GeoParquet dir
 """
 
 from __future__ import annotations
@@ -277,6 +273,12 @@ def read_config(file_name: Path) -> configparser.ConfigParser:
     cfg.read(file_name, encoding="utf-8")
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
+    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
+    try:
+        from mesa_shared import apply_settings_overlay
+        apply_settings_overlay(cfg, Path(file_name).parent)
+    except Exception:
+        pass
     return cfg
 
 def _safe_rmtree(p: Path):
@@ -713,10 +715,23 @@ def run_import_geocodes(base_dir: Path, cfg: configparser.ConfigParser):
     try:
         log_to_gui(f"Importing geocodes from: {input_folder}")
         g_grp, g_obj = import_geocodes_from_folder(input_folder, working_epsg)
-        out_dir = gpq_dir(base_dir)
-        ensure_wgs84(g_grp).to_parquet(out_dir / TABLE_GEOCODE_GROUP, index=False)
-        ensure_wgs84(g_obj).to_parquet(out_dir / TABLE_GEOCODE_OBJECT, index=False)
-        log_to_gui(f"Saved tbl_geocode_* → {out_dir}")
+        # Non-destructive import: refresh only the imported group names and keep
+        # every other group (H3 / QDGC / basic_mosaic) intact. Deletion is an
+        # explicit action in the Manage geocodes tab, never a side effect of an
+        # import. See learning.md "Geocode import must merge, not overwrite".
+        g_grp = ensure_wgs84(g_grp)
+        g_obj = ensure_wgs84(g_obj)
+        refresh_names = (
+            [str(n) for n in g_grp["name_gis_geocodegroup"].tolist()]
+            if (not g_grp.empty and "name_gis_geocodegroup" in g_grp.columns) else []
+        )
+        added_g, added_o, tot_g, tot_o = _merge_and_write_geocodes(
+            base_dir, g_grp, g_obj, refresh_group_names=refresh_names
+        )
+        log_to_gui(
+            f"Imported geocodes merged → added groups: {added_g}, objects: {added_o:,}; "
+            f"totals => groups: {tot_g}, objects: {tot_o:,}"
+        )
         log_to_gui("Step [Import geocodes] COMPLETED")
     except Exception as e:
         log_to_gui(f"Step [Import geocodes] FAILED: {e}", "ERROR")
@@ -1095,15 +1110,36 @@ def _iter_boundary_lines(polyish):
             return
 
 
-def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200):
-    """Attempt unary_union; on memory/GEOS errors, retry with smaller chunks."""
+def _union_all_gs(geoms, grid_size=None):
+    """union_all/unary_union with optional precision-grid snapping.
+
+    grid_size is in the working metric CRS units (metres for the mosaic, which
+    always runs in a projected CRS). None or <= 0 disables snapping and yields
+    the exact, pre-existing result. A small positive value snaps coordinates to
+    that grid, collapsing near-duplicate vertices: faster GEOS unions, fewer
+    robustness retries, and lower vertex count (so lower peak memory).
+    """
+    gs = grid_size if (grid_size and grid_size > 0) else None
+    if shapely_union_all is not None:
+        return shapely_union_all(geoms, grid_size=gs) if gs is not None else shapely_union_all(geoms)
+    if gs is not None:
+        try:
+            return unary_union(geoms, grid_size=gs)
+        except TypeError:
+            return unary_union(geoms)
+    return unary_union(geoms)
+
+
+def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200, grid_size=None):
+    """Attempt unary_union; on memory/GEOS errors, retry with smaller chunks.
+
+    grid_size (optional) snaps coordinates to a precision grid during the union;
+    None preserves the exact prior behaviour.
+    """
     if not geoms:
         return None
     try:
-        # Shapely 2.x: union_all is typically faster but equivalent.
-        if shapely_union_all is not None:
-            return shapely_union_all(geoms)
-        return unary_union(geoms)
+        return _union_all_gs(geoms, grid_size)
     except MemoryError:
         log_to_gui(f"[Mosaic] MemoryError during unary_union ({label}) for n={len(geoms):,}; retrying smaller chunks…", "WARN")
     except Exception as e:
@@ -1117,10 +1153,7 @@ def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200):
         for i in range(0, len(geoms), step):
             chunk = geoms[i:i+step]
             try:
-                if shapely_union_all is not None:
-                    cu = shapely_union_all(chunk)
-                else:
-                    cu = unary_union(chunk)
+                cu = _union_all_gs(chunk, grid_size)
             except Exception:
                 ok = False
                 break
@@ -1131,7 +1164,7 @@ def _unary_union_safe(geoms: list, *, label: str, min_step: int = 200):
                 return None
             if len(partials) == 1:
                 return partials[0]
-            partials = _tree_reduce_unions(partials, max_partials=1, label=f"{label}:retry", heartbeat_s=10.0)
+            partials = _tree_reduce_unions(partials, max_partials=1, label=f"{label}:retry", heartbeat_s=10.0, grid_size=grid_size)
             return partials[0] if partials else None
         step = max(min_step, step // 2)
     return None
@@ -1141,19 +1174,21 @@ def _reduce_pair_worker(pair):
     """Module-level worker for parallel pairwise unions inside the mosaic
     reduction tree (must be importable by spawn-context Pool workers).
 
-    Receives a (a, b) tuple of shapely geometries. b may be None for the
-    odd-one-out partial passed straight through. The result is identical to
-    serial unary_union([a, b]) — order of independent pairs within a round
-    has no effect on the final reduced geometry, so parallelisation does
-    not affect output quality.
+    Receives a (a, b, grid_size) tuple of shapely geometries (grid_size optional
+    for backward-compatible 2-tuples). b may be None for the odd-one-out partial
+    passed straight through. The result is identical to serial unary_union([a, b])
+    — order of independent pairs within a round has no effect on the final reduced
+    geometry, so parallelisation does not affect output quality.
     """
-    a, b = pair
+    if len(pair) == 3:
+        a, b, grid_size = pair
+    else:
+        a, b = pair
+        grid_size = None
     if b is None:
         return a
     try:
-        if shapely_union_all is not None:
-            return shapely_union_all([a, b])
-        return unary_union([a, b])
+        return _union_all_gs([a, b], grid_size)
     except Exception:
         # If GEOS rejects this specific pair, return `a` so the round still
         # makes progress; the parent will see one un-merged partial and the
@@ -1169,6 +1204,7 @@ def _tree_reduce_unions(
     label: str = "unions",
     heartbeat_s: float = 10.0,
     n_workers: int = 1,
+    grid_size=None,
 ) -> list:
     """Repeatedly merge unions in a tree-like pairwise fashion.
 
@@ -1208,7 +1244,7 @@ def _tree_reduce_unions(
         it = iter(unions)
         for a in it:
             b = next(it, None)
-            pairs.append((a, b))
+            pairs.append((a, b, grid_size))
 
         # Cap parallelism at the number of merges in this round; later rounds
         # with 1-2 merges automatically drop to (near-)serial.
@@ -1230,11 +1266,22 @@ def _tree_reduce_unions(
         if round_workers > 1:
             try:
                 ctx = mp.get_context("spawn")
-                # maxtasksperchild=1 keeps each worker's address space small —
-                # they each handle one pair, return the result, then exit and
-                # are replaced. This prevents memory accumulation across the
-                # late rounds where each pair already holds large geometries.
-                with ctx.Pool(processes=round_workers, maxtasksperchild=1) as pool:
+                # Per-round maxtasksperchild. Respawning a worker per pair pays a
+                # full spawn+reimport (~1-2s on Windows/macOS — both default to
+                # 'spawn'; this code forces 'spawn' on Linux too), which dominated
+                # the early rounds (thousands of small-geometry merges): measured
+                # ~1.8 s/merge for unions that take GEOS milliseconds. Let workers
+                # persist across many pairs when a round has many (small) merges,
+                # and fall back to one-task-per-worker for the late rounds where
+                # each pair holds large geometries (keeps peak RSS bounded). Many
+                # merges => small geometries (each round halves count, doubles
+                # size), so merges_total is an inverse proxy for per-pair memory.
+                # See learning.md "Mosaic union reduction is spawn-bound".
+                if merges_total >= 4 * round_workers:
+                    mtpc = max(1, min(64, merges_total // (round_workers * 4)))
+                else:
+                    mtpc = 1
+                with ctx.Pool(processes=round_workers, maxtasksperchild=mtpc) as pool:
                     for u in pool.imap_unordered(_reduce_pair_worker, pairs, chunksize=1):
                         merge_i += 1
                         merged.append(u)
@@ -1256,12 +1303,12 @@ def _tree_reduce_unions(
                     f"[Mosaic] Reducing {label}: round {round_idx} parallel path failed ({type(e).__name__}: {e}); falling back to serial for the rest of this round.",
                     "WARN",
                 )
-                for a, b in pairs[merge_i:]:
+                for a, b, _gs in pairs[merge_i:]:
                     merge_i += 1
                     if b is None:
                         merged.append(a)
                     else:
-                        u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2)
+                        u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2, grid_size=_gs)
                         merged.append(u if u is not None else a)
                     now = time.time()
                     if now - last_log >= hb:
@@ -1273,12 +1320,12 @@ def _tree_reduce_unions(
                         )
                         last_log = now
         else:
-            for a, b in pairs:
+            for a, b, _gs in pairs:
                 merge_i += 1
                 if b is None:
                     merged.append(a)
                 else:
-                    u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2)
+                    u = _unary_union_safe([a, b], label=f"partial_merge:{label}", min_step=2, grid_size=_gs)
                     merged.append(u if u is not None else a)
 
                 now = time.time()
@@ -1344,13 +1391,15 @@ def _maybe_sort_partials_before_reduction(
         return unions
 
 
-def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict:
+def _mosaic_extract_chunk_worker(args: tuple) -> dict:
     """Worker: extract boundary linework + coverage polygons for a chunk.
 
     Returns WKB for a locally-unioned edge net and coverage polygon union to keep
-    IPC payloads small.
+    IPC payloads small. args = (wkbs, line_buf_m, point_buf_m[, grid_size]); the
+    optional grid_size pre-snaps the per-chunk unions (None = exact).
     """
-    (wkbs, line_buf_m, point_buf_m) = args
+    wkbs, line_buf_m, point_buf_m = args[0], args[1], args[2]
+    grid_size = args[3] if len(args) > 3 else None
     boundary_parts = 0
     skipped = 0
     union_retries = 0
@@ -1368,9 +1417,7 @@ def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict
         if len(geoms) == 1:
             return geoms[0]
         try:
-            if shapely_union_all is not None:
-                return shapely_union_all(geoms)
-            return unary_union(geoms)
+            return _union_all_gs(geoms, grid_size)
         except Exception:
             # Retry in smaller pieces; avoid logging from workers.
             nonlocal union_retries
@@ -1382,10 +1429,7 @@ def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict
                 for i in range(0, len(geoms), step):
                     chunk = geoms[i:i + step]
                     try:
-                        if shapely_union_all is not None:
-                            cu = shapely_union_all(chunk)
-                        else:
-                            cu = unary_union(chunk)
+                        cu = _union_all_gs(chunk, grid_size)
                     except Exception:
                         ok = False
                         break
@@ -1404,10 +1448,7 @@ def _mosaic_extract_chunk_worker(args: tuple[list[bytes], float, float]) -> dict
                                 merged.append(a)
                             else:
                                 try:
-                                    if shapely_union_all is not None:
-                                        u = shapely_union_all([a, b])
-                                    else:
-                                        u = unary_union([a, b])
+                                    u = _union_all_gs([a, b], grid_size)
                                 except Exception:
                                     u = a
                                 merged.append(u)
@@ -1495,6 +1536,12 @@ def _build_linework_and_coverage(
     cov_batch_size = max(50, _cfg_int(cfg, "mosaic_coverage_union_batch", 500))
     # Per-round parallelism for the tree reduction. 1 = old serial behaviour.
     reduce_workers = max(1, _cfg_int(cfg, "mosaic_reduce_workers", 4))
+    # Optional precision-grid snapping (metres) applied during all unions. 0 = off
+    # (exact, pre-existing output). A small positive value (e.g. 0.05) collapses
+    # near-duplicate vertices: faster GEOS unions, fewer robustness retries, lower
+    # peak memory. Safe here because the mosaic always runs in a projected CRS.
+    union_grid_size = _cfg_float(cfg, "mosaic_union_grid_size", 0.0)
+    union_grid_size = union_grid_size if union_grid_size > 0 else None
 
     stats = {
         "assets": int(len(a_metric)),
@@ -1525,24 +1572,24 @@ def _build_linework_and_coverage(
     def flush_boundary():
         if not boundary_batch:
             return
-        u = _unary_union_safe(boundary_batch, label="boundary_batch")
+        u = _unary_union_safe(boundary_batch, label="boundary_batch", grid_size=union_grid_size)
         if u is not None:
             line_partials.append(u)
             stats["union_batches"] += 1
             if len(line_partials) > max_partials:
                 line_partials[:] = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
-                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges", n_workers=reduce_workers)
+                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges", n_workers=reduce_workers, grid_size=union_grid_size)
         boundary_batch.clear()
 
     def flush_coverage():
         if not cov_batch:
             return
-        u = _unary_union_safe(cov_batch, label="coverage_batch")
+        u = _unary_union_safe(cov_batch, label="coverage_batch", grid_size=union_grid_size)
         if u is not None:
             cov_partials.append(u)
             if len(cov_partials) > max_partials:
                 cov_partials[:] = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
-                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage", n_workers=reduce_workers)
+                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage", n_workers=reduce_workers, grid_size=union_grid_size)
         cov_batch.clear()
 
     # Prefer parallel extraction/union when workers>1. This stage is the bottleneck.
@@ -1635,7 +1682,7 @@ def _build_linework_and_coverage(
             with ctx.Pool(processes=int(workers), maxtasksperchild=int(maxtasks)) as pool:
                 it = pool.imap_unordered(
                     _mosaic_extract_chunk_worker,
-                    [(c, float(line_buf_m), float(point_buf_m)) for c in chunks],
+                    [(c, float(line_buf_m), float(point_buf_m), union_grid_size) for c in chunks],
                     chunksize=int(pool_chunksize),
                 )
                 # Use iterator timeouts so we can log “still working” heartbeats
@@ -1733,10 +1780,10 @@ def _build_linework_and_coverage(
             )
             if len(line_partials) > max_partials:
                 line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
-                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges", n_workers=reduce_workers)
+                line_partials[:] = _tree_reduce_unions(line_partials, max_partials=max_partials, label="edges", n_workers=reduce_workers, grid_size=union_grid_size)
             if cov_partials and len(cov_partials) > max_partials:
                 cov_partials = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
-                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage", n_workers=reduce_workers)
+                cov_partials[:] = _tree_reduce_unions(cov_partials, max_partials=max_partials, label="coverage", n_workers=reduce_workers, grid_size=union_grid_size)
             if progress_floor is not None and progress_ceiling is not None:
                 update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.97))
 
@@ -1797,8 +1844,8 @@ def _build_linework_and_coverage(
     if progress_floor is not None and progress_ceiling is not None:
         update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.985))
     line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
-    line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)", n_workers=reduce_workers)
-    edge_net = _unary_union_safe(line_partials, label="linework_final", min_step=2)
+    line_partials = _tree_reduce_unions(line_partials, max_partials=2, label="edges(final)", n_workers=reduce_workers, grid_size=union_grid_size)
+    edge_net = _unary_union_safe(line_partials, label="linework_final", min_step=2, grid_size=union_grid_size)
     if edge_net is None:
         edge_net = line_partials[0]
 
@@ -1806,8 +1853,8 @@ def _build_linework_and_coverage(
     if cov_partials:
         if coverage_union_enabled:
             cov_partials = _maybe_sort_partials_before_reduction(cov_partials, cfg=cfg, kind="coverage")
-            cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)", n_workers=reduce_workers)
-            coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2)
+            cov_partials = _tree_reduce_unions(cov_partials, max_partials=2, label="coverage(final)", n_workers=reduce_workers, grid_size=union_grid_size)
+            coverage = _unary_union_safe(cov_partials, label="coverage_final", min_step=2, grid_size=union_grid_size)
             if coverage is None:
                 coverage = cov_partials[0]
         else:
@@ -2258,164 +2305,6 @@ def _load_asset_objects(base_dir: Path) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
 # -----------------------------------------------------------------------------
-# Mosaic worker (clip-before-buffer; no geometry changes)
-# -----------------------------------------------------------------------------
-def _mosaic_tile_worker(task: Tuple[int, List[bytes], float, float, bytes]):
-    """
-    Input:
-      (tile_index, [WKB of original geoms (metric CRS)], buffer_m, simplify_tol_m, clip_wkb)
-    Output:
-      (tile_index, [WKB faces], error:str|None)
-    Notes:
-      - Clip-before-buffer is mathematically exact inside the tile’s region expanded by buffer_m.
-      - Keep simplify_tol_m = 0 for identity; nonzero only if you accept approximation.
-    """
-    idx, wkb_list, buf_m, simp, clip_wkb = task
-    try:
-        if not wkb_list:
-            return (idx, [], None)
-
-        geoms = [shp_wkb.loads(b) for b in wkb_list if b]
-        clip_poly = shp_wkb.loads(clip_wkb) if clip_wkb else None
-        buf = max(0.01, float(buf_m))
-
-        processed = []
-        for g in geoms:
-            if not g or g.is_empty:
-                continue
-            g_local = g
-            if clip_poly is not None:
-                try:
-                    g_local = g.intersection(clip_poly)
-                    if not g_local or g_local.is_empty:
-                        continue
-                except Exception:
-                    g_local = g
-
-            try:
-                gb = g_local.buffer(buf)
-                if shapely_make_valid:
-                    gb = shapely_make_valid(gb)
-                else:
-                    gb = gb.buffer(0)
-
-                if simp and simp > 0:
-                    gb = gb.simplify(simp, preserve_topology=True)
-
-                if gb and not gb.is_empty:
-                    processed.append(gb)
-            except Exception:
-                continue
-
-        if not processed:
-            return (idx, [], None)
-
-        lines = []
-        for g in processed:
-            try:
-                lb = g.boundary
-                if lb and not lb.is_empty:
-                    lines.append(lb)
-            except Exception:
-                continue
-        if not lines:
-            return (idx, [], None)
-
-        def batched_union(seq, max_batch):
-            out = None
-            step = max_batch
-            i = 0
-            while i < len(seq):
-                chunk = seq[i:i+step]
-                try:
-                    u = unary_union(chunk)
-                except Exception:
-                    if step <= 200:
-                        raise
-                    step = max(200, step // 2)
-                    continue
-                out = u if out is None else unary_union([out, u])
-                i += step
-            return out
-
-        edge_net = batched_union(lines, max_batch=1500)
-        faces = list(polygonize(edge_net))
-        res = [shp_wkb.dumps(f) for f in faces
-               if isinstance(f, (Polygon, MultiPolygon)) and not f.is_empty]
-        return (idx, res, None)
-
-    except MemoryError:
-        return (idx, [], "memory")
-    except Exception as e:
-        return (idx, [], str(e))
-
-# -----------------------------------------------------------------------------
-# Quadtree tiler (+ heavy split)
-# -----------------------------------------------------------------------------
-def _plan_tiles_quadtree(a_metric: gpd.GeoDataFrame,
-                         sidx,
-                         minx: float, miny: float, maxx: float, maxy: float,
-                         *,
-                         overlap_m: float,
-                         max_feats_per_tile: int = 800,
-                         max_depth: int = 8,
-                         min_tile_size_m: float = 0.0) -> List[Tuple[Tuple[float,float,float,float], List[int]]]:
-    leaves: List[Tuple[Tuple[float,float,float,float], List[int]]] = []
-    stack = [(minx, miny, maxx, maxy, 0)]
-    eps = 1e-3
-    steps = 0
-
-    while stack:
-        bx0, by0, bx1, by1, depth = stack.pop()
-        w, h = (bx1 - bx0), (by1 - by0)
-        if w <= eps or h <= eps:
-            continue
-
-        tile_poly = box(bx0, by0, bx1, by1).buffer(overlap_m)
-        try:
-            idxs = list(sidx.query(tile_poly, predicate="intersects"))
-        except Exception:
-            idxs = list(sidx.query(tile_poly))
-        n = len(idxs)
-        steps += 1
-        if steps % 200 == 0:
-            STATS.detail = f"(planner steps: {steps:,})"
-
-        if n == 0:
-            continue
-
-        stop_for_size = (min_tile_size_m > 0.0 and (w <= min_tile_size_m and h <= min_tile_size_m))
-        if n <= max_feats_per_tile or depth >= max_depth or stop_for_size:
-            leaves.append(((bx0, by0, bx1, by1), idxs))
-            continue
-
-        mx = (bx0 + bx1) * 0.5
-        my = (by0 + by1) * 0.5
-        stack.extend([
-            (bx0, by0, mx,  my,  depth + 1),
-            (mx,  by0, bx1, my,  depth + 1),
-            (bx0, my,  mx,  by1, depth + 1),
-            (mx,  my,  bx1, by1, depth + 1),
-        ])
-
-    return leaves
-
-def _split_tile(bounds, a_metric, sidx, overlap_m):
-    (bx0, by0, bx1, by1) = bounds
-    mx = (bx0 + bx1) * 0.5
-    my = (by0 + by1) * 0.5
-    out = []
-    for (x0, y0, x1, y1) in [(bx0,by0,mx,my),(mx,by0,bx1,my),(bx0,my,mx,by1),(mx,my,bx1,by1)]:
-        tp = box(x0, y0, x1, y1).buffer(overlap_m)
-        try:
-            idxs = list(sidx.query(tp, predicate="intersects"))
-        except Exception:
-            idxs = list(sidx.query(tp))
-        if idxs:
-            out.append(((x0,y0,x1,y1), idxs))
-    return out
-
-# -----------------------------------------------------------------------------
 # Task ordering helpers (for snappy early progress)
 # -----------------------------------------------------------------------------
 def _order_tasks(counts: List[int], mode: str) -> List[int]:
@@ -2479,6 +2368,52 @@ def mosaic_faces_from_assets_parallel(
     a_metric = a.to_crs(metric_crs)
     log_to_gui(f"[Mosaic] Loaded {len(a_metric):,} assets; projected to {metric_crs} in {time.time()-t0:.2f}s.", "INFO")
     update_progress(10)
+
+    # ---- Pre-flight memory gate: graceful abort instead of an OOM crash --------
+    # basic_mosaic peak RAM is dominated by the single-threaded global polygonize,
+    # which holds the whole edge network + all faces at once (~21.7 GB measured for
+    # 3.53 M assets). On a roomy host that is fine and this never fires; on a 16 GB
+    # box the largest projects would OOM-kill the process partway through a multi-
+    # hour run. Estimate the peak from the asset count and, when it would not fit
+    # the machine, stop *now* with a clear message rather than crashing later.
+    # Scales with the host (high-RAM users are never blocked); overridable.
+    if str(cfg["DEFAULT"].get("mosaic_preflight_enabled", "true")).strip().lower() in ("1", "true", "yes", "on"):
+        gb_per_million = max(0.0, _cfg_float(cfg, "mosaic_preflight_gb_per_million_assets", 7.0))
+        safety_frac = min(0.95, max(0.2, _cfg_float(cfg, "mosaic_preflight_safety_frac", 0.8)))
+        allow_oversized = str(cfg["DEFAULT"].get("mosaic_preflight_allow_oversized", "false")).strip().lower() in ("1", "true", "yes", "on")
+        est_peak_gb = (len(a_metric) / 1_000_000.0) * gb_per_million
+        avail_gb = None
+        if psutil is not None:
+            try:
+                avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            except Exception:
+                avail_gb = None
+        if avail_gb is not None and est_peak_gb > 0:
+            budget_gb = avail_gb * safety_frac
+            if est_peak_gb > budget_gb:
+                head = (
+                    f"[Mosaic] Pre-flight: estimated peak ~{est_peak_gb:.0f} GB for "
+                    f"{len(a_metric):,} assets exceeds the safe budget ~{budget_gb:.0f} GB "
+                    f"({avail_gb:.0f} GB available × {safety_frac:.0%}). The global polygonize "
+                    f"step is memory-heavy and would risk an out-of-memory crash here."
+                )
+                if allow_oversized:
+                    log_to_gui(head + " Proceeding anyway (mosaic_preflight_allow_oversized=true) — watch RAM.", "WARN")
+                else:
+                    log_to_gui(
+                        head + " Skipping basic_mosaic (H3/QDGC grids are unaffected). To run it "
+                        "anyway: free RAM, use a smaller AOI, run on a larger machine, or set "
+                        "mosaic_preflight_allow_oversized=true in config.ini.",
+                        "ERROR",
+                    )
+                    STATS.stage = "skipped (pre-flight memory)"
+                    update_progress(100)
+                    return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+            else:
+                log_to_gui(
+                    f"[Mosaic] Pre-flight OK: estimated peak ~{est_peak_gb:.0f} GB vs budget "
+                    f"~{budget_gb:.0f} GB ({avail_gb:.0f} GB available).", "INFO",
+                )
 
     STATS.stage = "linework"
     STATS.faces_total = 0
@@ -3213,6 +3148,7 @@ class GeocodeManagerWindow(QMainWindow):
         self._build_h3_tab()
         self._build_qdgc_tab()
         self._build_import_tab()
+        self._build_manage_tab()
         self._build_edit_tab()
 
         # Progress bar
@@ -3235,7 +3171,8 @@ class GeocodeManagerWindow(QMainWindow):
                       "h3": 2, "other": 2,
                       "qdgc": 3,
                       "import": 4, "bin": 4,
-                      "edit": 5, "group": 5}
+                      "manage": 5,
+                      "edit": 6, "group": 6}
         try:
             self.tabs.setCurrentIndex(tab_lookup.get(str(start_tab).strip().lower(), 0))
         except Exception:
@@ -3532,7 +3469,10 @@ class GeocodeManagerWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        layout.addWidget(QLabel("Import geocode datasets and manage existing geocode groups."))
+        layout.addWidget(QLabel(
+            "Import geocode datasets from the input folder. Importing merges into the "
+            "existing geocodes and never deletes other groups."
+        ))
 
         import_group = QGroupBox("Import")
         import_layout = QHBoxLayout(import_group)
@@ -3543,6 +3483,32 @@ class GeocodeManagerWindow(QMainWindow):
         import_btn.clicked.connect(self._run_import)
         import_layout.addWidget(import_btn)
         layout.addWidget(import_group)
+
+        self.import_status_label = QLabel("")
+        self.import_status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        layout.addWidget(self.import_status_label)
+        layout.addStretch()
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        self.import_log = QPlainTextEdit()
+        self.import_log.setReadOnly(True)
+        self.import_log.setMaximumHeight(150)
+        log_layout.addWidget(self.import_log)
+        layout.addWidget(log_group)
+
+        self.tabs.addTab(tab, "Import geocodes")
+
+    def _build_manage_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel(
+            "Manage existing geocode groups. Only imported groups can be deleted here; "
+            "H3, QDGC and basic_mosaic are protected."
+        ))
 
         group_group = QGroupBox("Geocode groups")
         group_layout = QVBoxLayout(group_group)
@@ -3572,19 +3538,19 @@ class GeocodeManagerWindow(QMainWindow):
         group_layout.addLayout(btn_row)
         layout.addWidget(group_group)
 
-        self.import_status_label = QLabel("")
-        self.import_status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
-        layout.addWidget(self.import_status_label)
+        self.manage_status_label = QLabel("")
+        self.manage_status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        layout.addWidget(self.manage_status_label)
 
         log_group = QGroupBox("Log")
         log_layout = QVBoxLayout(log_group)
-        self.import_log = QPlainTextEdit()
-        self.import_log.setReadOnly(True)
-        self.import_log.setMaximumHeight(150)
-        log_layout.addWidget(self.import_log)
+        self.manage_log = QPlainTextEdit()
+        self.manage_log.setReadOnly(True)
+        self.manage_log.setMaximumHeight(150)
+        log_layout.addWidget(self.manage_log)
         layout.addWidget(log_group)
 
-        self.tabs.addTab(tab, "Import && manage geocodes")
+        self.tabs.addTab(tab, "Manage geocodes")
 
     # ---- Tab 4: Edit ----
     def _build_edit_tab(self):
@@ -3682,6 +3648,8 @@ class GeocodeManagerWindow(QMainWindow):
                 target = self.qdgc_log
             elif "h3" in label:
                 target = self.h3_log
+            elif "manage" in label:
+                target = self.manage_log
             elif "import" in label:
                 target = self.import_log
             else:
@@ -3863,7 +3831,7 @@ class GeocodeManagerWindow(QMainWindow):
         try:
             existing_g, _ = _load_existing_geocodes(self.base, load_objects=False)
         except Exception as exc:
-            self.import_status_label.setText(f"Failed to load geocode groups: {exc}")
+            self.manage_status_label.setText(f"Failed to load geocode groups: {exc}")
             return
 
         obj_counts, total_objects = _load_geocode_object_counts(self.base)
@@ -3871,7 +3839,7 @@ class GeocodeManagerWindow(QMainWindow):
         self.group_tree.clear()
 
         if existing_g.empty:
-            self.import_status_label.setText("No geocode groups found.")
+            self.manage_status_label.setText("No geocode groups found.")
             return
 
         try:
@@ -3895,10 +3863,11 @@ class GeocodeManagerWindow(QMainWindow):
             ])
             self.group_tree.addTopLevelItem(item)
 
-        self.import_status_label.setText(f"Groups: {len(existing_g)}  |  Total objects: {total_objects}")
+        self.manage_status_label.setText(f"Groups: {len(existing_g)}  |  Total objects: {total_objects}")
 
     def _delete_selected_groups(self):
-        log_to_gui("[Import] Delete selected requested.", "INFO")
+        self._active_log_widget = self.manage_log
+        log_to_gui("[Manage] Delete selected requested.", "INFO")
         selected = self.group_tree.selectedItems()
         if not selected:
             QMessageBox.information(self, "Delete geocodes", "Select one or more geocode groups to delete.")
@@ -3933,7 +3902,7 @@ class GeocodeManagerWindow(QMainWindow):
             return
 
         _clear_geocode_groups(self.base, names_imported)
-        log_to_gui(f"[Import] Deleted imported groups: {', '.join(names_imported)}", "INFO")
+        log_to_gui(f"[Manage] Deleted imported groups: {', '.join(names_imported)}", "INFO")
         self._refresh_group_list()
         self._refresh_edit_data()
 
