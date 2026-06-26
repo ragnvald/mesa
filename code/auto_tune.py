@@ -57,7 +57,12 @@ def _probe_hardware() -> dict:
     under-tune than OOM.
     """
     import os
-    cpu_count = max(1, os.cpu_count() or 4)
+    cpu_count = max(1, os.cpu_count() or 4)  # logical CPUs
+    # Physical cores: the right cap for CPU-bound, memory-heavy stages (flatten),
+    # where hyperthreads add little but cost RAM. psutil reports it directly;
+    # fall back to cpu_count // 2 (assume 2-way SMT) when it is unavailable, and
+    # never exceed the logical count (a non-HT box has physical == logical).
+    cpu_physical = 0
     ram_total_gb = 8.0
     ram_avail_gb = 4.0
     if psutil is not None:
@@ -67,11 +72,21 @@ def _probe_hardware() -> dict:
             ram_avail_gb = float(vm.available) / (1024 ** 3)
         except Exception:
             pass
+        try:
+            phys = psutil.cpu_count(logical=False)
+            if phys:
+                cpu_physical = int(phys)
+        except Exception:
+            cpu_physical = 0
+    if cpu_physical <= 0:
+        cpu_physical = max(1, cpu_count // 2)
+    cpu_physical = max(1, min(cpu_physical, cpu_count))
     os_name = platform.system().lower()
     machine = platform.machine().lower()
     is_apple_silicon = (os_name == "darwin") and machine.startswith("arm")
     return {
         "cpu_count": cpu_count,
+        "cpu_physical": cpu_physical,
         "ram_total_gb": ram_total_gb,
         "ram_avail_gb": ram_avail_gb,
         "os_name": os_name,
@@ -252,11 +267,11 @@ def _derive_flatten_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tup
     flatten_per_worker_gb, src = _flatten_per_worker_gb(cfg, hw)
     mem_target = _mem_target(cfg, hw)
     by_ram = max(1, int((avail_gb * mem_target) / flatten_per_worker_gb))
-    by_cpu = max(1, hw["cpu_count"] // 2)
+    by_cpu = max(1, hw["cpu_physical"])
     n = max(1, min(by_ram, by_cpu))
     reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
               f"{flatten_per_worker_gb:.1f} GB per-flatten-worker [{src}] = {by_ram}, "
-              f"capped to CPU/2 = {by_cpu}")
+              f"capped to physical CPU = {by_cpu}")
     return n, reason
 
 
