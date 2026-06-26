@@ -1231,6 +1231,7 @@ def _rm_rf(path: Path):
     log_to_gui(log_widget, f"Error removing {path.name}: {last_err}")
 
 def cleanup_outputs():
+    log_to_gui(log_widget, "[Stage 1/4] Removing stale processing outputs (tbl_stacked / tbl_flat / parts)…")
     for fn in ["tbl_stacked.parquet","tbl_flat.parquet","tbl_segmentation_profiles.parquet"]:
         _rm_rf(gpq_dir() / fn)
     for d in ["tbl_stacked", "tbl_segmentation", "__stacked_parts", "__grid_assign_in", "__grid_assign_out"]:
@@ -1250,6 +1251,7 @@ def write_data_extent(working_epsg: int) -> None:
     if not path.exists():
         log_to_gui(log_widget, "[Stage 1/4] Data extent: tbl_asset_object missing; skipping.")
         return
+    log_to_gui(log_widget, "[Stage 1/4] Data extent: loading tbl_asset_object…")
     try:
         gdf = gpd.read_parquet(path)
     except Exception as exc:
@@ -1267,6 +1269,10 @@ def write_data_extent(working_epsg: int) -> None:
         log_to_gui(log_widget, "[Stage 1/4] Data extent: no asset geometries found; skipping.")
         return
 
+    log_to_gui(log_widget,
+               f"[Stage 1/4] Data extent: dissolving {len(geoms):,} asset geometries "
+               f"(single-threaded GEOS union; can take several minutes on large projects)…")
+    _extent_t0 = time.time()
     try:
         union = shapely.union_all(geoms)
     except Exception as exc:
@@ -1307,7 +1313,8 @@ def write_data_extent(working_epsg: int) -> None:
         n_polys = 1
     area_str = f"{area_km2:,.1f} km²" if area_km2 is not None else "area unknown"
     log_to_gui(log_widget,
-               f"[Stage 1/4] Data extent written: {n_polys} polygon(s), {area_str} -> tbl_data_extent.parquet")
+               f"[Stage 1/4] Data extent written: {n_polys} polygon(s), {area_str} "
+               f"(dissolve {time.time()-_extent_t0:.0f}s) -> tbl_data_extent.parquet")
 
 # ----------------------------
 # Grid & chunking
