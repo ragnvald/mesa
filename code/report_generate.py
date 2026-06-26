@@ -1621,6 +1621,13 @@ def read_config(file_name: str) -> configparser.ConfigParser:
         print(f"[mesa] warn: config could not be read from {file_name}: {e}", flush=True)
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
+    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
+    try:
+        from mesa_shared import apply_settings_overlay
+        from pathlib import Path as _Path
+        apply_settings_overlay(cfg, _Path(file_name).parent)
+    except Exception:
+        pass
     return cfg
 
 def config_path(base_dir: str) -> str:

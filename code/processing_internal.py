@@ -342,6 +342,12 @@ def read_config(path: Path) -> configparser.ConfigParser:
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
     cfg["DEFAULT"].setdefault("parquet_folder", "output/geoparquet")
+    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
+    try:
+        from mesa_shared import apply_settings_overlay
+        apply_settings_overlay(cfg, Path(path).parent)
+    except Exception:
+        pass
     return cfg
 
 

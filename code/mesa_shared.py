@@ -104,7 +104,105 @@ def read_config(base_dir: Path) -> configparser.ConfigParser:
             except Exception:
                 cfg.read(candidate)
             break
+    # config.ini holds the version-controlled defaults; a per-project settings
+    # table (seeded from it, written by Tune processing) overrides them when
+    # present. Absent table -> config.ini stays authoritative (the fallback for
+    # helpers run before mesa.py has seeded anything).
+    apply_settings_overlay(cfg, base_dir)
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Settings store (config.ini = defaults; tbl_settings = live per-project store)
+# ---------------------------------------------------------------------------
+# Design: config.ini ships the version-controlled defaults. At runtime they are
+# overlaid by a per-project key/value table (output/geoparquet/tbl_settings.parquet)
+# that Tune processing writes to. read_config() applies the overlay, so every
+# existing `cfg["DEFAULT"].get(...)` call site honours it with no change.
+#
+# Stdlib-import-safety: this module stays stdlib-only, so pyarrow is imported
+# lazily *inside* these functions — and only when the table actually exists. An
+# untuned project (or a helper run before mesa.py seeds anything) pays just a
+# Path.exists() and falls back to config.ini. Results are cached per process,
+# keyed on the file mtime, so repeated read_config() calls stay cheap.
+_SETTINGS_OVERLAY_CACHE: dict = {}
+
+
+def settings_table_path(base_dir: Path) -> Path:
+    """Path to the per-project settings store (parquet key/value table)."""
+    return Path(base_dir) / "output" / "geoparquet" / "tbl_settings.parquet"
+
+
+def read_settings_overlay(base_dir: Path) -> dict:
+    """Return {key: value} from the settings table, or {} if absent/unreadable.
+
+    Cached per process on the file mtime; lazy-imports pyarrow only when the
+    table exists. Any failure returns {} so config.ini remains authoritative.
+    """
+    try:
+        p = settings_table_path(base_dir)
+        if not p.exists():
+            return {}
+        mtime = p.stat().st_mtime
+        key = str(p)
+        cached = _SETTINGS_OVERLAY_CACHE.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        import pyarrow.parquet as pq  # lazy: only when a table exists
+        tbl = pq.read_table(p, columns=["key", "value"])
+        keys = tbl.column("key").to_pylist()
+        vals = tbl.column("value").to_pylist()
+        out = {str(k): ("" if v is None else str(v)) for k, v in zip(keys, vals) if k is not None}
+        _SETTINGS_OVERLAY_CACHE[key] = (mtime, out)
+        return out
+    except Exception:
+        return {}
+
+
+def apply_settings_overlay(cfg: configparser.ConfigParser, base_dir: Path) -> configparser.ConfigParser:
+    """Overlay the settings table onto cfg['DEFAULT'] in place and return cfg.
+
+    No-op when the table is absent (config.ini stays authoritative) — this is the
+    standalone-helper fallback. Never raises.
+    """
+    try:
+        overlay = read_settings_overlay(base_dir)
+        if overlay:
+            for k, v in overlay.items():
+                try:
+                    cfg.set("DEFAULT", str(k), str(v))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return cfg
+
+
+def write_settings(base_dir: Path, updates: dict) -> bool:
+    """Upsert key/value pairs into the settings table (created if absent).
+
+    Returns True on success. Lazy-imports pyarrow. Atomic write via temp+replace.
+    """
+    if not updates:
+        return False
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        merged = dict(read_settings_overlay(base_dir))
+        for k, v in updates.items():
+            merged[str(k)] = "" if v is None else str(v)
+        keys = list(merged.keys())
+        vals = [merged[k] for k in keys]
+        tbl = pa.table({"key": keys, "value": vals})
+        p = settings_table_path(base_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        pq.write_table(tbl, tmp)
+        os.replace(tmp, p)
+        _SETTINGS_OVERLAY_CACHE.pop(str(p), None)  # invalidate cache
+        return True
+    except Exception:
+        return False
 
 
 def mesa_version_label(cfg: configparser.ConfigParser) -> str:

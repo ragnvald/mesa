@@ -159,6 +159,13 @@ def find_base_dir(cli_arg: str | None) -> Path:
 def read_config(file_name: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
     cfg.read(file_name, encoding="utf-8")
+    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
+    try:
+        from mesa_shared import apply_settings_overlay
+        from pathlib import Path as _Path
+        apply_settings_overlay(cfg, _Path(file_name).parent)
+    except Exception:
+        pass
     return cfg
 
 def read_config_classification(file_name: str) -> dict:

@@ -151,6 +151,12 @@ def read_config(base_dir: Path) -> configparser.ConfigParser:
             break
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
+    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
+    try:
+        from mesa_shared import apply_settings_overlay
+        apply_settings_overlay(cfg, base_dir)
+    except Exception:
+        pass
     return cfg
 
 
