@@ -2482,6 +2482,16 @@ class ProcessRunnerWindow(QMainWindow):
         self._progress_bar.setValue(int(p))
 
     def _on_task_finished(self) -> None:
+        # Release the single-instance lock so the next run on this project can
+        # start. The GUI process lives across runs, so we release per-run here
+        # rather than relying on atexit (which only fires when MESA closes).
+        rel = getattr(self, "_pipeline_lock_release", None)
+        if rel is not None:
+            try:
+                rel()
+            except Exception:
+                pass
+            self._pipeline_lock_release = None
         self._process_btn.setEnabled(True)
         self._process_btn.setText(
             "Process all selected" if self._rb_advanced.isChecked() else "Process"
@@ -2686,6 +2696,22 @@ class ProcessRunnerWindow(QMainWindow):
                     "\n\n".join(readiness.reasons),
                 )
                 return  # button stays enabled so the operator can retry
+        # Single-instance guard: refuse a second concurrent run on this project.
+        # Overlapping runs share log.txt + parquet outputs (and the minimap status
+        # file) and corrupt all three. The GUI used to bypass this lock entirely —
+        # only the CLI path held it — which is how two "Process all" runs could
+        # interleave. See learning.md "Single-instance lock must cover the GUI path".
+        acquired, holder, release = _acquire_pipeline_lock(self._base_dir)
+        if not acquired:
+            QMessageBox.warning(
+                self, "Already running",
+                "A processing run is already in progress on this project.\n\n"
+                f"Existing run: {holder or '(unknown)'}\n\n"
+                "Wait for it to finish, or cancel it from the other window, "
+                "before starting another.",
+            )
+            return  # button stays enabled
+        self._pipeline_lock_release = release
         self._process_btn.setEnabled(False)
         self._process_btn.setText("Processing…")
         # Reset pause/cancel state for the new run and enable the controls.
@@ -2868,57 +2894,96 @@ def run(base_dir: str, master=None) -> None:
     return run_ui(resolved, cfg, master=master)
 
 
-def _acquire_pipeline_lock(base_dir: Path) -> tuple[bool, str | None]:
+def _pid_alive(pid: int) -> bool:
+    """Cross-platform process-liveness check.
+
+    NEVER use os.kill(pid, 0) for this on Windows: there os.kill with a signal
+    other than CTRL_C/CTRL_BREAK calls TerminateProcess(handle, sig) — it KILLS
+    the process. psutil is the safe, portable check; fall back conservatively.
+    """
+    try:
+        import psutil
+        return psutil.pid_exists(int(pid))
+    except Exception:
+        if os.name == "nt":
+            return True  # can't verify safely -> assume alive (don't reclaim a live lock)
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+
+
+def _acquire_pipeline_lock(base_dir: Path) -> tuple[bool, str | None, "callable | None"]:
     """Single-instance lockfile for the processing pipeline.
 
-    Two pipeline subprocesses writing to the same project share one log.txt
-    and one set of geoparquet outputs; the log becomes unreadable and the
-    outputs race each other. Refuse a second concurrent run.
+    Two pipeline runs writing to the same project share one log.txt and one set
+    of geoparquet outputs; the log becomes unreadable and the outputs race each
+    other. Refuse a second concurrent run.
 
-    Stale locks (process crashed without cleanup) are detected via PID
-    liveness and silently reclaimed.
+    Acquisition is atomic (O_CREAT|O_EXCL) so two processes can't both pass a
+    check-then-write window. Stale locks (process crashed without cleanup) are
+    detected via PID liveness (psutil, never os.kill on Windows) and reclaimed.
+
+    Returns (acquired, holder, release). The caller must call release() when its
+    run finishes (the GUI stays alive across runs, so atexit alone is not enough);
+    atexit is also registered as a crash backstop.
     """
     lock_path = base_dir / "output" / ".pipeline.lock"
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        return False, f"cannot create {lock_path.parent}: {e}"
-
-    if lock_path.exists():
-        try:
-            content = lock_path.read_text(encoding="utf-8").strip()
-            existing_pid = int(content.split("\n", 1)[0])
-            try:
-                os.kill(existing_pid, 0)
-                holder = f"PID {existing_pid}"
-                rest = content.split("\n", 1)[1] if "\n" in content else ""
-                if rest:
-                    holder = f"{holder} (started {rest})"
-                return False, holder
-            except (OSError, ProcessLookupError):
-                pass  # stale lock; reclaim below
-        except (OSError, ValueError):
-            pass  # garbage; reclaim below
+        return False, f"cannot create {lock_path.parent}: {e}", None
 
     my_pid = os.getpid()
     my_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        lock_path.write_text(f"{my_pid}\n{my_time}\n", encoding="utf-8")
-    except OSError as e:
-        return False, f"cannot write {lock_path}: {e}"
+    payload = f"{my_pid}\n{my_time}\n".encode("utf-8")
+
+    acquired = False
+    for _attempt in range(2):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            acquired = True
+            break
+        except FileExistsError:
+            existing_pid = None
+            holder = None
+            try:
+                content = lock_path.read_text(encoding="utf-8").strip()
+                existing_pid = int(content.split("\n", 1)[0])
+                rest = content.split("\n", 1)[1] if "\n" in content else ""
+                holder = f"PID {existing_pid}" + (f" (started {rest})" if rest else "")
+            except Exception:
+                holder = None  # garbage -> reclaim
+            if existing_pid is not None and existing_pid != my_pid and _pid_alive(existing_pid):
+                return False, holder, None
+            try:
+                lock_path.unlink()  # stale / garbage -> reclaim and retry the atomic create
+            except Exception:
+                pass
+            continue
+        except OSError as e:
+            return False, f"cannot write {lock_path}: {e}", None
+    if not acquired:
+        return False, "(lock contended)", None
 
     def _release():
         try:
-            if not lock_path.exists():
-                return
-            content = lock_path.read_text(encoding="utf-8").strip()
-            if content.startswith(str(my_pid)):
-                lock_path.unlink()
+            if lock_path.exists():
+                content = lock_path.read_text(encoding="utf-8").strip()
+                if content.startswith(str(my_pid)):
+                    lock_path.unlink()
         except Exception:
             pass
 
     atexit.register(_release)
-    return True, None
+    return True, None, _release
 
 
 def _refuse_concurrent_run(base_dir: Path, holder: str, headless: bool) -> None:
@@ -3002,7 +3067,7 @@ def main() -> None:
     # Single-instance guard: refuse a second concurrent pipeline run for this
     # project (overlapping runs share one log.txt and one set of parquet
     # outputs and produce unreadable mixed logs + raced files).
-    acquired, holder = _acquire_pipeline_lock(base_dir)
+    acquired, holder, _lock_release = _acquire_pipeline_lock(base_dir)
     if not acquired:
         _refuse_concurrent_run(base_dir, holder or "(unknown)", bool(args.headless))
         return  # _refuse_concurrent_run already called sys.exit; defensive.
