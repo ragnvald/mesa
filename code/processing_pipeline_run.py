@@ -2537,13 +2537,63 @@ class ProcessRunnerWindow(QMainWindow):
             self._append_log(f"{_ts()} - Cancel unavailable: {exc}")
             return
         dpi.request_cancel()
-        self._cancel_btn.setText("Cancelling…")
+        self._was_cancelled = True
+        self._cancel_btn.setText("Stopping…")
         self._cancel_btn.setEnabled(False)
-        # If we were paused, the cancel also wakes the wait so the worker
-        # observes the cancel promptly. The Pause caption may have been
-        # "Continue" — disable it now since cancel takes priority.
+        # Cancel takes priority over a pending pause.
         self._pause_btn.setEnabled(False)
-        self._append_log(f"{_ts()} - Cancel requested. Will stop after the current chunk completes.")
+        self._append_log(f"{_ts()} - Cancel requested — force-stopping workers (this run's output is discarded).")
+        # Force stop: kill the processing worker tree now instead of waiting for
+        # the current chunk to finish cooperatively (a long GEOS union or a huge
+        # flatten partition can be many minutes). Safe: the cancelled run's
+        # partial output is reclaimed by cleanup_outputs() on the next Prep.
+        try:
+            n = self._force_stop_workers()
+            if n:
+                self._append_log(f"{_ts()} - Force-stopped {n} worker process(es).")
+        except Exception as exc:
+            self._append_log(f"{_ts()} - Force-stop note: {exc}")
+
+    def _force_stop_workers(self) -> int:
+        """Hard-kill the data-process pool workers + the tiles/segmv subprocess
+        tree. Targets only processing compute (multiprocessing workers and the
+        known helper scripts), so open viewer windows (Maps etc.) are left alone.
+        Returns the number of processes signalled."""
+        try:
+            import os as _os
+            import psutil
+        except Exception:
+            return 0
+        try:
+            me = psutil.Process(_os.getpid())
+            kids = me.children(recursive=True)
+        except Exception:
+            return 0
+        victims = []
+        for ch in kids:
+            try:
+                cl = " ".join(ch.cmdline()).lower()
+            except Exception:
+                cl = ""
+            if ("multiprocessing" in cl
+                    or "tiles_create_raster" in cl
+                    or "segmentation_run" in cl):
+                victims.append(ch)
+        for p in victims:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        try:
+            _gone, alive = psutil.wait_procs(victims, timeout=1.5)
+        except Exception:
+            alive = victims
+        for p in alive:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        return len(victims)
 
     def _on_pause_state_changed(self, paused: bool) -> None:
         # Driven from the worker thread (via the pause observer in
@@ -2722,13 +2772,23 @@ class ProcessRunnerWindow(QMainWindow):
                     except Exception: pass
         except Exception as e:
             # ProcessingCancelled is the operator-driven path; surface it as
-            # a clean cancellation message rather than an error.
+            # a clean cancellation message rather than an error. A force-stop
+            # kills the pool workers, so the stage raises BrokenProcessPool (not
+            # ProcessingCancelled) — treat any exception as a cancel when the
+            # cancel flag is set (or the operator already pressed Cancel).
             try:
                 import processing_internal as dpi
                 cancelled_cls = getattr(dpi, "ProcessingCancelled", None)
+                cancel_flag = bool(dpi.is_cancelled())
             except Exception:
                 cancelled_cls = None
-            if cancelled_cls is not None and isinstance(e, cancelled_cls):
+                cancel_flag = False
+            is_cancel = (
+                (cancelled_cls is not None and isinstance(e, cancelled_cls))
+                or cancel_flag
+                or self._was_cancelled
+            )
+            if is_cancel:
                 self._was_cancelled = True
                 self._signals.log_message.emit(f"{_ts()} - PROCESSING CANCELLED BY OPERATOR")
             else:
