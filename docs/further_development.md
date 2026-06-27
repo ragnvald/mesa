@@ -71,6 +71,21 @@ or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
   would let multiple imported sets coexist.
 - **Dependabot vulnerabilities (14).** Low priority for a local, air-gapped app;
   GDAL/numpy are the oldest. Revisit if the threat model changes.
+- **Progress bar should reflect real work, not flat per-stage weights.** The
+  "Process all" progress bar does not track actual progress for large projects —
+  e.g. it showed ~90% while the run was still in Stage 1 (the data-extent
+  dissolve), i.e. ~5% of the real work. The self-calibrating weights
+  (`tbl_stage_runtime.parquet`: mean of the last 5 clean runs per stage —
+  data/tiles/lines/analysis) help, but (a) they mix wildly different dataset
+  sizes (a tiny run's timing skews a huge run's bar), (b) the whole "data" stage
+  is one band, so prep / intersect / flatten / backfill / segment are not shown
+  individually, and (c) the dominant cost variable — the intersect chunk count
+  (≈ assets × geocode density) — is not used. Fix direction: scale each stage's
+  band by the run's concrete work units (intersect chunk count, flatten
+  partition count, tile count) rather than flat historical means; split the
+  "data" band into its sub-stages; and drive the bar inside the intersect band
+  from the already-reported done/total chunks. Goal: a bar that is roughly true
+  regardless of dataset size and geocode detail.
 
 ---
 
