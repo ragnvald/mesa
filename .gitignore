@@ -29,7 +29,7 @@ compile_candidate/mesa/src/main.rs
 code/input/asset/OSM/forest_landuse_osm.qmd
 mesa_4.0.0-alpha/qgis/mesa.qgz
 mesa_4.0.0-alpha.zip
-.venv/
+.venv*
 win/
 .vscode/
 .claude/
