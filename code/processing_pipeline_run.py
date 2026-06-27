@@ -2482,6 +2482,13 @@ class ProcessRunnerWindow(QMainWindow):
         self._progress_bar.setValue(int(p))
 
     def _on_task_finished(self) -> None:
+        # Run finalisation exactly once per run. A force-stop finalises the UI
+        # directly (the worker thread may be hung on a killed Pool and never
+        # emit), so a later stale task_finished from that daemon thread must be
+        # a no-op — otherwise it would reset the UI mid-way through the NEXT run.
+        if not getattr(self, "_run_active", True):
+            return
+        self._run_active = False
         # Release the single-instance lock so the next run on this project can
         # start. The GUI process lives across runs, so we release per-run here
         # rather than relying on atexit (which only fires when MESA closes).
@@ -2563,6 +2570,14 @@ class ProcessRunnerWindow(QMainWindow):
                 self._append_log(f"{_ts()} - Force-stopped {n} worker process(es).")
         except Exception as exc:
             self._append_log(f"{_ts()} - Force-stop note: {exc}")
+        # The worker thread may be blocked inside a multiprocessing.Pool.imap
+        # whose workers we just killed — Pool does not reliably unblock when its
+        # workers are terminated externally, so run_selected can hang and never
+        # emit task_finished (the Process button would stay greyed out). Don't
+        # wait for it: finalise the UI now so the operator can start a new run.
+        # The _run_active guard in _on_task_finished makes a later (stale) signal
+        # from the daemon worker a harmless no-op.
+        self._signals.task_finished.emit()
 
     def _force_stop_workers(self) -> int:
         """Hard-kill the data-process pool workers + the tiles/segmv subprocess
@@ -2712,6 +2727,7 @@ class ProcessRunnerWindow(QMainWindow):
             )
             return  # button stays enabled
         self._pipeline_lock_release = release
+        self._run_active = True
         self._process_btn.setEnabled(False)
         self._process_btn.setText("Processing…")
         # Reset pause/cancel state for the new run and enable the controls.
