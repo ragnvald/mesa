@@ -2011,7 +2011,7 @@ class _BannerWidget(QFrame):
         super().__init__(parent)
         self._source = pixmap
         h = max(72, pixmap.height()) if pixmap and not pixmap.isNull() else 72
-        self.setFixedHeight(h)
+        self.setFixedHeight(max(48, h // 2))  # halved to free vertical space
         self.setStyleSheet("background: transparent;")
 
     def paintEvent(self, event):
@@ -4216,21 +4216,6 @@ class MesaMainWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        intro = QLabel(
-            "Common project defaults. Edit the values you need and press "
-            "<b>Save all</b> to apply them."
-        )
-        intro.setWordWrap(True)
-        _intro_row = QHBoxLayout()
-        _intro_row.setContentsMargins(0, 0, 0, 0)
-        _intro_row.setSpacing(6)
-        _intro_row.addWidget(intro, 1)
-        _cfg_info = _InfoCircleLabel(
-            "https://github.com/ragnvald/mesa/wiki/User-interface#config-tab")
-        _cfg_info.setToolTip("Open the Config tab guide in the wiki")
-        _intro_row.addWidget(_cfg_info, 0, Qt.AlignTop)
-        layout.addLayout(_intro_row)
-
         self._config_status_label = QLabel("")
         self._config_status_label.setProperty("role", "muted")
         self._config_status_label.setWordWrap(True)
@@ -4335,47 +4320,46 @@ class MesaMainWindow(QMainWindow):
             "backups unless you tick “Include AI token” when creating one.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
-        grid.addWidget(intro, 0, 0, 1, 4)
+        grid.addWidget(intro, 0, 0, 1, 5)
 
+        # Row 1: Provider + Access token + Delete (button inline to save height).
         grid.addWidget(QLabel("Provider:"), 1, 0, Qt.AlignRight)
         self._ai_provider = QComboBox()
         self._ai_provider.addItem("OpenAI (cloud, token)", userData="openai")
         self._ai_provider.addItem("Ollama (local server)", userData="ollama")
         self._ai_provider.currentIndexChanged.connect(self._ai_provider_changed)
         grid.addWidget(self._ai_provider, 1, 1)
-
         self._ai_token_label = QLabel("Access token:")
         grid.addWidget(self._ai_token_label, 1, 2, Qt.AlignRight)
         self._ai_token = QLineEdit()
         self._ai_token.setEchoMode(QLineEdit.Password)
         self._ai_token.setPlaceholderText("paste API token")
         grid.addWidget(self._ai_token, 1, 3)
-
         self._ai_delete_btn = QPushButton("Delete token")
         self._ai_delete_btn.setToolTip("Remove the stored token from secrets/.")
         self._ai_delete_btn.clicked.connect(self._delete_ai_token)
-        grid.addWidget(self._ai_delete_btn, 2, 3, Qt.AlignRight)
+        grid.addWidget(self._ai_delete_btn, 1, 4)
 
+        # Row 2: Ollama URL + Model + Save (button inline on the URL row).
         self._ai_ollama_url_label = QLabel("Ollama URL:")
-        grid.addWidget(self._ai_ollama_url_label, 3, 0, Qt.AlignRight)
+        grid.addWidget(self._ai_ollama_url_label, 2, 0, Qt.AlignRight)
         self._ai_ollama_url = QLineEdit()
         self._ai_ollama_url.setPlaceholderText("http://localhost:11434/api/generate")
-        grid.addWidget(self._ai_ollama_url, 3, 1)
+        grid.addWidget(self._ai_ollama_url, 2, 1)
         self._ai_ollama_model_label = QLabel("Model:")
-        grid.addWidget(self._ai_ollama_model_label, 3, 2, Qt.AlignRight)
+        grid.addWidget(self._ai_ollama_model_label, 2, 2, Qt.AlignRight)
         self._ai_ollama_model = QLineEdit()
         self._ai_ollama_model.setPlaceholderText("mistral")
-        grid.addWidget(self._ai_ollama_model, 3, 3)
-
+        grid.addWidget(self._ai_ollama_model, 2, 3)
         save_btn = QPushButton("Save AI connection")
         save_btn.setProperty("role", "primary")
         save_btn.clicked.connect(self._save_ai_connection)
-        grid.addWidget(save_btn, 4, 3, Qt.AlignRight)
+        grid.addWidget(save_btn, 2, 4)
 
         self._ai_status = QLabel("")
         self._ai_status.setProperty("role", "muted")
         self._ai_status.setWordWrap(True)
-        grid.addWidget(self._ai_status, 4, 0, 1, 3)
+        grid.addWidget(self._ai_status, 3, 0, 1, 5)
 
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
