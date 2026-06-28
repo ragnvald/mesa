@@ -4440,6 +4440,149 @@ def _seg_mv_certainty(gpq_dir) -> dict:
         return {}
 
 
+# ---------------- Report graphics (matplotlib) + AI narrative ----------------
+AREA_BAR_COLOR = "#6b8aa6"  # single accent, matches the Maps legend area bar
+
+
+def _area_barh_png(items, out_path, *, xlabel="Total area (km²)"):
+    """Horizontal 'data-science' area chart mirroring the Maps legend: one bar per
+    zone/type (largest first), each coloured with the same fill the map uses, value
+    labelled in km². items = list of (label, area_km2, colour). Returns path/None."""
+    clean = []
+    for (lbl, a, c) in (items or []):
+        try:
+            av = float(a)
+        except (TypeError, ValueError):
+            continue
+        if av != av:  # NaN
+            continue
+        clean.append((str(lbl), av, c or AREA_BAR_COLOR))
+    if not clean:
+        return None
+    clean.sort(key=lambda t: t[1], reverse=True)
+    clean = clean[:24]
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    labels = [it[0] for it in clean][::-1]   # largest at top
+    vals = [it[1] for it in clean][::-1]
+    colours = [it[2] for it in clean][::-1]
+    n = len(clean)
+    fig, ax = plt.subplots(figsize=(7.2, max(1.2, 0.34 * n + 0.5)))
+    ax.barh(range(n), vals, color=colours, edgecolor="#b9a87f", linewidth=0.5)
+    ax.set_yticks(range(n)); ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel(xlabel, fontsize=9); ax.tick_params(axis="x", labelsize=8)
+    vmax = max(vals) or 1.0
+    for i, v in enumerate(vals):
+        ax.text(v + vmax * 0.01, i, f"{v:,.0f}", va="center", ha="left", fontsize=7, color="#333")
+    ax.set_xlim(0, vmax * 1.15)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout(pad=0.5)
+    try:
+        fig.savefig(str(out_path), dpi=130)
+    finally:
+        plt.close(fig)
+    return str(out_path)
+
+
+# -- AI narrative (Config -> AI connection; deterministic fallback) -----------
+def _report_ai_conn(base_dir) -> dict:
+    try:
+        p = os.path.join(str(base_dir), "secrets", "ai_connection.parquet")
+        if not os.path.exists(p):
+            return {}
+        df = pd.read_parquet(p)
+        if df is None or df.empty:
+            return {}
+        row = df.iloc[-1].to_dict()
+        return {k: ("" if (v is None or (isinstance(v, float) and v != v)) else str(v))
+                for k, v in row.items()}
+    except Exception:
+        return {}
+
+
+def _report_ai_complete(prompt: str, base_dir):
+    """One LLM completion via the configured AI connection. None on no-token/error."""
+    conn = _report_ai_conn(base_dir)
+    if not conn:
+        return None
+    provider = (conn.get("provider") or "openai").lower()
+    token = (conn.get("openai_token") or "").strip()
+    import json as _json
+    import urllib.request as _ur
+    try:
+        if provider == "openai" and token:
+            payload = _json.dumps({"model": "gpt-4o-mini",
+                                   "messages": [{"role": "user", "content": prompt}],
+                                   "temperature": 0.3}).encode("utf-8")
+            req = _ur.Request("https://api.openai.com/v1/chat/completions", data=payload,
+                              headers={"Content-Type": "application/json",
+                                       "Authorization": f"Bearer {token}"})
+            with _ur.urlopen(req, timeout=45) as r:
+                data = _json.loads(r.read().decode("utf-8"))
+            return (data["choices"][0]["message"]["content"] or "").strip() or None
+        if provider == "ollama":
+            url = conn.get("ollama_url") or "http://localhost:11434/api/generate"
+            payload = _json.dumps({"model": conn.get("ollama_model") or "mistral",
+                                   "prompt": prompt, "stream": False}).encode("utf-8")
+            req = _ur.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            with _ur.urlopen(req, timeout=90) as r:
+                data = _json.loads(r.read().decode("utf-8"))
+            return (data.get("response") or "").strip() or None
+    except Exception:
+        return None
+    return None
+
+
+def _classification_overview(recs, layer, base_dir):
+    """Short overview of how the area divides into sensitivity types + how the
+    method works. Uses the AI connection when configured, else a deterministic
+    summary. Returns (text, is_ai)."""
+    recs = [r for r in (recs or []) if r]
+    if not recs:
+        return "", False
+
+    def _nf(x):
+        try:
+            x = float(x); return x if x == x else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    tot = sum(_nf(r.get("total_area_km2")) for r in recs)
+    lines = []
+    for r in recs:
+        share = (_nf(r.get("total_area_km2")) / tot * 100.0) if tot else 0.0
+        lines.append(f"- {r.get('cluster_label','')}: {share:.0f}% of area, "
+                     f"mean importance {_nf(r.get('mean_importance')):.1f}, "
+                     f"susceptibility {_nf(r.get('mean_susceptibility')):.1f}, "
+                     f"top groups: {str(r.get('top_asset_groups','') or '')[:80]}")
+    prompt = (
+        "You are an environmental-sensitivity analyst writing a report. The study "
+        "area was classified into sensitivity TYPES by clustering each cell on the "
+        "SHAPE of its (importance x susceptibility) histogram, not on the A-E "
+        "sensitivity code. In 3-4 sentences of plain English, explain how this area "
+        "divides into these types, what distinguishes the dominant types from one "
+        "another, and what the typology adds beyond the A-E classes. Do not invent "
+        "numbers beyond those given. Types (largest first):\n" + "\n".join(lines))
+    txt = _report_ai_complete(prompt, base_dir)
+    if txt:
+        return txt, True
+    big = max(recs, key=lambda r: _nf(r.get("total_area_km2")))
+    share = (_nf(big.get("total_area_km2")) / tot * 100.0) if tot else 0.0
+    det = (f"The area divides into <b>{len(recs)}</b> sensitivity types by the shape of each "
+           f"cell's importance–susceptibility histogram, rather than by the A–E code. The "
+           f"largest type, <b>{big.get('cluster_label','')}</b> "
+           f"({_imp_sus_corner(big.get('mean_importance'), big.get('mean_susceptibility'))}), "
+           f"covers about <b>{share:.0f}%</b> of the area; the other types separate places that "
+           f"may share an A–E class but differ in whether importance or susceptibility drives "
+           f"that sensitivity.")
+    return det, False
+
+
 # ---------------- Core: generate report ----------------
 def generate_report(base_dir: str,
                     config_file: str,
@@ -5248,6 +5391,22 @@ def generate_report(base_dir: str,
                         _syn = _zone_synthesis(mp, n_zones_total, total_area_all, has_area)
                         if _syn:
                             order_list.append(('text', _syn))
+                        # Zone-area chart (mirrors the Maps legend area bar; same colours).
+                        if _seg is not None and has_area:
+                            try:
+                                _sitems = []
+                                for _, _rr in mp.iterrows():
+                                    _z = str(_rr.get("zone", ""))
+                                    _col = (_seg._hex(_seg._signature_colour(_z)) if method == "signatures"
+                                            else _seg._overview_colour(_z, "clusters"))
+                                    _sitems.append((_z, _rr.get("total_area_km2"), _col))
+                                _spng = output_subpath(base_dir, "tmp",
+                                    f"seg_areas_{_safe_name(str(layer))}_{_safe_name(str(method))}.png")
+                                if _area_barh_png(_sitems, _spng):
+                                    order_list.append(('image',
+                                        (f"{layer} – {_pretty_seg_method(method)}: zone areas", _spng)))
+                            except Exception as _exc:
+                                write_to_log(f"Seg area chart failed for {layer}/{method}: {_exc}", base_dir)
                     order_list.append(('new_page', None))
 
         # Optional multivariate "sensitivity generalisation" section (segmentation
@@ -5342,6 +5501,10 @@ def generate_report(base_dir: str,
                                if "n_clusters" in lp.columns and pd.notna(lp["n_clusters"].iloc[0])
                                else len(lp))
                     order_list.append(('heading(3)', f"Sensitivity types – {layer} ({k_types} types)"))
+                    # AI (or deterministic) overview: how the area divides + how it works.
+                    _ov_text, _ov_ai = _classification_overview(lp.to_dict("records"), layer, base_dir)
+                    if _ov_text:
+                        order_list.append(('text', ("<b>AI overview.</b> " if _ov_ai else "") + _ov_text))
                     header = ["Type", "Cells", "Area (km²)", "Mean imp.", "Mean sus.", "Coverage",
                               "Top asset groups"]
                     if has_ai:
@@ -5365,6 +5528,23 @@ def generate_report(base_dir: str,
                     if fp_png:
                         order_list.append(('image',
                             (f"Type fingerprints – {layer} (importance × susceptibility)", fp_png)))
+                    # Type-area chart (mirrors the Maps classification legend; same colours).
+                    try:
+                        import segmentation as _segc
+                        _citems = []
+                        for _, _rr in lp.iterrows():
+                            try:
+                                _cid = int(_rr.get("cluster_id"))
+                            except Exception:
+                                _cid = -1
+                            _citems.append((str(_rr.get("cluster_label", "")),
+                                            _rr.get("total_area_km2"),
+                                            _segc._overview_colour(str(_cid), "clusters")))
+                        _cpng = output_subpath(base_dir, "tmp", f"segmv_areas_{_safe_name(str(layer))}.png")
+                        if _area_barh_png(_citems, _cpng):
+                            order_list.append(('image', (f"Sensitivity-type areas – {layer}", _cpng)))
+                    except Exception as _exc:
+                        write_to_log(f"Classification area chart failed for {layer}: {_exc}", base_dir)
                     # Interpretive prose — promote the profile + AI descriptions to readable text.
                     _recs = lp.to_dict("records")
                     if _recs:
