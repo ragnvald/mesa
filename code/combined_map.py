@@ -1164,15 +1164,25 @@ HTML = r"""<!doctype html>
   #segZones thead th:hover, #classTable thead th:hover{color:#3f3528}
   tfoot td{font-weight:600;border-top:1px solid #cbb791}
   .sw{display:inline-block;width:12px;height:12px;border:1px solid #b9a87f;vertical-align:middle;margin-right:6px}
-  /* Segmentation legend: swatch | combination label | full-width A–E composition bar,
-     with a 0–100% scale header so the equal-width cells read as relative shares. */
-  #segLegend .legrow, #segLegend .legscale{display:grid;grid-template-columns:14px 84px 1fr;align-items:center;gap:6px;margin:2px 0}
+  /* Segmentation legend: swatch | label | A–E composition bar (1fr) | total-area
+     bar (right 35%), with a scale header (0–100% for the composition, 0–max km²
+     for the area). */
+  #segLegend .legrow, #segLegend .legscale{display:grid;grid-template-columns:14px 84px 1fr 35%;align-items:center;gap:6px;margin:2px 0}
   #segLegend .legrow .sw{margin-right:0;flex:0 0 auto}
   #segLegend .leglbl{font-size:12px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .catbar{display:flex;height:11px;border:1px solid #b9a87f;overflow:hidden}
   .catcell{height:100%}
   #segLegend .legscale{font-size:10px;color:#8a7c63;margin-bottom:1px}
   #segLegend .legscale-axis{display:flex;justify-content:space-between}
+  /* Classification legend: swatch | type label | full-width total-area bar. */
+  #classLegend .legrow, #classLegend .legscale{display:grid;grid-template-columns:14px 120px 1fr;align-items:center;gap:6px;margin:2px 0}
+  #classLegend .legrow .sw{margin-right:0;flex:0 0 auto}
+  #classLegend .leglbl{font-size:12px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #classLegend .legscale{font-size:10px;color:#8a7c63;margin-bottom:1px}
+  #classLegend .legscale-axis{display:flex;justify-content:space-between}
+  /* Single-colour magnitude bar (total area) shared by both legends. */
+  .areabar{position:relative;height:11px;border:1px solid #b9a87f;background:#f3ecdf;overflow:hidden}
+  .areafill{position:absolute;left:0;top:0;height:100%;background:#6b8aa6}
   .muted{color:#8a7c63}
   .stub{position:absolute;top:14px;left:14px;z-index:500;background:#fff;border:1px solid #ccc;
         border-radius:6px;padding:8px 12px;box-shadow:0 1px 6px rgba(0,0,0,.15)}
@@ -1301,7 +1311,7 @@ HTML = r"""<!doctype html>
           <p>Pick a level and mode, then click a cell to identify it.</p>
         </div>
         <div class="row"><b>Legend</b><div id="segLegend" class="muted">–</div></div>
-        <div class="row"><b>Zones</b> <span class="muted">(largest area first)</span>
+        <div class="row">
           <table id="segZones"><thead><tr><th data-key="zone">Zone</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="sens_mean">Sens</th><th data-key="mean_n_assets">Assets</th></tr></thead>
           <tbody></tbody></table>
         </div>
@@ -1340,7 +1350,7 @@ HTML = r"""<!doctype html>
              click a polygon to identify it.</p>
         </div>
         <div class="row"><b>Legend</b><div id="classLegend" class="muted">–</div></div>
-        <div class="row"><b>Types</b> <span class="muted">(largest area first)</span>
+        <div class="row">
           <table id="classTable"><thead><tr><th data-key="cluster_label">Type</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="mean_importance">Imp</th><th data-key="mean_susceptibility">Sus</th><th data-key="mean_coverage_index">Cov</th><th data-key="top_asset_groups" style="text-align:left">Top asset groups</th></tr></thead>
           <tbody></tbody></table>
         </div>
@@ -1709,7 +1719,7 @@ HTML = r"""<!doctype html>
 
   // Zone table sort state. Legend keeps the server order (largest area first);
   // only the table reorders when a header is clicked.
-  var segZonesData=[], segSort={key:null, dir:1};
+  var segZonesData=[], segSort={key:'total_area_km2', dir:-1};  // default: Area, largest first (arrow shown)
 
   // A–E sensitivity-code colours — mirror segmentation._RAMP so the legend's
   // composition bar matches the signature fill computed server-side.
@@ -1723,6 +1733,12 @@ HTML = r"""<!doctype html>
     var w=(100/codes.length).toFixed(4);
     var cells=codes.map(function(c){ return '<span class="catcell" title="'+c+'" style="width:'+w+'%;background:'+SEG_RAMP[c]+'"></span>'; }).join('');
     return '<span class="catbar">'+cells+'</span>';
+  }
+  // Single-colour magnitude bar for a total-area value, scaled to the max in view.
+  function areaBar(area, maxA){
+    var a=(area==null||isNaN(area))?0:Number(area);
+    var pct=(maxA>0)?Math.max(0,Math.min(100,a/maxA*100)):0;
+    return '<span class="areabar" title="'+fmt(a,2)+' km²"><span class="areafill" style="width:'+pct.toFixed(1)+'%"></span></span>';
   }
   function sortedSegZones(){
     var rows=segZonesData.slice();
@@ -1741,16 +1757,19 @@ HTML = r"""<!doctype html>
     var leg=document.getElementById('segLegend'); leg.innerHTML='';
     if(!segZonesData.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
     var rows=sortedSegZones();
-    if(rows.some(function(z){ return segCatBar(z.zone)!==''; })){
-      var hd=document.createElement('div'); hd.className='legscale';
-      hd.innerHTML='<span></span><span></span><span class="legscale-axis"><span>0%</span><span>50%</span><span>100%</span></span>';
-      leg.appendChild(hd);
-    }
+    var maxArea=0; rows.forEach(function(z){ var a=Number(z.total_area_km2); if(!isNaN(a)&&a>maxArea)maxArea=a; });
+    var hasCat=rows.some(function(z){ return segCatBar(z.zone)!==''; });
+    var hd=document.createElement('div'); hd.className='legscale';
+    hd.innerHTML='<span></span><span></span>'+
+                 (hasCat?'<span class="legscale-axis"><span>0%</span><span>50%</span><span>100%</span></span>':'<span></span>')+
+                 '<span class="legscale-axis"><span>0</span><span>'+fmt(maxArea,0)+' km²</span></span>';
+    leg.appendChild(hd);
     rows.forEach(function(z){
       var d=document.createElement('div'); d.className='legrow';
       d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+
                   '<span class="leglbl" title="'+z.zone+'">'+z.zone+'</span>'+
-                  segCatBar(z.zone);
+                  (segCatBar(z.zone)||'<span></span>')+
+                  areaBar(z.total_area_km2, maxArea);
       leg.appendChild(d);
     });
   }
@@ -1930,6 +1949,17 @@ HTML = r"""<!doctype html>
     var note=certainty ? '' : ' (Certainty needs a Tiles re-run)';
     classMsg('<b>'+(layer||'')+'</b> · raster view'+note+'; hover a cell to identify it.');
   }
+  function sortedClassProfile(){
+    var rows=classProfileData.slice();
+    if(classSort.key){
+      var k=classSort.key, dir=classSort.dir, txt=(k==='cluster_label'||k==='top_asset_groups');
+      rows.sort(function(a,b){ var va=a[k], vb=b[k];
+        if(txt){ return String(va==null?'':va).localeCompare(String(vb==null?'':vb))*dir; }
+        va=(va==null||isNaN(va))?-Infinity:Number(va); vb=(vb==null||isNaN(vb))?-Infinity:Number(vb);
+        return (va<vb?-1:va>vb?1:0)*dir; });
+    }
+    return rows;
+  }
   function updateClassLegend(){
     var leg=document.getElementById('classLegend'); if(!leg) return; leg.innerHTML='';
     if(classColourMode==='certainty'){
@@ -1940,28 +1970,29 @@ HTML = r"""<!doctype html>
         '<div class="muted" style="font-size:11px"><span class="sw" style="background:#cccccc"></span>ingen data (ingen overlapp)</div>';
       return;
     }
-    if(!classLegendData.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
-    classLegendData.forEach(function(z){ var d=document.createElement('div');
-      d.innerHTML='<span class="sw" style="background:'+z.fill+'"></span>'+z.zone; leg.appendChild(d); });
+    var rows=sortedClassProfile();
+    if(!rows.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
+    var maxArea=0; rows.forEach(function(p){ var a=Number(p.total_area_km2); if(!isNaN(a)&&a>maxArea)maxArea=a; });
+    var hd=document.createElement('div'); hd.className='legscale';
+    hd.innerHTML='<span></span><span></span><span class="legscale-axis"><span>0</span><span>'+fmt(maxArea,0)+' km²</span></span>';
+    leg.appendChild(hd);
+    rows.forEach(function(p){
+      var d=document.createElement('div'); d.className='legrow';
+      d.innerHTML='<span class="sw" style="background:'+(p.fill||'#cccccc')+'"></span>'+
+                  '<span class="leglbl" title="'+(p.cluster_label||'')+'">'+(p.cluster_label||'')+'</span>'+
+                  areaBar(p.total_area_km2, maxArea);
+      leg.appendChild(d);
+    });
   }
   function renderClassPanel(legend, profile){
     classLegendData = legend ? legend.slice() : [];
+    classProfileData = profile ? profile.slice() : [];  // set before updateClassLegend (it reads areas from the profile)
     updateClassLegend();
-    classProfileData = profile ? profile.slice() : [];
     renderClassRows();
   }
   function renderClassRows(){
     var tb=document.querySelector('#classTable tbody'); tb.innerHTML='';
-    var rows=classProfileData.slice();
-    if(classSort.key){
-      var k=classSort.key, dir=classSort.dir, txt=(k==='cluster_label'||k==='top_asset_groups');
-      rows.sort(function(a,b){
-        var va=a[k], vb=b[k];
-        if(txt){ return String(va==null?'':va).localeCompare(String(vb==null?'':vb))*dir; }
-        va=(va==null||isNaN(va))?-Infinity:Number(va); vb=(vb==null||isNaN(vb))?-Infinity:Number(vb);
-        return (va<vb?-1:va>vb?1:0)*dir;
-      });
-    }
+    var rows=sortedClassProfile();
     rows.forEach(function(p){
       var tr=document.createElement('tr');
       tr.innerHTML='<td>'+p.cluster_label+'</td><td>'+fmt(p.total_area_km2,2)+'</td><td>'+fmt(p.n_polygons,0)+
@@ -1985,7 +2016,7 @@ HTML = r"""<!doctype html>
       // column: flip direction.
       if(classSort.key===k){ classSort.dir=-classSort.dir; }
       else { classSort.key=k; classSort.dir=txt?1:-1; }
-      renderClassRows();
+      renderClassRows(); updateClassLegend();  // keep the legend ordering in sync with the table
     });
   })();
   function loadClass(run){
