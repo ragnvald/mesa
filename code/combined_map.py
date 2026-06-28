@@ -491,15 +491,37 @@ class _Api:
         return {"type": "FeatureCollection", "features": feats}
 
     def generate_ai_styles(self, group_ids) -> dict:
-        """AI cartography styling: distinct per-group colours, persisted to
-        tbl_asset_group. (Local generator — same path asset_map_view uses when
-        no OpenAI key is configured.)"""
+        """AI cartography styling: title-aware colours — the LLM when an AI
+        connection token is set (Config -> AI connection), else a local semantic
+        heuristic from the layer titles. Persisted to tbl_asset_group."""
         try:
             import asset_styling
-            styles = asset_styling.apply_ai_styles(self.gpq / "tbl_asset_group.parquet", group_ids or [])
-            return {"ok": True, "styles": styles, "mode": "local"}
+            titles = self._asset_group_titles(group_ids)
+            styles, mode = asset_styling.apply_ai_styles(
+                self.gpq / "tbl_asset_group.parquet", group_ids or [],
+                titles=titles, base_dir=str(self.base))
+            return {"ok": True, "styles": styles, "mode": mode}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def _asset_group_titles(self, group_ids) -> dict:
+        """id -> human title (title_fromuser > name_original > name_gis_assetgroup)."""
+        try:
+            import pandas as pd
+            df = pd.read_parquet(self.gpq / "tbl_asset_group.parquet",
+                                 columns=["id", "title_fromuser", "name_original",
+                                          "name_gis_assetgroup"])
+        except Exception:
+            return {}
+        wanted = {str(g) for g in (group_ids or [])}
+        out = {}
+        for _, r in df.iterrows():
+            gid = str(r.get("id"))
+            if wanted and gid not in wanted:
+                continue
+            out[gid] = str(r.get("title_fromuser") or r.get("name_original")
+                           or r.get("name_gis_assetgroup") or "")
+        return out
 
     def clear_asset_styles(self, group_ids) -> dict:
         try:
@@ -1558,7 +1580,8 @@ HTML = r"""<!doctype html>
         ai.disabled=false;
         if(!res || !res.ok){ if(msg) msg.textContent='Styling failed: '+((res&&res.error)||''); return; }
         refreshAssetColors();
-        if(msg) msg.textContent='Re-styled '+Object.keys(res.styles||{}).length+' groups'+(res.mode==='local'?' (local cartography).':'.');
+        var modeTxt=res.mode==='llm'?' (AI).':(res.mode==='heuristic'?' (semantic).':' (distinct colours).');
+        if(msg) msg.textContent='Re-styled '+Object.keys(res.styles||{}).length+' groups'+modeTxt;
       });
     });
     if(cl) cl.addEventListener('click', function(){
