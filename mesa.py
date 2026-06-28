@@ -1,5 +1,4 @@
 import os
-import locale
 import sys
 import warnings
 import importlib
@@ -943,6 +942,33 @@ def _iter_backup_files(root_path: Path):
         for fn in filenames:
             yield Path(dirpath) / fn
 
+# --- AI connection settings (secrets/ table) -------------------------------
+# Stored in secrets/ai_connection.parquet, OUTSIDE output/ so it survives
+# "Clear generated data" and is left out of backups unless the user opts in
+# (secrets/ is not in the default backup set). Holds the AI backend connection
+# only (provider + token + Ollama endpoint); whether descriptions run is a
+# per-pass choice in Classification setup. The token lives only in this table.
+def ai_connection_path(base_dir: str) -> str:
+    return os.path.join(base_dir, "secrets", "ai_connection.parquet")
+
+def read_ai_connection(base_dir: str) -> dict:
+    path = ai_connection_path(base_dir)
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_parquet(path)
+        if df is None or df.empty:
+            return {}
+        row = df.iloc[-1].to_dict()
+        return {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v))
+                for k, v in row.items()}
+    except Exception:
+        return {}
+
+def write_ai_connection(base_dir: str, settings: dict) -> None:
+    os.makedirs(os.path.join(base_dir, "secrets"), exist_ok=True)
+    pd.DataFrame([settings]).to_parquet(ai_connection_path(base_dir), index=False)
+
 def _safe_zip_member_names(names: list[str]) -> list[str]:
     safe: list[str] = []
     for member in names:
@@ -961,6 +987,7 @@ def create_backup_archive(
     *,
     include_tiles: bool = True,
     compression_kind: str = "deflate",
+    include_ai_token: bool = False,
     progress_cb=None,
 ) -> str:
     """Create a backup zip at destination_path.
@@ -1002,6 +1029,13 @@ def create_backup_archive(
                     arc = file_path.relative_to(base).as_posix()
                     files_to_add.append((file_path, arc))
 
+    # The AI token (secrets/ai_connection.parquet) lives outside input/ and
+    # output/, so it never enters the archive unless the user explicitly opts in.
+    if include_ai_token:
+        ai_path = base / "secrets" / "ai_connection.parquet"
+        if ai_path.is_file():
+            files_to_add.append((ai_path, "secrets/ai_connection.parquet"))
+
     if compression_kind == "lzma":
         zf_kwargs = dict(compression=zipfile.ZIP_LZMA)
     else:
@@ -1035,6 +1069,7 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
         to_extract = [
             m for m in safe_members
             if m == "config.ini" or m.startswith("input/") or m.startswith("output/")
+            or m.startswith("secrets/")  # restored only if the backup opted to include it
         ]
         for folder_name in ("input", "output"):
             folder = base / folder_name
@@ -4169,18 +4204,10 @@ class MesaMainWindow(QMainWindow):
              "How far apart cuts are made along the line. Shorter = more, "
              "finer segments (and more processing)."),
         ]),
-        ("Atlas", [
-            ("atlas_lon_size_km", "Longitude size (km)", "float",
-             {"min": 0.1, "max": 10000.0, "step": 1.0, "decimals": 2},
-             "Default east-west extent of one atlas page."),
-            ("atlas_lat_size_km", "Latitude size (km)", "float",
-             {"min": 0.1, "max": 10000.0, "step": 1.0, "decimals": 2},
-             "Default north-south extent of one atlas page."),
-            ("atlas_overlap_percent", "Page overlap (%)", "float",
-             {"min": 0.0, "max": 100.0, "step": 1.0, "decimals": 1},
-             "How much adjacent atlas pages overlap, so features near a page "
-             "edge are still visible on the neighbour."),
-        ]),
+        # Atlas page sizing (atlas_lon_size_km / atlas_lat_size_km /
+        # atlas_overlap_percent) is configured in the Atlas tool (Workflows →
+        # Atlas), which already reads/writes these keys — kept off this tab so the
+        # three remaining columns can widen and leave room for the AI box on top.
     ]
 
     def _build_config_tab(self):
@@ -4208,6 +4235,9 @@ class MesaMainWindow(QMainWindow):
         self._config_status_label.setProperty("role", "muted")
         self._config_status_label.setWordWrap(True)
         layout.addWidget(self._config_status_label)
+
+        # AI connection — a single box on top spanning the three setting columns.
+        layout.addWidget(self._build_ai_connection_box())
 
         # One QGroupBox per domain, side by side. Each box stacks its fields
         # vertically; inputs sit at their natural width (left-aligned, no stretch).
@@ -4246,7 +4276,7 @@ class MesaMainWindow(QMainWindow):
                 self._config_widgets[key] = (widget, kind, opts)
 
             box_layout.addStretch()
-            cols.addWidget(box)
+            cols.addWidget(box, 1)  # stretch so the three columns widen evenly
 
         layout.addWidget(cols_host)
         layout.addStretch()
@@ -4284,6 +4314,114 @@ class MesaMainWindow(QMainWindow):
 
         self._tabs.addTab(tab, "Config")
         self._load_config_editor()
+
+    def _build_ai_connection_box(self):
+        """Top box on the Config tab (spans the three setting columns). Configures
+        the AI *connection* used to generate plain-language descriptions: a cloud
+        provider with an access token, or a local Ollama server. The token is
+        stored only in secrets/ai_connection.parquet — outside output/ (survives
+        "Clear output") and excluded from backups unless opted in. Whether the
+        descriptions actually run is chosen per pass in Classification setup."""
+        box = QGroupBox("AI connection")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(10, 8, 10, 10)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        intro = QLabel(
+            "Optional. Connect an AI backend for plain-language descriptions "
+            "(e.g. Classification class summaries). The access token is stored only "
+            "in <b>secrets/</b> — it survives “Clear output” and is left out of "
+            "backups unless you tick “Include AI token” when creating one.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        grid.addWidget(intro, 0, 0, 1, 4)
+
+        grid.addWidget(QLabel("Provider:"), 1, 0, Qt.AlignRight)
+        self._ai_provider = QComboBox()
+        self._ai_provider.addItem("OpenAI (cloud, token)", userData="openai")
+        self._ai_provider.addItem("Ollama (local server)", userData="ollama")
+        self._ai_provider.currentIndexChanged.connect(self._ai_provider_changed)
+        grid.addWidget(self._ai_provider, 1, 1)
+
+        self._ai_token_label = QLabel("Access token:")
+        grid.addWidget(self._ai_token_label, 1, 2, Qt.AlignRight)
+        self._ai_token = QLineEdit()
+        self._ai_token.setEchoMode(QLineEdit.Password)
+        self._ai_token.setPlaceholderText("paste API token")
+        grid.addWidget(self._ai_token, 1, 3)
+
+        self._ai_delete_btn = QPushButton("Delete token")
+        self._ai_delete_btn.setToolTip("Remove the stored token from secrets/.")
+        self._ai_delete_btn.clicked.connect(self._delete_ai_token)
+        grid.addWidget(self._ai_delete_btn, 2, 3, Qt.AlignRight)
+
+        self._ai_ollama_url_label = QLabel("Ollama URL:")
+        grid.addWidget(self._ai_ollama_url_label, 3, 0, Qt.AlignRight)
+        self._ai_ollama_url = QLineEdit()
+        self._ai_ollama_url.setPlaceholderText("http://localhost:11434/api/generate")
+        grid.addWidget(self._ai_ollama_url, 3, 1)
+        self._ai_ollama_model_label = QLabel("Model:")
+        grid.addWidget(self._ai_ollama_model_label, 3, 2, Qt.AlignRight)
+        self._ai_ollama_model = QLineEdit()
+        self._ai_ollama_model.setPlaceholderText("mistral")
+        grid.addWidget(self._ai_ollama_model, 3, 3)
+
+        save_btn = QPushButton("Save AI connection")
+        save_btn.setProperty("role", "primary")
+        save_btn.clicked.connect(self._save_ai_connection)
+        grid.addWidget(save_btn, 4, 3, Qt.AlignRight)
+
+        self._ai_status = QLabel("")
+        self._ai_status.setProperty("role", "muted")
+        self._ai_status.setWordWrap(True)
+        grid.addWidget(self._ai_status, 4, 0, 1, 3)
+
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        self._load_ai_connection()
+        return box
+
+    def _ai_provider_changed(self, *args):
+        is_openai = (self._ai_provider.currentData() == "openai")
+        for w in (self._ai_token_label, self._ai_token, self._ai_delete_btn):
+            w.setEnabled(is_openai)
+        for w in (self._ai_ollama_url_label, self._ai_ollama_url,
+                  self._ai_ollama_model_label, self._ai_ollama_model):
+            w.setEnabled(not is_openai)
+
+    def _load_ai_connection(self):
+        s = read_ai_connection(original_working_directory)
+        prov = (s.get("provider") or "openai").strip().lower()
+        idx = self._ai_provider.findData(prov)
+        self._ai_provider.setCurrentIndex(idx if idx >= 0 else 0)
+        self._ai_token.setText(s.get("openai_token", "") or "")
+        self._ai_ollama_url.setText(s.get("ollama_url", "") or "")
+        self._ai_ollama_model.setText(s.get("ollama_model", "") or "")
+        self._ai_provider_changed()
+
+    def _save_ai_connection(self):
+        settings = {
+            "provider": self._ai_provider.currentData() or "openai",
+            "openai_token": self._ai_token.text().strip(),
+            "ollama_url": self._ai_ollama_url.text().strip(),
+            "ollama_model": self._ai_ollama_model.text().strip(),
+        }
+        try:
+            write_ai_connection(original_working_directory, settings)
+            self._ai_status.setText("AI connection saved to secrets/.")
+        except Exception as e:
+            self._ai_status.setText(f"Could not save AI connection: {e}")
+
+    def _delete_ai_token(self):
+        s = read_ai_connection(original_working_directory)
+        s["openai_token"] = ""
+        try:
+            write_ai_connection(original_working_directory, s)
+            self._ai_token.clear()
+            self._ai_status.setText("Token deleted from secrets/.")
+        except Exception as e:
+            self._ai_status.setText(f"Could not delete token: {e}")
 
     def _make_config_widget(self, kind, opts):
         if kind == "int":
@@ -4509,8 +4647,8 @@ class MesaMainWindow(QMainWindow):
     def _ask_backup_options(self):
         """Show a small modal dialog with backup options.
 
-        Returns (include_tiles: bool, compression_kind: str) or None if the
-        user cancelled.
+        Returns (include_tiles: bool, compression_kind: str,
+        include_ai_token: bool) or None if the user cancelled.
         """
         dlg = QDialog(self)
         dlg.setWindowTitle("Backup options")
@@ -4554,6 +4692,18 @@ class MesaMainWindow(QMainWindow):
         fmt_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
         layout.addWidget(fmt_hint)
 
+        layout.addSpacing(4)
+        ai_token_cb = QCheckBox("Include AI token (secrets/)")
+        ai_token_cb.setChecked(False)
+        ai_token_hint = QLabel(
+            "Off by default: your AI access token is stripped from the backup. "
+            "Tick only if the recipient should inherit your token."
+        )
+        ai_token_hint.setWordWrap(True)
+        ai_token_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        layout.addWidget(ai_token_cb)
+        layout.addWidget(ai_token_hint)
+
         layout.addStretch()
 
         btn_row = QHBoxLayout()
@@ -4571,14 +4721,15 @@ class MesaMainWindow(QMainWindow):
         dlg.resize(420, dlg.sizeHint().height())
         if dlg.exec() != QDialog.Accepted:
             return None
-        return bool(tiles_cb.isChecked()), str(fmt_combo.currentData())
+        return (bool(tiles_cb.isChecked()), str(fmt_combo.currentData()),
+                bool(ai_token_cb.isChecked()))
 
     def _do_backup(self):
         # Step 1: collect options (tiles + compression) before asking where to save.
         opts = self._ask_backup_options()
         if opts is None:
             return  # user cancelled
-        include_tiles, compression_kind = opts
+        include_tiles, compression_kind, include_ai_token = opts
 
         # Step 2: file dialog for save path.
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -4656,6 +4807,7 @@ class MesaMainWindow(QMainWindow):
                     original_working_directory, chosen_path,
                     include_tiles=include_tiles,
                     compression_kind=compression_kind,
+                    include_ai_token=include_ai_token,
                     progress_cb=lambda i, n, a: signals.progress.emit(i, n, a),
                 )
                 signals.finished.emit(result_path)

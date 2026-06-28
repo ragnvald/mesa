@@ -648,10 +648,44 @@ def _ollama_describe(prompt: str, url: str, model: str, log) -> Optional[str]:
         return None
 
 
+def _ai_secrets(base_dir) -> dict:
+    """AI connection settings from secrets/ai_connection.parquet — the central
+    store written by the Config tab's "AI connection" box. Returns {} if absent.
+    Keeps the OpenAI token out of config.ini/output/ and survives "Clear output"."""
+    try:
+        p = Path(base_dir) / "secrets" / "ai_connection.parquet"
+        if not p.exists():
+            return {}
+        import pandas as pd
+        df = pd.read_parquet(p)
+        if df is None or df.empty:
+            return {}
+        row = df.iloc[-1].to_dict()
+        return {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v))
+                for k, v in row.items()}
+    except Exception:
+        return {}
+
+
+def _ai_overrides(base_dir) -> dict:
+    """Ollama endpoint overrides from the AI connection store, so the Config tab's
+    "AI connection" box wins over config.ini's segmv_ollama_* defaults. The OpenAI
+    token is consumed separately in _openai_*; it is not surfaced as a param."""
+    s = _ai_secrets(base_dir)
+    out = {}
+    if s.get("ollama_url"):
+        out["ollama_url"] = s["ollama_url"]
+    if s.get("ollama_model"):
+        out["ollama_model"] = s["ollama_model"]
+    return out
+
+
 def _openai_describe(prompt: str, base_dir: Path, log) -> Optional[str]:
     try:
         key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-        if not key:
+        if not key:  # central store (Config → AI connection) is the primary home
+            key = (_ai_secrets(base_dir).get("openai_token") or "").strip()
+        if not key:  # legacy fallback
             kp = Path(base_dir) / "secrets" / "openai.key"
             if kp.exists():
                 key = kp.read_text(encoding="utf-8").strip()
@@ -696,6 +730,8 @@ def _ollama_status(url: str, model: str, timeout: float = 2.0) -> str:
 
 def _openai_available(base_dir: Path) -> bool:
     if (os.environ.get("OPENAI_API_KEY") or "").strip():
+        return True
+    if (_ai_secrets(base_dir).get("openai_token") or "").strip():
         return True
     try:
         return (Path(base_dir) / "secrets" / "openai.key").exists()
@@ -1073,7 +1109,7 @@ def run(base_dir: str, master=None, **params):
     """In-process entry (kept for symmetry; normally launched as a subprocess)."""
     bd = Path(mesa_shared.find_base_dir(base_dir))
     cfg = mesa_shared.read_config(bd)
-    p = params_from_config(cfg, **params)
+    p = params_from_config(cfg, **{**_ai_overrides(bd), **params})
     return run_segmentation(bd, p)
 
 
@@ -1098,6 +1134,7 @@ def main(argv=None):
     cfg = mesa_shared.read_config(base_dir)
     overrides = {k: v for k, v in vars(args).items()
                  if k != "original_working_directory" and v is not None}
+    overrides = {**_ai_overrides(base_dir), **overrides}  # explicit CLI args win
     params = params_from_config(cfg, **overrides)
     log = make_logger(base_dir)
     t0 = time.time()
