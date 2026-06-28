@@ -1293,11 +1293,15 @@ class ReportEngine:
                 base_dir=self.base_dir,
             )
             if ok and _file_ok(out_png):
+                _grp = (flat_df[flat_df["name_gis_geocodegroup"].astype(str) == str(basic_name)]
+                        if "name_gis_geocodegroup" in flat_df.columns else flat_df)
+                _dist = _summarise_distribution(_grp.get(col), _grp.get("area_m2"))
                 stats_text = (
                     (f"{stats_lead} " if stats_lead else "") +
                     f"The chart below is computed from <b>tbl_flat</b> for geocode group <b>{basic_name}</b> only. "
                     "Bars show total polygon area (km²) per index value. "
                     "The line shows the number of categories per index value (A–E if available; otherwise the number of cells)."
+                    + (f" {_dist}" if _dist else "")
                 )
                 pages += [
                     ('heading(2)', f"{title} – statistics"),
@@ -4338,6 +4342,104 @@ def set_progress(pct: float, message: str | None = None):
     except Exception:
         pass
 
+# ---------------- Narrative prose helpers (data-driven interpretation) ----------------
+def _rep_pct(part, whole) -> float:
+    try:
+        whole = float(whole)
+        return (float(part) / whole * 100.0) if whole else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _imp_sus_corner(mean_imp, mean_sus) -> str:
+    """Plain-language (importance, susceptibility) corner from the two means (1–5)."""
+    def band(x):
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return "moderate"
+        return "high" if x >= 3.5 else ("low" if x <= 2.5 else "moderate")
+    return f"{band(mean_imp)}-importance / {band(mean_sus)}-susceptibility"
+
+
+def _summarise_distribution(values, weights=None) -> str:
+    """One-sentence area- (or count-) weighted summary of a numeric distribution.
+    Returns '' when there is nothing meaningful to say."""
+    try:
+        v = pd.to_numeric(values, errors="coerce")
+        v = v[v.notna()]
+        if v.empty:
+            return ""
+        w = pd.to_numeric(weights, errors="coerce").reindex(v.index).fillna(0.0) if weights is not None else None
+        if w is None or float(w.sum()) <= 0:
+            w = pd.Series(1.0, index=v.index)
+            unit_word, mean_label = "cells", "mean"
+        else:
+            unit_word, mean_label = "the mapped area", "area-weighted mean"
+        tot = float(w.sum())
+        vmin, vmax = float(v.min()), float(v.max())
+        mean_w = float((v * w).sum() / tot)
+        thr = vmin + 0.8 * (vmax - vmin) if vmax > vmin else vmax
+        top = float(w[v >= thr].sum()) / tot * 100.0
+        nonzero = float(w[v > 0].sum()) / tot * 100.0
+        s = (f"The values span <b>{vmin:.0f}–{vmax:.0f}</b> ({mean_label} <b>{mean_w:.0f}</b>); "
+             f"<b>{top:.0f}%</b> of {unit_word} sits in the top fifth (≥ {thr:.0f})")
+        if nonzero < 99.5:
+            s += f", and <b>{100.0 - nonzero:.0f}%</b> carries no sensitive overlap (value 0)"
+        return s + "."
+    except Exception:
+        return ""
+
+
+def _zone_synthesis(mp_head, n_total: int, total_area: float, has_area: bool) -> str:
+    """One-sentence synthesis of a segmentation zone table."""
+    try:
+        recs = mp_head.to_dict("records")
+        if not recs:
+            return ""
+        if has_area and total_area > 0:
+            top = recs[0]
+            top_share = _rep_pct(top.get("total_area_km2") or 0, total_area)
+            top3 = _rep_pct(sum(float(x.get("total_area_km2") or 0) for x in recs[:3]), total_area)
+            sens = [float(x.get("sens_mean")) for x in recs if pd.notna(x.get("sens_mean"))]
+            srange = (f"; mean sensitivity ranges {min(sens):.1f}–{max(sens):.1f} across zones"
+                      if sens else "")
+            return (f"The area divides into <b>{n_total}</b> zones. The largest, "
+                    f"<b>{top.get('zone', '')}</b>, covers <b>{top_share:.0f}%</b> of the mapped area; "
+                    f"the top three together account for <b>{top3:.0f}%</b>{srange}.")
+        return f"The area divides into <b>{n_total}</b> zones (listed largest-first by polygon count)."
+    except Exception:
+        return ""
+
+
+def _seg_mv_certainty(gpq_dir) -> dict:
+    """Per-layer mean assignment certainty (p_max) + entropy from tbl_seg_mv via a
+    light, projected Arrow group-by (the per-cell table is geometry-free, so this
+    stays cheap). Returns {layer: (mean_p_max, mean_entropy)}; {} on any issue."""
+    try:
+        import pyarrow.dataset as ds
+        p = os.path.join(str(gpq_dir), "tbl_seg_mv.parquet")
+        if not os.path.exists(p):
+            return {}
+        schema = ds.dataset(p, format="parquet").schema.names
+        if "name_gis_geocodegroup" not in schema or "p_max" not in schema:
+            return {}
+        cols = ["name_gis_geocodegroup", "p_max"] + (["entropy"] if "entropy" in schema else [])
+        t = ds.dataset(p, format="parquet").to_table(columns=cols)
+        aggs = [("p_max", "mean")] + ([("entropy", "mean")] if "entropy" in schema else [])
+        gd = t.group_by("name_gis_geocodegroup").aggregate(aggs).to_pydict()
+        keys = [str(k) for k in gd.get("name_gis_geocodegroup", [])]
+        pmax = gd.get("p_max_mean", [])
+        ent = gd.get("entropy_mean", [None] * len(keys))
+        out = {}
+        for i, k in enumerate(keys):
+            out[k] = (float(pmax[i]) if i < len(pmax) and pmax[i] is not None else None,
+                      float(ent[i]) if i < len(ent) and ent[i] is not None else None)
+        return out
+    except Exception:
+        return {}
+
+
 # ---------------- Core: generate report ----------------
 def generate_report(base_dir: str,
                     config_file: str,
@@ -5128,6 +5230,9 @@ def generate_report(base_dir: str,
                             mp = mp.sort_values("total_area_km2", ascending=False, na_position="last")
                         else:
                             mp = mp.sort_values("n_polygons", ascending=False)
+                        n_zones_total = len(mp)
+                        total_area_all = (float(pd.to_numeric(mp["total_area_km2"], errors="coerce").sum())
+                                          if has_area else 0.0)
                         mp = mp.head(30)
                         order_list.append(('heading(4)', _pretty_seg_method(method)))
                         tbl = [["Zone", "Total area (km²)", "Polygons", "Mean sensitivity", "Mean # assets"]]
@@ -5140,6 +5245,9 @@ def generate_report(base_dir: str,
                                 f"{float(r['mean_n_assets']):.1f}",
                             ])
                         order_list.append(('table', tbl))
+                        _syn = _zone_synthesis(mp, n_zones_total, total_area_all, has_area)
+                        if _syn:
+                            order_list.append(('text', _syn))
                     order_list.append(('new_page', None))
 
         # Optional multivariate "sensitivity generalisation" section (segmentation
@@ -5223,6 +5331,7 @@ def generate_report(base_dir: str,
                     return str(out)
 
                 has_ai = "description_ai" in mv.columns and mv["description_ai"].notna().any()
+                _cert = _seg_mv_certainty(gpq_dir)
                 for layer in sorted(mv["name_gis_geocodegroup"].astype(str).unique()):
                     lp = mv[mv["name_gis_geocodegroup"].astype(str) == layer]
                     if lp.empty:
@@ -5256,6 +5365,38 @@ def generate_report(base_dir: str,
                     if fp_png:
                         order_list.append(('image',
                             (f"Type fingerprints – {layer} (importance × susceptibility)", fp_png)))
+                    # Interpretive prose — promote the profile + AI descriptions to readable text.
+                    _recs = lp.to_dict("records")
+                    if _recs:
+                        _nf = lambda x: float(x) if pd.notna(x) else 0.0
+                        _tot_area = sum(_nf(x.get("total_area_km2")) for x in _recs)
+                        _big = _recs[0]
+                        _lead = (f"These <b>{k_types}</b> sensitivity types"
+                                 + (f" cover <b>{_tot_area:,.0f} km²</b>" if _tot_area else "")
+                                 + f". The largest, <b>{_big.get('cluster_label', '')}</b>, accounts for "
+                                 f"<b>{_rep_pct(_nf(_big.get('total_area_km2')), _tot_area):.0f}%</b> of the typed area")
+                        _cov = [_nf(x.get("mean_coverage_index")) for x in _recs]
+                        if any(_cov):
+                            _lead += f"; mean overlap depth across types is <b>{sum(_cov) / len(_cov):.1f}</b>"
+                        _cpair = _cert.get(layer)
+                        if _cpair and _cpair[0] is not None:
+                            _lead += f", and mean assignment certainty is <b>{_cpair[0]:.2f}</b>"
+                        order_list.append(('text', _lead + "."))
+                        for _x in _recs:
+                            _a = _nf(_x.get("total_area_km2"))
+                            _np = int(_x["n_polygons"]) if pd.notna(_x.get("n_polygons")) else 0
+                            _sent = (f"<b>{_x.get('cluster_label', '')}</b> — "
+                                     f"{_imp_sus_corner(_x.get('mean_importance'), _x.get('mean_susceptibility'))}; "
+                                     f"<b>{_a:,.0f} km²</b> ({_rep_pct(_a, _tot_area):.0f}% of the area) over "
+                                     f"<b>{_np:,}</b> cells (mean importance {_nf(_x.get('mean_importance')):.1f}, "
+                                     f"susceptibility {_nf(_x.get('mean_susceptibility')):.1f}).")
+                            _tg = str(_x.get("top_asset_groups", "") or "").strip()
+                            if _tg:
+                                _sent += f" Dominant asset groups: {_tg}."
+                            _da = str(_x.get("description_ai", "") or "").strip()
+                            if _da:
+                                _sent += f" {_da}"
+                            order_list.append(('text', _sent))
                     order_list.append(('new_page', None))
 
         if atlas_pages:
