@@ -53,8 +53,6 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 # imports) so helpers can pull just the stylesheet without dragging in the
 # fiona/geopandas/shapely stack. See learning.md.
 from ui_style import (
-    ASSET_STYLESHEET,
-    _generate_indicator_stylesheet,
     apply_shared_stylesheet,
 )
 

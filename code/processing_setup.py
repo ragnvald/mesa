@@ -77,8 +77,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QIcon, QPainter, QPen, QBrush, QColor
 from PySide6.QtCore import Qt, Signal, QObject
 
-import webbrowser
-
 from ui_style import apply_shared_stylesheet
 
 

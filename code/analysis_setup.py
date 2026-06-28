@@ -43,7 +43,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote
-import sys
 from mesa_osm_tiles import OsmTileProxyManager
 
 from PySide6.QtWidgets import QApplication, QFileDialog

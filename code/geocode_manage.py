@@ -47,7 +47,6 @@ from mesa_constants import TABLE_GEOCODE_GROUP, TABLE_GEOCODE_OBJECT
 import argparse
 import configparser
 import datetime
-import locale
 import os
 import sys
 import threading
@@ -57,7 +56,7 @@ import multiprocessing as mp
 import traceback
 import warnings
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 import numpy as np
 import geopandas as gpd
