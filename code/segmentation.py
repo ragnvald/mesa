@@ -53,14 +53,19 @@ def _safe_layer_name(layer: str) -> str:
 
 
 def list_geocode_layers(gpq_dir: Path) -> list[str]:
-    """Distinct geocode-layer names from tbl_geocode_object (small read)."""
-    import pandas as pd
+    """Distinct geocode-layer names from tbl_geocode_object (small read).
+
+    pyarrow-only (no pandas) so the lightweight Classification setup UI that calls
+    this can exclude pandas from its bundle. See build_all.py
+    helper_exclude_modules["segmentation_setup"]."""
+    import pyarrow.dataset as ds
     poly_path = Path(gpq_dir) / "tbl_geocode_object.parquet"
     if not poly_path.exists():
         return []
     try:
-        s = pd.read_parquet(poly_path, columns=["name_gis_geocodegroup"])
-        return sorted(s["name_gis_geocodegroup"].dropna().astype(str).unique().tolist())
+        col = "name_gis_geocodegroup"
+        tbl = ds.dataset(str(poly_path), format="parquet").to_table(columns=[col])
+        return sorted({str(v) for v in tbl.column(col).to_pylist() if v is not None})
     except Exception:
         return []
 

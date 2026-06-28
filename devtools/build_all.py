@@ -638,7 +638,12 @@ def helper_collects_for(basename: str) -> list[str]:
             collects += COLLECT_PYSIDE6
         if not uses_gis and basename == "segmentation_run":
             collects += COLLECT_GIS_STACK
-        if not uses_pandas:
+        # segmentation_setup's config UI is pyarrow-only (list_geocode_layers +
+        # detect_pressure_columns read parquet via pyarrow; params_from_config is
+        # config-only). pandas runs solely in the spawned segmentation_run.exe and
+        # is excluded below, so do NOT collect pandas data into segmentation_setup
+        # (it would contradict --exclude-module pandas). segmentation_run still needs it.
+        if not uses_pandas and basename == "segmentation_run":
             collects += COLLECT_PANDAS
         if not uses_pyarrow:
             collects += COLLECT_PYARROW
@@ -668,6 +673,18 @@ def helper_collects_for(basename: str) -> list[str]:
         "segmentation_setup": [
             "sklearn", "scipy", "libpysal", "spopt", "hdbscan",
             "geopandas", "shapely", "pyproj", "pyogrio",
+            # matplotlib is imported only inside segmentation_run's PNG-plot helper
+            # (lazy + try/except), which runs in the spawned segmentation_run.exe —
+            # never in this config UI. Static analysis bundles it anyway (~50 MB).
+            "matplotlib",
+            # pandas: the only three segmentation funcs this UI calls
+            # (params_from_config = config parse, detect_pressure_columns +
+            # list_geocode_layers = pyarrow schema/column reads) are pandas-free.
+            # Every other `import pandas` in segmentation*/segmentation_run lives in
+            # a function that runs only in the spawned exe. ~45 MB. INVARIANT: if a
+            # future edit adds a pandas-using path to segmentation_setup, drop this
+            # exclude or the helper ImportErrors at runtime (not build time).
+            "pandas",
         ],
     }
     for _mod in helper_exclude_modules.get(basename, []):
