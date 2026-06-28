@@ -1787,10 +1787,13 @@ def run_selected(
         except ImportError:
             raise RuntimeError("Cancelled by operator")
 
-    # If tiles step is unchecked but old tiles are on disk, wipe them so they
-    # cannot silently misalign with the new processing results. The UI surfaces
-    # this with a warning next to the unchecked Tiles checkbox.
-    if not plan.run_tiles:
+    # Wipe existing tiles ONLY when a stage that FEEDS them (Data or Classification)
+    # was reprocessed but Tiles was left unchecked — otherwise the old tiles would
+    # silently misalign with the new results. A lines/analysis-only run does NOT
+    # touch the tiled data, so its tiles are not stale; wiping them there left the
+    # Maps Overview (geocode list comes from the mbtiles filenames) and the
+    # Segmentation map empty. See learning.md "Lines/analysis-only run wiped Maps tiles".
+    if (plan.run_data or plan.run_classification) and not plan.run_tiles:
         mbt_dir = base_dir / "output" / "mbtiles"
         try:
             stale = list(mbt_dir.glob("*.mbtiles")) if mbt_dir.is_dir() else []
@@ -2355,14 +2358,19 @@ class ProcessRunnerWindow(QMainWindow):
                 self._cb_tiles.setChecked(False)
 
         def _sync_tiles_warning():
-            # Show a red warning next to the Tiles checkbox when leaving it
-            # unchecked would cause existing tiles to be deleted at run start.
+            # Red warning next to Tiles when leaving it unchecked would delete
+            # existing tiles at run start. That only happens when a tile-feeding
+            # stage (Data or Classification) is also selected; a lines/analysis-only
+            # run leaves tiles untouched, so no warning (and no deletion) then.
             mbt_dir = base_dir / "output" / "mbtiles"
             try:
                 has_existing = mbt_dir.is_dir() and any(mbt_dir.glob("*.mbtiles"))
             except OSError:
                 has_existing = False
-            if (not self._cb_tiles.isChecked()) and has_existing:
+            feeds_tiles = any(cb.isChecked() for cb in (
+                self._cb_prep, self._cb_intersect, self._cb_flatten,
+                self._cb_backfill, self._cb_segment, self._cb_classification))
+            if feeds_tiles and (not self._cb_tiles.isChecked()) and has_existing:
                 self._lbl_tiles.setText(
                     "Existing tiles in output/mbtiles will be DELETED at run start "
                     "to keep them aligned with new processing results."
@@ -2373,8 +2381,10 @@ class ProcessRunnerWindow(QMainWindow):
                 self._lbl_tiles.setStyleSheet("")
 
         self._cb_data_master.clicked.connect(_on_master_clicked)
+        self._cb_data_master.clicked.connect(_sync_tiles_warning)
         for cb in sub_cbs:
             cb.clicked.connect(_refresh_master_state)
+            cb.clicked.connect(_sync_tiles_warning)  # warning depends on data/classification too
         # Flatten controls availability of the explode option and (along with
         # an on-disk tbl_flat) controls Tiles availability.
         self._cb_flatten.clicked.connect(_sync_data_option)
