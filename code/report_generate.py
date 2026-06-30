@@ -4489,6 +4489,74 @@ def _area_barh_png(items, out_path, *, xlabel="Total area (km²)"):
     return str(out_path)
 
 
+def _seg_legend_strip_png(rows, out_path):
+    """Data-science legend strip for segmentation signatures, mirroring the Maps
+    legend: per zone (largest area first) a colour swatch, the A–E composition as
+    equal-width cells, and a single-colour total-area bar (max labelled in km²).
+    rows: list of (zone, total_area_km2, fill). Returns path/None."""
+    clean = []
+    for r in (rows or []):
+        try:
+            zone, a, fill = str(r[0]), float(r[1]), (r[2] or "#cccccc")
+        except (TypeError, ValueError, IndexError):
+            continue
+        if a != a:  # NaN
+            continue
+        clean.append((zone, a, fill))
+    if not clean:
+        return None
+    clean.sort(key=lambda t: t[1], reverse=True)
+    clean = clean[:20]
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+    except Exception:
+        return None
+    RAMP = {"A": "#b2182b", "B": "#ef8a62", "C": "#c8c8c8", "D": "#67a9cf", "E": "#2166ac"}
+    maxA = max(a for _, a, _ in clean) or 1.0
+    n = len(clean)
+    fig, ax = plt.subplots(figsize=(7.4, 0.32 * n + 1.0))
+    ax.set_xlim(0, 1.0)
+    ax.set_ylim(0, n + 1.0)
+    ax.axis("off")
+    SWw, LBLx, CMPx, CMPw, ARx, ARw = 0.022, 0.03, 0.17, 0.20, 0.42, 0.48
+    for i, (zone, area, fill) in enumerate(clean):
+        yb = (n - 1 - i) + 0.15
+        h = 0.70
+        ax.add_patch(Rectangle((0.0, yb), SWw, h, facecolor=fill, edgecolor="#b9a87f", lw=0.5))
+        ax.text(LBLx, yb + h / 2, zone, va="center", ha="left", fontsize=8)
+        codes = [c for c in zone.split("+") if c in RAMP]
+        if codes:
+            cw = CMPw / len(codes)
+            for j, c in enumerate(codes):
+                ax.add_patch(Rectangle((CMPx + j * cw, yb), cw, h, facecolor=RAMP[c],
+                                       edgecolor="#ffffff", lw=0.4))
+        ax.add_patch(Rectangle((ARx, yb), ARw, h, facecolor="#f3ecdf", edgecolor="#b9a87f", lw=0.5))
+        frac = max(0.0, min(1.0, area / maxA))
+        ax.add_patch(Rectangle((ARx, yb), ARw * frac, h, facecolor="#6b8aa6"))
+        ax.text(ARx + ARw + 0.006, yb + h / 2, f"{area:,.0f}", va="center", ha="left",
+                fontsize=7, color="#333")
+    # Header: an A–E key under the composition column + an area-max note.
+    hy = n + 0.45
+    kw = 0.030
+    for j, c in enumerate("ABCDE"):
+        ax.add_patch(Rectangle((CMPx + j * kw, hy), kw, 0.34, facecolor=RAMP[c],
+                               edgecolor="#ffffff", lw=0.4))
+        ax.text(CMPx + j * kw + kw / 2, hy + 0.17, c, fontsize=6, ha="center", va="center",
+                color="#222")
+    ax.text(CMPx, hy - 0.18, "A–E composition", fontsize=7, color="#8a7c63", ha="left", va="center")
+    ax.text(ARx, hy + 0.17, f"Total area — max {maxA:,.0f} km²", fontsize=7, color="#8a7c63",
+            ha="left", va="center")
+    fig.tight_layout(pad=0.4)
+    try:
+        fig.savefig(str(out_path), dpi=140, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    return str(out_path)
+
+
 # -- AI narrative (Config -> AI connection; deterministic fallback) -----------
 def _report_ai_conn(base_dir) -> dict:
     try:
@@ -5391,22 +5459,29 @@ def generate_report(base_dir: str,
                         _syn = _zone_synthesis(mp, n_zones_total, total_area_all, has_area)
                         if _syn:
                             order_list.append(('text', _syn))
-                        # Zone-area chart (mirrors the Maps legend area bar; same colours).
+                        # Data-science legend (mirrors the Maps Segmentation legend):
+                        # swatch + A-E composition cells + total-area bar for signature
+                        # zones; a plain area bar for algorithmic cluster methods.
                         if _seg is not None and has_area:
                             try:
                                 _sitems = []
                                 for _, _rr in mp.iterrows():
                                     _z = str(_rr.get("zone", ""))
-                                    _col = (_seg._hex(_seg._signature_colour(_z)) if method == "signatures"
-                                            else _seg._overview_colour(_z, "clusters"))
+                                    if method == "signatures":
+                                        _col = ("#d2d2d2" if _z in ("", "(no overlap)")
+                                                else _seg._hex(_seg._signature_colour(_z)))
+                                    else:
+                                        _col = _seg._overview_colour(_z, "clusters")
                                     _sitems.append((_z, _rr.get("total_area_km2"), _col))
-                                _spng = output_subpath(base_dir, "tmp",
-                                    f"seg_areas_{_safe_name(str(layer))}_{_safe_name(str(method))}.png")
-                                if _area_barh_png(_sitems, _spng):
+                                _spng = str(output_subpath(base_dir, "tmp",
+                                    f"seg_legend_{_safe_name(str(layer))}_{_safe_name(str(method))}.png"))
+                                _ok = (_seg_legend_strip_png(_sitems, _spng) if method == "signatures"
+                                       else _area_barh_png(_sitems, _spng))
+                                if _ok:
                                     order_list.append(('image',
-                                        (f"{layer} – {_pretty_seg_method(method)}: zone areas", _spng)))
+                                        (f"{layer} – {_pretty_seg_method(method)}: composition & area", _spng)))
                             except Exception as _exc:
-                                write_to_log(f"Seg area chart failed for {layer}/{method}: {_exc}", base_dir)
+                                write_to_log(f"Seg legend chart failed for {layer}/{method}: {_exc}", base_dir)
                     order_list.append(('new_page', None))
 
         # Optional multivariate "sensitivity generalisation" section (segmentation
@@ -5537,7 +5612,7 @@ def generate_report(base_dir: str,
                             _citems.append((str(_rr.get("cluster_label", "")),
                                             _rr.get("total_area_km2"),
                                             _segc._overview_colour(str(_cid), "clusters")))
-                        _cpng = output_subpath(base_dir, "tmp", f"segmv_areas_{_safe_name(str(layer))}.png")
+                        _cpng = str(output_subpath(base_dir, "tmp", f"segmv_areas_{_safe_name(str(layer))}.png"))
                         if _area_barh_png(_citems, _cpng):
                             order_list.append(('image', (f"Sensitivity-type areas – {layer}", _cpng)))
                     except Exception as _exc:
