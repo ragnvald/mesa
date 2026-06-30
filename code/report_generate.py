@@ -5489,7 +5489,6 @@ def generate_report(base_dir: str,
                         plt.close(fig)
                     return str(out)
 
-                has_ai = "description_ai" in mv.columns and mv["description_ai"].notna().any()
                 _cert = _seg_mv_certainty(gpq_dir)
                 for layer in sorted(mv["name_gis_geocodegroup"].astype(str).unique()):
                     lp = mv[mv["name_gis_geocodegroup"].astype(str) == layer]
@@ -5505,10 +5504,10 @@ def generate_report(base_dir: str,
                     _ov_text, _ov_ai = _classification_overview(lp.to_dict("records"), layer, base_dir)
                     if _ov_text:
                         order_list.append(('text', ("<b>AI overview.</b> " if _ov_ai else "") + _ov_text))
+                    # No Description column: the per-type AI/description text is rendered
+                    # as prose below, where long text reads without crushing the table.
                     header = ["Type", "Cells", "Area (km²)", "Mean imp.", "Mean sus.", "Coverage",
                               "Top asset groups"]
-                    if has_ai:
-                        header.append("Description")
                     tbl = [header]
                     for _, r in lp.iterrows():
                         row = [
@@ -5520,8 +5519,6 @@ def generate_report(base_dir: str,
                             f"{float(r.get('mean_coverage_index', 0) or 0):.2f}",
                             str(r.get("top_asset_groups", "") or ""),
                         ]
-                        if has_ai:
-                            row.append(str(r.get("description_ai", "") or ""))
                         tbl.append(row)
                     order_list.append(('table', tbl))
                     fp_png = _fingerprint_png_for_layer(lp, layer)
