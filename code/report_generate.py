@@ -5651,6 +5651,7 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  include_index_statistics: bool,
                                  include_lines_and_segments: bool,
                                  include_segmentation: bool = False,
+                                 include_segmentation_mv: bool = False,
                                  segmentation_layers: list | None = None,
                                  report_geocode_groups: list | None = None,
                                  include_atlas_maps: bool = False,
@@ -5671,6 +5672,7 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
             'include_index_statistics': include_index_statistics,
             'include_lines_and_segments': include_lines_and_segments,
             'include_segmentation': include_segmentation,
+            'include_segmentation_mv': include_segmentation_mv,
             'segmentation_layers': segmentation_layers,
             'report_geocode_groups': report_geocode_groups,
             'include_atlas_maps': include_atlas_maps,
@@ -5750,11 +5752,21 @@ class ReportGeneratorWindow(QMainWindow):
         self._chk_lines_segments.setChecked(True)
         self._chk_atlas = QCheckBox("Atlas maps (detailed)")
         self._chk_atlas.setChecked(False)
+        # Classification (multivariate sensitivity types, tbl_seg_mv) — offered
+        # only when a Classification run has produced the profile table.
+        _segmv_ok = os.path.exists(os.path.join(
+            base_dir, "output", "geoparquet", "tbl_seg_mv_profile.parquet"))
+        self._chk_classification = QCheckBox("Classification (sensitivity types)")
+        self._chk_classification.setChecked(_segmv_ok)
+        self._chk_classification.setEnabled(_segmv_ok)
+        if not _segmv_ok:
+            self._chk_classification.setToolTip("Run Classification (in Process) first")
 
         _include_checks = [
             self._chk_assets, self._chk_analysis,
             self._chk_other_maps, self._chk_index_stats,
             self._chk_lines_segments, self._chk_atlas,
+            self._chk_classification,
         ]
         for idx, chk in enumerate(_include_checks):
             include_grid.addWidget(chk, idx // 2, idx % 2)
@@ -6003,6 +6015,7 @@ class ReportGeneratorWindow(QMainWindow):
             include_other_maps=self._chk_other_maps.isChecked(),
             include_index_statistics=self._chk_index_stats.isChecked(),
             include_lines_and_segments=self._chk_lines_segments.isChecked(),
+            include_segmentation_mv=self._chk_classification.isChecked(),
             segmentation_layers=[lvl for lvl, cb in self._chk_seg_levels.items() if cb.isChecked()],
             report_geocode_groups=[c for c, cb in self._chk_report_geocats.items() if cb.isChecked()],
             include_atlas_maps=self._chk_atlas.isChecked(),
