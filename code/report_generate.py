@@ -5775,7 +5775,7 @@ class ReportGeneratorWindow(QMainWindow):
         # stage (5) has actually produced, enumerated from tbl_segmentation/.
         # basic_mosaic is checked by default; the others are opt-in.
         seg_group = QGroupBox("Segmentation (area types)")
-        seg_vbox = QVBoxLayout(seg_group)
+        seg_grid = QGridLayout(seg_group)
         self._chk_seg_levels: dict[str, QCheckBox] = {}
         seg_part_dir = os.path.join(base_dir, "output", "geoparquet", "tbl_segmentation")
         seg_levels = []
@@ -5784,21 +5784,22 @@ class ReportGeneratorWindow(QMainWindow):
                 os.path.splitext(f)[0] for f in os.listdir(seg_part_dir) if f.endswith(".parquet")
             )
         if seg_levels:
-            for lvl in seg_levels:
+            for i, lvl in enumerate(seg_levels):  # two columns to save vertical space
                 cb = QCheckBox(lvl)
                 cb.setChecked(lvl == "basic_mosaic")
-                seg_vbox.addWidget(cb)
+                seg_grid.addWidget(cb, i // 2, i % 2)
                 self._chk_seg_levels[lvl] = cb
         else:
             hint = QLabel("Run the Segment stage (5) first")
             hint.setEnabled(False)
-            seg_vbox.addWidget(hint)
-        seg_vbox.addStretch(1)
+            seg_grid.addWidget(hint, 0, 0, 1, 2)
+        seg_grid.setColumnStretch(0, 1)
+        seg_grid.setColumnStretch(1, 1)
 
         # Geocode groups the report's Other maps + Index pages cover. One
         # checkbox per geocode group; basic_mosaic checked by default.
         geo_group = QGroupBox("Map geocode groups")
-        geo_vbox = QVBoxLayout(geo_group)
+        geo_grid = QGridLayout(geo_group)
         self._chk_report_geocats: dict[str, QCheckBox] = {}
         _geo_cats = []
         try:
@@ -5811,16 +5812,17 @@ class ReportGeneratorWindow(QMainWindow):
             _geo_cats = []
         _geo_cats = sorted(_geo_cats, key=lambda c: (c != "basic_mosaic", c))
         if _geo_cats:
-            for c in _geo_cats:
+            for i, c in enumerate(_geo_cats):  # two columns to save vertical space
                 cb = QCheckBox(c)
                 cb.setChecked(c == "basic_mosaic")
-                geo_vbox.addWidget(cb)
+                geo_grid.addWidget(cb, i // 2, i % 2)
                 self._chk_report_geocats[c] = cb
         else:
             _gh = QLabel("No geocode groups found")
             _gh.setEnabled(False)
-            geo_vbox.addWidget(_gh)
-        geo_vbox.addStretch(1)
+            geo_grid.addWidget(_gh, 0, 0, 1, 2)
+        geo_grid.setColumnStretch(0, 1)
+        geo_grid.setColumnStretch(1, 1)
 
         # Settings row: general includes | geocode groups | segmentation levels.
         settings_row = QWidget()
