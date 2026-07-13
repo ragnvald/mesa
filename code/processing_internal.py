@@ -5,7 +5,7 @@
 
 import os, sys, math, re, time, argparse, threading, multiprocessing, json, shutil, uuid, gc, importlib.util, subprocess, ast
 import configparser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -1473,7 +1473,7 @@ def _write_status_atomic(payload: dict):
             pass
 
 def _init_idle_status():
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     payload = {
         "phase": "idle",
         "updated_at": now,
@@ -1499,7 +1499,7 @@ def _update_status_phase(new_phase: str):
     try:
         payload = {
             "phase": (new_phase or "").strip().lower() or "idle",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "chunks_total": int(existing.get("chunks_total", 0) or 0),
             "done": int(existing.get("done", 0) or 0),
             "running": existing.get("running", []),
@@ -2230,7 +2230,7 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
                         existing = json.load(f) or {}
                 payload = {
                     "phase": "error",
-                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                     "chunks_total": int(existing.get("chunks_total", 0) or 0),
                     "done": int(existing.get("done", 0) or 0),
                     "running": existing.get("running", []),
@@ -3594,7 +3594,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             prev = {}
         _write_status_atomic({
             "phase": "done",
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "chunks_total": int(prev.get("chunks_total", 0) or 0),
             "done": int(prev.get("done", 0) or 0),
             "running": [],
@@ -4761,7 +4761,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
             except Exception: pass
     hb_thread = threading.Thread(target=_heartbeat, daemon=True); hb_thread.start()
     try:
-        _write_status_atomic({"phase":"intersect","updated_at": datetime.utcnow().isoformat()+"Z","chunks_total": total_chunks,"done":0,"running": list(range(1, min(max_workers, total_chunks)+1)),"cells": cells_meta,"home_bounds": home_bounds})
+        _write_status_atomic({"phase":"intersect","updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z","chunks_total": total_chunks,"done":0,"running": list(range(1, min(max_workers, total_chunks)+1)),"cells": cells_meta,"home_bounds": home_bounds})
     except Exception: pass
     def _update_status(done_count:int):
         try:
@@ -4775,7 +4775,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
             for cid in running_cells:
                 i = id_to_idx.get(int(cid))
                 if i is not None and cells_meta[i]["state"] != "done": cells_meta[i]["state"] = "running"
-            _write_status_atomic({"phase":"intersect","updated_at": datetime.utcnow().isoformat()+"Z","chunks_total": total_chunks,"done": done_count,"running": running_chunk_ids,"cells": cells_meta,"home_bounds": home_bounds})
+            _write_status_atomic({"phase":"intersect","updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z","chunks_total": total_chunks,"done": done_count,"running": running_chunk_ids,"cells": cells_meta,"home_bounds": home_bounds})
         except Exception: pass
     def _tick_progress(done_count:int, written:int, started_at:float):
         try:
@@ -4879,7 +4879,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     except Exception: pass
     try:
         for c in cells_meta: c["state"] = "done"
-        _write_status_atomic({"phase": "flatten_pending" if error_msg is None else "error","updated_at": datetime.utcnow().isoformat()+"Z","chunks_total": total_chunks,"done": progress_state["done"],"running": [],"cells": cells_meta,"home_bounds": home_bounds})
+        _write_status_atomic({"phase": "flatten_pending" if error_msg is None else "error","updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z","chunks_total": total_chunks,"done": progress_state["done"],"running": [],"cells": cells_meta,"home_bounds": home_bounds})
     except Exception: pass
     if error_msg: raise RuntimeError(error_msg)
     if not files:
