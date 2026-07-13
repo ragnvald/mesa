@@ -109,7 +109,7 @@ import platform
 import shutil
 import json
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
@@ -942,6 +942,30 @@ def _iter_backup_files(root_path: Path):
         for fn in filenames:
             yield Path(dirpath) / fn
 
+# Classify a file under output/ into a backup category, or None for files that
+# must never ship. Categories mirror the Manage-data export dialog:
+#   - "tiles"     -> output/mbtiles/ (rendered H3 rasters)
+#   - "reports"   -> output/reports/ (generated Word/Excel reports)
+#   - "databases" -> output/geoparquet/, output/segmentation_mv/, and any other
+#                    processed output (catch-all so nothing is silently dropped)
+# Never shipped (return None): output/cache/ (regenerable basemap tile cache) and
+# the runtime pipeline lock.
+def _classify_output_file(file_path: Path, output_dir: Path):
+    if file_path.name == ".pipeline.lock":
+        return None
+    try:
+        parts = file_path.relative_to(output_dir).parts
+    except ValueError:
+        return "databases"
+    top = parts[0] if parts else ""
+    if top == "cache":
+        return None
+    if top == "mbtiles":
+        return "tiles"
+    if top == "reports":
+        return "reports"
+    return "databases"
+
 # --- AI connection settings (secrets/ table) -------------------------------
 # Stored in secrets/ai_connection.parquet, OUTSIDE output/ so it survives
 # "Clear generated data" and is left out of backups unless the user opts in
@@ -985,7 +1009,9 @@ def create_backup_archive(
     base_dir: str,
     destination_path: str,
     *,
+    include_databases: bool = True,
     include_tiles: bool = True,
+    include_reports: bool = True,
     compression_kind: str = "deflate",
     include_ai_token: bool = False,
     progress_cb=None,
@@ -996,9 +1022,15 @@ def create_backup_archive(
     to; ``.zip`` is appended if no suffix is present, and parent directories
     are created as needed.
 
-    include_tiles: when False, files under output/mbtiles/ are skipped. Tiles
-    are large (often gigabytes) and fully regenerable from tbl_flat, so users
-    typically don't need them in a backup.
+    Input data (input/ + config.ini) is always included. Output data ships by
+    category, each independently toggleable (see _classify_output_file):
+      include_databases: output/geoparquet/, output/segmentation_mv/, other
+        processed output. Small but the analytical core of a project.
+      include_tiles: output/mbtiles/. Large (often gigabytes) and regenerable
+        from tbl_flat, so often dropped to keep the backup small.
+      include_reports: output/reports/ (generated Word/Excel reports).
+    The downloaded basemap cache (output/cache/) and the runtime pipeline lock
+    are never included, regardless of the flags.
 
     compression_kind: "deflate" (universal, what zip always supported) or
     "lzma" (~30-40% smaller on text/parquet, requires modern unzip — Windows
@@ -1016,18 +1048,30 @@ def create_backup_archive(
     files_to_add: list[tuple[Path, str]] = []
     if config_path.is_file():
         files_to_add.append((config_path, "config.ini"))
-    mbtiles_dir = output_dir / "mbtiles"
-    skipped_tile_count = 0
-    for folder in (input_dir, output_dir):
-        if folder.is_dir():
-            for file_path in _iter_backup_files(folder):
-                if file_path.is_file():
-                    if (not include_tiles
-                            and mbtiles_dir in file_path.parents):
-                        skipped_tile_count += 1
-                        continue
-                    arc = file_path.relative_to(base).as_posix()
-                    files_to_add.append((file_path, arc))
+    # Input is always included in full.
+    if input_dir.is_dir():
+        for file_path in _iter_backup_files(input_dir):
+            if file_path.is_file():
+                files_to_add.append((file_path, file_path.relative_to(base).as_posix()))
+
+    # Output is filtered per category; cache + runtime lock never ship.
+    include_by_cat = {
+        "databases": include_databases,
+        "tiles": include_tiles,
+        "reports": include_reports,
+    }
+    skipped_counts = {"databases": 0, "tiles": 0, "reports": 0}
+    if output_dir.is_dir():
+        for file_path in _iter_backup_files(output_dir):
+            if not file_path.is_file():
+                continue
+            cat = _classify_output_file(file_path, output_dir)
+            if cat is None:
+                continue  # cache / lock: excluded unconditionally
+            if not include_by_cat.get(cat, True):
+                skipped_counts[cat] = skipped_counts.get(cat, 0) + 1
+                continue
+            files_to_add.append((file_path, file_path.relative_to(base).as_posix()))
 
     # The AI token (secrets/ai_connection.parquet) lives outside input/ and
     # output/, so it never enters the archive unless the user explicitly opts in.
@@ -1052,9 +1096,11 @@ def create_backup_archive(
                     progress_cb(i, total, arcname)
                 except Exception:
                     pass  # never let a UI callback break the backup
-    if skipped_tile_count:
+    skipped_summary = ", ".join(f"{cat}: {n} file(s)"
+                                for cat, n in skipped_counts.items() if n)
+    if skipped_summary:
         log_to_logfile(f"Created backup archive: {zip_path} "
-                       f"(tiles excluded: {skipped_tile_count} file(s))")
+                       f"(excluded by category — {skipped_summary})")
     else:
         log_to_logfile(f"Created backup archive: {zip_path}")
     return str(zip_path)
@@ -1357,7 +1403,7 @@ def _friendly_platform_string() -> str:
 
 
 def _collect_system_capabilities() -> dict:
-    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
     try:
         if ZoneInfo is not None:
             now_local = datetime.now(ZoneInfo("Europe/Oslo")).replace(microsecond=0).isoformat()
@@ -2952,7 +2998,7 @@ class TuneProcessingWindow(QMainWindow):
     def _write_tune_backup(self, previous_values, applied_values):
         os.makedirs(os.path.dirname(self._tune_backup_path), exist_ok=True)
         payload = {
-            "created_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "created_at": datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z",
             "config_path": config_file,
             "keys": sorted(list(applied_values.keys())),
             "previous_values": previous_values,
@@ -3266,7 +3312,7 @@ class MesaMainWindow(QMainWindow):
     def _save_project_info(self):
         path = self._project_info_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
         # Merge with any existing columns (e.g. last_parameter_import_*
         # written by the asset importer) so saving here doesn't clobber
         # them.
@@ -4631,8 +4677,9 @@ class MesaMainWindow(QMainWindow):
     def _ask_backup_options(self):
         """Show a small modal dialog with backup options.
 
-        Returns (include_tiles: bool, compression_kind: str,
-        include_ai_token: bool) or None if the user cancelled.
+        Returns (include_databases: bool, include_tiles: bool,
+        include_reports: bool, compression_kind: str, include_ai_token: bool)
+        or None if the user cancelled.
         """
         dlg = QDialog(self)
         dlg.setWindowTitle("Backup options")
@@ -4647,16 +4694,37 @@ class MesaMainWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        tiles_cb = QCheckBox("Include rendered tiles (output/mbtiles/)")
+        # Input data is the source of a project and is always included.
+        input_cb = QCheckBox("Input data (input/, config.ini) — always included")
+        input_cb.setChecked(True)
+        input_cb.setEnabled(False)
+        layout.addWidget(input_cb)
+
+        out_label = QLabel("Output data:")
+        layout.addWidget(out_label)
+
+        out_box = QVBoxLayout()
+        out_box.setContentsMargins(18, 0, 0, 0)
+        out_box.setSpacing(6)
+        db_cb = QCheckBox("Processed databases (output/geoparquet/, segmentation)")
+        db_cb.setChecked(True)
+        out_box.addWidget(db_cb)
+        tiles_cb = QCheckBox("Tiles (output/mbtiles/)")
         tiles_cb.setChecked(True)
-        tiles_hint = QLabel(
-            "Tiles are large (often gigabytes) and can be regenerated from "
-            "tbl_flat. Uncheck to keep the backup small."
+        out_box.addWidget(tiles_cb)
+        reports_cb = QCheckBox("Reports (output/reports/)")
+        reports_cb.setChecked(True)
+        out_box.addWidget(reports_cb)
+        layout.addLayout(out_box)
+
+        out_hint = QLabel(
+            "Tiles are large (often gigabytes) and regenerable from tbl_flat — "
+            "untick them for a small backup. The downloaded basemap cache "
+            "(output/cache/) is never included."
         )
-        tiles_hint.setWordWrap(True)
-        tiles_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
-        layout.addWidget(tiles_cb)
-        layout.addWidget(tiles_hint)
+        out_hint.setWordWrap(True)
+        out_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        layout.addWidget(out_hint)
 
         layout.addSpacing(4)
 
@@ -4705,7 +4773,8 @@ class MesaMainWindow(QMainWindow):
         dlg.resize(420, dlg.sizeHint().height())
         if dlg.exec() != QDialog.Accepted:
             return None
-        return (bool(tiles_cb.isChecked()), str(fmt_combo.currentData()),
+        return (bool(db_cb.isChecked()), bool(tiles_cb.isChecked()),
+                bool(reports_cb.isChecked()), str(fmt_combo.currentData()),
                 bool(ai_token_cb.isChecked()))
 
     def _do_backup(self):
@@ -4713,7 +4782,8 @@ class MesaMainWindow(QMainWindow):
         opts = self._ask_backup_options()
         if opts is None:
             return  # user cancelled
-        include_tiles, compression_kind, include_ai_token = opts
+        (include_databases, include_tiles, include_reports,
+         compression_kind, include_ai_token) = opts
 
         # Step 2: file dialog for save path.
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -4789,7 +4859,9 @@ class MesaMainWindow(QMainWindow):
             try:
                 result_path = create_backup_archive(
                     original_working_directory, chosen_path,
+                    include_databases=include_databases,
                     include_tiles=include_tiles,
+                    include_reports=include_reports,
                     compression_kind=compression_kind,
                     include_ai_token=include_ai_token,
                     progress_cb=lambda i, n, a: signals.progress.emit(i, n, a),
