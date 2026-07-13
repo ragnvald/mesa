@@ -1477,7 +1477,7 @@ def run_analysis_process(
                 stacked_base = stacked_base[stacked_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
 
             run_id = uuid.uuid4().hex
-            run_ts = datetime.datetime.utcnow().isoformat()
+            run_ts = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
 
             total_records = len(records)
             if progress_callback is not None:
@@ -1870,7 +1870,7 @@ def run_selected(
         return _slice
 
     def _now_iso() -> str:
-        return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).replace(microsecond=0).isoformat() + "Z"
 
     try:
         _bail_if_cancelled()
