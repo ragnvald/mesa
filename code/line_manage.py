@@ -13,7 +13,7 @@ Updates in this Parquet-only, flat-layout version:
 import os, sys, uuid, threading, locale, configparser, argparse, warnings, time, atexit
 from pathlib import Path
 from typing import Any, Dict, Optional
-from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP
+from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP, TABLE_GEOCODE_GROUP
 from mesa_shared import leaflet_bundle, mesa_version_label, read_config
 from mesa_osm_tiles import OsmTileProxyManager
 
@@ -190,6 +190,14 @@ def asset_group_parquet_path(base_dir: str) -> str:
         if os.path.exists(path):
             return path
     primary = os.path.join(gpq_dir(base_dir), TABLE_ASSET_GROUP)
+    return primary
+
+def geocode_group_parquet_path(base_dir: str) -> str:
+    for cand in _parquet_dir_candidates(base_dir):
+        path = os.path.join(cand, TABLE_GEOCODE_GROUP)
+        if os.path.exists(path):
+            return path
+    primary = os.path.join(gpq_dir(base_dir), TABLE_GEOCODE_GROUP)
     return primary
 
 
@@ -386,10 +394,19 @@ def import_lines_from_folder(
         except Exception:
             metric = gdf
         for idx, row in gdf.iterrows():
-            try:
-                length_m = int(metric.loc[idx].geometry.length) if metric is not None else 0
-            except Exception:
-                length_m = 0
+            length_m = 0
+            geom = metric.loc[idx].geometry if metric is not None else None
+            if geom is not None and not geom.is_empty:
+                try:
+                    # An invalid geometry (NaN coords) makes shapely's length emit a
+                    # RuntimeWarning and return NaN; silence it and keep length 0.
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        length_val = geom.length
+                    if length_val == length_val and abs(length_val) != float("inf"):
+                        length_m = int(length_val)
+                except Exception:
+                    length_m = 0
             attrs = "; ".join([f"{c}: {row[c]}" for c in gdf.columns if c != gdf.geometry.name and c != "geometry"])
             line_objects.append(
                 {
@@ -495,7 +512,51 @@ class Api:
         except Exception:
             self._storage_epsg = default_epsg
 
+    def _geocode_home_bounds(self):
+        """Bounds of the geocode area (tbl_geocode_group), in [[miny,minx],[maxy,maxx]]
+        (lat/lng). This is the home extent for Lines - we zoom to the geocodes, NOT the
+        lines: a single bad line geometry (NaN coords) would otherwise blow the extent up
+        to near-global. Mirrors the Analysis tab (analysis_setup.canvas_geojson). None when
+        no usable geocode group is present, so the caller can fall back to lines/assets."""
+        try:
+            path = geocode_group_parquet_path(self._base_dir)
+            if not os.path.exists(path):
+                return None
+            gg = gpd.read_parquet(path)
+            if not isinstance(gg, gpd.GeoDataFrame) or gg.empty or "geometry" not in gg.columns:
+                return None
+            if gg.crs is None:
+                gg = gg.set_crs(epsg=self._default_epsg, allow_override=True)
+            gg = to_epsg4326(gg)
+            gg = gg[gg.geometry.notna()]
+            try:
+                mask_empty = gg.geometry.is_empty
+                mask_empty = mask_empty.fillna(True) if hasattr(mask_empty, "fillna") else mask_empty
+                gg = gg[~mask_empty]
+            except Exception:
+                pass
+            if gg.empty:
+                return None
+            minx, miny, maxx, maxy = [float(x) for x in gg.total_bounds]
+            # Reject non-finite extents (NaN/inf) rather than zoom to garbage.
+            if any(v != v or abs(v) == float("inf") for v in (minx, miny, maxx, maxy)):
+                return None
+            dx, dy = maxx - minx, maxy - miny
+            if dx <= 0 or dy <= 0:
+                pad = 0.1
+                minx -= pad; maxx += pad; miny -= pad; maxy += pad
+            else:
+                minx -= dx * 0.05; maxx += dx * 0.05; miny -= dy * 0.05; maxy += dy * 0.05
+            minx = max(-180.0, minx); maxx = min(180.0, maxx)
+            miny = max(-85.0,  miny); maxy = min(85.0,  maxy)
+            return [[miny, minx], [maxy, maxx]]
+        except Exception:
+            return None
+
     def _home_bounds(self):
+        geo = self._geocode_home_bounds()
+        if geo is not None:
+            return geo
         g = to_epsg4326(self._gdf)
         g = g[g.geometry.notna()]
         try:
@@ -869,6 +930,7 @@ window.onerror = function(message, source, lineno, colno, error){
 
 let MAP=null, BASE_OSM=null, BASE_SAT=null, LINES_GROUP=null, DRAW_CONTROL=null;
 let HOME_BOUNDS = null;
+let AREA_BOX = null;
 let SELECTED_ID = null;
 let LAYER_BY_ID = {};
 let SELECT_GROUP = null;
@@ -1037,9 +1099,32 @@ function initMapOnce(){
 }
 
 function clearLayers(){
+  if (AREA_BOX && MAP){ try{ MAP.removeLayer(AREA_BOX); }catch(e){} AREA_BOX = null; }
   if (!LINES_GROUP) return;
   LINES_GROUP.clearLayers();
   LAYER_BY_ID = {};
+}
+
+// Bounding box for the area of data. Mirrors the Analysis geocode-area box
+// (analysis_setup.py); non-interactive + faint fill so lines stay clickable and visible.
+// Painting is deferred via MAP.whenReady so it never depends on a timer/machine speed:
+// adding a path to a view-less map crashes in Leaflet's projection, and whenReady fires
+// exactly when the map has a view (immediately if it already does).
+function drawAreaBox(){
+  if (AREA_BOX && MAP){ try{ MAP.removeLayer(AREA_BOX); }catch(e){} AREA_BOX = null; }
+  if (!MAP || !HOME_BOUNDS) return;
+  const b = HOME_BOUNDS;
+  const ok = Array.isArray(b) && b.length === 2 && Array.isArray(b[0]) && Array.isArray(b[1])
+    && [b[0][0], b[0][1], b[1][0], b[1][1]].every(v => Number.isFinite(Number(v)));
+  if (!ok) return;
+  MAP.whenReady(function(){
+    try {
+      if (AREA_BOX){ try{ MAP.removeLayer(AREA_BOX); }catch(e){} AREA_BOX = null; }
+      AREA_BOX = L.rectangle(b, {color:'#1e3a8a', weight:1, fillColor:'#3b82f6', fillOpacity:0.04, interactive:false});
+      AREA_BOX.addTo(MAP);
+      if (LINES_GROUP) LINES_GROUP.bringToFront();
+    } catch(e){ AREA_BOX = null; }
+  });
 }
 
 function addFeature(feature, selectAfter=false){
@@ -1205,6 +1290,7 @@ async function loadAll(){
     setTimeout(function(){
       if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]});
       else MAP.setView([59.9139,10.7522], 5);
+      drawAreaBox();
     }, 80);
 
     enforceVisibility();
@@ -1350,7 +1436,7 @@ def run(base_dir: str) -> None:
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
         .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(resolved, mesa_version_label(cfg)))
     )
-    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
+    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770)
     try:
         webview.start(gui='edgechromium', debug=False)
     except Exception as e:
@@ -1387,7 +1473,7 @@ def main():
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
         .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(base_dir, mesa_version_label(cfg)))
     )
-    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1280, height=860)
+    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770)
 
     try:
         webview.start(gui='edgechromium', debug=False)
