@@ -117,7 +117,7 @@ def debug_log(base_dir: Path, message: str) -> None:
   """
 
   try:
-    ts = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    ts = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
     path = (base_dir / "log.txt").resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
@@ -567,14 +567,14 @@ class AnalysisStorage:
         if isinstance(value, dt.datetime):
             return value
         if _is_blank(value):
-            return dt.datetime.utcnow()
+            return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
         try:
             parsed = pd.to_datetime(value, errors="coerce")
             if pd.isna(parsed):
-                return dt.datetime.utcnow()
+                return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
             return parsed.to_pydatetime()
         except Exception:
-            return dt.datetime.utcnow()
+            return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
     def _load_or_init_groups(self) -> pd.DataFrame:
         path = self._existing_group_path or self.group_path
@@ -590,7 +590,7 @@ class AnalysisStorage:
             if col not in df.columns:
                 df[col] = pd.NA
         if df.empty:
-            now = dt.datetime.utcnow().isoformat()
+            now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             df = pd.DataFrame(
                 [
                     {
@@ -739,7 +739,7 @@ class AnalysisStorage:
     def add_group(self, name: str, notes: str = "", default_geocode: Optional[str] = None) -> AnalysisGroup:
         with self._lock:
             new_id = self._ensure_unique_group_id()
-            now = dt.datetime.utcnow().isoformat()
+            now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             entry = {
                 "id": new_id,
                 "name": name or new_id,
@@ -769,7 +769,7 @@ class AnalysisStorage:
             mask = self._groups_df["id"] == gid
             if not mask.any():
                 raise KeyError(gid)
-            now = dt.datetime.utcnow().isoformat()
+            now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             if name is not None:
                 self._groups_df.loc[mask, "name"] = name or gid
             if notes is not None:
@@ -835,7 +835,7 @@ class AnalysisStorage:
         gid = self._resolve_group_id(group_id)
         geom_storage = gpd.GeoDataFrame(geometry=[geom_ll], crs=4326).to_crs(self.storage_epsg).geometry.iloc[0]
         new_id = self._ensure_unique_polygon_id()
-        now = dt.datetime.utcnow().isoformat()
+        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
         entry = {
             "id": new_id,
             "group_id": gid,
@@ -862,7 +862,7 @@ class AnalysisStorage:
                 raise KeyError(identifier)
             self._polygons_gdf.loc[mask, "title"] = title
             self._polygons_gdf.loc[mask, "notes"] = notes
-            self._polygons_gdf.loc[mask, "updated_at"] = dt.datetime.utcnow().isoformat()
+            self._polygons_gdf.loc[mask, "updated_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             row = self._polygons_gdf.loc[mask].iloc[0]
             self._write_polygons()
         return self._record_from_row(row)
@@ -878,7 +878,7 @@ class AnalysisStorage:
             if not mask.any():
                 raise KeyError(identifier)
             self._polygons_gdf.loc[mask, "geometry"] = [geom_storage]
-            self._polygons_gdf.loc[mask, "updated_at"] = dt.datetime.utcnow().isoformat()
+            self._polygons_gdf.loc[mask, "updated_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             row = self._polygons_gdf.loc[mask].iloc[0]
             self._write_polygons()
         return self._record_from_row(row)
