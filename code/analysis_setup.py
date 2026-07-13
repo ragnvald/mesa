@@ -1835,7 +1835,7 @@ function addGridLayer(features){
       color: '#1e3a8a',
       weight: 1,
       fillColor: '#3b82f6',
-      fillOpacity: 0.08
+      fillOpacity: 0.04
     }),
     onEachFeature: (feature, layer) => {
       const label = feature?.properties?.label;
@@ -2717,8 +2717,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         title="MESA Area Analysis",
         html=html_payload,
         js_api=api,
-        width=1200,
-        height=760,
+        width=1080,
+        height=680,
         resizable=True,
     )
     webview.start(debug=False)
