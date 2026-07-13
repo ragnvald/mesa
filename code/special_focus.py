@@ -289,7 +289,7 @@ def run(base: str | None = None) -> None:
         title="MESA — Special focus (Lines / Analysis)",
         url=url,
         js_api=_HostApi(),
-        width=1320, height=880, resizable=True,
+        width=1180, height=780, resizable=True,
     )
     # Register the two apps' bridges under namespaced names.
     window.expose(*_namespaced_wrappers(lines_api, "lines"))
