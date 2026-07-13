@@ -1136,7 +1136,7 @@ class AssetManagerWindow(QMainWindow):
                 n_groups = len(asset_groups) if asset_groups is not None else 0
                 update_project_info(self.base_dir, {
                     "last_parameter_import_path": str(self.input_folder_asset),
-                    "last_parameter_import_utc": datetime.datetime.utcnow()
+                    "last_parameter_import_utc": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                         .replace(microsecond=0).isoformat() + "Z",
                     "last_parameter_import_groups": int(n_groups),
                 })
