@@ -128,7 +128,7 @@ DEFAULT_COLOR_FALLBACK: Dict[str, str] = {
 def debug_log(base_dir: Path, message: str) -> None:
     """Append a timestamped message to log.txt for diagnostics."""
     try:
-        ts = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        ts = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
         path = (base_dir / "log.txt").resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
