@@ -56,6 +56,21 @@ or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
 
 ## B. Ideas — candidates, not yet decided
 
+- **Scalable processing — bounded-working-set partitioning & adaptive sizing
+  (5.4+).** Generalises A2 (mosaic tiling) into one principle covering the
+  **intersect** stage too, plus upgrades the scaling mechanism (`auto_tune.py`)
+  from open-loop static guesses to closed-loop calibration + a runtime memory
+  watchdog, so peak memory is *bounded* (small machines slow down instead of
+  aborting; big machines ramp up without hubris). Also records why GPU (CUDA/Metal)
+  is not the cross-platform lever, and a 2026-07 benchmark showing config-only
+  mosaic tuning tops out at ~1.0–1.1×. Full design: `docs/SCALABLE_PROCESSING_PLAN.md`.
+- **MESA processing server — hosted heavy compute (version 6).** A **separate
+  portfolio component** (not a desktop change): users upload a project as the
+  existing backup ZIP, a high-capacity Linux server runs the headless pipeline under
+  full environment control (`fork` instead of spawn-bound `spawn`, huge RAM, pinned
+  GEOS), and returns an output backup. Additive — **no desktop implications**;
+  reuses backup upload/download + headless entry points. Builds on 5.4's scalable
+  processing. Full design: `docs/CLOUD_PROCESSING_SERVER_PLAN.md`.
 - **Snap-rounding default.** `mosaic_union_grid_size` is opt-in (0 = off). Once
   validated on a few datasets, consider a small default (e.g. 0.05 m) for the
   extra speed/robustness — it is safe in the metric mosaic CRS.
