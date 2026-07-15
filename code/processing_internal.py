@@ -226,7 +226,7 @@ _DEFAULT_BASIC_GROUP_NAME = "basic_mosaic"
 # Paths & config helpers
 # ----------------------------
 def base_dir() -> Path:
-    """
+    r"""
     Resolve the mesa root folder in all modes:
     - dev .py, compiled helper .exe (tools\), launched from mesa.exe, or double-clicked in tools\
     """
@@ -489,13 +489,18 @@ def _log_memory_snapshot(context: str, extra: dict | None = None, force: bool = 
                 return
 
         vm = psutil.virtual_memory()
+        total_gb = vm.total / (1024 ** 3)
         avail_gb = vm.available / (1024 ** 3)
+        used_gb = (vm.total - vm.available) / (1024 ** 3)  # reconciles: total = avail + used
         used_pct = vm.percent
 
         msg = f"[mem] {context}: proc RSS ~{rss_gb:.2f} GB"
         if delta is not None:
             msg += f" (Δ{delta:+.2f} GB)"
-        msg += f" • VMS ~{vms_gb:.2f} GB • System avail ~{avail_gb:.2f} GB ({used_pct:.0f}% used)"
+        msg += (
+            f" • VMS ~{vms_gb:.2f} GB"
+            f" • System RAM {total_gb:.1f} GB total, {avail_gb:.1f} GB avail, {used_gb:.1f} GB used ({used_pct:.0f}%)"
+        )
 
         if extra:
             try:
@@ -4721,7 +4726,10 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                 vm_used = None
                 rss_gb = None
                 if psutil is not None:
-                    vm = psutil.virtual_memory(); vm_used = f"{int(vm.percent)}%"
+                    vm = psutil.virtual_memory()
+                    _tot = vm.total / (1024 ** 3); _av = vm.available / (1024 ** 3)
+                    vm_used = (f"{_tot:.1f} GB total, {_av:.1f} GB avail, "
+                               f"{_tot - _av:.1f} GB used ({int(vm.percent)}%)")
                     try:
                         rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
                     except Exception:
@@ -4753,7 +4761,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                     f" • rows written: {progress_state['rows']:,}"
                     f" • active workers {active_workers}/{max_workers}"
                 )
-                if vm_used: msg += f" • RAM used {vm_used}"
+                if vm_used: msg += f" • RAM {vm_used}"
                 if rss_gb is not None:
                     msg += f" • proc RSS ~{rss_gb:.2f} GB"
                 msg += f" • ETA {eta}"
