@@ -490,8 +490,8 @@ def _log_memory_snapshot(context: str, extra: dict | None = None, force: bool = 
 
         vm = psutil.virtual_memory()
         total_gb = vm.total / (1024 ** 3)
-        avail_gb = vm.available / (1024 ** 3)
-        used_gb = (vm.total - vm.available) / (1024 ** 3)  # reconciles: total = avail + used
+        free_gb = vm.available / (1024 ** 3)
+        used_gb = (vm.total - vm.available) / (1024 ** 3)  # reconciles: total = used + free
         used_pct = vm.percent
 
         msg = f"[mem] {context}: proc RSS ~{rss_gb:.2f} GB"
@@ -499,7 +499,7 @@ def _log_memory_snapshot(context: str, extra: dict | None = None, force: bool = 
             msg += f" (Δ{delta:+.2f} GB)"
         msg += (
             f" • VMS ~{vms_gb:.2f} GB"
-            f" • System RAM {total_gb:.1f} GB total, {avail_gb:.1f} GB avail, {used_gb:.1f} GB used ({used_pct:.0f}%)"
+            f" • System RAM {used_gb:.1f} GB used, {free_gb:.1f} GB free, {total_gb:.1f} GB total ({used_pct:.0f}%)"
         )
 
         if extra:
@@ -4727,9 +4727,9 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                 rss_gb = None
                 if psutil is not None:
                     vm = psutil.virtual_memory()
-                    _tot = vm.total / (1024 ** 3); _av = vm.available / (1024 ** 3)
-                    vm_used = (f"{_tot:.1f} GB total, {_av:.1f} GB avail, "
-                               f"{_tot - _av:.1f} GB used ({int(vm.percent)}%)")
+                    _tot = vm.total / (1024 ** 3); _free = vm.available / (1024 ** 3)
+                    vm_used = (f"{_tot - _free:.1f} GB used, {_free:.1f} GB free, "
+                               f"{_tot:.1f} GB total ({int(vm.percent)}%)")
                     try:
                         rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
                     except Exception:
