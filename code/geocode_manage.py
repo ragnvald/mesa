@@ -820,10 +820,19 @@ def _extract_polygonal(geom):
 # -----------------------------------------------------------------------------
 # Mosaic (basic_mosaic) — linework-based (no tiling)
 # -----------------------------------------------------------------------------
+def _strip_inline_comment(raw: str) -> str:
+    # read_config keeps a plain parser so '#' stays usable as hex-colour DATA
+    # elsewhere in config.ini; the trade-off is that other values may carry a
+    # trailing '; ...' or '# ...' note. Numeric/flag values never contain either
+    # char, so strip both here. See learning.md "Config inline comments + mosaic
+    # pre-flight silent-default trap".
+    return str(raw).split("#", 1)[0].split(";", 1)[0].strip()
+
+
 def _cfg_float(cfg: configparser.ConfigParser, key: str, default: float) -> float:
     try:
         raw = (cfg["DEFAULT"].get(key, str(default)) if cfg is not None and "DEFAULT" in cfg else str(default))
-        return float(str(raw).strip())
+        return float(_strip_inline_comment(raw))
     except Exception:
         return float(default)
 
@@ -831,9 +840,18 @@ def _cfg_float(cfg: configparser.ConfigParser, key: str, default: float) -> floa
 def _cfg_int(cfg: configparser.ConfigParser, key: str, default: int) -> int:
     try:
         raw = (cfg["DEFAULT"].get(key, str(default)) if cfg is not None and "DEFAULT" in cfg else str(default))
-        return int(float(str(raw).strip()))
+        return int(float(_strip_inline_comment(raw)))
     except Exception:
         return int(default)
+
+
+def _cfg_flag(cfg: configparser.ConfigParser, key: str, default: bool) -> bool:
+    """Read a boolean flag, tolerant of inline '; ...'/'# ...' comments."""
+    try:
+        raw = cfg["DEFAULT"].get(key, str(default)) if cfg is not None and "DEFAULT" in cfg else str(default)
+        return _strip_inline_comment(raw).lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return bool(default)
 
 
 def _geom_to_polygonal_metric(geom, *, line_buf_m: float, point_buf_m: float):
@@ -2376,10 +2394,10 @@ def mosaic_faces_from_assets_parallel(
     # hour run. Estimate the peak from the asset count and, when it would not fit
     # the machine, stop *now* with a clear message rather than crashing later.
     # Scales with the host (high-RAM users are never blocked); overridable.
-    if str(cfg["DEFAULT"].get("mosaic_preflight_enabled", "true")).strip().lower() in ("1", "true", "yes", "on"):
+    if _cfg_flag(cfg, "mosaic_preflight_enabled", True):
         gb_per_million = max(0.0, _cfg_float(cfg, "mosaic_preflight_gb_per_million_assets", 7.0))
         safety_frac = min(0.95, max(0.2, _cfg_float(cfg, "mosaic_preflight_safety_frac", 0.8)))
-        allow_oversized = str(cfg["DEFAULT"].get("mosaic_preflight_allow_oversized", "false")).strip().lower() in ("1", "true", "yes", "on")
+        allow_oversized = _cfg_flag(cfg, "mosaic_preflight_allow_oversized", False)
         est_peak_gb = (len(a_metric) / 1_000_000.0) * gb_per_million
         avail_gb = None
         if psutil is not None:
