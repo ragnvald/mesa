@@ -712,9 +712,10 @@ class _Api:
         out.sort(key=lambda d: d["run_id"], reverse=True)
         return out
 
-    def _segmv_profile(self, run_id: str):
-        """Profile rows + legend for one run, largest area first. Each row carries
-        the cluster fingerprint (25-bin mean histogram) for the report heatmap."""
+    def _segmv_profile(self, run_id: str, layer: str | None = None):
+        """Profile rows + legend for one run (and layer, when given), largest area
+        first. Each row carries the cluster fingerprint (25-bin mean histogram) for
+        the report heatmap, and area_basis so the stats panel can flag grid areas."""
         import pandas as pd
         prof = self.gpq / "tbl_seg_mv_profile.parquet"
         if not prof.exists():
@@ -724,6 +725,8 @@ class _Api:
         except Exception:
             return [], []
         df = df[df["run_id"].astype(str) == str(run_id)]
+        if layer is not None and "name_gis_geocodegroup" in df.columns:
+            df = df[df["name_gis_geocodegroup"].astype(str) == str(layer)]
         if df.empty:
             return [], []
         if "total_area_km2" in df.columns and df["total_area_km2"].notna().any():
@@ -747,15 +750,18 @@ class _Api:
                 "mean_susceptibility": float(r["mean_susceptibility"]) if pd.notna(r.get("mean_susceptibility")) else None,
                 "mean_coverage_index": float(r["mean_coverage_index"]) if pd.notna(r.get("mean_coverage_index")) else None,
                 "top_asset_groups": str(r.get("top_asset_groups") or ""),
+                "area_basis": str(r.get("area_basis") or "polygon"),
                 "fingerprint": [float(r[c]) for c in hist_cols] if hist_cols else [],
             })
             legend.append({"zone": label, "fill": fill})
         return rows, legend
 
-    def segmv_layer(self, run_id: str, *_legacy) -> dict:
-        """Polygon GeoJSON + legend + profile for one Classification run. Each
-        feature carries both a categorical Types fill (per cluster id) and a
-        sequential Certainty fill (per p_max), plus the fields the tooltip shows."""
+    def segmv_layer(self, run_id: str, layer: str | None = None, *_legacy) -> dict:
+        """Polygon GeoJSON + legend + profile for one Classification (run_id, layer).
+        A run_id can now hold several layers (e.g. basic_mosaic + H3/QDGC), so the
+        caller passes the selected layer to disambiguate; when omitted we fall back
+        to the first layer for backward compatibility. Each feature carries both a
+        categorical Types fill (per cluster id) and a sequential Certainty fill."""
         import pandas as pd
         try:
             import geopandas as gpd
@@ -770,17 +776,19 @@ class _Api:
         except Exception as exc:
             return {"error": str(exc)}
         m = df[df["run_id"].astype(str) == str(run_id)]
+        if layer:
+            m = m[m["name_gis_geocodegroup"].astype(str) == str(layer)]
         m = m[m["cluster_id"].notna()]
         if m.empty:
             return {"geojson": {"type": "FeatureCollection", "features": []}, "legend": [], "profile": []}
-        layer = str(m["name_gis_geocodegroup"].iloc[0])
+        layer = str(layer) if layer else str(m["name_gis_geocodegroup"].iloc[0])
         if len(m) > self.SEGMV_MAX_FEATURES:
             # Too many cells to ship as vector GeoJSON (a dissolved boundary would be
             # 100+ MB). If the Tiles stage rasterised this run, draw it as a raster
             # tile layer; otherwise tell the user to run the Tiles stage.
             name = f"{_safe_name(layer)}_segmv_{run_id}"
             path = _mbtiles_dir() / f"{name}.mbtiles"
-            profile, legend = self._segmv_profile(run_id)
+            profile, legend = self._segmv_profile(run_id, layer)
             if path.exists():
                 meta = _mbtiles_meta(path)
                 out = {"raster": {"name": name, "bounds": meta["bounds"],
@@ -832,7 +840,7 @@ class _Api:
                               "top_bins": str(r.get("top_bins") or ""),
                               "fill": seg._overview_colour(str(cid), "clusters"),
                               "cert_fill": _certainty_colour(pmax)}})
-        profile, legend = self._segmv_profile(run_id)
+        profile, legend = self._segmv_profile(run_id, layer)
         return {"geojson": {"type": "FeatureCollection", "features": feats},
                 "legend": legend, "profile": profile, "layer": layer}
 
@@ -1350,6 +1358,7 @@ HTML = r"""<!doctype html>
              click a polygon to identify it.</p>
         </div>
         <div class="row"><b>Legend</b><div id="classLegend" class="muted">–</div></div>
+        <div id="classAreaWarn" class="row" style="display:none;color:#8a5a00;background:#fff6e0;border:1px solid #f0d48a;border-radius:4px;padding:6px 8px;font-size:12px"></div>
         <div class="row">
           <table id="classTable"><thead><tr><th data-key="cluster_label">Type</th><th data-key="total_area_km2">Area km²</th><th data-key="n_polygons">Cells</th><th data-key="mean_importance">Imp</th><th data-key="mean_susceptibility">Sus</th><th data-key="mean_coverage_index">Cov</th><th data-key="top_asset_groups" style="text-align:left">Top asset groups</th></tr></thead>
           <tbody></tbody></table>
@@ -1987,6 +1996,15 @@ HTML = r"""<!doctype html>
   function renderClassPanel(legend, profile){
     classLegendData = legend ? legend.slice() : [];
     classProfileData = profile ? profile.slice() : [];  // set before updateClassLegend (it reads areas from the profile)
+    // Grid layers (H3/QDGC) report cell area, which generalizes the true footprint.
+    var warn=document.getElementById('classAreaWarn');
+    if(warn){
+      var isGrid = (profile||[]).some(function(p){ return p && p.area_basis==='grid'; });
+      if(isGrid){ warn.innerHTML='⚠︎ Areas here are grid-cell areas (H3/QDGC) and generalize the '+
+        'true asset footprint — treat km² as approximate. basic_mosaic and uploaded polygon layers report exact areas.';
+        warn.style.display='block'; }
+      else { warn.style.display='none'; warn.textContent=''; }
+    }
     updateClassLegend();
     renderClassRows();
   }
@@ -2022,8 +2040,8 @@ HTML = r"""<!doctype html>
   function loadClass(run){
     if(!run) return;
     clearClassLayers(); classMsg('Loading…'); classSetLoading(true);
-    classRunId=run.run_id; classLayer=null;
-    api().segmv_layer(run.run_id).then(function(res){
+    classRunId=run.run_id; classLayer=run.layer||null;
+    api().segmv_layer(run.run_id, run.layer||null).then(function(res){
       classSetLoading(false);
       if(!res || res.error){ classMsg((res&&res.error)||'Could not load results.'); renderClassPanel([],[]); return; }
       classLayer=res.layer||null;

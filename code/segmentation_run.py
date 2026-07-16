@@ -403,6 +403,18 @@ def per_code_area_km2(gpq: Path, layer: str, geom_gdf):
         return pd.Series(dtype="float64")
 
 
+def _area_basis(layer: str) -> str:
+    """How a layer's polygon area relates to the real assets underneath it.
+
+    'grid'   — H3/QDGC regular tessellations: each cell's area is the CELL area,
+               which generalises (over/under-states) the true asset footprint.
+    'polygon'— basic_mosaic and uploaded admin layers (counties/municipalities/…):
+               the geometry is the real feature, so its area is exact.
+    The Maps stats panel warns when area_basis == 'grid'."""
+    l = str(layer)
+    return "grid" if l.startswith("H3_") or l.startswith("QDGC_") else "polygon"
+
+
 # ---------------------------------------------------------------------------
 # Histograms over the (importance, susceptibility) plane
 # ---------------------------------------------------------------------------
@@ -769,9 +781,11 @@ def add_ai_descriptions(profile_rows, params, base_dir, log):
 # ---------------------------------------------------------------------------
 # Writers
 # ---------------------------------------------------------------------------
-def _write_parquet_coexist(path: Path, new_df, run_id: str, log):
-    """Append rows for this run_id, replacing any existing rows with the same
-    run_id so a re-run is idempotent and multiple runs co-exist."""
+def _write_parquet_coexist(path: Path, new_df, run_id: str, log, layer: str | None = None):
+    """Append rows for this run, replacing existing rows with the same key so a
+    re-run is idempotent and prior results co-exist. The key is (run_id, layer)
+    when a layer is given — so classifying several layers under ONE run_id
+    accumulates instead of each layer clobbering the previous one's rows."""
     import pandas as pd
     path = Path(path)
     if path.exists():
@@ -783,8 +797,13 @@ def _write_parquet_coexist(path: Path, new_df, run_id: str, log):
             if set(old.columns) != set(new_df.columns):
                 log(f"{path.name}: schema changed since the previous engine — "
                     f"replacing {len(old)} obsolete row(s) from earlier runs.")
+            elif "run_id" in old.columns:
+                drop = old["run_id"].astype(str) == str(run_id)
+                if layer is not None and "name_gis_geocodegroup" in old.columns:
+                    drop &= old["name_gis_geocodegroup"].astype(str) == str(layer)
+                old = old[~drop]
+                new_df = pd.concat([old, new_df], ignore_index=True)
             else:
-                old = old[old.get("run_id").astype(str) != str(run_id)] if "run_id" in old.columns else old
                 new_df = pd.concat([old, new_df], ignore_index=True)
         except Exception as exc:
             log(f"WARNING: could not merge existing {path.name} ({exc}); overwriting run rows only.")
@@ -1050,8 +1069,12 @@ def run_segmentation(base_dir, params: Params, log=None) -> dict:
                 "cluster_label", "p_max", "entropy", "coverage_index", "top_bins"]
     seg_df = assign[seg_cols].copy()
     prof_df = pd.DataFrame(profiles)
-    _write_parquet_coexist(gpq / "tbl_seg_mv.parquet", seg_df, params.run_id, log)
-    _write_parquet_coexist(gpq / "tbl_seg_mv_profile.parquet", prof_df, params.run_id, log)
+    if not prof_df.empty:
+        # Flag whether this layer's areas are exact polygons or generalized grid cells,
+        # so the Maps stats panel can warn on H3/QDGC. See _area_basis().
+        prof_df["area_basis"] = _area_basis(params.layer)
+    _write_parquet_coexist(gpq / "tbl_seg_mv.parquet", seg_df, params.run_id, log, layer=params.layer)
+    _write_parquet_coexist(gpq / "tbl_seg_mv_profile.parquet", prof_df, params.run_id, log, layer=params.layer)
 
     # ---- File exports ----
     out_dir = base_dir / "output" / "segmentation_mv" / params.run_id
@@ -1105,12 +1128,68 @@ def _top_bins_series(prop_df, scale, top=3):
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
+def _resolve_layers(cfg, gpq: Path, spec, log) -> list[str]:
+    """Turn a segmv_geocode_layer spec into an ordered list of real layers.
+
+    'all'         -> every generated geocode layer (H3/QDGC levels, basic_mosaic,
+                     uploaded admin layers).
+    'a, b, c'     -> just those (unknown names are skipped with a warning).
+    '' / single   -> basic_mosaic (or the first layer) / that one layer.
+    """
+    import segmentation as _seg
+    available = list(_seg.list_geocode_layers(gpq))
+    s = str(spec or "").strip()
+    if not s:
+        return (["basic_mosaic"] if "basic_mosaic" in available
+                else (available[:1] if available else []))
+    if s.lower() == "all":
+        return available
+    want = [x.strip() for x in s.split(",") if x.strip()]
+    chosen = [l for l in want if l in available]
+    missing = [l for l in want if l not in available]
+    if missing:
+        log(f"Classification: skipping unknown layer(s) {', '.join(missing)}. "
+            f"Available: {', '.join(available) or '(none)'}")
+    return chosen
+
+
+def run_all_layers(base_dir, cfg, overrides: dict, log) -> dict:
+    """Classify one or more geocode layers under a single shared run_id.
+
+    Multiple layers co-exist in tbl_seg_mv keyed on (run_id, name_gis_geocodegroup);
+    the Maps window lists each (run_id, layer) as its own selectable Classification.
+    """
+    gpq = mesa_shared.parquet_dir(base_dir, cfg)
+    spec = overrides.get("layer")
+    if spec is None:
+        spec = (cfg["DEFAULT"].get("segmv_geocode_layer", "") or "").split("#", 1)[0].strip()
+    layers = _resolve_layers(cfg, gpq, spec, log)
+    if not layers:
+        log("Classification: no geocode layers to classify.")
+        return {"ok": False, "reason": "no layers"}
+    run_id = overrides.get("run_id") or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    log(f"Classification over {len(layers)} layer(s) [{', '.join(layers)}]  run_id={run_id}")
+    results = []
+    for i, layer in enumerate(layers, 1):
+        _section(log, f"Layer {i}/{len(layers)}: {layer}")
+        try:
+            p = params_from_config(cfg, **{**overrides, "layer": layer, "run_id": run_id})
+            res = run_segmentation(base_dir, p, log)
+        except Exception as exc:
+            log(f"Layer '{layer}' FAILED: {exc!r}")
+            res = {"ok": False, "reason": repr(exc), "layer": layer}
+        results.append(res)
+    ok = [r for r in results if r.get("ok")]
+    log(f"Classification finished: {len(ok)}/{len(layers)} layer(s) succeeded  run_id={run_id}")
+    return {"ok": bool(ok), "run_id": run_id, "layers": layers,
+            "succeeded": [r.get("layer") for r in ok], "results": results}
+
+
 def run(base_dir: str, master=None, **params):
     """In-process entry (kept for symmetry; normally launched as a subprocess)."""
     bd = Path(mesa_shared.find_base_dir(base_dir))
     cfg = mesa_shared.read_config(bd)
-    p = params_from_config(cfg, **{**_ai_overrides(bd), **params})
-    return run_segmentation(bd, p)
+    return run_all_layers(bd, cfg, {**_ai_overrides(bd), **params}, make_logger(bd))
 
 
 def _parse_args(argv):
@@ -1135,11 +1214,10 @@ def main(argv=None):
     overrides = {k: v for k, v in vars(args).items()
                  if k != "original_working_directory" and v is not None}
     overrides = {**_ai_overrides(base_dir), **overrides}  # explicit CLI args win
-    params = params_from_config(cfg, **overrides)
     log = make_logger(base_dir)
     t0 = time.time()
     try:
-        res = run_segmentation(base_dir, params, log)
+        res = run_all_layers(base_dir, cfg, overrides, log)
     except Exception as exc:
         log(f"FATAL: {exc!r}")
         raise
