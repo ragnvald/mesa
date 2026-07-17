@@ -39,16 +39,15 @@ ships. Full design documents for individual items live in `devtools/docs/`, whic
   `devtools/docs/basic_mosaic_capacity.md`. The deleted `_mosaic_tile_worker` (git history)
   is a starting point but needs the membership-dissolve it never had.
 
-### A3. Python 3.14 — finish validation & frozen build
-- **State:** 3.14 is the default dev venv; high-risk stages (pandas-3 flatten,
-  classification, pyogrio GPKG export) validated. Not yet: a full from-scratch
-  headless run (Prep/import + intersect + tiles-to-completion + lines + analysis)
-  and a green PyInstaller frozen build on 3.14.
-- **To do:** run the from-scratch pipeline on 3.14; run `devtools\setup_venvs.bat`
-  + `devtools\compile_win_11.bat` and pin `pyinstaller`/`-hooks-contrib` to the
-  cp314-working versions once the build is green.
-- **Refs:** `cooperation.md` "Python 3.14 promoted to default on Windows";
-  `requirements_compile_win.txt`.
+### A3. Python 3.14 — finish validation
+- **State:** the frozen build is **done** (2026-07-17): green PyInstaller build on
+  3.14.6, toolchain pinned, `mesa.exe` launches and reports its version. See
+  `learning.md` "First green frozen build on Python 3.14".
+- **To do:** what remains is the *run*, not the build — a full from-scratch pipeline
+  in the **compiled** app: Prep/import + intersect + tiles-to-completion + **lines +
+  analysis**. The 3.14 source validation stopped during tiles, so lines and analysis
+  have never executed on 3.14 in any form.
+- **Refs:** `learning.md` "Python 3.14 validation run"; `requirements_compile_win.txt`.
 
 ### A4. basic_mosaic — post-Tier-1 measurement
 - **State:** Tier 1 should cut the spawn-bound ~87 % reduction dramatically, but
