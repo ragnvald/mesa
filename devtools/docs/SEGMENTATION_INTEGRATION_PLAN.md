@@ -6,7 +6,7 @@
 > MESA architecture (file paths + symbols verified 2026-06-04). The experimental
 > proof of concept lives in `devtools/test_segmentation.py`,
 > `devtools/signature_analysis.py`, `devtools/dissolve_clusters.py`, and is described
-> in `docs/MESA_Segmentation_PoC.docx`.
+> in `devtools/docs/MESA_Segmentation_PoC.docx`.
 
 ---
 
@@ -15,7 +15,7 @@
 ```
 You are integrating the experimental "segmentation" capability (currently in
 devtools/) into MESA as a first-class, optional pipeline stage plus an optional
-report section. Read docs/SEGMENTATION_INTEGRATION_PLAN.md and docs/
+report section. Read devtools/docs/SEGMENTATION_INTEGRATION_PLAN.md and docs/
 MESA_Segmentation_PoC.docx first. Then:
 
 1. Add a new optional processing stage "Segment" that, after Backfill, builds a

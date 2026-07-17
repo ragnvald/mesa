@@ -4391,23 +4391,33 @@ def _summarise_distribution(values, weights=None) -> str:
         return ""
 
 
-def _zone_synthesis(mp_head, n_total: int, total_area: float, has_area: bool) -> str:
-    """One-sentence synthesis of a segmentation zone table."""
+def _zone_synthesis(mp_head, n_total, total_sens) -> str:
+    """One-sentence synthesis of a segmentation zone table, ranked by total
+    sensitivity (mean sensitivity × cell count)."""
     try:
         recs = mp_head.to_dict("records")
         if not recs:
             return ""
-        if has_area and total_area > 0:
+
+        def _ts(r):
+            try:
+                v = float(r.get("total_sens"))
+                return v if v == v else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        if total_sens > 0:
             top = recs[0]
-            top_share = _rep_pct(top.get("total_area_km2") or 0, total_area)
-            top3 = _rep_pct(sum(float(x.get("total_area_km2") or 0) for x in recs[:3]), total_area)
+            top_share = _rep_pct(_ts(top), total_sens)
+            top3 = _rep_pct(sum(_ts(x) for x in recs[:3]), total_sens)
             sens = [float(x.get("sens_mean")) for x in recs if pd.notna(x.get("sens_mean"))]
             srange = (f"; mean sensitivity ranges {min(sens):.1f}–{max(sens):.1f} across zones"
                       if sens else "")
-            return (f"The area divides into <b>{n_total}</b> zones. The largest, "
-                    f"<b>{top.get('zone', '')}</b>, covers <b>{top_share:.0f}%</b> of the mapped area; "
-                    f"the top three together account for <b>{top3:.0f}%</b>{srange}.")
-        return f"The area divides into <b>{n_total}</b> zones (listed largest-first by polygon count)."
+            return (f"The area divides into <b>{n_total}</b> zones, ranked by total sensitivity "
+                    f"(mean sensitivity × cells). The leading zone, <b>{top.get('zone', '')}</b>, "
+                    f"holds <b>{top_share:.0f}%</b> of total sensitivity; the top three together "
+                    f"account for <b>{top3:.0f}%</b>{srange}.")
+        return f"The area divides into <b>{n_total}</b> zones (ranked by total sensitivity)."
     except Exception:
         return ""
 
@@ -4489,11 +4499,11 @@ def _area_barh_png(items, out_path, *, xlabel="Total area (km²)"):
     return str(out_path)
 
 
-def _seg_legend_strip_png(rows, out_path):
+def _seg_legend_strip_png(rows, out_path, *, bar_title="Total area", unit="km²"):
     """Data-science legend strip for segmentation signatures, mirroring the Maps
-    legend: per zone (largest area first) a colour swatch, the A–E composition as
-    equal-width cells, and a single-colour total-area bar (max labelled in km²).
-    rows: list of (zone, total_area_km2, fill). Returns path/None."""
+    legend: per zone (largest first) a colour swatch, the A–E composition as
+    equal-width cells, and a single-colour magnitude bar (max labelled).
+    rows: list of (zone, value, fill). Returns path/None."""
     clean = []
     for r in (rows or []):
         try:
@@ -4547,7 +4557,8 @@ def _seg_legend_strip_png(rows, out_path):
         ax.text(CMPx + j * kw + kw / 2, hy + 0.17, c, fontsize=6, ha="center", va="center",
                 color="#222")
     ax.text(CMPx, hy - 0.18, "A–E composition", fontsize=7, color="#8a7c63", ha="left", va="center")
-    ax.text(ARx, hy + 0.17, f"Total area — max {maxA:,.0f} km²", fontsize=7, color="#8a7c63",
+    _ulbl = (" " + unit) if unit else ""
+    ax.text(ARx, hy + 0.17, f"{bar_title} — max {maxA:,.0f}{_ulbl}", fontsize=7, color="#8a7c63",
             ha="left", va="center")
     fig.tight_layout(pad=0.4)
     try:
@@ -5379,7 +5390,7 @@ def generate_report(base_dir: str,
         # renders only the selected, available levels (seg_layers_render). Per
         # level: a signature mosaic, then one per-zone table PER method (the
         # method names the sub-heading, so it is not a table column), with zones
-        # sorted big-to-small by total area. See docs/SEGMENTATION_INTEGRATION_PLAN.md.
+        # sorted big-to-small by total area. See devtools/docs/SEGMENTATION_INTEGRATION_PLAN.md.
         if seg_layers_render and os.path.exists(_seg_prof_path):
             try:
                 seg_prof = pd.read_parquet(_seg_prof_path)
@@ -5435,34 +5446,34 @@ def generate_report(base_dir: str,
                     methods_ordered = (["signatures"] if "signatures" in methods else []) + \
                                       sorted(m for m in methods if m != "signatures")
                     for method in methods_ordered:
-                        mp = lp[lp["method"].astype(str) == method]
-                        has_area = "total_area_km2" in mp.columns and mp["total_area_km2"].notna().any()
-                        if has_area:
-                            mp = mp.sort_values("total_area_km2", ascending=False, na_position="last")
-                        else:
-                            mp = mp.sort_values("n_polygons", ascending=False)
+                        mp = lp[lp["method"].astype(str) == method].copy()
+                        # Rank by "importance" = total sensitivity (mean sensitivity × cells).
+                        mp["total_sens"] = (pd.to_numeric(mp.get("sens_mean"), errors="coerce").fillna(0.0)
+                                            * pd.to_numeric(mp.get("n_polygons"), errors="coerce").fillna(0.0))
+                        mp = mp.sort_values("total_sens", ascending=False, na_position="last")
                         n_zones_total = len(mp)
-                        total_area_all = (float(pd.to_numeric(mp["total_area_km2"], errors="coerce").sum())
-                                          if has_area else 0.0)
+                        total_sens_all = float(mp["total_sens"].sum())
                         mp = mp.head(30)
                         order_list.append(('heading(4)', _pretty_seg_method(method)))
-                        tbl = [["Zone", "Total area (km²)", "Polygons", "Mean sensitivity", "Mean # assets"]]
+                        tbl = [["Zone", "Total sens.", "Total area (km²)", "Polygons",
+                                "Mean sensitivity", "Mean # assets"]]
                         for _, r in mp.iterrows():
                             tbl.append([
                                 str(r["zone"]),
+                                f"{float(r['total_sens']):,.0f}",
                                 _fmt_area(r.get("total_area_km2")),
                                 f"{int(r['n_polygons']):,}",
                                 f"{float(r['sens_mean']):.2f}",
                                 f"{float(r['mean_n_assets']):.1f}",
                             ])
                         order_list.append(('table', tbl))
-                        _syn = _zone_synthesis(mp, n_zones_total, total_area_all, has_area)
+                        _syn = _zone_synthesis(mp, n_zones_total, total_sens_all)
                         if _syn:
                             order_list.append(('text', _syn))
                         # Data-science legend (mirrors the Maps Segmentation legend):
-                        # swatch + A-E composition cells + total-area bar for signature
-                        # zones; a plain area bar for algorithmic cluster methods.
-                        if _seg is not None and has_area:
+                        # swatch + A-E composition cells + total-sensitivity bar (the sort
+                        # key) for signature zones; a plain bar for cluster methods.
+                        if _seg is not None:
                             try:
                                 _sitems = []
                                 for _, _rr in mp.iterrows():
@@ -5472,14 +5483,15 @@ def generate_report(base_dir: str,
                                                 else _seg._hex(_seg._signature_colour(_z)))
                                     else:
                                         _col = _seg._overview_colour(_z, "clusters")
-                                    _sitems.append((_z, _rr.get("total_area_km2"), _col))
+                                    _sitems.append((_z, _rr.get("total_sens"), _col))
                                 _spng = str(output_subpath(base_dir, "tmp",
                                     f"seg_legend_{_safe_name(str(layer))}_{_safe_name(str(method))}.png"))
-                                _ok = (_seg_legend_strip_png(_sitems, _spng) if method == "signatures"
-                                       else _area_barh_png(_sitems, _spng))
+                                _ok = (_seg_legend_strip_png(_sitems, _spng, bar_title="Total sensitivity", unit="")
+                                       if method == "signatures"
+                                       else _area_barh_png(_sitems, _spng, xlabel="Total sensitivity"))
                                 if _ok:
                                     order_list.append(('image',
-                                        (f"{layer} – {_pretty_seg_method(method)}: composition & area", _spng)))
+                                        (f"{layer} – {_pretty_seg_method(method)}: composition & total sensitivity", _spng)))
                             except Exception as _exc:
                                 write_to_log(f"Seg legend chart failed for {layer}/{method}: {_exc}", base_dir)
                     order_list.append(('new_page', None))
@@ -5489,7 +5501,7 @@ def generate_report(base_dir: str,
         # sensitivity pattern alongside the A–E sensitivity classes for the same
         # area, framed as the "what kind of sensitivity" view vs the "how sensitive"
         # view. Skips cleanly when no v2 run exists. Does not touch the shipped
-        # tbl_segmentation* section above. See docs/segmentation.md.
+        # tbl_segmentation* section above. See devtools/docs/segmentation.md.
         _seg_mv_path = os.path.join(str(gpq_dir), "tbl_seg_mv_profile.parquet")
         if include_segmentation_mv and os.path.exists(_seg_mv_path):
             try:

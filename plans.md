@@ -1,10 +1,14 @@
-# Further development — pending work & ideas
+# Plans — pending work & ideas
 
 Single index of work that is **decided but not yet done** and **ideas worth
 considering**. The durable "why/how" lives in `learning.md`; this file is the
 roadmap surface so a future session (or the other dev host) can pick something up
 without re-deriving it from the code. Keep entries short; link to `learning.md`
 or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
+
+Lives at the repo root next to `learning.md` — both are developer notes and neither
+ships. Full design documents for individual items live in `devtools/docs/`, which
+`build_all.py` strips from the distribution wholesale.
 
 ---
 
@@ -32,7 +36,7 @@ or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
   tiled path. This parallelises polygonize *and* bounds per-process memory, so the
   largest projects become runnable on small machines instead of just skipped.
 - **Refs:** `learning.md` "Mosaic union reduction is spawn-bound";
-  `docs/basic_mosaic_capacity.md`. The deleted `_mosaic_tile_worker` (git history)
+  `devtools/docs/basic_mosaic_capacity.md`. The deleted `_mosaic_tile_worker` (git history)
   is a starting point but needs the membership-dissolve it never had.
 
 ### A3. Python 3.14 — finish validation & frozen build
@@ -50,7 +54,7 @@ or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
 - **State:** Tier 1 should cut the spawn-bound ~87 % reduction dramatically, but
   the actual post-change wall-clock has not been measured.
 - **To do:** re-run basic_mosaic on the 3.53 M-asset project and fill the result
-  into `docs/basic_mosaic_capacity.md` ("Expected effect" → measured).
+  into `devtools/docs/basic_mosaic_capacity.md` ("Expected effect" → measured).
 
 ---
 
@@ -63,14 +67,14 @@ or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
   watchdog, so peak memory is *bounded* (small machines slow down instead of
   aborting; big machines ramp up without hubris). Also records why GPU (CUDA/Metal)
   is not the cross-platform lever, and a 2026-07 benchmark showing config-only
-  mosaic tuning tops out at ~1.0–1.1×. Full design: `docs/SCALABLE_PROCESSING_PLAN.md`.
+  mosaic tuning tops out at ~1.0–1.1×. Full design: `devtools/docs/SCALABLE_PROCESSING_PLAN.md`.
 - **MESA processing server — hosted heavy compute (version 6).** A **separate
   portfolio component** (not a desktop change): users upload a project as the
   existing backup ZIP, a high-capacity Linux server runs the headless pipeline under
   full environment control (`fork` instead of spawn-bound `spawn`, huge RAM, pinned
   GEOS), and returns an output backup. Additive — **no desktop implications**;
   reuses backup upload/download + headless entry points. Builds on 5.4's scalable
-  processing. Full design: `docs/CLOUD_PROCESSING_SERVER_PLAN.md`.
+  processing. Full design: `devtools/docs/CLOUD_PROCESSING_SERVER_PLAN.md`.
 - **Snap-rounding default.** `mosaic_union_grid_size` is opt-in (0 = off). Once
   validated on a few datasets, consider a small default (e.g. 0.05 m) for the
   extra speed/robustness — it is safe in the metric mosaic CRS.

@@ -3,7 +3,7 @@
 **Status:** Direction for **version 6** — a **separate server component** added to
 the MESA portfolio. Nothing here is implemented; this is the roadmap surface, not a
 committed design. It builds on the compute work in
-`docs/SCALABLE_PROCESSING_PLAN.md` but does not depend on anything server-specific
+`devtools/docs/SCALABLE_PROCESSING_PLAN.md` but does not depend on anything server-specific
 landing in the desktop app.
 
 **Scope guardrail — no desktop implications.** This is an **additive portfolio
@@ -99,8 +99,8 @@ A hosted server **inverts** that promise, so it cannot be a silent default:
 
 ## 6. References
 
-- `docs/SCALABLE_PROCESSING_PLAN.md` (the compute work this productises; GPU rationale)
-- `docs/basic_mosaic_capacity.md`, `learning.md` "Mosaic union reduction is spawn-bound"
+- `devtools/docs/SCALABLE_PROCESSING_PLAN.md` (the compute work this productises; GPU rationale)
+- `devtools/docs/basic_mosaic_capacity.md`, `learning.md` "Mosaic union reduction is spawn-bound"
 - `mesa.py` `create_backup_archive` / `restore_backup_archive` / `_safe_zip_member_names`
 - `code/auto_tune.py` (`_probe_data`, `_probe_hardware`, per-stage sizing)
 - Headless entry points: `code/geocode_manage.py --nogui`, `code/processing_pipeline_run.py`

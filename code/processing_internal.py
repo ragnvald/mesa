@@ -3825,7 +3825,7 @@ def segment_tbl_stacked(config_file: Path,
     The heavy per-layer read + clustering runs inside spawned workers (one
     geocode layer per task) so the orchestrator never materialises a large
     dataset. See learning.md "Parent-side memory in the pipeline" and
-    docs/SEGMENTATION_INTEGRATION_PLAN.md. Soft validation: missing tbl_stacked
+    devtools/docs/SEGMENTATION_INTEGRATION_PLAN.md. Soft validation: missing tbl_stacked
     logs a clear skip and returns without raising; a failure soft-fails the
     stage (optional) rather than aborting the run.
     """

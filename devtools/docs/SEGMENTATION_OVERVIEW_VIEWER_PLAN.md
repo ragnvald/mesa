@@ -25,7 +25,7 @@
 > (or developer) session. Paste the “Prompt” block at the repo root, or follow the
 > phased plan. Grounded in the actual MESA architecture (file paths + symbols verified
 > 2026-06-05). Depends on the Segment stage delivered in
-> `docs/SEGMENTATION_INTEGRATION_PLAN.md` (it consumes `tbl_segmentation`).
+> `devtools/docs/SEGMENTATION_INTEGRATION_PLAN.md` (it consumes `tbl_segmentation`).
 
 The goal: a **separate viewer window** — exactly like the **Results map**, *not* an
 integrated panel — that lets an analyst look at the segmentation across the different

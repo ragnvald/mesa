@@ -4,7 +4,7 @@
 
 Reads the experimental segmentation outputs under
 <repo>/output/segmentation_test/ and the three devtools scripts, and writes a
-self-contained Word document to docs/MESA_Segmentation_PoC.docx that explains
+self-contained Word document to devtools/docs/MESA_Segmentation_PoC.docx that explains
 the visualisations, documents the process, and argues the value to MESA.
 
 Reproducible: re-run after a fresh test_segmentation.py / signature_analysis.py

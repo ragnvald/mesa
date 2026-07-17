@@ -67,7 +67,7 @@ Var den store blokkeren. **Nå gjort:** første grønne PyInstaller-build på 3.
   log.txt og host-capabilities-snapshot. Altså ikke bare bygget — den kjører.
 - Toolchain **pinnet** i `requirements_compile_win.txt`: `pyinstaller==6.21.0`,
   `pyinstaller-hooks-contrib==2026.6`, på CPython **3.14.6**.
-- `docs/further_development.md` A3 sier fortsatt «Not yet: … a green PyInstaller
+- `plans.md` A3 sier fortsatt «Not yet: … a green PyInstaller
   frozen build on 3.14» — **bør oppdateres**.
 
 Gjenstår før vi kan si at 3.14 er fullt validert: en full prosesseringskjøring i den
@@ -90,28 +90,30 @@ utgivelsen. **Ikke avgjort.**
 Merk også at `build_user_guide.py` ikke kalles av bygget og krever at `../mesa.wiki`
 finnes som søsken-checkout.
 
-### 3.3 `docs/` shipper rått — interne planer lekker ut 🟠
+### 3.3 `docs/` shipper rått ✅ LØST 2026-07-17
 
-`build_all.py:864` kopierer hele `docs/`. `DEVELOPER_ONLY_FILES` (linje 931) fjerner
-`CLAUDE.md`, `cooperation.md`, `instructions.md`, `learning.md` — men **ikke**
-planleggingsdokumentene i `docs/`. **Bekreftet i bygget 2026-07-17** — dette ligger nå
-i `D:\dist\mesa\docs\`:
+Bygget 2026-07-17 sendte seks roadmap-dokumenter ut til sluttbrukerne — inkludert
+`further_development.md`, altså vår egen «ikke gjort»-liste, og `UNIFIED_MAP_PLAN.md`,
+som ikke bare var utdatert men **motsagt** (den påstår at Asset-kartet er et eget
+vindu; Assets shippet som fane).
 
-| Fil | Vurdering |
+**Ryddet.** `docs/` inneholder nå kun det brukeren skal ha:
+
+| Fil | |
 |---|---|
-| `further_development.md` | 🔴 vår «ikke gjort»-liste |
-| `CLOUD_PROCESSING_SERVER_PLAN.md` | 🔴 roadmap |
-| `SCALABLE_PROCESSING_PLAN.md` | 🔴 roadmap |
-| `SEGMENTATION_INTEGRATION_PLAN.md` | 🔴 roadmap |
-| `SEGMENTATION_OVERVIEW_VIEWER_PLAN.md` | 🔴 roadmap |
-| `UNIFIED_MAP_PLAN.md` | 🔴 roadmap |
-| `basic_mosaic_capacity.md` | 🟡 kan være nyttig for brukere |
-| `MESA_Segmentation_PoC.docx` | 🟡 |
-| `segmentation.md`, `data_model.graphml`, `system_overview.graphml` | 🟡 |
-| `MESA_User_Guide_en.docx` / `_pt.docx` | ✅ skal med (14 MB hver) |
+| `MESA_User_Guide_en.docx` / `_pt.docx` | brukermanualene (14 MB hver) |
+| `templates/report_about.md` | kjøretidsmal — `report_generate` leser den |
 
-**Slett de røde fra `D:\dist\mesa\docs\` før zip**, eller legg dem i
-`DEVELOPER_ONLY_FILES` så bygget gjør det selv.
+Alt utviklerrettet ligger nå i `devtools/docs/` (designdokumenter, kapasitetsnotatet,
+yEd-diagrammene, segmenterings-PoC-en) eller på repo-roten (`plans.md`, `learning.md`).
+`build_all.py` fjerner `devtools/` i sin helhet, så de kan ikke lekke.
+
+> **Regelen framover:** legg aldri utviklermateriale i `docs/`. Kopieringslista i
+> `build_all.py` er en mappe-allowlist — en mappe som ikke står der kan ikke shippe.
+> Det er sikrere enn `DEVELOPER_ONLY_FILES`, som matcher på filnavn og må huskes.
+> Og strip aldri på `*.md` — `docs/templates/report_about.md` er en kjøretidsressurs.
+
+⚠️ **Bygget må kjøres på nytt** for at dette skal slå gjennom i `D:\dist\mesa`.
 
 ### 3.4 `output/` shipper rått — din egen cache blir med 🟠
 
@@ -409,10 +411,10 @@ Sjekket mot kildene. Ikke la disse snike seg inn i notatene.
 | Ikke påstå | Hvorfor |
 |---|---|
 | «Ny AI-klassifisering» | Motoren shippet i 5.2. Det nye er *integrasjonen*. |
-| «Mosaic fra timer til minutter» | `docs/basic_mosaic_capacity.md:64-65` sier ordrett at dette er en **forventning**, og at faktisk tid «is pending a fresh full run — to be filled in here once measured». Ingen måling etter endringen finnes. |
+| «Mosaic fra timer til minutter» | `devtools/docs/basic_mosaic_capacity.md:64-65` sier ordrett at dette er en **forventning**, og at faktisk tid «is pending a fresh full run — to be filled in here once measured». Ingen måling etter endringen finnes. |
 | Et tall på mosaic-forbedringen | Se over. Den ene benchmarken som finnes (`SCALABLE_PROCESSING_PLAN.md:53-66`) viser at config-knappene gir 0,61×–1,09× — altså at de *ikke* hjelper. |
 | At 3,18× gjelder mosaikk-**byggingen** | Lett å lese feil: learning.md:759 sier «final full-pipeline run … **basic_mosaic**, 10 workers». Der navngir «basic_mosaic» *geocode-laget intersect kjørte mot*, ikke det å bygge mosaikken. Tallet er intersect. |
-| «Minne-watchdog i mosaic» | To-tiers-watchdogen er fra før 5.2 og er per `further_development.md:77-78` fortsatt **ikke** koblet til mosaic-poolen. |
+| «Minne-watchdog i mosaic» | To-tiers-watchdogen er fra før 5.2 og er per `plans.md:77-78` fortsatt **ikke** koblet til mosaic-poolen. |
 | «Polygonize bruker mindre minne» | 21,7 GB-toppen er uendret — kun *beskyttet* av pre-flight-gaten. |
 | «Ny settings-store» | `492969e` er Phase 1 og eksplisitt uten produksjonseffekt. Phase 2 er ikke gjort. |
 | «Fullt validert på 3.14» | Lines og analysis ble aldri nådd i valideringskjøringen, og frozen build er uprøvd (§3.1). |
@@ -433,7 +435,7 @@ Den store kjøringen er altså **før** endringen. Hver basic_mosaic-kjøring *e
 ubrukelig som sammenligning. Det finnes ingen «etter»-måling på sammenlignbare data.
 
 For å lukke dette trengs 3,5M-asset-prosjektet kjørt på nytt (~timer). Da fylles
-tallet inn i `docs/basic_mosaic_capacity.md:64`, som står og venter på det.
+tallet inn i `devtools/docs/basic_mosaic_capacity.md:64`, som står og venter på det.
 
 ---
 
@@ -469,7 +471,7 @@ tallet inn i `docs/basic_mosaic_capacity.md:64`, som står og venter på det.
     lines + analysis (aldri nådd i kilde-valideringen på 3.14)
 [ ] Avgjør og rydd docs/ i D:\dist\mesa           (§3.3 — 6 roadmaps ligger der nå)
 [ ] Avgjør og rydd output/ i D:\dist\mesa         (§3.4 — 20,7 MB, din cache)
-[ ] Oppdater docs/further_development.md A3       (sier fortsatt frozen build mangler)
+[ ] Oppdater plans.md A3       (sier fortsatt frozen build mangler)
 [ ] python devtools\build_user_guide.py           (avhenger av §3.2 — sier 5.2)
 [ ] Bygg på nytt hvis docs/ ryddes via DEVELOPER_ONLY_FILES
 [ ] Zip D:\dist\mesa

@@ -927,12 +927,19 @@ def ensure_devtools_not_in_dist() -> None:
 
 
 # Developer-facing notes that must never end up in the distribution. Matched
-# case-insensitively. Add new entries here as the dev-notes set grows.
+# case-insensitively by FILENAME, so never list a name that a runtime asset also
+# uses. Add new entries here as the dev-notes set grows.
+#
+# This is the belt, not the braces: developer material belongs in `devtools/docs/`
+# (removed wholesale above) or at the repo root, neither of which the copy list in
+# copy_runtime_resources() reaches. `docs/` is a user-facing folder — it ships.
+# See learning.md "Developer docs must live outside docs/".
 DEVELOPER_ONLY_FILES = (
     "CLAUDE.md",
     "cooperation.md",
     "instructions.md",
     "learning.md",
+    "plans.md",
 )
 
 

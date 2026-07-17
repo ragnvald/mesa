@@ -9,7 +9,7 @@ One pywebview window with two tabs, each its own Leaflet map:
                     a small vector fallback for levels that have no tiles yet.
 
 The Asset map is deliberately kept as its own separate window (asset_map_view.py)
-so its heavy asset layers don't load alongside Results — see docs/UNIFIED_MAP_PLAN.md.
+so its heavy asset layers don't load alongside Results — see devtools/docs/UNIFIED_MAP_PLAN.md.
 
 A "Link zoom & pan" toggle in the header (right of the tabs, left of Exit) keeps
 the two maps' view in lockstep when enabled.

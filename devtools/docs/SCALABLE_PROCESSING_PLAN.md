@@ -2,8 +2,8 @@
 
 **Status:** Proposal for **5.4+**, deferred out of the 5.3 stabilisation phase.
 Nothing here is implemented. This is the roadmap surface; durable "why" lives in
-`learning.md`, mosaic-specific detail in `docs/basic_mosaic_capacity.md`, and the
-committed-but-not-done mosaic slice in `docs/further_development.md` **A2**.
+`learning.md`, mosaic-specific detail in `devtools/docs/basic_mosaic_capacity.md`, and the
+committed-but-not-done mosaic slice in `plans.md` **A2**.
 
 This document generalises A2 (mosaic tiling) into a single architectural
 principle that also covers the **intersect** stage and, crucially, upgrades the
@@ -82,8 +82,8 @@ Node + polygonize per tile in parallel; reconcile only tile-boundary faces by
 set; dissolve adjacent faces with identical signatures — this removes the moiré
 seams that retired the old tiled path). Interior faces finalise immediately and
 stream to output; the monolithic `polygonize` peak (~21.7 GB on the 3.5 M run)
-collapses to per-tile peaks. See `docs/further_development.md` A2,
-`docs/basic_mosaic_capacity.md`, `learning.md` "Mosaic union reduction is
+collapses to per-tile peaks. See `plans.md` A2,
+`devtools/docs/basic_mosaic_capacity.md`, `learning.md` "Mosaic union reduction is
 spawn-bound".
 
 ### 4b. Intersect (new — the easier, higher-frequency win)
@@ -127,7 +127,7 @@ explicit overrides. Weaknesses this plan targets:
    (`_probe_data`: asset/geocode rows + sizes) but per-worker GB is a constant
    (`approx_gb_per_worker = 4.0`, flatten ×3, tiles 3.0, …). Replace with
    `bytes-per-row × rows-per-partition × overhead`, calibrated once from a real run
-   and persisted (ties into the settings-store, `further_development.md` A1).
+   and persisted (ties into the settings-store, `plans.md` A1).
 4. **Adaptive instead of abort.** Replace the mosaic pre-flight **abort**
    (`geocode_manage.py` `mosaic_preflight_*`) with pre-flight **choose finer
    tiles**. Abort only if a single minimal tile cannot fit (effectively never for a
@@ -136,7 +136,7 @@ explicit overrides. Weaknesses this plan targets:
    `virtual_memory().available`; below a floor it **pauses launching new
    partitions / shrinks the pool** rather than killing the run. Complements the
    existing lifetime panic watchdog (a graceful throttle, not a kill) and the
-   already-listed "Mosaic memory watchdog" idea (`further_development.md` B).
+   already-listed "Mosaic memory watchdog" idea (`plans.md` B).
 
 ## 6. Correctness & determinism (the real engineering cost)
 
@@ -167,8 +167,8 @@ benchmark harness from this session, comparing wall-clock **and** peak RSS).
 
 ## 8. References
 
-- `docs/further_development.md` A2 (mosaic Tier 2), B (mosaic watchdog, snap default)
-- `docs/basic_mosaic_capacity.md` (phase breakdown, capacity table, pre-flight gate)
+- `plans.md` A2 (mosaic Tier 2), B (mosaic watchdog, snap default)
+- `devtools/docs/basic_mosaic_capacity.md` (phase breakdown, capacity table, pre-flight gate)
 - `learning.md` "Mosaic union reduction is spawn-bound, not compute-bound"
 - `code/auto_tune.py` (`_derive_*`, `_probe_hardware`, `_probe_data`, `_mem_target`)
 - `code/geocode_manage.py` (`mosaic_faces_from_assets_parallel`, `_auto_worker_count`, `mosaic_preflight_*`)
