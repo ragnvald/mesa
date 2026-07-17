@@ -1117,16 +1117,24 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
             if m == "config.ini" or m.startswith("input/") or m.startswith("output/")
             or m.startswith("secrets/")  # restored only if the backup opted to include it
         ]
+        has_config = "config.ini" in to_extract
         for folder_name in ("input", "output"):
             folder = base / folder_name
             if folder.exists() and folder.is_dir():
                 shutil.rmtree(folder, ignore_errors=True)
+        # Only clear the current settings when the archive can put them back.
+        # Deleting a config.ini we cannot replace leaves the project unstartable.
         cfg = base / "config.ini"
-        if cfg.exists() and cfg.is_file():
+        if has_config and cfg.exists() and cfg.is_file():
             try:
                 cfg.unlink()
             except Exception:
                 pass
+        if not has_config:
+            log_to_logfile(
+                f"Backup archive contains no config.ini: {zip_file.name} — "
+                "keeping the current settings."
+            )
         total = len(to_extract)
         for i, member in enumerate(to_extract, start=1):
             target = (base / Path(member)).resolve()
