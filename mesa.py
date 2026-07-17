@@ -4657,9 +4657,10 @@ class MesaMainWindow(QMainWindow):
             "It includes all imported data (input/), processed results (output/), "
             "and your configuration (config.ini). Use this before major changes "
             "or to transfer a project to another computer.\n\n"
-            "Restoring a backup replaces the current project data entirely. "
-            "The existing input/, output/, and config.ini are removed and "
-            "replaced with the contents of the selected backup ZIP."
+            "Restoring data replaces the current project entirely — this can be "
+            "one of your own backups, a demo-data package, or a project shared by "
+            "a colleague. The existing input/, output/, and config.ini are removed "
+            "and replaced with the contents of the selected ZIP."
         )
         backup_intro.setWordWrap(True)
         backup_intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
@@ -4673,7 +4674,7 @@ class MesaMainWindow(QMainWindow):
         create_btn.clicked.connect(self._do_backup)
         backup_btn_row.addWidget(create_btn)
 
-        restore_btn = QPushButton("Restore backup")
+        restore_btn = QPushButton("Restore data")
         restore_btn.setFixedWidth(160)
         restore_btn.clicked.connect(self._do_restore)
         backup_btn_row.addWidget(restore_btn)
