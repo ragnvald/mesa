@@ -1599,12 +1599,16 @@ def _format_system_capabilities_for_about(row: dict | None) -> str:
 # ---------------------------------------------------------------------
 original_working_directory = PROJECT_BASE
 config_file = os.path.join(PROJECT_BASE, "config.ini")
-if not os.path.exists(config_file):
-    raise FileNotFoundError(f"Configuration not found: {config_file}")
-
 gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
-config = read_config(config_file)
-mesa_version = config['DEFAULT'].get('mesa_version', 'MESA 5')
+
+# Populated by _bootstrap_config(), which only runs in the main process. Nothing
+# here may read config.ini or touch disk at import time: in-process helpers spawn
+# worker pools, and under "spawn" every child re-executes this file as
+# __mp_main__. A raise at module level then kills each child before it can claim
+# its task, and the pool answers by respawning it — forever.
+# See learning.md "Module-level config in mesa.py hangs spawned worker pools".
+config: configparser.ConfigParser | None = None
+mesa_version = "MESA 5"
 
 
 def _format_display_version(version: str) -> str:
@@ -1628,11 +1632,30 @@ def _read_packaged_build_info() -> dict:
         return {}
 
 
-mesa_version_display = _format_display_version(mesa_version)
-packaged_build_info = _read_packaged_build_info()
-packaged_build_timestamp = str(packaged_build_info.get("build_timestamp", "") or "").strip()
+mesa_version_display = "MESA"
+packaged_build_info: dict = {}
+packaged_build_timestamp = ""
 
-check_and_create_folders()
+
+def _bootstrap_config() -> None:
+    """Read config.ini and prepare project folders. Main process only."""
+    global config, mesa_version, mesa_version_display
+    global packaged_build_info, packaged_build_timestamp
+
+    if not os.path.exists(config_file):
+        raise FileNotFoundError(f"Configuration not found: {config_file}")
+    config = read_config(config_file)
+    mesa_version = config['DEFAULT'].get('mesa_version', 'MESA 5')
+    mesa_version_display = _format_display_version(mesa_version)
+    packaged_build_info = _read_packaged_build_info()
+    packaged_build_timestamp = str(packaged_build_info.get("build_timestamp", "") or "").strip()
+    check_and_create_folders()
+
+
+# Kept here rather than in the __main__ block at the foot of the file so the
+# globals are ready before the module-level UI code below runs.
+if __name__ == "__main__":
+    _bootstrap_config()
 
 
 # =====================================================================
