@@ -871,14 +871,14 @@ class _ArchiveProgressDialog(QDialog):
         self._bar.setRange(0, 0)  # busy spinner until first progress tick
         layout.addWidget(self._bar)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        self._btn_row = QHBoxLayout()
+        self._btn_row.addStretch()
         self._btn = QPushButton(f"{action_word}…")
         self._btn.setEnabled(False)
         self._btn.setMinimumWidth(160)
-        btn_row.addWidget(self._btn)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
+        self._btn_row.addWidget(self._btn)
+        self._btn_row.addStretch()
+        layout.addLayout(self._btn_row)
 
     # --- Compatibility shims so existing progress-callback code still works ---
     def setLabelText(self, s: str) -> None:
@@ -894,11 +894,19 @@ class _ArchiveProgressDialog(QDialog):
         self._bar.setValue(v)
 
     # --- Terminal state ---
-    def finalize(self, label_text: str, *, success: bool) -> None:
+    def finalize(self, label_text: str, *, success: bool,
+                 extra_button: tuple[str, object] | None = None) -> None:
         if self._bar.maximum() <= 0:
             self._bar.setRange(0, 1)
         self._bar.setValue(self._bar.maximum() if success else 0)
         self._label.setText(label_text)
+        if extra_button is not None:
+            text, on_click = extra_button
+            secondary = QPushButton(text)
+            secondary.setMinimumWidth(160)
+            secondary.clicked.connect(on_click)
+            # btn_row is [stretch, _btn, stretch]; put this to the left of OK.
+            self._btn_row.insertWidget(1, secondary)
         self._btn.setText("OK")
         self._btn.setEnabled(True)
         self._btn.setDefault(True)
@@ -993,6 +1001,17 @@ def write_ai_connection(base_dir: str, settings: dict) -> None:
     os.makedirs(os.path.join(base_dir, "secrets"), exist_ok=True)
     pd.DataFrame([settings]).to_parquet(ai_connection_path(base_dir), index=False)
 
+# Demo packages from the mesa_demodata project carry a plain-text description of
+# themselves: synthetic vs real data, sources and the credits they require, and the
+# package's measured asset overlap.
+#
+# Matched by EXACT member name, never a `docs/` prefix. docs/ holds the user guides
+# and docs/templates/report_about.md, which report_generate reads at runtime — a
+# prefix match would let any archive replace either. _safe_zip_member_names blocks
+# traversal but not a member legitimately naming an existing doc.
+DEMO_README_MEMBER = "docs/readme_demodata.txt"
+
+
 def _safe_zip_member_names(names: list[str]) -> list[str]:
     safe: list[str] = []
     for member in names:
@@ -1073,6 +1092,12 @@ def create_backup_archive(
                 continue
             files_to_add.append((file_path, file_path.relative_to(base).as_posix()))
 
+    # DEMO_README_MEMBER is deliberately NOT added here. It describes the package as
+    # delivered — including its measured asset overlap — so once the user has evolved
+    # the project that claim no longer holds. Letting it fall away on the first backup
+    # is the point: restore_backup_archive drops any stale copy, so the description
+    # exists exactly while it is true. Do not "fix" this asymmetry.
+    #
     # The AI token (secrets/ai_connection.parquet) lives outside input/ and
     # output/, so it never enters the archive unless the user explicitly opts in.
     if include_ai_token:
@@ -1114,7 +1139,8 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
         safe_members = _safe_zip_member_names(zf.namelist())
         to_extract = [
             m for m in safe_members
-            if m == "config.ini" or m.startswith("input/") or m.startswith("output/")
+            if m == "config.ini" or m == DEMO_README_MEMBER
+            or m.startswith("input/") or m.startswith("output/")
             or m.startswith("secrets/")  # restored only if the backup opted to include it
         ]
         has_config = "config.ini" in to_extract
@@ -1128,6 +1154,16 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
         if has_config and cfg.exists() and cfg.is_file():
             try:
                 cfg.unlink()
+            except Exception:
+                pass
+        # The opposite rule applies to the package description, deliberately: it is a
+        # claim ABOUT the archive (sources, credits, measured overlap), so one left
+        # over from an earlier restore would credit the wrong data. config.ini is
+        # infrastructure the project needs; a wrong readme is worse than none.
+        stale_readme = base / DEMO_README_MEMBER
+        if stale_readme.is_file():
+            try:
+                stale_readme.unlink()
             except Exception:
                 pass
         if not has_config:
@@ -4571,6 +4607,17 @@ class MesaMainWindow(QMainWindow):
         except Exception as e:
             self._config_status_label.setText(f"Error opening config: {e}")
 
+    def _open_demo_readme(self, readme_path) -> None:
+        """Open a restored package's description in the system text viewer."""
+        try:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(readme_path)))
+            if not opened:
+                self._manage_status.setText(
+                    f"Could not open {readme_path} via the system default viewer."
+                )
+        except Exception as e:
+            self._manage_status.setText(f"Error opening package description: {e}")
+
     def _open_tune_processing(self):
         """Show the standalone Tune processing window (lazily constructed)."""
         win = getattr(self, "_tune_window", None)
@@ -4702,8 +4749,9 @@ class MesaMainWindow(QMainWindow):
         return _ArchiveProgressDialog(self, title, action_word)
 
     def _finalize_archive_dialog(self, progress, label_text: str,
-                                 *, success: bool) -> None:
-        progress.finalize(label_text, success=success)
+                                 *, success: bool,
+                                 extra_button: tuple[str, object] | None = None) -> None:
+        progress.finalize(label_text, success=success, extra_button=extra_button)
 
     def _ask_backup_options(self):
         """Show a small modal dialog with backup options.
@@ -4943,10 +4991,18 @@ class MesaMainWindow(QMainWindow):
         def _on_finished(_unused: str) -> None:
             self._manage_status.setText(f"Backup restored: {zip_path}")
             progress.setWindowTitle("Restore complete")
+            # Demo packages describe themselves; ordinary projects have no such file,
+            # so nothing extra appears for a normal restore. restore_backup_archive
+            # drops any stale copy first, so this can only be THIS archive's readme.
+            readme = Path(original_working_directory) / DEMO_README_MEMBER
+            text = f"Backup restore completed successfully.\n\nFrom: {zip_path}"
+            extra = None
+            if readme.is_file():
+                text += ("\n\nThis package includes a description (sources, credits "
+                         "and how its data is put together).")
+                extra = ("Open description", lambda: self._open_demo_readme(readme))
             self._finalize_archive_dialog(
-                progress,
-                f"Backup restore completed successfully.\n\nFrom: {zip_path}",
-                success=True,
+                progress, text, success=True, extra_button=extra,
             )
             try:
                 self._refresh_status_tab()
