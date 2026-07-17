@@ -210,9 +210,13 @@ Bygget kopierer `qgis/ docs/ input/ output/ system_resources/` + `config.ini`,
 skriver `build_info.json`, fjerner `devtools/`, og stripper utviklernotatene.
 `secrets/` er bevisst utelatt.
 
-### Demodata (jinja) — skal med
+### Demodata — to spor
 
-Ligger på disk nå og blir plukket opp automatisk siden bygget kopierer `input/`:
+Demodata publiseres som **egen Zenodo-opplasting ved siden av applikasjonen**, ikke
+bare bakt inn i pakken. Det gir to spørsmål som må avgjøres hver for seg:
+
+**a) Hva ligger i `input/` når vi bygger?** Bygget kopierer `input/` rått, så det som
+ligger der havner i pakken:
 
 | Fil | Størrelse | Sporet i git? |
 |---|---|---|
@@ -222,10 +226,16 @@ Ligger på disk nå og blir plukket opp automatisk siden bygget kopierer `input/
 
 ⚠️ **Ingen av dem er i git.** De finnes kun på denne maskinen. En ren klone bygger
 uten demodata. Kilden er `D:\data\mesa_demodata\exported\jinja_sample.zip`.
-Bekreft at de er på plass rett før bygg.
+Bekreft at de er på plass rett før bygg — eller at de er tomme, hvis pakken skal
+leveres uten data.
 
-Datasettet: 8 MULTIPOLYGON-features polygonisert fra ESA WorldCover 10m,
-~494k vertekser, EPSG:4326. Håndterbart — basic_mosaic bruker ~10 s på det.
+**b) Den separate demodata-opplastingen.** Nytt datasett med **overlappende**
+features er under arbeid (jinja-settet i dag har 8 ikke-overlappende MULTIPOLYGON
+polygonisert fra ESA WorldCover 10m, ~494k vertekser — overlapp er det som gjør
+sensitivitetsberegningen interessant). Lastes opp som egen post når det er klart.
+
+Merk at demo-pakkens `config.ini` **erstatter** mottakerprosjektets. Se §3.6 — og
+restaurer demodata i en dedikert MESA-kopi, ikke i utviklingsrepoet.
 
 ---
 
@@ -237,11 +247,25 @@ hentes derfra av GitHub-skriptet.
 Det finnes **ingen** `.zenodo.json` eller `CITATION.cff` i repoet, og ingen skript
 som zipper `D:\dist\mesa`. Alt i dette steget er manuelt:
 
+### 6a. Applikasjonen
+
 1. Rydd `D:\dist\mesa` etter §3.3/§3.4.
 2. Zip `D:\dist\mesa` → navngi konsistent med tidligere utgivelser.
 3. Last opp til Zenodo, community `mesatool` (https://zenodo.org/communities/mesatool/).
 4. Tittel må inneholde `5.5.0` — GitHub-skriptet utleder taggen fra tittelen.
 5. Publiser og noter record-id + DOI her: `_____________`
+
+### 6b. Demodata (egen post)
+
+Egen opplasting ved siden av applikasjonen, når det overlappende datasettet er klart
+(§5b). Noter record-id + DOI her: `_____________`
+
+⚠️ **Tittelen på demodata-posten må ikke inneholde `5.5.0`** hvis den ligger i samme
+community — `github_release_from_zenodo.py` utleder taggen fra Zenodo-tittelen, og to
+poster som begge matcher kan gi feil tag. Gi den et navn som `MESA demo data — Jinja
+(overlapping)`, uten versjonsnummer.
+
+Krysslenk de to postene i beskrivelsene når begge finnes.
 
 ---
 
@@ -273,17 +297,30 @@ learning.md/docs.** Se §9 for hva vi ikke kan påstå.
 
 > ### MESA 5.5.0
 >
-> A performance, memory and platform release. Classification becomes a first-class
-> part of the workflow, intersect is measurably ~3× faster, and the whole stack moves
-> to Python 3.14.
+> A performance, memory and platform release. The classification engine is updated and
+> woven into the rest of the tool, processing is measurably ~3× faster, and the whole
+> stack moves to Python 3.14.
 >
-> **Classification is now part of the pipeline**
-> The classification engine shipped in 5.2 as a standalone tool you ran by hand after
-> processing. In 5.5.0 it is integrated: it runs as a stage inside Process (between
-> Data and Tiles), renders on the maps as Types and Certainty rasters with
-> hover-identify, appears in reports with area charts and interpretive text, exports
-> to QGIS as both raster and vector, and can span several geocode layers in one run.
-> Setup moved to Configure. AI-generated descriptions are optional and off by default.
+> **The classification engine is updated and now reaches the whole workflow**
+> Classification arrived in 5.2 as a standalone engine you ran by hand after
+> processing — its results stayed in that one window. In 5.5.0 the engine is updated
+> and connected to everything around it:
+>
+> - **Reports.** Classification is now a selectable report section, with per-type area
+>   charts, a classification overview, a segmentation legend strip, and interpretive
+>   prose generated from the actual numbers. (Before 5.5.0 the section could never
+>   appear at all — the toggle never reached the report generator.)
+> - **Maps.** Types and Certainty render as rasters, with hover-identify reading
+>   straight from `tbl_seg_mv`, no-data shown as grey rather than white holes, and a
+>   contrast-stretched certainty ramp.
+> - **Processing.** It runs as a stage inside Process, between Data and Tiles — no
+>   second manual pass. Setup moved to Configure.
+> - **QGIS.** Both raster and vector exports, with a stable `_segmv_latest` alias so
+>   QGIS always tracks the newest run.
+> - **Scope.** One run can now classify several geocode layers at once, or all of them.
+>
+> AI-generated descriptions are optional and off by default; without them the engine
+> falls back to deterministic naming.
 >
 > **A configurable AI connection**
 > Config gains an AI connection panel (OpenAI or Ollama). The token is stored in
@@ -292,13 +329,14 @@ learning.md/docs.** Se §9 for hva vi ikke kan påstå.
 > title-aware map styling — each with a deterministic fallback when no AI is
 > configured.
 >
-> **Intersect: 3.18× faster, 21× less memory per worker**
-> Intersect workers no longer each hold the full asset layer; the parent ships a
-> per-chunk asset subset instead. Measured on a full pipeline run (3.5M assets,
-> basic_mosaic, Python 3.14): per-worker RAM fell from 5.76 GB to ~0.27 GB, which
-> lifted the RAM-derived worker cap from 3 to 10 and cut intersect wall-clock from
-> **9.6 hours to 3.02 hours**. Output is byte-identical to the old run — 1,387 parts
-> / 91,083,233 rows, zero errors across all 1,992 chunks.
+> **Processing is ~3× faster**
+> Intersect — the core of processing — no longer ships the full asset layer to every
+> worker; the parent sends a per-chunk asset subset instead. Measured on a full
+> pipeline run over the basic_mosaic geocode layer (3.5M assets, Python 3.14):
+> per-worker RAM fell from 5.76 GB to ~0.27 GB, which lifted the RAM-derived worker
+> cap from 3 to 10 and cut intersect wall-clock from **9.6 hours to 3.02 hours
+> (3.18×)**. Output is byte-identical to the old run — 1,387 parts / 91,083,233 rows,
+> zero errors across all 1,992 chunks.
 >
 > **basic_mosaic: graceful limits instead of out-of-memory crashes**
 > A new pre-flight memory gate estimates peak RAM and skips basic_mosaic with a clear
@@ -308,6 +346,11 @@ learning.md/docs.** Se §9 for hva vi ikke kan påstå.
 > basic_mosaic's dominant cost as process-spawn overhead rather than geometry
 > computation (~87% of a measured 9h56m reference run on 3.5M assets) and removed the
 > per-pair worker respawn; post-change wall-clock measurement is pending.
+>
+> **Tile construction is unchanged**
+> Building the local map tiles still costs what it always has. It is not a bottleneck
+> we have attacked in this release, and it is retained deliberately: the tiles are what
+> make the results explorable locally, without a server or a network connection.
 >
 > **Fixes that prevented data loss**
 > - Importing geocodes silently deleted every other geocode group. One import removed
@@ -340,11 +383,29 @@ Sjekket mot kildene. Ikke la disse snike seg inn i notatene.
 | «Ny AI-klassifisering» | Motoren shippet i 5.2. Det nye er *integrasjonen*. |
 | «Mosaic fra timer til minutter» | `docs/basic_mosaic_capacity.md:64-65` sier ordrett at dette er en **forventning**, og at faktisk tid «is pending a fresh full run — to be filled in here once measured». Ingen måling etter endringen finnes. |
 | Et tall på mosaic-forbedringen | Se over. Den ene benchmarken som finnes (`SCALABLE_PROCESSING_PLAN.md:53-66`) viser at config-knappene gir 0,61×–1,09× — altså at de *ikke* hjelper. |
+| At 3,18× gjelder mosaikk-**byggingen** | Lett å lese feil: learning.md:759 sier «final full-pipeline run … **basic_mosaic**, 10 workers». Der navngir «basic_mosaic» *geocode-laget intersect kjørte mot*, ikke det å bygge mosaikken. Tallet er intersect. |
 | «Minne-watchdog i mosaic» | To-tiers-watchdogen er fra før 5.2 og er per `further_development.md:77-78` fortsatt **ikke** koblet til mosaic-poolen. |
 | «Polygonize bruker mindre minne» | 21,7 GB-toppen er uendret — kun *beskyttet* av pre-flight-gaten. |
 | «Ny settings-store» | `492969e` er Phase 1 og eksplisitt uten produksjonseffekt. Phase 2 er ikke gjort. |
 | «Fullt validert på 3.14» | Lines og analysis ble aldri nådd i valideringskjøringen, og frozen build er uprøvd (§3.1). |
 | De gamle 2,3× / ~4–4,5 t-tallene | Superseded av `learning.md:757`. Bruk 3,18× / 3,02 t. |
+
+### Hvorfor mosaikk-byggingen er umålt — beviskjeden
+
+Fra `log.txt`, så ingen trenger grave dette fram igjen:
+
+```
+2026-06-26 06:13:16 -> 16:09:36   basic_mosaic: 9t 56m på 3 526 097 assets
+2026-06-26 20:42:10               ebb0710 «Tier-1 reduce speedup» committet
+                                  ^ 4,5 timer ETTER at kjøringen var ferdig
+```
+
+Den store kjøringen er altså **før** endringen. Hver basic_mosaic-kjøring *etter*
+`ebb0710` er på 34 596, 64, 25 eller 8 assets — to størrelsesordener mindre, og
+ubrukelig som sammenligning. Det finnes ingen «etter»-måling på sammenlignbare data.
+
+For å lukke dette trengs 3,5M-asset-prosjektet kjørt på nytt (~timer). Da fylles
+tallet inn i `docs/basic_mosaic_capacity.md:64`, som står og venter på det.
 
 ---
 
@@ -353,8 +414,14 @@ Sjekket mot kildene. Ikke la disse snike seg inn i notatene.
 1. **§3.2** Brukerveiledning: skriv om til 5.5.0, la stå på 5.2, eller dropp?
 2. **§3.3** Hvilke `docs/`-filer skal ut av distribusjonen?
 3. **§3.4** Skal `output/` shippes i det hele tatt, og i så fall hva?
-4. **§6** Filnavn/tittel på Zenodo-posten.
-5. Skal demodataene sjekkes inn (i dag kun på denne maskinen)?
+4. **§5a** Skal jinja-dataene ligge i `input/` i pakken, når de også publiseres separat?
+5. **§6** Filnavn/tittel på begge Zenodo-postene.
+6. Skal demodataene sjekkes inn (i dag kun på denne maskinen)?
+
+**Avgjort 2026-07-17:**
+- Config: kanonisk fra HEAD, ikke demo-configen (§3.6).
+- Ytelse: 3× oppgis om prosessering/intersect, som er målt. Mosaikk-byggingen
+  beskrives uten tall (§8, §9) — tidslinjen under viser hvorfor.
 
 ---
 
