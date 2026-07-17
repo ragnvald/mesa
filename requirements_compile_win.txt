@@ -9,10 +9,11 @@
 
 -r requirements_py314_win.txt
 
-# Build toolchain. Left unpinned so pip resolves the cp314-compatible release;
-# pin once a full build_all.py run on 3.14 confirms a working version.
-pyinstaller
-pyinstaller-hooks-contrib
+# Build toolchain. Pinned to the set that produced the first green 3.14 frozen
+# build (2026-07-17, CPython 3.14.6): full clean build_all.py in 7m16s, and the
+# resulting mesa.exe launches and reports 5.5.0.
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
 
 # setuptools/pkg_resources runtime deps needed inside frozen builds (pure-python,
 # version-flexible). Mirror build_all.py PKG_RESOURCES_HIDDEN_IMPORTS.

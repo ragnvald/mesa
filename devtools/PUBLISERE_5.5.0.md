@@ -15,8 +15,12 @@ Status per 2026-07-17. Oppdater etter hvert som punktene lukkes.
 | `mesa_version = 5.5.0` i config.ini | ✅ commit `0336f1b` |
 | Programvaren rapporterer 5.5.0 | ✅ verifisert i alle tre kodestier (se §2) |
 | Kanonisk config.ini gjenopprettet | ✅ demo-configen var skrevet over den |
-| Grønn frozen build på Python 3.14 | ❌ **aldri kjørt** — se §3.1 |
-| Zenodo-post | ⬜ |
+| Grønn frozen build på Python 3.14 | ✅ **2026-07-17, 7m16s, kjører** — se §3.1 |
+| Kompilert utgave i `D:\dist\mesa` | ✅ 2,05 GB / 7 855 filer, banner sier 5.5.0 |
+| Byggeverktøy pinnet | ✅ pyinstaller 6.21.0 / hooks-contrib 2026.6 |
+| Rydding av `docs/` og `output/` før zip | ⬜ bekreftet lekkasje — se §3.3/§3.4 |
+| Zenodo-post (applikasjon) | ⬜ |
+| Zenodo-post (demodata) | ⬜ venter på overlappende datasett |
 | GitHub-release | ⬜ (krever Zenodo først) |
 | Brukerveiledning oppdatert | ⬜ sier fortsatt 5.2 — se §3.2 |
 
@@ -44,21 +48,33 @@ Det er en dok-konstant, ikke programvaren. Se §3.2.
 
 ## 3. Blokkere og risiko — les før du bygger
 
-### 3.1 Frozen build på Python 3.14 er aldri validert 🔴
+### 3.1 Frozen build på Python 3.14 ✅ LØST 2026-07-17
 
-Dette er den store. 3.14-migreringen er ferdig og validert **fra kildekode**, men
-ingen har noensinne fått en grønn PyInstaller-build på 3.14.
+Var den store blokkeren. **Nå gjort:** første grønne PyInstaller-build på 3.14.
 
-- `requirements_compile_win.txt:12-15` lar `pyinstaller` og `pyinstaller-hooks-contrib`
-  stå **upinnet**, med kommentaren: *"pin once a full build_all.py run on 3.14
-  confirms a working version"*.
-- `docs/further_development.md` A3: *"Not yet: … a green PyInstaller frozen build on 3.14."*
-- `build_win_log.txt` er fra **Python 3.11.6** og `--collect-all fiona` — altså
-  fra før pyogrio-migreringen. Den ~9m46s-tiden er en pekepinn, ikke en baseline.
+```
+2026-07-17 12:22:33 | helpers=True main=True parallel=4 clean=True | total 435.9s
+    helper:combined_map              124.9s
+    helper:segmentation_run          222.2s
+    helper:segmentation_setup        283.5s
+    helper:special_focus             338.3s
+    helper:tiles_create_raster       123.0s
+    main:mesa                        304.2s
+```
 
-**Konsekvens:** første `compile_win_11.bat` på 3.14 er et eksperiment, ikke en
-rutinebygging. Sett av tid. Når den går grønn: **pinn pyinstaller-versjonen** i
-`requirements_compile_win.txt` og noter versjonen her.
+- Full ren build på **7m 16s** — raskere enn 3.11-byggene (525–597s i historikken).
+- Røyktest: `D:\dist\mesa\mesa.exe` starter, lever, vindustittel **`5.5.0`**, skriver
+  log.txt og host-capabilities-snapshot. Altså ikke bare bygget — den kjører.
+- Toolchain **pinnet** i `requirements_compile_win.txt`: `pyinstaller==6.21.0`,
+  `pyinstaller-hooks-contrib==2026.6`, på CPython **3.14.6**.
+- `docs/further_development.md` A3 sier fortsatt «Not yet: … a green PyInstaller
+  frozen build on 3.14» — **bør oppdateres**.
+
+Gjenstår før vi kan si at 3.14 er fullt validert: en full prosesseringskjøring i den
+*kompilerte* utgaven (kilde-kjøringen nådde aldri lines/analysis).
+
+Ufarlige advarsler i byggeloggen: `Library not found: could not resolve
+'Qt6QuickShapesDesignHelpers.dll'` o.l. — PySide6 QML-plugins MESA ikke bruker.
 
 ### 3.2 Brukerveiledningen sier fortsatt 5.2 🟠
 
@@ -78,26 +94,38 @@ finnes som søsken-checkout.
 
 `build_all.py:864` kopierer hele `docs/`. `DEVELOPER_ONLY_FILES` (linje 931) fjerner
 `CLAUDE.md`, `cooperation.md`, `instructions.md`, `learning.md` — men **ikke**
-planleggingsdokumentene i `docs/`. Disse havner hos sluttbrukerne:
+planleggingsdokumentene i `docs/`. **Bekreftet i bygget 2026-07-17** — dette ligger nå
+i `D:\dist\mesa\docs\`:
 
-- `docs/further_development.md` (inneholder «ikke gjort»-lista vår)
-- `docs/SEGMENTATION_INTEGRATION_PLAN.md`
-- `docs/SCALABLE_PROCESSING_PLAN.md`
-- `docs/CLOUD_PROCESSING_SERVER_PLAN.md`
-- `docs/basic_mosaic_capacity.md`
+| Fil | Vurdering |
+|---|---|
+| `further_development.md` | 🔴 vår «ikke gjort»-liste |
+| `CLOUD_PROCESSING_SERVER_PLAN.md` | 🔴 roadmap |
+| `SCALABLE_PROCESSING_PLAN.md` | 🔴 roadmap |
+| `SEGMENTATION_INTEGRATION_PLAN.md` | 🔴 roadmap |
+| `SEGMENTATION_OVERVIEW_VIEWER_PLAN.md` | 🔴 roadmap |
+| `UNIFIED_MAP_PLAN.md` | 🔴 roadmap |
+| `basic_mosaic_capacity.md` | 🟡 kan være nyttig for brukere |
+| `MESA_Segmentation_PoC.docx` | 🟡 |
+| `segmentation.md`, `data_model.graphml`, `system_overview.graphml` | 🟡 |
+| `MESA_User_Guide_en.docx` / `_pt.docx` | ✅ skal med (14 MB hver) |
 
-**Avgjør før bygg.** Kapasitetsdokumentet kan være greit å dele; roadmap-ene er
-neppe ment for publikum.
+**Slett de røde fra `D:\dist\mesa\docs\` før zip**, eller legg dem i
+`DEVELOPER_ONLY_FILES` så bygget gjør det selv.
 
 ### 3.4 `output/` shipper rått — din egen cache blir med 🟠
 
-`build_all.py:864` kopierer også `output/`. Akkurat nå: **111 filer / 20,6 MB**,
-mesteparten `output/cache/osm_tiles/` — basiskart-fliser cachet fra dine egne
-økter, pluss `processing_tuning_backup.json` og `area_stats.json`.
+`build_all.py:864` kopierer også `output/`. **Bekreftet i bygget 2026-07-17:**
+`D:\dist\mesa\output\` inneholder **112 filer / 20,7 MB** i fire undermapper —
+`cache` (basiskart-fliser fra dine egne økter), `geoparquet`, `mbtiles` og
+`segmentation_mv` (resultater fra dine demo-kjøringer).
 
 Backup-eksporten ble ryddet i `7318b8e` (basiskart-cache og runtime-lock aldri med),
-men **bygget har ikke fått samme rydding**. Rydd `output/` før bygg, eller bestem
-hva som skal være med.
+men **bygget har ikke fått samme rydding**.
+
+Avgjør: skal nedlastere få et tomt `output/` (rent utgangspunkt), eller ferdig
+prosesserte demo-resultater (kan utforskes umiddelbart)? Uansett bør
+`output/cache/osm_tiles/` ut — det er ren støy fra denne maskinen.
 
 ### 3.5 `input/`-readme-ene forsvinner ved hver demo-restore 🟡
 
@@ -428,20 +456,27 @@ tallet inn i `docs/basic_mosaic_capacity.md:64`, som står og venter på det.
 ## 11. Rekkefølge
 
 ```
-[ ] Rydd docs/ og output/ etter §3.3/§3.4
-[ ] Bekreft config.ini er kanonisk + 5.5.0        (§3.6)
-[ ] Bekreft input/-readmene er på plass           (§3.5)
-[ ] Bekreft jinja-demodata ligger i input/        (§5)
-[ ] devtools\setup_venvs.bat
-[ ] devtools\compile_win_11.bat                   ← første 3.14-build, sett av tid (§3.1)
-[ ] Pinn pyinstaller-versjonen når bygget er grønt
-[ ] Røyktest D:\dist\mesa\mesa.exe — banner skal si 5.5.0 Build <dato>
-[ ] Kjør demodataene gjennom i den kompilerte utgaven
-[ ] python devtools\build_user_guide.py           (avhenger av §3.2)
+[x] Bekreft config.ini er kanonisk + 5.5.0        (§3.6)
+[x] Bekreft input/-readmene er på plass           (§3.5)
+[x] Bekreft jinja-demodata ligger i input/        (§5a)
+[x] devtools\compile_win_11.bat                   7m16s, grønn (§3.1)
+[x] Pinn pyinstaller-versjonen                    6.21.0 / hooks-contrib 2026.6
+[x] Røyktest D:\dist\mesa\mesa.exe                starter, tittel 5.5.0
+
+--- gjenstår ---
+
+[ ] Kjør demodataene gjennom i den KOMPILERTE utgaven, hele veien inkl.
+    lines + analysis (aldri nådd i kilde-valideringen på 3.14)
+[ ] Avgjør og rydd docs/ i D:\dist\mesa           (§3.3 — 6 roadmaps ligger der nå)
+[ ] Avgjør og rydd output/ i D:\dist\mesa         (§3.4 — 20,7 MB, din cache)
+[ ] Oppdater docs/further_development.md A3       (sier fortsatt frozen build mangler)
+[ ] python devtools\build_user_guide.py           (avhenger av §3.2 — sier 5.2)
+[ ] Bygg på nytt hvis docs/ ryddes via DEVELOPER_ONLY_FILES
 [ ] Zip D:\dist\mesa
-[ ] Last opp til Zenodo, noter record-id + DOI
+[ ] Last opp til Zenodo, noter record-id + DOI    (§6a)
 [ ] python devtools\github_release_from_zenodo.py <id>
 [ ] Les gjennom auto-changelogen (spenner 64 commits)
 [ ] python devtools\github_release_from_zenodo.py <id> --publish
 [ ] git tag 5.5.0 + push (du styrer pushing)
+[ ] Demodata-post på Zenodo når overlapp-settet er klart (§6b)
 ```
