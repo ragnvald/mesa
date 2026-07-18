@@ -73,3 +73,6 @@ output/segmentation_mv/
 *.sbn
 *.sbx
 *.lock
+
+# Pre-restore config backup written by restore_backup_archive
+config.ini.bak

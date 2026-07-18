@@ -1152,6 +1152,15 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
         # Deleting a config.ini we cannot replace leaves the project unstartable.
         cfg = base / "config.ini"
         if has_config and cfg.exists() and cfg.is_file():
+            # Keep a one-level backup before the archive overwrites the config, so an
+            # experimental/accidental restore is recoverable — restore is otherwise
+            # irreversible and takes mesa_version from the archive. config.ini.bak is
+            # the config as it was immediately before THIS restore.
+            try:
+                shutil.copy2(cfg, base / "config.ini.bak")
+                log_to_logfile("Saved current config before restore: config.ini.bak")
+            except Exception:
+                pass
             try:
                 cfg.unlink()
             except Exception:
