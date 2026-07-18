@@ -27,7 +27,7 @@ QWidget#CentralHost {
 QWidget {
     color: #3f3528;
     font-family: "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
-    font-size: 10pt;
+    font-size: 11px;
 }
 QTabWidget::pane {
     border: 1px solid #cbb791;
@@ -51,7 +51,7 @@ QTabBar::tab {
     border-top-left-radius: 5px;
     border-top-right-radius: 5px;
     font-weight: 500;
-    font-size: 10pt;
+    font-size: 11px;
 }
 QTabBar::tab:selected {
     background: #f8f3e9;
@@ -66,7 +66,7 @@ QTabBar::tab:hover:!selected {
 }
 QGroupBox {
     font-weight: 600;
-    font-size: 10pt;
+    font-size: 11px;
     background: #faf6ee;
     border: 1px solid #d5c3a4;
     border-radius: 8px;
@@ -134,7 +134,7 @@ QLineEdit {
     border: 1px solid #d9cab1;
     border-radius: 6px;
     padding: 5px 8px;
-    font-size: 10pt;
+    font-size: 11px;
     selection-background-color: #d7bb7f;
     selection-color: #2f2517;
 }
@@ -147,7 +147,7 @@ QPlainTextEdit, QTextEdit {
     border-radius: 6px;
     padding: 6px;
     font-family: "Cascadia Code", "Consolas", monospace;
-    font-size: 9pt;
+    font-size: 10px;
     selection-background-color: #d7bb7f;
     selection-color: #2f2517;
 }
@@ -159,7 +159,7 @@ QComboBox {
     border: 1px solid #d9cab1;
     border-radius: 6px;
     padding: 4px 8px;
-    font-size: 10pt;
+    font-size: 11px;
     min-width: 60px;
 }
 QComboBox:hover { border-color: #b99763; }
@@ -178,7 +178,7 @@ QTableWidget {
     border: 1px solid #d9cab1;
     border-radius: 6px;
     gridline-color: #e2d5bf;
-    font-size: 9pt;
+    font-size: 10px;
     alternate-background-color: #f6efdf;
 }
 QTableWidget::item { padding: 4px 8px; }
@@ -188,7 +188,7 @@ QHeaderView::section {
     border: 1px solid #d5c3a4;
     padding: 4px 8px;
     font-weight: 600;
-    font-size: 9pt;
+    font-size: 10px;
 }
 QScrollArea {
     border: none;
@@ -199,7 +199,7 @@ QSplitter::handle {
 }
 QCheckBox {
     spacing: 6px;
-    font-size: 10pt;
+    font-size: 11px;
 }
 QCheckBox::indicator {
     width: 16px;
@@ -245,7 +245,7 @@ QProgressBar {
     height: 14px;
     text-align: center;
     color: #4f4129;
-    font-size: 8pt;
+    font-size: 9px;
 }
 QProgressBar::chunk {
     background: #b79b67;
@@ -287,7 +287,7 @@ QToolTip {
     border: none;
     border-radius: 6px;
     padding: 6px 10px;
-    font-size: 9pt;
+    font-size: 10px;
 }
 """
 

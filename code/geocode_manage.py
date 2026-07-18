@@ -3248,7 +3248,7 @@ class GeocodeManagerWindow(QMainWindow):
         )
         consequences.setWordWrap(True)
         consequences.setTextFormat(Qt.RichText)
-        consequences.setStyleSheet("color: #715a36; font-size: 9pt; padding: 4px 0;")
+        consequences.setStyleSheet("color: #715a36; font-size: 10px; padding: 4px 0;")
         strategy_layout.addWidget(consequences)
 
         layout.addWidget(strategy_group)
@@ -3288,7 +3288,7 @@ class GeocodeManagerWindow(QMainWindow):
             "Open the <i>Strategy</i> tab to change."
         )
         self._mosaic_skip_note.setTextFormat(Qt.RichText)
-        self._mosaic_skip_note.setStyleSheet("color: #b45309; font-size: 9pt; font-style: italic; padding: 2px 0;")
+        self._mosaic_skip_note.setStyleSheet("color: #b45309; font-size: 10px; font-style: italic; padding: 2px 0;")
         self._mosaic_skip_note.setWordWrap(True)
         layout.addWidget(self._mosaic_skip_note)
 
@@ -3502,7 +3502,7 @@ class GeocodeManagerWindow(QMainWindow):
         layout.addWidget(import_group)
 
         self.import_status_label = QLabel("")
-        self.import_status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        self.import_status_label.setStyleSheet("color: #9a8a6e; font-size: 10px;")
         layout.addWidget(self.import_status_label)
         layout.addStretch()
 
@@ -3556,7 +3556,7 @@ class GeocodeManagerWindow(QMainWindow):
         layout.addWidget(group_group)
 
         self.manage_status_label = QLabel("")
-        self.manage_status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        self.manage_status_label.setStyleSheet("color: #9a8a6e; font-size: 10px;")
         layout.addWidget(self.manage_status_label)
 
         log_group = QGroupBox("Log")
@@ -3579,7 +3579,7 @@ class GeocodeManagerWindow(QMainWindow):
         layout.addWidget(QLabel("Edit geocode names, user titles and descriptions."))
 
         self.edit_state_label = QLabel("")
-        self.edit_state_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        self.edit_state_label.setStyleSheet("color: #6a5533; font-size: 10px;")
         layout.addWidget(self.edit_state_label)
 
         meta_group = QGroupBox("Current geocode")
@@ -3618,7 +3618,7 @@ class GeocodeManagerWindow(QMainWindow):
         layout.addWidget(form_group, stretch=1)
 
         self.edit_info_label = QLabel("")
-        self.edit_info_label.setStyleSheet("color: #9a8a6e; font-size: 8pt;")
+        self.edit_info_label.setStyleSheet("color: #9a8a6e; font-size: 9px;")
         layout.addWidget(self.edit_info_label)
 
         controls = QHBoxLayout()

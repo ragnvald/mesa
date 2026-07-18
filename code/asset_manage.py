@@ -485,7 +485,7 @@ class AssetManagerWindow(QMainWindow):
 
         # --- Bottom status ---
         self.summary_label = QLabel("")
-        self.summary_label.setStyleSheet("color: #9a8a6e; font-size: 8pt;")
+        self.summary_label.setStyleSheet("color: #9a8a6e; font-size: 9px;")
         main_layout.addWidget(self.summary_label)
 
     def _request_close(self):
@@ -567,7 +567,7 @@ class AssetManagerWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _build_edit_tab(self, layout):
         self.edit_state_label = QLabel("")
-        self.edit_state_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        self.edit_state_label.setStyleSheet("color: #6a5533; font-size: 10px;")
         layout.addWidget(self.edit_state_label)
 
         # Source provenance line: which file/folder these values came from.
@@ -575,7 +575,7 @@ class AssetManagerWindow(QMainWindow):
         self.edit_source_label = QLabel("")
         self.edit_source_label.setWordWrap(True)
         self.edit_source_label.setStyleSheet(
-            "color: #4d4029; font-size: 9pt; padding: 4px 0;"
+            "color: #4d4029; font-size: 10px; padding: 4px 0;"
         )
         layout.addWidget(self.edit_source_label)
         self._refresh_import_source_label()

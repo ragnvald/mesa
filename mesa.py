@@ -1721,7 +1721,7 @@ QWidget#CentralWidget {
 QWidget {
     color: #3f3528;
     font-family: "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
-    font-size: 10pt;
+    font-size: 11px;
 }
 
 /* ---- Tab widget ---- */
@@ -1747,7 +1747,7 @@ QTabBar::tab {
     border-top-left-radius: 5px;
     border-top-right-radius: 5px;
     font-weight: 500;
-    font-size: 10pt;
+    font-size: 11px;
 }
 QTabBar::tab:selected {
     background: #f8f3e9;
@@ -1765,7 +1765,7 @@ QTabBar::tab:hover:!selected {
 /* ---- Group boxes (card style) ---- */
 QGroupBox {
     font-weight: 600;
-    font-size: 10pt;
+    font-size: 11px;
     background: #faf6ee;
     border: 1px solid #d5c3a4;
     border-radius: 8px;
@@ -1777,7 +1777,7 @@ QGroupBox::title {
     subcontrol-position: top left;
     padding: 3px 10px;
     color: #715a36;
-    font-size: 10pt;
+    font-size: 11px;
 }
 
 /* ---- Buttons ---- */
@@ -1855,12 +1855,12 @@ QLabel[role="heading"] {
 }
 QLabel[role="description"] {
     color: #6a5533;
-    font-size: 9pt;
+    font-size: 10px;
     line-height: 1.4;
 }
 QLabel[role="muted"] {
     color: #9a8a6e;
-    font-size: 8pt;
+    font-size: 9px;
 }
 
 /* Status bullet colors */
@@ -1875,7 +1875,7 @@ QPlainTextEdit, QTextEdit {
     border-radius: 6px;
     padding: 8px;
     font-family: "Cascadia Code", "Consolas", "Fira Code", monospace;
-    font-size: 9pt;
+    font-size: 10px;
     selection-background-color: #d7bb7f;
     selection-color: #2f2517;
 }
@@ -1889,7 +1889,7 @@ QTableWidget {
     border: 1px solid #d9cab1;
     border-radius: 6px;
     gridline-color: #e2d5bf;
-    font-size: 9pt;
+    font-size: 10px;
     alternate-background-color: #f6efdf;
 }
 QTableWidget::item {
@@ -2026,7 +2026,7 @@ QToolTip {
     border: none;
     border-radius: 6px;
     padding: 6px 10px;
-    font-size: 9pt;
+    font-size: 10px;
 }
 
 /* ---- Status bar ---- */
@@ -2038,7 +2038,7 @@ QStatusBar {
 /* ---- Footer ---- */
 QLabel[role="footer"] {
     color: #9a8a6e;
-    font-size: 8pt;
+    font-size: 9px;
 }
 """
 
@@ -2073,14 +2073,14 @@ class _ActionCard(QFrame):
 
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet(
-            "font-weight: 600; font-size: 10pt; color: #3f3528; background: transparent;"
+            "font-weight: 600; font-size: 11px; color: #3f3528; background: transparent;"
         )
         text_col.addWidget(title_lbl)
 
         desc_lbl = QLabel(description)
         desc_lbl.setWordWrap(True)
         desc_lbl.setStyleSheet(
-            "font-size: 9pt; color: #6a5533; background: transparent;"
+            "font-size: 10px; color: #6a5533; background: transparent;"
         )
         text_col.addWidget(desc_lbl)
 
@@ -2289,7 +2289,7 @@ class GeoNodePublishWindow(QMainWindow):
         def _add_section_header(text: str):
             lbl = QLabel(text)
             lbl.setStyleSheet(
-                "color: #6a5533; font-size: 8pt; font-weight: bold;"
+                "color: #6a5533; font-size: 9px; font-weight: bold;"
                 "padding: 4px 0px 2px 0px;"
             )
             inner_vbox.addWidget(lbl)
@@ -2324,8 +2324,8 @@ class GeoNodePublishWindow(QMainWindow):
             if detail_parts:
                 detail = QLabel("    " + "  ·  ".join(detail_parts))
                 detail.setStyleSheet(
-                    "color: #888; font-size: 8pt;" if available
-                    else "color: #bbb; font-size: 8pt;"
+                    "color: #888; font-size: 9px;" if available
+                    else "color: #bbb; font-size: 9px;"
                 )
                 row_layout.addWidget(detail)
 
@@ -2339,7 +2339,7 @@ class GeoNodePublishWindow(QMainWindow):
         else:
             _add_section_header("Geocode layers")
             placeholder = QLabel("    Run processing first to generate tbl_flat.")
-            placeholder.setStyleSheet("color: #aaa; font-size: 8pt;")
+            placeholder.setStyleSheet("color: #aaa; font-size: 9px;")
             inner_vbox.addWidget(placeholder)
 
         # Separator
@@ -2439,7 +2439,7 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_log = QPlainTextEdit()
         self._geonode_log.setReadOnly(True)
         self._geonode_log.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 9pt;"
+            "font-family: Consolas, monospace; font-size: 10px;"
         )
         log_layout.addWidget(self._geonode_log)
         right.addWidget(log_group, stretch=1)
@@ -3454,7 +3454,7 @@ class MesaMainWindow(QMainWindow):
         save_btn.setProperty("role", "primary")
         save_btn.clicked.connect(self._save_project_info)
         self._project_info_status = QLabel("")
-        self._project_info_status.setStyleSheet("color: #6e5a37; font-size: 9pt;")
+        self._project_info_status.setStyleSheet("color: #6e5a37; font-size: 10px;")
         self._project_continue_btn = QPushButton("Continue to Workflows →")
         self._project_continue_btn.setProperty("role", "success")
         self._project_continue_btn.setVisible(False)
@@ -3544,7 +3544,7 @@ class MesaMainWindow(QMainWindow):
             desc_row.setContentsMargins(0, 0, 0, 0)
             desc_row.setSpacing(6)
             desc = QLabel(description)
-            desc.setStyleSheet("font-size: 9pt; color: #6a5533; font-weight: 500;")
+            desc.setStyleSheet("font-size: 10px; color: #6a5533; font-weight: 500;")
             desc.setWordWrap(True)
             desc_row.addWidget(desc, 1)
             _info = _InfoCircleLabel(wiki_url)
@@ -4432,7 +4432,7 @@ class MesaMainWindow(QMainWindow):
             "in <b>secrets/</b> — it survives “Clear output” and is left out of "
             "backups unless you tick “Include AI token” when creating one.")
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        intro.setStyleSheet("color: #6a5533; font-size: 10px;")
         grid.addWidget(intro, 0, 0, 1, 5)
 
         # Row 1: Provider + Access token + Delete (button inline to save height).
@@ -4663,7 +4663,7 @@ class MesaMainWindow(QMainWindow):
             "and replaced with the contents of the selected ZIP."
         )
         backup_intro.setWordWrap(True)
-        backup_intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        backup_intro.setStyleSheet("color: #6a5533; font-size: 10px;")
         backup_layout.addWidget(backup_intro)
 
         backup_btn_row = QHBoxLayout()
@@ -4695,7 +4695,7 @@ class MesaMainWindow(QMainWindow):
             "a completed project cycle."
         )
         clear_intro.setWordWrap(True)
-        clear_intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        clear_intro.setStyleSheet("color: #6a5533; font-size: 10px;")
         clear_layout.addWidget(clear_intro)
 
         clear_btn_row = QHBoxLayout()
@@ -4727,7 +4727,7 @@ class MesaMainWindow(QMainWindow):
             "share the analysis output beyond the local project folder."
         )
         geonode_intro.setWordWrap(True)
-        geonode_intro.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        geonode_intro.setStyleSheet("color: #6a5533; font-size: 10px;")
         geonode_layout.addWidget(geonode_intro)
 
         geonode_btn_row = QHBoxLayout()
@@ -4803,7 +4803,7 @@ class MesaMainWindow(QMainWindow):
             "(output/cache/) is never included."
         )
         out_hint.setWordWrap(True)
-        out_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        out_hint.setStyleSheet("color: #6a5533; font-size: 10px;")
         layout.addWidget(out_hint)
 
         layout.addSpacing(4)
@@ -4821,7 +4821,7 @@ class MesaMainWindow(QMainWindow):
             "if recipients only have that."
         )
         fmt_hint.setWordWrap(True)
-        fmt_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        fmt_hint.setStyleSheet("color: #6a5533; font-size: 10px;")
         layout.addWidget(fmt_hint)
 
         layout.addSpacing(4)
@@ -4832,7 +4832,7 @@ class MesaMainWindow(QMainWindow):
             "Tick only if the recipient should inherit your token."
         )
         ai_token_hint.setWordWrap(True)
-        ai_token_hint.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        ai_token_hint.setStyleSheet("color: #6a5533; font-size: 10px;")
         layout.addWidget(ai_token_cb)
         layout.addWidget(ai_token_hint)
 
@@ -5153,7 +5153,7 @@ class MesaMainWindow(QMainWindow):
             "and generate reports for distribution."
         )
         steps_text.setWordWrap(True)
-        steps_text.setStyleSheet("color: #4d4029; font-size: 9pt; line-height: 1.5;")
+        steps_text.setStyleSheet("color: #4d4029; font-size: 10px; line-height: 1.5;")
         workflow_layout.addWidget(steps_text)
 
         workflow_layout.addStretch()
@@ -5288,7 +5288,7 @@ class MesaMainWindow(QMainWindow):
             "license text ships with each project."
         )
         footnote.setWordWrap(True)
-        footnote.setStyleSheet("color: #6b5d44; font-size: 9pt;")
+        footnote.setStyleSheet("color: #6b5d44; font-size: 10px;")
         v.addWidget(footnote)
 
         btn_row = QHBoxLayout()

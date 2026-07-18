@@ -965,7 +965,7 @@ class SetupWindow(QMainWindow):
         # --- Status label at bottom ---
         global status_message_var
         self._status_label = QLabel("Ready")
-        self._status_label.setStyleSheet("color: #9a8a6e; font-size: 9pt;")
+        self._status_label.setStyleSheet("color: #9a8a6e; font-size: 10px;")
         status_message_var = self._status_label
         main_layout.addWidget(self._status_label)
 
@@ -982,7 +982,7 @@ class SetupWindow(QMainWindow):
             "Click a column header to sort."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #5c4a2f; font-size: 9pt; padding: 4px 0;")
+        info.setStyleSheet("color: #5c4a2f; font-size: 10px; padding: 4px 0;")
         layout.addWidget(info)
 
         headers = ["Dataset", "Importance", "Susceptibility", "Sensitivity", "Code", "Description"]

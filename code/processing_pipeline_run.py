@@ -2210,7 +2210,7 @@ class ProcessRunnerWindow(QMainWindow):
             _cats = []
         if _cats:
             _seglbl = QLabel("Segment geocodes:")
-            _seglbl.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
+            _seglbl.setStyleSheet("color: #6a5533; font-size: 10px; padding-top: 4px;")
             opts_col_a.addWidget(_seglbl)
             # basic_mosaic first
             _cats = sorted(_cats, key=lambda c: (c != "basic_mosaic", c))
@@ -2241,7 +2241,7 @@ class ProcessRunnerWindow(QMainWindow):
             "Segment groups cells by the set of A–E sensitivity codes that co-occur in "
             "them — deterministic and tuning-free. For pattern-based types of place use "
             "Configure → Classification (the Classifications tab in Maps).")
-        _segnote.setStyleSheet("color: #6a5533; font-size: 9pt; padding-top: 4px;")
+        _segnote.setStyleSheet("color: #6a5533; font-size: 10px; padding-top: 4px;")
         opts_col_b.addWidget(_segnote)
 
         opts_col_a.addStretch(1)
@@ -2293,7 +2293,7 @@ class ProcessRunnerWindow(QMainWindow):
 
         # Options: two content columns to the right of the stages.
         opts_label = QLabel("Options")
-        opts_label.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        opts_label.setStyleSheet("color: #6a5533; font-size: 10px;")
         grid.addWidget(opts_label, 0, 2)
         grid.addWidget(opts_a_host, 1, 2, Qt.AlignTop)
         grid.addWidget(opts_b_host, 1, 3, Qt.AlignTop)

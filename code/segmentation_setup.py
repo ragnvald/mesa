@@ -152,7 +152,7 @@ class SegmentationSetupWindow(QMainWindow):
             "place?”</i>; this answers <i>“what kind of sensitivity pattern is this place "
             "part of?”</i>")
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #5c4a2f; font-size: 9pt;")
+        intro.setStyleSheet("color: #5c4a2f; font-size: 10px;")
         # Intro + a wiki info-icon (same widget as the main window) linking to the
         # Classification reference page.
         _intro_row = QHBoxLayout()
@@ -229,7 +229,7 @@ class SegmentationSetupWindow(QMainWindow):
             "automatically by BIC over the k range; per-cell certainty (p_max, entropy) "
             "is kept for the map.")
         method_help.setWordWrap(True)
-        method_help.setStyleSheet("color: #6a5533; font-size: 9pt;")
+        method_help.setStyleSheet("color: #6a5533; font-size: 10px;")
         form.addWidget(method_help, r, 1, 1, 3); r += 1
 
         # Pressure filter — only shown when tbl_stacked actually has pressure
