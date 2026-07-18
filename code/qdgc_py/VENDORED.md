@@ -8,11 +8,15 @@ This package is a vendored copy of the **qdgc_py** library (Quarter Degree Grid 
 
 ## Why vendored (not pip)
 
-`qdgc_py` is not published on PyPI, and MESA ships as a frozen PyInstaller build that
+`qdgc-py` is now published on PyPI, but MESA 5 deliberately keeps the vendored copy
+rather than switching to the pip package. MESA ships as a frozen PyInstaller build that
 must import it without network access. Vendoring the pure-stdlib source under `code/`
 (already on `sys.path`) makes `from qdgc_py import ...` work in dev and frozen builds
-alike, with zero transitive dependencies. This mirrors how `h3` is consumed, except h3
-is a pinned pip dependency (`h3==4.2.2`) because it is on PyPI.
+alike, with zero transitive dependencies.
+
+A pip migration — mirroring how `h3` is pinned as a PyPI dependency (`h3==4.2.2`) — is on
+the table for a future release, but not v5. Until then, updates flow by manual
+re-vendoring (re-copy the files and bump the version note below).
 
 ## Updating
 
