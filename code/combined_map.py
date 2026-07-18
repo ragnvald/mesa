@@ -1728,7 +1728,7 @@ HTML = r"""<!doctype html>
 
   // Zone table sort state. Legend keeps the server order (largest area first);
   // only the table reorders when a header is clicked.
-  var segZonesData=[], segSort={key:'total_area_km2', dir:-1};  // default: Area, largest first (arrow shown)
+  var segZonesData=[], segSort={key:'sens_mean', dir:-1};  // default: Sensitivity, high→low (arrow shown)
 
   // A–E sensitivity-code colours — mirror segmentation._RAMP so the legend's
   // composition bar matches the signature fill computed server-side.
@@ -1765,7 +1765,9 @@ HTML = r"""<!doctype html>
   function renderSegLegend(){
     var leg=document.getElementById('segLegend'); leg.innerHTML='';
     if(!segZonesData.length){ leg.innerHTML='<span class="muted">–</span>'; return; }
-    var rows=sortedSegZones();
+    // Legend stays in server order (area, largest first), independent of the
+    // table sort — so the area magnitude bars read monotonically top-to-bottom.
+    var rows=segZonesData.slice();
     var maxArea=0; rows.forEach(function(z){ var a=Number(z.total_area_km2); if(!isNaN(a)&&a>maxArea)maxArea=a; });
     var hasCat=rows.some(function(z){ return segCatBar(z.zone)!==''; });
     var hd=document.createElement('div'); hd.className='legscale';
@@ -1816,7 +1818,7 @@ HTML = r"""<!doctype html>
       // the zone name, descending for the numeric metrics (largest first).
       if(segSort.key===k){ segSort.dir=-segSort.dir; }
       else { segSort.key=k; segSort.dir=(k==='zone')?1:-1; }
-      renderSegLegend(); renderSegRows();
+      renderSegRows();  // legend is fixed to area order; only the table reorders
     });
   })();
 
