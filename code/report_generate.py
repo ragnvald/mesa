@@ -427,6 +427,35 @@ def _analysis_code_color(code: str, palette_A2E: dict) -> str:
     return fallback
 
 
+def _analysis_polygon_total_km2(polygons_gdf: gpd.GeoDataFrame) -> float:
+    """Total geodesic area (km²) of an analysis area's polygon(s)."""
+    try:
+        if polygons_gdf is None or getattr(polygons_gdf, "empty", True) or "geometry" not in polygons_gdf.columns:
+            return 0.0
+        g = polygons_gdf.dropna(subset=["geometry"])
+        if g.empty:
+            return 0.0
+        try:
+            if g.crs is not None and (g.crs.to_epsg() or 4326) != 4326:
+                g = g.to_crs(4326)
+        except Exception:
+            pass
+        from pyproj import Geod
+        geod = Geod(ellps="WGS84")
+        total = 0.0
+        for geom in g.geometry:
+            if geom is None:
+                continue
+            try:
+                area, _ = geod.geometry_area_perimeter(geom)
+                total += abs(area)
+            except Exception:
+                pass
+        return total / 1e6
+    except Exception:
+        return 0.0
+
+
 def _analysis_write_area_map_png(
     polygons_gdf: gpd.GeoDataFrame,
     out_path: str,
@@ -454,7 +483,9 @@ def _analysis_write_area_map_png(
         if g3857.empty:
             return False
 
-        bounds_3857 = _expand_bounds(g3857.total_bounds, pad_ratio=0.08)
+        # 30% padding so the analysis area sits inside a clear border of context
+        # rather than filling the frame edge-to-edge.
+        bounds_3857 = _expand_bounds(g3857.total_bounds, pad_ratio=0.30)
 
         # Union geometry for clipping/masking
         clip_geom = None
@@ -5237,6 +5268,7 @@ def generate_report(base_dir: str,
                         flat_cells_gdf=flat_cells,
                     ):
                         order_list.append(('image_map', ("Area overview (basemap + sensitivity)", minimap_path)))
+                        order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(polys))}"))
                     else:
                         order_list.append(('text', "(Area map unavailable: missing analysis polygons and/or basemap/mbtiles.)"))
 
@@ -5315,6 +5347,7 @@ def generate_report(base_dir: str,
                             flat_cells_gdf=left_cells,
                         ):
                             order_list.append(('image_map', (f"Area map – {left_title}", left_map)))
+                            order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(left_polys))}"))
 
                         left_assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, left_polys)
                         if left_assets_tbl:
@@ -5331,6 +5364,7 @@ def generate_report(base_dir: str,
                             flat_cells_gdf=right_cells,
                         ):
                             order_list.append(('image_map', (f"Area map – {right_title}", right_map)))
+                            order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(right_polys))}"))
 
                         right_assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, right_polys)
                         if right_assets_tbl:
