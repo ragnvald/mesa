@@ -1017,7 +1017,7 @@ class ReportEngine:
 
             pages.append(('heading(2)', f"Other maps: {gname}"))
             pages.append(('text',
-                "Per-cell summary maps for the <b>basic_mosaic</b> grouping, rendered from MBTiles with a "
+                f"Per-cell summary maps for the <b>{gname}</b> grouping, rendered from MBTiles with a "
                 "basemap underlay. Each map shows a different aggregation of the assets that overlap each "
                 "geocode cell — the <b>worst-case</b> sensitivity class, the highest <b>importance</b> "
                 "value, and counts of overlapping <b>asset groups</b> and <b>asset objects</b>. They are "
@@ -1099,7 +1099,9 @@ class ReportEngine:
         return [
             ('heading(2)', "Area overview"),
             ('text', intro),
-            ('image', ("Project data extent", png)),
+            # image_map (not image) so it is clamped to panel size and shares the
+            # page with its heading instead of filling a page and leaving a blank one.
+            ('image_map', ("Project data extent", png)),
             ('rule', None),
         ]
 
@@ -1284,7 +1286,9 @@ class ReportEngine:
             if isinstance(map_intro_paragraphs, str):
                 map_intro_paragraphs = (map_intro_paragraphs,)
 
-            out_png = self.make_path("index", _safe_name(col), "distribution")
+            # Include the group name: otherwise every group's chart collides on one
+            # file and the last-written one (e.g. basic_mosaic) shows on all stats pages.
+            out_png = self.make_path("index", _safe_name(basic_name), _safe_name(col), "distribution")
             ok, note = create_index_area_distribution_chart(
                 flat_df,
                 index_col=col,
@@ -1337,7 +1341,7 @@ class ReportEngine:
                 pages.append(('image_map', (f"{title} – map", map_png)))
                 # Legend strip below the map. Filename includes "_legend" so
                 # compile_docx routes it through the legend-width branch.
-                legend_png = self.make_path("index", _safe_name(col), "legend")
+                legend_png = self.make_path("index", _safe_name(basic_name), _safe_name(col), "legend")
                 legend_kind = "sensitivity"
                 legend_caption = f"Index value 0–100 (relative within {basic_name})"
                 if _build_index_legend_png(
@@ -4034,7 +4038,13 @@ def compile_docx(output_docx: str, order_list: list):
     def add_heading(level: int, text: str):
         clean = _clean_docx_text(text)
         lvl = max(1, min(4, int(level)))
-        doc.add_heading(clean, level=lvl)
+        h = doc.add_heading(clean, level=lvl)
+        # Keep a heading with the paragraph/image that follows, so it never sits
+        # orphaned at the foot of a page ahead of its content.
+        try:
+            h.paragraph_format.keep_with_next = True
+        except Exception:
+            pass
 
     def add_text(text: str):
         clean = _clean_docx_text(text)
@@ -4047,6 +4057,11 @@ def compile_docx(output_docx: str, order_list: list):
         r = p.add_run(clean)
         r.bold = True
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        # A bold label precedes its image/table; keep them together across a break.
+        try:
+            p.paragraph_format.keep_with_next = True
+        except Exception:
+            pass
 
     def add_rule():
         # Earlier iterations of the template used a row of "―" characters as a
@@ -4617,6 +4632,21 @@ def _report_ai_complete(prompt: str, base_dir):
     return None
 
 
+def _report_project_about(base_dir) -> str:
+    """The operator's free-text 'About this project' (Welcome tab), if any."""
+    try:
+        p = os.path.join(str(base_dir), "output", "geoparquet", "tbl_project_info.parquet")
+        if not os.path.exists(p):
+            return ""
+        df = pd.read_parquet(p)
+        if df is None or df.empty or "about" not in df.columns:
+            return ""
+        v = df.iloc[-1].get("about")
+        return str(v).strip() if pd.notna(v) else ""
+    except Exception:
+        return ""
+
+
 def _classification_overview(recs, layer, base_dir):
     """Short overview of how the area divides into sensitivity types + how the
     method works. Uses the AI connection when configured, else a deterministic
@@ -4639,7 +4669,12 @@ def _classification_overview(recs, layer, base_dir):
                      f"mean importance {_nf(r.get('mean_importance')):.1f}, "
                      f"susceptibility {_nf(r.get('mean_susceptibility')):.1f}, "
                      f"top groups: {str(r.get('top_asset_groups','') or '')[:80]}")
+    _about = _report_project_about(base_dir)
+    _ctx = (f"Background on this project, written by the analyst (use it only to ground "
+            f"your wording and framing; do not quote it verbatim): {_about}\n\n"
+            if _about else "")
     prompt = (
+        _ctx +
         "You are an environmental-sensitivity analyst writing a report. The study "
         "area was classified into sensitivity TYPES by clustering each cell on the "
         "SHAPE of its (importance x susceptibility) histogram, not on the A-E "
@@ -5031,6 +5066,12 @@ def generate_report(base_dir: str,
             about_path = os.path.join(base_dir, "docs", "report_about.md")
         about_text = _urls_to_footnotes(_read_text_file(about_path)).strip() if os.path.exists(about_path) else ""
 
+        # The operator's free-text "About this project" (Welcome tab). It grounds the
+        # report AI prose when an AI connection is configured; when there is no AI to
+        # weave it in, show it here verbatim so the project description is not lost.
+        _proj_about = _report_project_about(base_dir)
+        _ai_on = bool(_report_ai_conn(base_dir))
+
         # Build initial order_list up to About section
         order_list = [
             ('heading(1)', "MESA report"),
@@ -5038,6 +5079,13 @@ def generate_report(base_dir: str,
             ('spacer', 2),
             ('heading(2)', "About this report"),
             ('text', about_text or "(About text missing: docs/templates/report_about.md)"),
+        ]
+        if _proj_about and not _ai_on:
+            order_list += [
+                ('heading(3)', "About this project"),
+                ('text', _proj_about),
+            ]
+        order_list += [
             ('rule', None),
             # Insert a Word TOC field after About section
             ('toc', None),
@@ -5657,7 +5705,10 @@ def generate_report(base_dir: str,
                             _tg = str(_x.get("top_asset_groups", "") or "").strip()
                             if _tg:
                                 _sent += f" Dominant asset groups: {_tg}."
-                            _da = str(_x.get("description_ai", "") or "").strip()
+                            # Guard against a NaN float: `nan or ""` is nan (NaN is
+                            # truthy), which str()s to the literal "nan" in the report.
+                            _da_raw = _x.get("description_ai")
+                            _da = str(_da_raw).strip() if pd.notna(_da_raw) else ""
                             if _da:
                                 _sent += f" {_da}"
                             order_list.append(('text', _sent))
@@ -5834,8 +5885,21 @@ class ReportGeneratorWindow(QMainWindow):
         self._chk_index_stats.setChecked(True)
         self._chk_lines_segments = QCheckBox("Lines")
         self._chk_lines_segments.setChecked(True)
+        # Atlas maps need atlas tiles (tbl_atlas). Offer the option only when at
+        # least one tile is defined; otherwise the section would be silently skipped.
+        _atlas_ok = False
+        _atlas_pq = os.path.join(base_dir, "output", "geoparquet", "tbl_atlas.parquet")
+        if os.path.exists(_atlas_pq):
+            try:
+                import pyarrow.parquet as _pq
+                _atlas_ok = _pq.ParquetFile(_atlas_pq).metadata.num_rows > 0
+            except Exception:
+                _atlas_ok = True  # exists but metadata unreadable — don't hard-block
         self._chk_atlas = QCheckBox("Atlas maps (detailed)")
         self._chk_atlas.setChecked(False)
+        self._chk_atlas.setEnabled(_atlas_ok)
+        if not _atlas_ok:
+            self._chk_atlas.setToolTip("No atlas tiles defined — create them with the Atlas tool first")
         # Classification (multivariate sensitivity types, tbl_seg_mv) — offered
         # only when a Classification run has produced the profile table.
         _segmv_ok = os.path.exists(os.path.join(
