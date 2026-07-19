@@ -72,6 +72,10 @@ except ModuleNotFoundError as exc:
 
 # ---------------- UI / sizing constants ----------------
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
+# Opacity of the MBTiles overlay (sensitivity/index rasters) when composited over
+# the basemap in the report. < 1.0 lets the basemap read through for context.
+# Applied at report-render time — changing it does NOT require re-running Tiles.
+MBTILES_OVERLAY_ALPHA = 0.7
 RIBBON_CM_HEIGHT   = 0.6           # ribbon display height inside PDF (cm)
 ATLAS_FIGURE_INCHES = (7.2, 7.2)   # atlas tiles render smaller to fit more per page
 ATLAS_DOC_WIDTH_SCALE = 1.0        # atlas images may use the full text width (portrait tiles are height-bound anyway)
@@ -2703,12 +2707,14 @@ def render_mbtiles_to_png_best_fit(mbtiles_path: str,
                 # Background basemap in WebMercator
                 _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
 
-                # Overlay MBTiles image in correct extent
+                # Overlay MBTiles image in correct extent. alpha < 1 lets the
+                # basemap read through; no-data pixels are already fully transparent.
                 ax.imshow(
                     canvas,
                     extent=[west_x, east_x, south_y, north_y],
                     origin="upper",
                     interpolation='nearest',
+                    alpha=MBTILES_OVERLAY_ALPHA,
                     zorder=10,
                 )
                 _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=True)
