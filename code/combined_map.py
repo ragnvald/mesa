@@ -1257,7 +1257,8 @@ HTML = r"""<!doctype html>
           <div class="mapctl-hd"><span>Layers</span><span class="mapctl-arrow">▾</span></div>
           <div class="mapctl-body">
             <div class="ctlrow"><b>Geocode group</b><br><select id="resGroup"></select></div>
-            <div class="ctlrow"><b>Layer</b> <span class="muted">(one at a time)</span><br><span id="resKinds"></span></div>
+            <label class="ctlrow"><input type="checkbox" id="resLayerChk" checked> <b>Geocode layer</b> <span class="muted">(one at a time)</span></label>
+            <div class="ctlrow" style="padding-left:16px"><span id="resKinds"></span></div>
             <label class="ctlrow"><input type="checkbox" id="resSegChk"> Line segments</label>
             <div class="ctlrow"><b>Basemap</b><br>
               <select id="resBasemap">
@@ -1450,8 +1451,14 @@ HTML = r"""<!doctype html>
         onEachFeature:function(f,l){ var p=f.properties;
           l.bindPopup('<b>'+(p.name||'line')+'</b> · seg '+p.seg+'<br>Sensitivity: '+(p.code||'–')+' ('+p.sens+')'); }
       }).addTo(maps.results);
-      try{ maps.results.fitBounds(segOverlay.getBounds(),{padding:[20,20]}); if(linking) syncFrom('results'); }catch(e){}
+      try{ if(linking){ syncFrom('results'); } else { maps.results.fitBounds(segOverlay.getBounds(),{padding:[20,20]}); } }catch(e){}
     });
+  });
+  // ---- geocode-layer master toggle (Overview tab): off = line segments only ----
+  document.getElementById('resLayerChk').addEventListener('change', function(){
+    var on=this.checked;
+    document.querySelectorAll('#resKinds input[name=reskind]').forEach(function(r){ r.disabled=!on; });
+    if(resGroup && resKind) showResLayer(resGroup, resKind);
   });
   document.getElementById('opacity').addEventListener('input', function(){
     opacity = (this.value||0)/100; applyOpacity();
@@ -1632,7 +1639,7 @@ HTML = r"""<!doctype html>
       }).addTo(maps.asset);
       assetLayers[gid]=lyr;
       // Frame the asset's own extent; when linked, propagate that view to the other maps.
-      try{ maps.asset.invalidateSize(); maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); if(linking) syncFrom('asset'); }catch(e){}
+      try{ maps.asset.invalidateSize(); if(linking){ syncFrom('asset'); } else { maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); } }catch(e){}
     });
   }
 
@@ -1647,15 +1654,19 @@ HTML = r"""<!doctype html>
     assetstotal:'Count of asset objects per cell (density).'
   };
   function showResLayer(group, suf){
-    var info=((resCatalog[group]||{}).kinds||{})[suf];
-    if(!info) return;
-    resKind=suf;                       // remember active overlay for click-to-query
+    resKind=suf;                       // remember selection (click-to-query + re-show on toggle)
     fiClear();                         // a new layer invalidates the previous popup/highlight
     if(resTile){ maps.results.removeLayer(resTile); resTile=null; }
+    if(!document.getElementById('resLayerChk').checked){   // geocode layer off → lines only
+      document.getElementById('resMsg').innerHTML='<span class="muted">Geocode layer hidden — showing line segments only (enable them below if needed).</span>';
+      return;
+    }
+    var info=((resCatalog[group]||{}).kinds||{})[suf];
+    if(!info) return;
     resTile=L.tileLayer('/tiles/'+info.name+'/{z}/{x}/{y}.png',
       {opacity:opacity, maxNativeZoom:(info.maxzoom||14), minNativeZoom:(info.minzoom||0), maxZoom:19, tms:false}).addTo(maps.results);
     if(info.bounds && info.bounds.length===4){
-      try{ maps.results.fitBounds([[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]],{padding:[20,20]}); if(linking) syncFrom('results'); }catch(e){}
+      try{ if(linking){ syncFrom('results'); } else { maps.results.fitBounds([[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]],{padding:[20,20]}); } }catch(e){}
     }
     var d=KIND_DESC[suf]||'';
     document.getElementById('resMsg').innerHTML='<b>'+info.label+'</b> — '+group+(d?('<br>'+d):'')+
@@ -1671,7 +1682,9 @@ HTML = r"""<!doctype html>
       lab.innerHTML='<input type="radio" name="reskind" value="'+k+'" '+(i===0?'checked':'')+'> '+kinds[k].label;
       box.appendChild(lab);
     });
+    var layerOn=document.getElementById('resLayerChk').checked;
     box.querySelectorAll('input[name=reskind]').forEach(function(r){
+      r.disabled=!layerOn;
       r.addEventListener('change', function(){ showResLayer(group, this.value); });
     });
     showResLayer(group, avail[0]);
@@ -1831,7 +1844,7 @@ HTML = r"""<!doctype html>
       // invalidateSize first: the seg map is hidden until its tab is shown, so the
       // container can still report a stale size when this async chain resolves —
       // fitBounds against a 0-sized map yields the wrong zoom.
-      try{ maps.seg.invalidateSize(); maps.seg.fitBounds(b,{padding:[20,20]}); if(linking) syncFrom('seg'); }catch(e){}
+      try{ maps.seg.invalidateSize(); if(linking){ syncFrom('seg'); } else { maps.seg.fitBounds(b,{padding:[20,20]}); } }catch(e){}
     }
     setMsg('Raster tiles ('+info.name+'). <span class="muted">Click a cell to identify it.</span>');
     api().seg_panel(level, mode).then(function(p){ renderPanel(p.zones||[]); });
@@ -1849,7 +1862,7 @@ HTML = r"""<!doctype html>
                       '<br>Mean sensitivity: '+fmt(p.sens_mean,2)+'<br>Mean # assets: '+fmt(p.mean_n_assets,1)); }
     });
     segVecGj=gj; segVec.addLayer(gj);
-    try{ maps.seg.invalidateSize(); maps.seg.fitBounds(gj.getBounds(),{padding:[20,20]}); if(linking) syncFrom('seg'); }catch(e){}
+    try{ maps.seg.invalidateSize(); if(linking){ syncFrom('seg'); } else { maps.seg.fitBounds(gj.getBounds(),{padding:[20,20]}); } }catch(e){}
     setMsg('Vector view (no MBTiles for this level yet).');
     renderPanel((res.legend||[]));
   }
