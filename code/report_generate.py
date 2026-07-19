@@ -14,6 +14,8 @@ from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from ui_style import apply_shared_stylesheet
 
+from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
+_ensure_geo_data()  # repair a machine-wide PROJ/GDAL env before the GIS stack loads
 import geopandas as gpd
 import pandas as pd
 import configparser

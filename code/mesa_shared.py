@@ -20,6 +20,42 @@ from pathlib import Path
 from typing import Optional
 
 
+def ensure_bundled_geo_data() -> None:
+    """Point PROJ/GDAL at the data bundled with pyproj/pyogrio, so a machine-wide
+    ``PROJ_LIB`` or ``GDAL_DATA`` from another install (PostgreSQL/PostGIS, QGIS,
+    OSGeo4W) cannot feed MESA an incompatible ``proj.db`` — the cause of
+    "DATABASE.LAYOUT.VERSION.MINOR ... a number >= 6 is expected. It comes from
+    another PROJ installation." Idempotent and fully guarded; must run before
+    geopandas/pyproj/rasterio load. Uses importlib to locate the packages without
+    importing them (keeps this stdlib-only module light and avoids early PROJ init).
+    """
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec("pyproj")
+        if spec and spec.origin:
+            proj_dir = os.path.join(os.path.dirname(spec.origin), "proj_dir", "share", "proj")
+            if os.path.exists(os.path.join(proj_dir, "proj.db")):
+                os.environ["PROJ_DATA"] = proj_dir
+                os.environ["PROJ_LIB"] = proj_dir  # legacy name still read by some GDAL builds
+    except Exception:
+        pass
+    try:
+        for _pkg in ("pyogrio", "rasterio"):
+            spec = importlib.util.find_spec(_pkg)
+            if spec and spec.origin:
+                gd = os.path.join(os.path.dirname(spec.origin), "gdal_data")
+                if os.path.isdir(gd):
+                    os.environ["GDAL_DATA"] = gd
+                    break
+    except Exception:
+        pass
+
+
+# Run at import: helpers import mesa_shared before geopandas, so this repairs a
+# polluted PROJ/GDAL environment before the GIS stack initialises.
+ensure_bundled_geo_data()
+
+
 def find_base_dir(cli_arg: Optional[str] = None) -> Path:
     """Locate the MESA project root in all execution modes.
 

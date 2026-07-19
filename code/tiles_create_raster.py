@@ -52,6 +52,8 @@ _tame_stdio()
 
 import numpy as np
 import pandas as pd
+from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
+_ensure_geo_data()  # repair a machine-wide PROJ/GDAL env before the GIS stack loads
 import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon
 from PIL import Image, ImageDraw  # Pillow
