@@ -3995,27 +3995,22 @@ class MesaMainWindow(QMainWindow):
         seconds["Build basic_mosaic"] = mosaic_secs
         times["Build basic_mosaic"] = mosaic_end.strftime("%Y-%m-%d %H:%M") if mosaic_end else "--"
 
-        seconds["Processing"] = self._scan_last_run_from_log(
+        # "Processing" = one full run of the unified pipeline, bracketed by the
+        # outer [Process] wrapper ONLY. The per-stage markers (DATA/LINES/ANALYSIS
+        # PROCESS …, [Tiles] …) must not be used here: they fragment a single run
+        # into its sub-phases, so the scan reports just the last ~1 s micro-phase
+        # instead of the whole run. open_process_all() and processing_pipeline_run
+        # each log "[Process] STARTED" (button click, then pipeline start); the
+        # reset-on-new-start scan keeps the pipeline's own start, i.e. execution
+        # time excluding exe launch. See learning.md "Recent activity – Processing
+        # duration reflects the last full [Process] run".
+        proc_secs, proc_end = self._scan_last_run_from_log(
             log_path,
-            start_markers=[
-                "[Process] STARTED", "DATA PROCESS START",
-                "LINES PROCESS START", "LINES PROCESS START (Parquet)",
-                "ANALYSIS PROCESS START", "Attempting to run command:",
-                "[Stage 1/4] Preparing workspace",
-            ],
-            end_markers_primary=[
-                "[Process] COMPLETED", "[Process] FAILED",
-                "DATA PROCESS COMPLETED", "LINES PROCESS COMPLETED",
-                "ANALYSIS PROCESS COMPLETED",
-                "ERROR: data processing failed", "ERROR: lines processing failed",
-                "ERROR: analysis processing failed",
-                "[Tiles] Completed.",
-                "[Tiles] Skipping MBTiles stage because processing exited with code",
-                "[Tiles] tbl_flat not present or empty; skipping MBTiles generation.",
-                "[Tiles] tiles_create_raster exited with code",
-                "[Tiles] Error:", "Error during processing:",
-            ],
-        )[0]
+            start_markers=["[Process] STARTED"],
+            end_markers_primary=["[Process] COMPLETED", "[Process] FAILED"],
+        )
+        seconds["Processing"] = proc_secs
+        times["Processing"] = proc_end.strftime("%Y-%m-%d %H:%M") if proc_end else "--"
 
         seconds["Line processing"] = self._scan_last_run_from_log(
             log_path,
@@ -4121,10 +4116,17 @@ class MesaMainWindow(QMainWindow):
         if not report_ts or report_ts == "--":
             report_ts = times.get("Newest report export", "--")
 
+        # Prefer the last [Process] run's end time so the stamp matches the
+        # duration in the same row; fall back to tbl_flat's mtime (and then to
+        # config's last_process_run) when the log carries no [Process] run.
+        proc_ts = times.get("Processing", "--")
+        if not proc_ts or proc_ts == "--":
+            proc_ts = self._last_flat_timestamp()
+
         events = [
             ("Assets", self._last_asset_import_timestamp()),
             ("Build basic_mosaic", times.get("Build basic_mosaic", "--")),
-            ("Processing", self._last_flat_timestamp()),
+            ("Processing", proc_ts),
             ("Line processing", self._last_line_processing_timestamp()),
             ("Newest report export", report_ts),
             ("Time to calculate stats on this page", ""),
