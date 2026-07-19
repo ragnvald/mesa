@@ -3993,7 +3993,7 @@ def compile_docx(output_docx: str, order_list: list):
     # margins) and forced their heading + description onto a separate page.
     # Cap the height so heading + intro text + tile fit on one page; width
     # is still scaled by ATLAS_DOC_WIDTH_SCALE * MAX_IMAGE_WIDTH_CM.
-    MAX_ATLAS_HEIGHT_CM = 16.8   # +40%: tiles were leaving most of the page blank
+    MAX_ATLAS_HEIGHT_CM = 14.3   # +40% then -15%: tall enough to fill the page without running too tall
     # Line maps are inserted together with distribution + ribbon.
     # Allow a taller cap now that we use a single combined map (segments + context inset).
     MAX_LINE_MAP_HEIGHT_CM = 14.0
