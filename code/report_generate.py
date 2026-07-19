@@ -464,13 +464,20 @@ def _analysis_write_area_map_png(
     config_path: str | None,
     palette_A2E: dict,
     desc_A2E: dict,
-    overlay_alpha: float = 0.65,
+    overlay_alpha: float = 0.55,
     flat_cells_gdf: gpd.GeoDataFrame | None = None,
+    context_cells_gdf: gpd.GeoDataFrame | None = None,
+    outside_alpha_frac: float = 0.4,
 ) -> bool:
     """Render analysis area map with basemap + sensitivity overlay (no MBTiles).
 
     - Border is drawn from tbl_analysis_polygons.parquet (true analysis polygons).
-    - Sensitivity overlay is derived from tbl_analysis_flat.parquet (geocode-cell polygons).
+    - Sensitivity is drawn in two layers so each area shows its own sensitivity
+      *and* its surroundings: project-wide sensitivity (``context_cells_gdf``,
+      typically tbl_flat) faint across the whole frame, then the same data
+      clipped to the study area at ``overlay_alpha``. ``flat_cells_gdf`` (the
+      per-area analysis cells) is the fallback when no project-wide source is
+      supplied. See learning.md "Analysis area maps – inside/outside sensitivity".
     """
     try:
         if polygons_gdf is None or polygons_gdf.empty or "geometry" not in polygons_gdf.columns:
@@ -513,43 +520,82 @@ def _analysis_write_area_map_png(
 
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
 
-        # Sensitivity overlay from flat geocode-cell polygons (dissolved by sensitivity_code_max)
-        try:
-            if flat_cells_gdf is not None and not getattr(flat_cells_gdf, 'empty', True) and 'geometry' in flat_cells_gdf.columns:
-                cells = flat_cells_gdf.dropna(subset=['geometry']).copy()
-                if not cells.empty:
-                    cells_3857 = _safe_to_3857(cells)
-                    if not cells_3857.empty:
-                        code_col = 'sensitivity_code_max' if 'sensitivity_code_max' in cells_3857.columns else (
-                            'sensitivity_code' if 'sensitivity_code' in cells_3857.columns else None
+        # Sensitivity overlay drawn in two layers (see docstring): a faint
+        # project-wide context across the whole frame, then a stronger fill
+        # clipped to the study area. Keeps both areas visually comparable even
+        # when one area's own analysis cells are sparse.
+        inside_alpha = float(max(0.05, min(0.95, overlay_alpha)))
+        outside_alpha = float(max(0.03, min(0.8, overlay_alpha * outside_alpha_frac)))
+
+        def _draw_sensitivity(cells_3857, alpha, zbase):
+            try:
+                if cells_3857 is None or getattr(cells_3857, 'empty', True) or 'geometry' not in cells_3857.columns:
+                    return
+                code_col = 'sensitivity_code_max' if 'sensitivity_code_max' in cells_3857.columns else (
+                    'sensitivity_code' if 'sensitivity_code' in cells_3857.columns else None
+                )
+                if not code_col:
+                    return
+                tmp = cells_3857.dropna(subset=['geometry']).copy()
+                if tmp.empty:
+                    return
+                tmp['__sens_code'] = (
+                    tmp[code_col].astype(str).str.strip().str.upper().replace({'NAN': '', 'NONE': ''})
+                )
+                tmp = tmp[tmp['__sens_code'] != ''].copy()
+                if tmp.empty:
+                    return
+                # Dissolve to reduce draw cost and make output stable.
+                dissolved = tmp.dissolve(by='__sens_code', as_index=False)
+                dissolved['__order'] = dissolved['__sens_code'].map(
+                    {c: i for i, c in enumerate(SENSITIVITY_ORDER)}
+                ).fillna(99)
+                dissolved = dissolved.sort_values(['__order', '__sens_code'])
+                for _, row in dissolved.iterrows():
+                    code = str(row.get('__sens_code', '')).strip().upper()
+                    geom = row.get('geometry')
+                    if not code or geom is None:
+                        continue
+                    col = _analysis_code_color(code, palette_A2E)
+                    try:
+                        gpd.GeoSeries([geom], crs=dissolved.crs).plot(
+                            ax=ax, color=col, alpha=alpha,
+                            edgecolor='none', linewidth=0.0, zorder=zbase,
                         )
-                        if code_col:
-                            cells_3857['__sens_code'] = (
-                                cells_3857[code_col].astype(str).str.strip().str.upper().replace({'NAN': '', 'NONE': ''})
-                            )
-                            cells_3857 = cells_3857[cells_3857['__sens_code'] != ''].copy()
-                            if not cells_3857.empty:
-                                # Dissolve to reduce draw cost and make output stable.
-                                dissolved = cells_3857.dissolve(by='__sens_code', as_index=False)
-                                dissolved['__order'] = dissolved['__sens_code'].map({c: i for i, c in enumerate(SENSITIVITY_ORDER)}).fillna(99)
-                                dissolved = dissolved.sort_values(['__order', '__sens_code'])
-                                for _, row in dissolved.iterrows():
-                                    code = str(row.get('__sens_code', '')).strip().upper()
-                                    geom = row.get('geometry')
-                                    if not code or geom is None:
-                                        continue
-                                    col = _analysis_code_color(code, palette_A2E)
-                                    try:
-                                        gpd.GeoSeries([geom], crs=dissolved.crs).plot(
-                                            ax=ax,
-                                            color=col,
-                                            alpha=float(max(0.05, min(0.95, overlay_alpha))),
-                                            edgecolor='none',
-                                            linewidth=0.0,
-                                            zorder=10,
-                                        )
-                                    except Exception:
-                                        pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            # Context source: project-wide sensitivity when available, else the
+            # per-area cells (still gives some fill if tbl_flat is missing).
+            def _has_geo(g):
+                return g is not None and not getattr(g, 'empty', True) and 'geometry' in getattr(g, 'columns', [])
+
+            context_src = context_cells_gdf if _has_geo(context_cells_gdf) else flat_cells_gdf
+            if _has_geo(context_src):
+                ctx_3857 = _safe_to_3857(context_src.dropna(subset=['geometry']).copy())
+                if not ctx_3857.empty:
+                    # Trim to the visible frame to keep draw cost bounded.
+                    try:
+                        ctx_3857 = ctx_3857.cx[minx:maxx, miny:maxy]
+                    except Exception:
+                        pass
+                    # 1) faint context everywhere (the surroundings).
+                    _draw_sensitivity(ctx_3857, outside_alpha, zbase=8)
+                    # 2) stronger fill clipped to the study area (the inside).
+                    inside_3857 = None
+                    if clip_geom is not None and not getattr(clip_geom, 'is_empty', True):
+                        try:
+                            inside_3857 = gpd.clip(ctx_3857, clip_geom)
+                        except Exception:
+                            inside_3857 = None
+                    if inside_3857 is None or getattr(inside_3857, 'empty', True):
+                        # Fall back to the per-area analysis cells for the inside.
+                        if _has_geo(flat_cells_gdf):
+                            inside_3857 = _safe_to_3857(flat_cells_gdf.dropna(subset=['geometry']).copy())
+                    _draw_sensitivity(inside_3857, inside_alpha, zbase=12)
         except Exception:
             pass
 
@@ -5250,6 +5296,10 @@ def generate_report(base_dir: str,
                 groups = _analysis_group_choices(gpq_dir_analysis)
                 id_list = [gid for gid, _disp in groups]
 
+                # Project-wide basic_mosaic sensitivity, reused as the faint
+                # context (surroundings) behind each area's own sensitivity fill.
+                analysis_context_cells = load_tbl_flat(gpq_dir_analysis, base_dir=base_dir)
+
                 def _add_single(group_id: str):
                     group_title = _analysis_group_title(gpq_dir_analysis, group_id)
                     order_list.append(('heading(2)', f"Analysis – {group_title}"))
@@ -5264,8 +5314,9 @@ def generate_report(base_dir: str,
                         config_path=config_file,
                         palette_A2E=palette_A2E,
                         desc_A2E=desc_A2E,
-                        overlay_alpha=0.65,
+                        overlay_alpha=0.55,
                         flat_cells_gdf=flat_cells,
+                        context_cells_gdf=analysis_context_cells,
                     ):
                         order_list.append(('image_map', ("Area overview (basemap + sensitivity)", minimap_path)))
                         order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(polys))}"))
@@ -5343,8 +5394,9 @@ def generate_report(base_dir: str,
                             config_path=config_file,
                             palette_A2E=palette_A2E,
                             desc_A2E=desc_A2E,
-                            overlay_alpha=0.65,
+                            overlay_alpha=0.55,
                             flat_cells_gdf=left_cells,
+                            context_cells_gdf=analysis_context_cells,
                         ):
                             order_list.append(('image_map', (f"Area map – {left_title}", left_map)))
                             order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(left_polys))}"))
@@ -5360,8 +5412,9 @@ def generate_report(base_dir: str,
                             config_path=config_file,
                             palette_A2E=palette_A2E,
                             desc_A2E=desc_A2E,
-                            overlay_alpha=0.65,
+                            overlay_alpha=0.55,
                             flat_cells_gdf=right_cells,
+                            context_cells_gdf=analysis_context_cells,
                         ):
                             order_list.append(('image_map', (f"Area map – {right_title}", right_map)))
                             order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(right_polys))}"))
