@@ -2092,6 +2092,7 @@ class _ActionCard(QFrame):
             "font-size: 10px; color: #6a5533; background: transparent;"
         )
         text_col.addWidget(desc_lbl)
+        text_col.addStretch(1)  # keep title + description top-aligned when the card is stretched taller
 
         layout.addLayout(text_col, stretch=1)
 
@@ -2102,7 +2103,7 @@ class _ActionCard(QFrame):
         )
         arrow.setAlignment(Qt.AlignCenter)
         arrow.setFixedWidth(20)
-        layout.addWidget(arrow)
+        layout.addWidget(arrow, 0, Qt.AlignTop)
 
         self.setStyleSheet("""
             #ActionCard {
@@ -3542,6 +3543,7 @@ class MesaMainWindow(QMainWindow):
             ]),
         ]
 
+        workflow_cards = []
         for col_idx, (title, description, wiki_url, actions) in enumerate(workflow_sections):
             group = QGroupBox(title)
             group_layout = QVBoxLayout(group)
@@ -3566,12 +3568,45 @@ class MesaMainWindow(QMainWindow):
             for action_label, action_command, action_desc in actions:
                 card = _ActionCard(action_label, action_desc, action_command)
                 group_layout.addWidget(card)
+                workflow_cards.append(card)
 
             group_layout.addStretch()
             grid.addWidget(group, 0, col_idx)
             grid.setColumnStretch(col_idx, 1)
 
+        # Give every workflow card the same height (the tallest — Classification's),
+        # so the four columns line up and text stays top-aligned. Deferred + re-run on
+        # tab change because a word-wrapped label's height is only known once it has a
+        # real width.
+        self._workflow_cards = workflow_cards
+        QTimer.singleShot(0, self._equalize_workflow_cards)
+        # Defer through a singleShot so the page has been laid out (real widths)
+        # by the time we re-measure when the Workflows tab is first shown.
+        self._tabs.currentChanged.connect(
+            lambda *_: QTimer.singleShot(0, self._equalize_workflow_cards))
+
         self._tabs.addTab(tab, "Workflows")
+
+    def _equalize_workflow_cards(self):
+        cards = getattr(self, "_workflow_cards", None)
+        if not cards:
+            return
+        try:
+            # Clear any prior clamp first so sizeHint reflects the true wrapped
+            # content at the card's real width, not an earlier (pre-layout)
+            # over-measurement that would otherwise ratchet the height upward.
+            for c in cards:
+                c.setMinimumHeight(0)
+                c.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+            h = max((c.sizeHint().height() for c in cards), default=0)
+            if h > 0:
+                # setFixedHeight caps the max too, so a lone card (e.g. Process)
+                # can't stretch to fill its column — the group's trailing stretch
+                # absorbs the slack instead.
+                for c in cards:
+                    c.setFixedHeight(h)
+        except Exception:
+            pass
 
     # ---- Tab 2: Status ----
     # ------------------------------------------------------------------
