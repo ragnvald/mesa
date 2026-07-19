@@ -523,6 +523,30 @@ class _Api:
                            or r.get("name_gis_assetgroup") or "")
         return out
 
+    def _asset_group_gis_to_title(self) -> dict:
+        """name_gis_assetgroup -> human title (title_fromuser > name_original),
+        falling back to the GIS name. Cached; drives the popup's 'Asset group
+        names' row so it reads e.g. 'Herbaceous wetland' rather than 'layer_008'."""
+        cache = getattr(self, "_ag_gis_title_cache", None)
+        if cache is not None:
+            return cache
+        out = {}
+        try:
+            import pandas as pd
+            df = pd.read_parquet(self.gpq / "tbl_asset_group.parquet",
+                                 columns=["name_gis_assetgroup", "title_fromuser",
+                                          "name_original"])
+            for _, r in df.iterrows():
+                gis = str(r.get("name_gis_assetgroup") or "").strip()
+                if not gis:
+                    continue
+                out[gis] = (str(r.get("title_fromuser") or r.get("name_original") or gis).strip()
+                            or gis)
+        except Exception:
+            out = {}
+        self._ag_gis_title_cache = out
+        return out
+
     def clear_asset_styles(self, group_ids) -> dict:
         try:
             import asset_styling
@@ -997,6 +1021,15 @@ class _Api:
                 return {"ok": False, "error": "No cell at that location."}
             if str(mode) == "results":
                 info = _fi_results_info(row, str(overlay or "sensitivity_max"), str(layer))
+                # Prefer human asset-group titles over their GIS names in the popup.
+                mapping = self._asset_group_gis_to_title()
+                if mapping:
+                    for metric in info.get("metrics", []):
+                        if metric.get("label") != "Asset group names":
+                            continue
+                        parts = [p.strip() for p in str(metric.get("value") or "").split(",") if p.strip()]
+                        if parts:
+                            metric["value"] = ", ".join(mapping.get(p, p) for p in parts)
             elif str(mode) == "class":
                 info = _fi_class_info(row, str(layer))
             else:
