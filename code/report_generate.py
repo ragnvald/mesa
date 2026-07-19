@@ -72,7 +72,7 @@ except ModuleNotFoundError as exc:
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
 RIBBON_CM_HEIGHT   = 0.6           # ribbon display height inside PDF (cm)
 ATLAS_FIGURE_INCHES = (7.2, 7.2)   # atlas tiles render smaller to fit more per page
-ATLAS_DOC_WIDTH_SCALE = 0.75       # reduce displayed width of atlas images inside documents
+ATLAS_DOC_WIDTH_SCALE = 1.0        # atlas images may use the full text width (portrait tiles are height-bound anyway)
 
 TILE_CACHE_MAX_AGE_DAYS = 30       # discard cached OSM tiles older than this (<=0 keeps forever)
 
@@ -1090,12 +1090,15 @@ class ReportEngine:
                 if extent_gdf.geometry.iloc[0].geom_type == 'MultiPolygon' else 1
         except Exception:
             n_parts = 1
-        intro = (
+        default_intro = (
             "Outline of the project's data area, computed at processing-time as "
             "the dissolved union of all input asset and geocode geometries. "
             f"Shown as {n_parts} polygon{'s' if n_parts != 1 else ''}; disjoint "
             "regions are preserved rather than collapsed into a single hull."
         )
+        # If the operator wrote an "About this project", merge it with the
+        # boilerplate above into a short AI-written intro (2-3 paragraphs).
+        intro = _blend_area_overview_intro(default_intro, self.base_dir)
         return [
             ('heading(2)', "Area overview"),
             ('text', intro),
@@ -3988,7 +3991,7 @@ def compile_docx(output_docx: str, order_list: list):
     # margins) and forced their heading + description onto a separate page.
     # Cap the height so heading + intro text + tile fit on one page; width
     # is still scaled by ATLAS_DOC_WIDTH_SCALE * MAX_IMAGE_WIDTH_CM.
-    MAX_ATLAS_HEIGHT_CM = 12.0
+    MAX_ATLAS_HEIGHT_CM = 16.8   # +40%: tiles were leaving most of the page blank
     # Line maps are inserted together with distribution + ribbon.
     # Allow a taller cap now that we use a single combined map (segments + context inset).
     MAX_LINE_MAP_HEIGHT_CM = 14.0
@@ -3996,8 +3999,10 @@ def compile_docx(output_docx: str, order_list: list):
     # at 10 cm tall, which forced their explanatory text onto a separate page.
     # Shrink them to a panel size so heading + intro paragraphs + map fit on one
     # page together. Width is independent of MAX_IMAGE_WIDTH_CM for this kind.
-    MAX_OVERVIEW_MAP_WIDTH_CM = 13.0
-    MAX_OVERVIEW_MAP_HEIGHT_CM = 9.5
+    # +40% on the height (the binding dimension for these portrait maps); width cap
+    # raised too but kept within the page text width so wider maps can grow as well.
+    MAX_OVERVIEW_MAP_WIDTH_CM = 16.0
+    MAX_OVERVIEW_MAP_HEIGHT_CM = 13.3
     # Index legends are emitted right after the map and should align visually
     # with it, so they share the overview width.
     MAX_LEGEND_WIDTH_CM = MAX_OVERVIEW_MAP_WIDTH_CM
@@ -4647,6 +4652,31 @@ def _report_project_about(base_dir) -> str:
         return ""
 
 
+def _blend_area_overview_intro(default_intro: str, base_dir) -> str:
+    """Merge the operator's 'About this project' with the default Area-overview
+    boilerplate into a 2-3 paragraph intro (max ~12 lines) via AI. Falls back to
+    the boilerplate followed by the project text when no AI is configured, and to
+    the boilerplate alone when no project description exists."""
+    about = _report_project_about(base_dir)
+    if not about:
+        return default_intro
+    prompt = (
+        "You are writing the opening 'Area overview' section of an environmental-"
+        "sensitivity report. Merge the analyst's project description with the "
+        "standard boilerplate below into 2-3 short paragraphs, AT MOST 12 lines "
+        "total, in plain English. Preserve the factual meaning of the boilerplate "
+        "(the mapped area is the dissolved union of all input geometries). Do not "
+        "invent facts, place names, or numbers beyond those given.\n\n"
+        f"Analyst's project description:\n{about}\n\n"
+        f"Standard boilerplate:\n{default_intro}"
+    )
+    txt = _report_ai_complete(prompt, base_dir)
+    if txt:
+        return txt
+    # No AI to weave it in — keep the boilerplate, then the project text verbatim.
+    return default_intro + "\n\n" + about
+
+
 def _classification_overview(recs, layer, base_dir):
     """Short overview of how the area divides into sensitivity types + how the
     method works. Uses the AI connection when configured, else a deterministic
@@ -5066,11 +5096,8 @@ def generate_report(base_dir: str,
             about_path = os.path.join(base_dir, "docs", "report_about.md")
         about_text = _urls_to_footnotes(_read_text_file(about_path)).strip() if os.path.exists(about_path) else ""
 
-        # The operator's free-text "About this project" (Welcome tab). It grounds the
-        # report AI prose when an AI connection is configured; when there is no AI to
-        # weave it in, show it here verbatim so the project description is not lost.
-        _proj_about = _report_project_about(base_dir)
-        _ai_on = bool(_report_ai_conn(base_dir))
+        # The operator's "About this project" (Welcome tab) is woven into the
+        # Area-overview intro instead of shown here — see _blend_area_overview_intro.
 
         # Build initial order_list up to About section
         order_list = [
@@ -5079,13 +5106,6 @@ def generate_report(base_dir: str,
             ('spacer', 2),
             ('heading(2)', "About this report"),
             ('text', about_text or "(About text missing: docs/templates/report_about.md)"),
-        ]
-        if _proj_about and not _ai_on:
-            order_list += [
-                ('heading(3)', "About this project"),
-                ('text', _proj_about),
-            ]
-        order_list += [
             ('rule', None),
             # Insert a Word TOC field after About section
             ('toc', None),
