@@ -5357,6 +5357,11 @@ if __name__ == "__main__":
     import multiprocessing as _mp
     _mp.freeze_support()
 
+    # Windows: claim an explicit taskbar identity before any window exists, so
+    # the taskbar shows MESA's icon instead of a blank placeholder.
+    from mesa_shared import set_windows_app_user_model_id
+    set_windows_app_user_model_id()
+
     app = QApplication(sys.argv)
 
     # Generate checkmark / radio-dot indicator images for QSS

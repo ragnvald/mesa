@@ -20,6 +20,25 @@ from pathlib import Path
 from typing import Optional
 
 
+def set_windows_app_user_model_id(app_id: str = "com.mindland.mesa") -> None:
+    """Windows taskbar: give this process an explicit AppUserModelID so the
+    taskbar shows MESA's own icon and groups MESA windows together, instead of a
+    generic (blank) placeholder. Frozen (PyInstaller) builds otherwise inherit a
+    loader identity and the taskbar button comes up iconless even though
+    setWindowIcon is set. No-op off Windows and fully guarded; call once per
+    process, before any window is shown. Every MESA process (main app + separate
+    helper exes) uses the SAME id so their windows group under one MESA icon.
+    See learning.md "Windows taskbar icon needs an explicit AppUserModelID".
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(str(app_id))
+    except Exception:
+        pass
+
+
 def ensure_bundled_geo_data() -> None:
     """Point PROJ/GDAL at the data bundled with pyproj/pyogrio, so a machine-wide
     ``PROJ_LIB`` or ``GDAL_DATA`` from another install (PostgreSQL/PostGIS, QGIS,

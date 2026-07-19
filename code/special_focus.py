@@ -309,4 +309,6 @@ if __name__ == "__main__":
     if webview is None:
         sys.stderr.write("ERROR: 'pywebview' is not installed in this environment.\n")
         raise SystemExit(1)
+    from mesa_shared import set_windows_app_user_model_id
+    set_windows_app_user_model_id()
     raise SystemExit(main())

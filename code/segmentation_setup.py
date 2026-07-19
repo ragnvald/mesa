@@ -358,4 +358,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    mesa_shared.set_windows_app_user_model_id()
     raise SystemExit(main())

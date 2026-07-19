@@ -1226,4 +1226,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    from mesa_shared import set_windows_app_user_model_id
+    set_windows_app_user_model_id()
     raise SystemExit(main())

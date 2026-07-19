@@ -2177,6 +2177,11 @@ if __name__ == "__main__":
     if webview is None:
         sys.stderr.write("ERROR: 'pywebview' is not installed in this environment.\n")
         raise SystemExit(1)
+    try:
+        from mesa_shared import set_windows_app_user_model_id
+        set_windows_app_user_model_id()
+    except Exception:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--original_working_directory", default=None)
     args, _ = ap.parse_known_args()
