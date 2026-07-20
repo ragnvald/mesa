@@ -58,8 +58,8 @@ Windows and macOS both target CPython 3.14, with a refreshed, security-current s
 
 The compiled Windows build is published on Zenodo:
 
-- **Zenodo record:** ‹PASTE ZENODO RECORD URL — e.g. https://zenodo.org/records/XXXXXXX›
-- **DOI:** ‹PASTE DOI URL — e.g. https://doi.org/10.5281/zenodo.XXXXXXX›
+- **Zenodo record:** https://zenodo.org/records/21455341
+- **DOI:** https://doi.org/10.5281/zenodo.21455341
 - **Project wiki:** https://github.com/ragnvald/mesa/wiki
 
 ### Getting started

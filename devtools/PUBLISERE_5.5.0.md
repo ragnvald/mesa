@@ -19,7 +19,7 @@ Status per 2026-07-17. Oppdater etter hvert som punktene lukkes.
 | Kompilert utgave i `D:\dist\mesa` | ✅ 2,05 GB / 7 855 filer, banner sier 5.5.0 |
 | Byggeverktøy pinnet | ✅ pyinstaller 6.21.0 / hooks-contrib 2026.6 |
 | Rydding av `docs/` og `output/` før zip | ⬜ bekreftet lekkasje — se §3.3/§3.4 |
-| Zenodo-post (applikasjon) | ⬜ |
+| Zenodo-post (applikasjon) | ✅ record 21455341 · DOI 10.5281/zenodo.21455341 |
 | Zenodo-post (demodata) | ⬜ venter på overlappende datasett |
 | GitHub-release | ⬜ (krever Zenodo først) |
 | Brukerveiledning oppdatert | ⬜ sier fortsatt 5.2 — se §3.2 |
@@ -283,7 +283,21 @@ som zipper `D:\dist\mesa`. Alt i dette steget er manuelt:
 2. Zip `D:\dist\mesa` → navngi konsistent med tidligere utgivelser.
 3. Last opp til Zenodo, community `mesatool` (https://zenodo.org/communities/mesatool/).
 4. Tittel må inneholde `5.5.0` — GitHub-skriptet utleder taggen fra tittelen.
-5. Publiser og noter record-id + DOI her: `_____________`
+5. Publiser og noter record-id + DOI her: **record 21455341** · publisert 2026-07-20
+   · https://zenodo.org/records/21455341
+   · tittel: «MESA tool version 5.5.0 2026.07.20»
+   · fil: `MESA_550_2026_07_20.zip` (1,5 GB) · lisens `gpl-3.0-or-later`
+
+   To DOI-er — bruk riktig etter formål:
+
+   | DOI | Peker på | Bruk til |
+   |---|---|---|
+   | `10.5281/zenodo.21455341` | **denne versjonen** (5.5.0) | release-notat, «jeg brukte 5.5.0» |
+   | `10.5281/zenodo.10775727` | **concept** — alltid nyeste | README, wiki, «siter MESA» generelt |
+
+   Concept-DOI-en er stabil på tvers av utgivelser (concept record 10775727) og bør stå
+   der lenken skal overleve neste versjon. Versjons-DOI-en er den som gjør et resultat
+   reproduserbart.
 
 ### 6b. Demodata (egen post)
 
@@ -467,15 +481,15 @@ tallet inn i `devtools/docs/basic_mosaic_capacity.md:64`, som står og venter p�
 
 --- gjenstår ---
 
-[ ] Kjør demodataene gjennom i den KOMPILERTE utgaven, hele veien inkl.
+[X] Kjør demodataene gjennom i den KOMPILERTE utgaven, hele veien inkl.
     lines + analysis (aldri nådd i kilde-valideringen på 3.14)
-[ ] Avgjør og rydd docs/ i D:\dist\mesa           (§3.3 — 6 roadmaps ligger der nå)
-[ ] Avgjør og rydd output/ i D:\dist\mesa         (§3.4 — 20,7 MB, din cache)
+[X] Avgjør og rydd docs/ i D:\dist\mesa           (§3.3 — 6 roadmaps ligger der nå)
+[X] Avgjør og rydd output/ i D:\dist\mesa         (§3.4 — 20,7 MB, din cache)
 [ ] Oppdater plans.md A3       (sier fortsatt frozen build mangler)
 [ ] python devtools\build_user_guide.py           (avhenger av §3.2 — sier 5.2)
 [ ] Bygg på nytt hvis docs/ ryddes via DEVELOPER_ONLY_FILES
-[ ] Zip D:\dist\mesa
-[ ] Last opp til Zenodo, noter record-id + DOI    (§6a)
+[X] Zip D:\dist\mesa
+[X] Last opp til Zenodo, noter record-id + DOI    (§6a)
 [ ] python devtools\github_release_from_zenodo.py <id>
 [ ] Les gjennom auto-changelogen (spenner 64 commits)
 [ ] python devtools\github_release_from_zenodo.py <id> --publish
