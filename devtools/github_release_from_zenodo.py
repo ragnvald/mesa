@@ -121,9 +121,19 @@ def _derive_tag(version_label: str) -> str:
     return tag
 
 
+_PRERELEASE_RE = re.compile(r"(?<![a-z])(alpha|beta|rc\d*|pre-?release)(?![a-z])")
+
+
 def _is_prerelease(*values: str) -> bool:
+    """True only when a prerelease marker appears as a WORD.
+
+    A plain substring test matched "rc" inside ordinary words — "archive" and
+    "sources" in the Zenodo description were enough to mark a finished release as
+    a prerelease and inject the beta notice. See learning.md "Release automation:
+    match version markers on word boundaries".
+    """
     joined = " ".join(values).lower()
-    return any(token in joined for token in ("alpha", "beta", "rc", "pre-release", "prerelease"))
+    return _PRERELEASE_RE.search(joined) is not None
 
 
 def _latest_previous_release_tag(repo: str, *, exclude_tag: str | None = None) -> str | None:
@@ -169,20 +179,39 @@ def _normalize_subject(subject: str) -> str:
     return subject
 
 
+def _has_word(text: str, words: tuple[str, ...]) -> bool:
+    """Word-boundary membership test.
+
+    Short tokens must not match inside longer words: a substring test put
+    "Guide for counting LOC" under *User interface* because "guide" contains "ui".
+    """
+    return any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", text) for w in words)
+
+
 def _classify_subject(subject: str) -> str:
     text = subject.lower()
-    if any(word in text for word in ("geonode", "publish", "oauth", "report", "presentation")):
+    if _has_word(text, ("geonode", "publish", "publishing", "oauth", "report", "reports", "presentation")):
         return "Publishing and reporting"
-    if any(word in text for word in ("build", "bundle", "startup", "runtime", "venv", "icon")):
+    if _has_word(text, ("build", "bundle", "startup", "runtime", "venv", "icon", "taskbar")):
         return "Packaging and runtime"
-    if any(word in text for word in ("pyside6", "desktop", "ui", "launcher", "label", "tab", "workflow")):
+    if _has_word(text, ("pyside6", "desktop", "ui", "launcher", "label", "labels", "tab", "tabs",
+                        "workflow", "workflows", "maps", "map", "popup", "popups", "button",
+                        "buttons", "dialog", "window", "windows", "card", "cards", "legend")):
         return "User interface and workflow"
-    if any(word in text for word in ("process", "processing", "mosaic", "tile", "analysis", "grid", "flatten")):
+    if _has_word(text, ("process", "processing", "mosaic", "tile", "tiles", "analysis", "grid",
+                        "flatten", "status", "qgis", "raster", "rasters", "geocode", "geocodes",
+                        "segmentation", "classification")):
         return "Processing and outputs"
     return "Other changes"
 
 
 def _skip_subject(subject: str) -> bool:
+    """Drop commits that say nothing to someone downloading the release.
+
+    Release plumbing (the publishing checklist, the Zenodo text, release notes,
+    the changelog itself) and developer-only material are noise in a download
+    page — they describe how the release was made, not what it does.
+    """
     text = subject.lower()
     return any(
         marker in text
@@ -198,7 +227,22 @@ def _skip_subject(subject: str) -> bool:
             "local probe",
             "workspace artifacts",
             "learning log",
+            "learning.md",
             "temporary",
+            # release plumbing and developer-only work
+            "zenodo",
+            "release note",
+            "release-note",
+            "changelog",
+            "working document",
+            "publishing 5",
+            "publisere",
+            "counting",
+            "loc",
+            "devtools",
+            "wiki",
+            "bump version",
+            "version bump",
         )
     )
 
@@ -226,11 +270,17 @@ def _select_changes(subjects: list[str]) -> dict[str, list[str]]:
     return {section: items for section, items in selected.items() if items}
 
 
-def _description_highlights(description_text: str) -> list[str]:
+def _description_highlights(description_text: str, version_label: str = "") -> list[str]:
     text = description_text.lower()
     highlights: list[str] = []
     if "fully replaces all earlier mesa versions" in text:
-        highlights.append("Version 5.1 fully replaces the earlier MESA releases.")
+        # Derive the line from the release being built; it used to be hardcoded to 5.1.
+        m = re.search(r"\d+\.\d+(?:\.\d+)?", version_label or "")
+        series = m.group(0) if m else None
+        highlights.append(
+            f"Version {series} fully replaces the earlier MESA releases."
+            if series else "This release fully replaces the earlier MESA releases."
+        )
     if "end-to-end workflow" in text or "from inputs to published outputs" in text:
         highlights.append("New end-to-end workflow from project inputs to published outputs.")
     if "word-first" in text or ".docx" in text:
@@ -287,7 +337,7 @@ def _build_notes(
             ]
         )
 
-    highlights = _description_highlights(description_text)
+    highlights = _description_highlights(description_text, version_label)
     if highlights:
         lines.extend(["", "### Highlights"])
         for item in highlights:
