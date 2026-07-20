@@ -5427,16 +5427,34 @@ QRadioButton::indicator:checked {{
     # never re-reads the window icon, so the button came up blank. Hand the
     # shell an explicit icon resource BEFORE the first show(): the frozen exe
     # carries the icon itself, from source we point at the .ico.
-    try:
-        from mesa_shared import set_window_taskbar_icon
-        _icon_res = (f"{sys.executable},0" if getattr(sys, "frozen", False)
-                     else (icon_path if os.path.exists(icon_path) else None))
-        if _icon_res:
-            set_window_taskbar_icon(int(main_window.winId()), _icon_res)
-    except Exception:
-        pass
+    # Qt can recreate the native window between winId() and show(), which would
+    # strand the property on a dead HWND, so apply it again if the handle moved.
+    _icon_res = icon_path if os.path.exists(icon_path) else (
+        f"{sys.executable},0" if getattr(sys, "frozen", False) else None)
+
+    def _pin_taskbar_icon(tag):
+        if not _icon_res:
+            return None
+        try:
+            from mesa_shared import set_window_taskbar_icon
+            hwnd = int(main_window.winId())
+            ok = set_window_taskbar_icon(hwnd, _icon_res)
+            log_to_logfile(f"[icon] {tag}: hwnd={hwnd} set={ok} res={_icon_res}")
+            return hwnd
+        except Exception as exc:
+            log_to_logfile(f"[icon] {tag}: failed {exc}")
+            return None
+
+    _hwnd_before = _pin_taskbar_icon("before-show")
 
     main_window.show()
+
+    if _hwnd_before is not None:
+        try:
+            if int(main_window.winId()) != _hwnd_before:
+                _pin_taskbar_icon("after-show (handle changed)")
+        except Exception:
+            pass
 
     # Devtools hook: when MESA_DEVTOOLS_POPUP is set to a known popup key, open
     # that popup automatically once the main window has rendered. Used by
