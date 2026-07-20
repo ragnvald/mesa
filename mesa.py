@@ -5357,10 +5357,17 @@ if __name__ == "__main__":
     import multiprocessing as _mp
     _mp.freeze_support()
 
+    # mesa.py sits at the repo root, so code/ (where mesa_shared lives) is not on
+    # sys.path yet when running from source — frozen builds bundle it either way.
+    _ensure_code_dir_on_syspath()
+
     # Windows: claim an explicit taskbar identity before any window exists, so
     # the taskbar shows MESA's icon instead of a blank placeholder.
-    from mesa_shared import set_windows_app_user_model_id
-    set_windows_app_user_model_id()
+    try:
+        from mesa_shared import set_windows_app_user_model_id
+        set_windows_app_user_model_id()
+    except Exception:
+        pass
 
     app = QApplication(sys.argv)
 
@@ -5415,6 +5422,20 @@ QRadioButton::indicator:checked {{
         app.setWindowIcon(QIcon(icon_path))
 
     main_window = MesaMainWindow()
+
+    # Windows decides a taskbar button's icon when the button is created and
+    # never re-reads the window icon, so the button came up blank. Hand the
+    # shell an explicit icon resource BEFORE the first show(): the frozen exe
+    # carries the icon itself, from source we point at the .ico.
+    try:
+        from mesa_shared import set_window_taskbar_icon
+        _icon_res = (f"{sys.executable},0" if getattr(sys, "frozen", False)
+                     else (icon_path if os.path.exists(icon_path) else None))
+        if _icon_res:
+            set_window_taskbar_icon(int(main_window.winId()), _icon_res)
+    except Exception:
+        pass
+
     main_window.show()
 
     # Devtools hook: when MESA_DEVTOOLS_POPUP is set to a known popup key, open

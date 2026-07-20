@@ -39,6 +39,93 @@ def set_windows_app_user_model_id(app_id: str = "com.mindland.mesa") -> None:
         pass
 
 
+def set_window_taskbar_icon(hwnd: int, icon_resource: str,
+                            app_id: str = "com.mindland.mesa") -> bool:
+    """Attach an explicit AppUserModelID + icon resource to one window's shell
+    property store, so the taskbar has an icon to draw at the moment it creates
+    the button.
+
+    Windows decides a taskbar button's icon when the button is created and does
+    NOT pick up the window icon afterwards, so a Qt window can show the right
+    icon in its title bar and thumbnail while the taskbar button stays blank.
+    (Re-registering the button — hide/show — makes the shell re-read it, which
+    is the manual workaround this replaces.)
+
+    ``icon_resource`` is a shell icon reference: ``"C:\\path\\app.exe,0"`` for an
+    exe's embedded icon, or a plain path to an .ico file. Must be called from the
+    window's OWN process (the property store is read-only cross-process) and
+    before the window is first shown. Windows-only, fully guarded.
+    See learning.md "Windows taskbar button icon is fixed at button creation".
+    """
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes, POINTER, byref, c_void_p, c_ushort
+
+        ole32 = ctypes.windll.ole32
+        shell32 = ctypes.windll.shell32
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                        ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+        class PROPERTYKEY(ctypes.Structure):
+            _fields_ = [("fmtid", GUID), ("pid", ctypes.c_ulong)]
+
+        class PROPVARIANT(ctypes.Structure):
+            _fields_ = [("vt", c_ushort), ("r1", c_ushort), ("r2", c_ushort),
+                        ("r3", c_ushort), ("val", c_void_p), ("val2", c_void_p)]
+
+        def guid(s):
+            g = GUID()
+            ole32.CLSIDFromString(ctypes.c_wchar_p(s), byref(g))
+            return g
+
+        IID_IPropertyStore = guid("{886d8eeb-8cf2-4446-8d02-cdba1dbdcf99}")
+        FMTID = guid("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}")
+        PID_APPID, PID_ICON = 5, 3
+        VT_LPWSTR = 31
+
+        ole32.CoInitialize(None)  # S_FALSE when already initialised — harmless
+        ole32.CoTaskMemAlloc.restype = c_void_p
+        ole32.CoTaskMemAlloc.argtypes = [ctypes.c_size_t]
+
+        store = c_void_p()
+        hr = shell32.SHGetPropertyStoreForWindow(
+            wintypes.HWND(hwnd), byref(IID_IPropertyStore), byref(store))
+        if hr != 0 or not store:
+            return False
+
+        vtbl = ctypes.cast(store, POINTER(POINTER(c_void_p))).contents
+        SetValue = ctypes.WINFUNCTYPE(
+            ctypes.c_long, c_void_p, POINTER(PROPERTYKEY), POINTER(PROPVARIANT))(vtbl[6])
+        Commit = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p)(vtbl[7])
+        Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(vtbl[2])
+
+        def put(pid, value):
+            key = PROPERTYKEY()
+            key.fmtid = FMTID
+            key.pid = pid
+            buf = ctypes.create_unicode_buffer(value)
+            nbytes = (len(value) + 1) * ctypes.sizeof(ctypes.c_wchar)
+            mem = ole32.CoTaskMemAlloc(nbytes)
+            if not mem:
+                return -1
+            ctypes.memmove(mem, buf, nbytes)
+            pv = PROPVARIANT()
+            pv.vt = VT_LPWSTR
+            pv.val = mem
+            return SetValue(store, byref(key), byref(pv))
+
+        ok = (put(PID_APPID, app_id) == 0) and (put(PID_ICON, icon_resource) == 0)
+        Commit(store)
+        Release(store)
+        return ok
+    except Exception:
+        return False
+
+
 def ensure_bundled_geo_data() -> None:
     """Point PROJ/GDAL at the data bundled with pyproj/pyogrio, so a machine-wide
     ``PROJ_LIB`` or ``GDAL_DATA`` from another install (PostgreSQL/PostGIS, QGIS,
