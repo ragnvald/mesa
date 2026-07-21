@@ -2496,13 +2496,61 @@ def mosaic_faces_from_assets_parallel(
     faces_kept = 0
     faces_total = 0
     last_ui = 0.0
+    repaired_faces = 0
+    repaired_multi = 0
+    repair_area_before = 0.0
+    repair_area_after = 0.0
+
+    def _repair_faces(gseries: gpd.GeoSeries) -> gpd.GeoSeries:
+        """Repair faces that self-intersect at a single vertex (pinch points).
+
+        Must run *after* the reprojection to EPSG:4326: polygonize's output is
+        valid in the metric CRS, and it is the coordinate rounding in to_crs()
+        that pinches near-coincident vertices together. Area is unaffected, but
+        GEOS <3.11 (e.g. PostGIS 3.2) and GDAL/ArcGIS reject such geometry
+        outright. See learning.md "Self-intersecting basic_mosaic faces".
+        """
+        nonlocal repaired_faces, repaired_multi, repair_area_before, repair_area_after
+        try:
+            invalid = ~gseries.is_valid.values
+        except Exception as e:
+            log_to_gui(f"[Mosaic][Repair] validity check failed ({type(e).__name__}: {e}); publishing faces unrepaired.", "WARN")
+            return gseries
+        if not invalid.any():
+            return gseries
+        geoms = gseries.values.copy()
+        before, after = [], []
+        for i in np.nonzero(invalid)[0]:
+            src = geoms[i]
+            fixed = _extract_polygonal(_fix_valid(src))
+            if fixed is None or fixed.is_empty:
+                # Nothing polygonal survived; keep the original rather than
+                # dropping area out of the mosaic.
+                log_to_gui("[Mosaic][Repair] a face could not be repaired into a polygon; keeping it as-is.", "WARN")
+                continue
+            repaired_faces += 1
+            if fixed.geom_type == "MultiPolygon" and src.geom_type == "Polygon":
+                repaired_multi += 1
+            before.append(src)
+            after.append(fixed)
+            geoms[i] = fixed
+        # Area delta is only meaningful in metres, and the faces are in degrees
+        # here - project just the repaired ones back.
+        if before:
+            try:
+                crs4326 = gseries.crs
+                repair_area_before += float(gpd.GeoSeries(before, crs=crs4326).to_crs(metric_crs).area.sum())
+                repair_area_after += float(gpd.GeoSeries(after, crs=crs4326).to_crs(metric_crs).area.sum())
+            except Exception as e:
+                log_to_gui(f"[Mosaic][Repair] area delta computation failed: {e}", "WARN")
+        return gpd.GeoSeries(geoms, crs=gseries.crs)
 
     def _flush_faces():
         nonlocal face_wkb_batch, faces_kept
         if not face_wkb_batch:
             return
-        gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_wkb_batch], crs=metric_crs)
-        gdf = gpd.GeoDataFrame(geometry=gseries, crs=metric_crs).to_crs("EPSG:4326")
+        gseries = gpd.GeoSeries([shp_wkb.loads(b) for b in face_wkb_batch], crs=metric_crs).to_crs("EPSG:4326")
+        gdf = gpd.GeoDataFrame(geometry=_repair_faces(gseries), crs="EPSG:4326")
         part = tmp_dir / f"faces_part_{len(part_files):05d}.parquet"
         gdf.to_parquet(part, index=False)
         part_files.append(part)
@@ -2581,6 +2629,16 @@ def mosaic_faces_from_assets_parallel(
                 f"[Mosaic] polygonize(edge_net) completed: produced {faces_total:,} faces; kept {faces_kept:,} (flush_batch={flush_batch:,}).",
                 "INFO",
             )
+            if repaired_faces:
+                delta = repair_area_after - repair_area_before
+                log_to_gui(
+                    f"[Mosaic][Repair] repaired {repaired_faces:,} invalid face(s) of {faces_kept:,} "
+                    f"(self-intersections); area before={repair_area_before:,.1f} m²; after={repair_area_after:,.1f} m²; "
+                    f"delta={delta:,.1f} m²; split into MultiPolygon: {repaired_multi:,}",
+                    "INFO",
+                )
+            else:
+                log_to_gui(f"[Mosaic][Repair] all {faces_kept:,} face(s) already valid; nothing repaired.", "INFO")
         else:
             log_to_gui(
                 f"[Mosaic] polygonize(edge_net) failed after producing {faces_total:,} faces; kept {faces_kept:,}. Error: {polygonize_error}",
@@ -2623,6 +2681,22 @@ def mosaic_faces_from_assets_parallel(
             log_to_gui(f"[Mosaic][Sanity] faces_area={faces_area:,.0f} m² (coverage unavailable)", "INFO")
     except Exception as e:
         log_to_gui(f"[Mosaic][Sanity] area computation failed: {e}", "WARN")
+
+    # Publishing an invalid face is an interoperability defect: PostGIS/GDAL
+    # reject it outright even though our own numbers are right. The repair pass
+    # in _flush_faces should leave none, so any survivor is a regression.
+    try:
+        n_invalid = int((~faces.geometry.is_valid).sum())
+        if n_invalid:
+            log_to_gui(
+                f"[Mosaic][Sanity] {n_invalid:,} of {len(faces):,} faces are still invalid after repair — "
+                f"downstream GIS tools (PostGIS, GDAL, ArcGIS) will reject them.",
+                "WARN",
+            )
+        else:
+            log_to_gui(f"[Mosaic][Sanity] geometry validity OK: all {len(faces):,} faces valid.", "INFO")
+    except Exception as e:
+        log_to_gui(f"[Mosaic][Sanity] validity check failed: {e}", "WARN")
 
     # Leave room for publishing (run_mosaic/publish_mosaic_as_geocode will take it to 100).
     update_progress(90)
