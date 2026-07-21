@@ -132,7 +132,7 @@ def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path) 
     part_path = tmp_path / "part.parquet"
     gdf.to_parquet(part_path, index=False)
 
-    result = pi._flatten_worker((part_path, _class_ranges(), {}, pi.INDEX_WEIGHT_DEFAULTS))
+    result = pi._flatten_worker((part_path, _class_ranges(), {}))
     assert result is not None
     assert set(result["code"]) == {"A", "B"}
 
@@ -142,8 +142,11 @@ def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path) 
     assert set(row_a["name_gis_assetgroup"]) == {"roads", "water"}
     assert int(row_a["importance_min"]) == 1
     assert int(row_a["importance_max"]) == 5
-    assert int(row_a["importance_raw_score"]) == 7
-    assert int(row_a["sensitivity_raw_score"]) == 30
+    # The *_raw_score columns this test used to assert on were dropped from the
+    # flatten output; min/max plus the owa_n* histogram carry the same content.
+    assert int(row_a["sensitivity_min"]) == 1
+    assert int(row_a["sensitivity_max"]) == 25
+    assert row_a["sensitivity_code_max"] == "B"
     assert int(row_a["owa_n25"]) == 2
 
     row_b = result.loc[result["code"] == "B"].iloc[0]

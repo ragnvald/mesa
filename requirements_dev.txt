@@ -1,0 +1,15 @@
+# MESA — test/development extras, on top of the runtime environment.
+#
+# Deliberately NOT part of requirements_py314*.txt or requirements_compile_win.txt:
+# nothing here may reach a PyInstaller build, where every extra package adds to
+# the shipped helper size. Install into the runtime .venv when you want to run
+# the suite:
+#
+#     .venv\Scripts\python.exe -m pip install -r requirements_dev.txt
+#     .venv\Scripts\python.exe -m pytest tests/ -q
+#
+# The suite was found broken and unrun in July 2026 (it referenced a constant
+# removed in 5.2). Run it before releasing; see learning.md "The test suite was
+# never run".
+
+pytest>=8.0
