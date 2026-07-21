@@ -31,8 +31,8 @@ CALLED BY
 OUTPUTS (geometry-free; join to tbl_geocode_object on `code` at render time)
     output/geoparquet/tbl_seg_mv.parquet          per-cell assignments + certainty
     output/geoparquet/tbl_seg_mv_profile.parquet  per-cluster fingerprint + stats
-    output/segmentation_mv/<run_id>/              summary.md, GeoPackage, params.json,
-                                                  optional PNG fingerprints/maps
+    output/segmentation_mv/<run_id>/              summary.md, params.json, optional
+                                                  GeoPackage + PNG fingerprints/maps
 
 MEMORY DISCIPLINE (see CLAUDE.md + learning.md "Parent-side memory in the pipeline")
     Reads tbl_stacked one layer at a time with a pyarrow filter; never materialises
@@ -157,6 +157,7 @@ class Params:
         self.ollama_url: str = kw.get("ollama_url") or "http://localhost:11434/api/generate"
         self.ollama_model: str = kw.get("ollama_model") or "mistral"
         self.make_png: bool = bool(kw.get("make_png") or False)
+        self.export_gpkg: bool = bool(kw.get("export_gpkg") or False)
         self.seed: int = int(kw.get("seed") or 42)
         if self.k_max < self.k_min:
             self.k_min, self.k_max = self.k_max, self.k_min
@@ -174,7 +175,8 @@ class Params:
             "transform": self.transform, "coverage_weight": self.coverage_weight,
             "pressure": self.pressure, "min_area_m2": self.min_area_m2,
             "ai_enabled": self.ai_enabled, "ollama_model": self.ollama_model,
-            "make_png": self.make_png, "seed": self.seed,
+            "make_png": self.make_png, "export_gpkg": self.export_gpkg,
+            "seed": self.seed,
         }
 
 
@@ -222,6 +224,8 @@ def params_from_config(cfg, **overrides) -> Params:
         ollama_url=overrides.get("ollama_url") or g("segmv_ollama_url", "http://localhost:11434/api/generate"),
         ollama_model=overrides.get("ollama_model") or g("segmv_ollama_model", "mistral"),
         make_png=overrides.get("make_png") if overrides.get("make_png") is not None else _truthy(g("segmv_make_png", "0")),
+        export_gpkg=(overrides.get("export_gpkg") if overrides.get("export_gpkg") is not None
+                     else _truthy(g("segmv_export_gpkg", "0"))),
         seed=overrides.get("seed") or 42,
     )
 
@@ -1084,8 +1088,13 @@ def run_segmentation(base_dir, params: Params, log=None) -> dict:
             geom4326 = geom.to_crs(4326)
     except Exception:
         pass
-    export_gpkg(out_dir, assign[[COL_CODE, "cluster_id", "cluster_label", "p_max",
-                                 "entropy", "coverage_index"]], geom4326, log)
+    # The GPKG is a denormalised copy for QGIS/ArcGIS - nothing in MESA reads it
+    # back (Maps, the report and the QGIS project all read tbl_seg_mv*.parquet),
+    # and at ~770 bytes/cell per run it dwarfs everything else the run writes.
+    # Opt-in, like make_png. See learning.md "Classification run exports".
+    if params.export_gpkg:
+        export_gpkg(out_dir, assign[[COL_CODE, "cluster_id", "cluster_label", "p_max",
+                                     "entropy", "coverage_index"]], geom4326, log)
     write_summary_md(out_dir, params, best_k, bic_table, profiles, validation, scale, log)
     if params.make_png:
         write_png_outputs(out_dir, profiles, assign[[COL_CODE, "cluster_label"]], geom4326, scale, log)
@@ -1203,6 +1212,8 @@ def _parse_args(argv):
     ap.add_argument("--min-area-m2", dest="min_area_m2", default=None)
     ap.add_argument("--ai", dest="ai_enabled", action="store_true", default=None)
     ap.add_argument("--png", dest="make_png", action="store_true", default=None)
+    ap.add_argument("--gpkg", dest="export_gpkg", action="store_true", default=None,
+                    help="also write classification_results.gpkg (large; off by default)")
     ap.add_argument("--run-id", dest="run_id", default=None, help="reuse to reproduce a run")
     return ap.parse_args(argv)
 

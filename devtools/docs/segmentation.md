@@ -106,8 +106,10 @@ In `output/geoparquet/` (ZSTD-3, multiple runs co-exist by `run_id`):
 
 In `output/segmentation_mv/<run_id>/`:
 
-- **`segmentation_results.gpkg`** — one layer per (method, n_clusters), polygons +
-  `cluster_id`, for direct use in QGIS.
+- Optional **`classification_results.gpkg`** (`segmv_export_gpkg`, off by default) —
+  polygons + `cluster_id`, for direct use in QGIS. Nothing in MESA reads it back;
+  the Maps window, the report and the shipped QGIS project all read the parquet
+  tables above.
 - **`summary.md`** — parameters, methods + path run, quality metrics (silhouette for
   attribute; a SKATER-style coherence objective for spatial), and the profile table.
 - **`params.json`** — the exact parameter set, for reproducibility.
