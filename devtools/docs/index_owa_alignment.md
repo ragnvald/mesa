@@ -69,6 +69,29 @@ Code, all in `processing_internal.py`:
 3. **Ordering.** Move the index computation to after the sliver cleanup, so the denominator only
    counts cells that reach the table.
 
+4. **Which sensitivity values are counted at all.** The reference script counts ten exact values —
+   4, 6, 8, 10, 12, 15, 16, 18, 20, 25 — and `18` is not a product of two classes on a 1–5 scale,
+   while `9` (3×3) is missing from the list. On the Uganda fixture `tbl_stacked` holds **38,194
+   rows at sensitivity 9 (32.85 %, the most common value) and 0 rows at 18**. An implementation
+   that hardcodes the list as written scores 8,678 cells (17.8 %) as empty because all their
+   overlaps sit at 9, and 20,653 cells have no overlap inside the list at all. Desktop is not
+   affected — it counts every bin `owa_n1 … owa_n25` — but the answer determines whether the
+   reference itself is fixed, and it is the same subject as the bins question below. Awaiting the
+   author (this is the fourth question put to him).
+
+Bins, worth settling in the same round because it is the same subject:
+
+- `_compute_owa_counts_from_stacked` hardcodes bins 1..25 while the valuation scale is
+  configurable (`[VALID_VALUES] valid_input`, default `1,2,3,4,5`). Eleven bins (7, 11, 13, 14,
+  17, 18, 19, 21–24) can never be non-zero on a 1–5 scale, and conversely a 1–6 scale would
+  produce 30 and 36, which fall outside the hardcoded ceiling and would vanish from the index
+  silently. The real question is therefore "derive the bins from `valid_input`", not "delete the
+  eleven dead columns". Note the columns are intermediate only — the write list at the end of
+  the flatten stage keeps `index_owa` and drops every `owa_n*`, so nothing user-facing carries
+  them and there is no schema gain in removing them. Deliberately deferred out of the parity
+  window: a change inside the index computation has to be mirrored by the server for no benefit
+  to either side.
+
 Everything else:
 
 - **Wiki**: `Indexes.md` currently describes pooled ranking (commit `139be4e`, pushed 2026-07-21).
