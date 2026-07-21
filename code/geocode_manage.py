@@ -566,6 +566,33 @@ def _scan_for_files(label: str, folder: Path, patterns: tuple[str, ...]) -> list
     return files
 
 
+def _repair_imported_geometry(gdf: gpd.GeoDataFrame, label: str) -> gpd.GeoDataFrame:
+    """Repair invalid geometry at geocode import, the same way asset import does.
+
+    An imported geocode layer becomes cells that assets are intersected against;
+    one invalid cell used to disable boundary filtering for a whole batch. See
+    learning.md "Boundary-bleed filter must fail per row, not per batch".
+    """
+    if gdf is None or gdf.empty or "geometry" not in gdf.columns:
+        return gdf
+    try:
+        bad = ~gdf.geometry.is_valid
+        n_bad = int(bad.sum())
+        if not n_bad:
+            return gdf
+        gdf = gdf.copy()
+        gdf.loc[bad, "geometry"] = gdf.loc[bad, "geometry"].apply(_fix_valid)
+        still_bad = int((~gdf.geometry.is_valid).sum())
+        log_to_gui(
+            f"{label}: repaired {n_bad - still_bad} invalid geometr(ies)"
+            + (f"; {still_bad} still invalid" if still_bad else ""),
+            "WARN" if still_bad else "INFO",
+        )
+    except Exception as e:
+        log_to_gui(f"{label}: geometry validity pass failed ({e}); importing as-is.", "WARN")
+    return gdf
+
+
 def _read_and_reproject_vector(filepath: Path, layer: str | None, working_epsg: int) -> gpd.GeoDataFrame:
     try:
         data = gpd.read_file(filepath, layer=layer) if layer else gpd.read_file(filepath)
@@ -581,6 +608,7 @@ def _read_and_reproject_vector(filepath: Path, layer: str | None, working_epsg: 
             data["geometry"] = data.geometry.apply(_force_2d_geom)
         except Exception:
             pass
+        data = _repair_imported_geometry(data, f"{filepath.name}" + (f" (layer={layer})" if layer else ""))
         return data
     except Exception as e:
         log_to_gui(f"Read fail {filepath} (layer={layer}): {e}", "ERROR")
@@ -601,6 +629,7 @@ def _read_parquet_vector(fp: Path, working_epsg: int) -> gpd.GeoDataFrame:
             gdf["geometry"] = gdf.geometry.apply(_force_2d_geom)
         except Exception:
             pass
+        gdf = _repair_imported_geometry(gdf, fp.name)
         return gdf
     except Exception as e:
         log_to_gui(f"Read fail (parquet) {fp.name}: {e}", "ERROR")
