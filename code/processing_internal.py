@@ -1837,28 +1837,87 @@ _GEOCODE_SOFT_LIMIT = 160
 _BOUNDARY_ONLY_OVERLAP_MIN_M2 = 1.0
 
 
-def _drop_boundary_only_joins(res, asset_df):
+def _intersect_rowwise(cell_geoms, asset_geoms):
+    """Per-pair intersection that isolates the pairs GEOS cannot handle.
+
+    Returns (intersections, unresolved_mask). A pair that raises even after
+    make_valid yields None and is marked unresolved, so one bad geometry costs
+    that row's filtering instead of the whole batch's.
+    """
+    out = np.empty(len(cell_geoms), dtype=object)
+    unresolved = np.zeros(len(cell_geoms), dtype=bool)
+    for i in range(len(cell_geoms)):
+        cell, asset = cell_geoms[i], asset_geoms[i]
+        try:
+            out[i] = shapely.intersection(cell, asset)
+            continue
+        except Exception:
+            pass
+        try:
+            out[i] = shapely.intersection(shapely.make_valid(cell), shapely.make_valid(asset))
+        except Exception:
+            out[i] = None
+            unresolved[i] = True
+    return out, unresolved
+
+
+def _drop_boundary_only_joins(res, asset_df, logs=None, idx=None):
     # Drop sjoin rows whose (cell ∩ asset) overlap area is below
     # _BOUNDARY_ONLY_OVERLAP_MIN_M2. predicate='intersects' is True for
     # boundary-only contact, which on basic_mosaic — whose face boundaries
     # *are* asset boundaries — pulls in every neighbour and inflates
     # sensitivity_max with assets that don't actually cover the face. See
     # learning.md "basic_mosaic boundary-bleed in sensitivity_max".
+    #
+    # A single invalid geometry makes the vectorised call raise, so failure is
+    # isolated per row: swallowing it for the whole batch silently republishes
+    # the boundary bleed this function exists to remove. See learning.md
+    # "Boundary-bleed filter must fail per row, not per batch".
     if res is None or res.empty or 'index_right' not in res.columns:
         return res
+
+    def _note(msg):
+        if logs is not None:
+            logs.append(f"Chunk {idx}: {msg}" if idx is not None else msg)
+
     try:
         cell_geoms = res.geometry.values
         asset_geoms = asset_df.geometry.loc[res['index_right'].values].values
-        inter = shapely.intersection(cell_geoms, asset_geoms)
+        unresolved = None
+        try:
+            inter = shapely.intersection(cell_geoms, asset_geoms)
+        except Exception as exc:
+            inter, unresolved = _intersect_rowwise(cell_geoms, asset_geoms)
+            _note(
+                f"boundary-bleed filter: vectorised intersection failed "
+                f"({type(exc).__name__}: {str(exc)[:120]}); retried per row over {len(res):,} row(s)."
+            )
         crs = res.crs
-        if crs is not None and not crs.is_projected:
-            inter_areas = gpd.GeoSeries(inter, crs=crs).to_crs(3857).area.values
-        else:
-            inter_areas = shapely.area(inter)
+        measurable = np.array([g is not None for g in inter], dtype=bool)
+        inter_areas = np.zeros(len(inter), dtype="float64")
+        if measurable.any():
+            geoms = inter[measurable]
+            if crs is not None and not crs.is_projected:
+                inter_areas[measurable] = gpd.GeoSeries(geoms, crs=crs).to_crs(3857).area.values
+            else:
+                inter_areas[measurable] = shapely.area(geoms)
         keep = inter_areas >= _BOUNDARY_ONLY_OVERLAP_MIN_M2
+        if unresolved is not None and unresolved.any():
+            # Cannot judge these; keep them (the pre-fix behaviour) but say so —
+            # each one may be a boundary contact inflating sensitivity_max.
+            keep = keep | unresolved
+            _note(
+                f"boundary-bleed filter: {int(unresolved.sum()):,} of {len(res):,} row(s) could not be "
+                f"evaluated even after make_valid and were KEPT unfiltered; sensitivity_max may be "
+                f"overstated for those cells."
+            )
         return res.loc[keep].copy()
-    except Exception:
-        # Fall back to original behaviour rather than silently dropping rows.
+    except Exception as exc:
+        # Last-resort guard: keep prior behaviour, but never silently.
+        _note(
+            f"boundary-bleed filter failed entirely ({type(exc).__name__}: {str(exc)[:120]}); "
+            f"{len(res):,} row(s) kept unfiltered."
+        )
         return res
 
 
@@ -1918,7 +1977,7 @@ def _intersection_worker(args):
         try:
             res = gpd.sjoin(geocode_gdf, asset_df, how='inner', predicate=predicate)
             if predicate == 'intersects':
-                res = _drop_boundary_only_joins(res, asset_df)
+                res = _drop_boundary_only_joins(res, asset_df, logs=logs, idx=idx)
             res.drop(columns=[c for c in ['index_right','geometry_wkb','geometry_wkb_1','process'] if c in res.columns],
                      inplace=True, errors='ignore')
             try:
@@ -2005,7 +2064,7 @@ def _intersection_worker(args):
             try:
                 res = gpd.sjoin(geocode_gdf, af, how='inner', predicate=predicate)
                 if predicate == 'intersects':
-                    res = _drop_boundary_only_joins(res, af)
+                    res = _drop_boundary_only_joins(res, af, logs=logs, idx=idx)
                 res.drop(columns=[c for c in ['index_right','geometry_wkb','geometry_wkb_1','process'] if c in res.columns],
                          inplace=True, errors='ignore')
                 try:
