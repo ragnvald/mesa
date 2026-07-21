@@ -2687,7 +2687,6 @@ def _compute_owa_counts_from_stacked(df: pd.DataFrame, min_score: int = 1, max_s
 
 def _compute_index_owa_from_counts(
     tbl_flat: pd.DataFrame,
-    labels: pd.Series | None = None,
     min_score: int = 1,
     max_score: int = 25,
 ) -> pd.Series:
@@ -2695,6 +2694,15 @@ def _compute_index_owa_from_counts(
 
     Ranking is lexicographic on counts from max_score down to min_score.
     The highest-ranked cell gets 100, and cells with no overlaps get 0.
+
+    The ranking population is the WHOLE project — every geocode group pooled.
+    A cell's index therefore depends on which other geocode layers exist, and
+    coarse cells rank higher for reasons of cell size. A per-group parameter
+    used to exist here but never took effect.
+
+    NOTE: the published wiki (Indexes.md) still describes per-group ranking,
+    so code and documentation disagree; which one moves is an open method
+    question. See learning.md "Dead per-group ranking in index_owa".
     """
     if tbl_flat is None or len(tbl_flat) == 0:
         return pd.Series(dtype="Int64")
@@ -2708,42 +2716,30 @@ def _compute_index_owa_from_counts(
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
         df[c] = df[c].clip(lower=0)
 
-    if labels is None:
-        group_labels = pd.Series(["__all__"] * len(df), index=df.index, dtype="string")
-    else:
-        group_labels = labels.reindex(df.index).astype("string").fillna("__all__")
-
     result = pd.Series([0] * len(df), index=df.index, dtype="Int64")
 
-    # Group-wise dense rank on lexicographic ordering of count vectors
-    for _, idx in df.groupby(group_labels).groups.items():
-        sub = df.loc[idx]
-        if sub.empty:
-            continue
+    # If every row is all-zero, they all stay 0.
+    if (df.sum(axis=1) == 0).all():
+        return result
 
-        # If every row is all-zero, keep as 0.
-        if (sub.sum(axis=1) == 0).all():
-            result.loc[idx] = 0
-            continue
+    # Dense rank on the lexicographic ordering of the count vectors
+    sorted_df = df.sort_values(cols_desc, ascending=[False] * len(cols_desc), kind="mergesort")
+    arr = sorted_df.to_numpy()
+    is_new = np.ones(len(sorted_df), dtype=bool)
+    if len(sorted_df) > 1:
+        is_new[1:] = (arr[1:] != arr[:-1]).any(axis=1)
+    dense = np.cumsum(is_new)
+    max_dense = int(dense[-1])
 
-        sorted_sub = sub.sort_values(cols_desc, ascending=[False] * len(cols_desc), kind="mergesort")
-        arr = sorted_sub.to_numpy()
-        is_new = np.ones(len(sorted_sub), dtype=bool)
-        if len(sorted_sub) > 1:
-            is_new[1:] = (arr[1:] != arr[:-1]).any(axis=1)
-        dense = np.cumsum(is_new)
-        max_dense = int(dense[-1])
+    # Invert so best gets max_dense
+    rank_high = (max_dense - dense + 1).astype(float)
+    scaled = np.round((rank_high / max(max_dense, 1)) * 100.0)
+    scaled = np.clip(scaled, 1.0, 100.0).astype("int64")
 
-        # Invert so best gets max_dense
-        rank_high = (max_dense - dense + 1).astype(float)
-        scaled = np.round((rank_high / max(max_dense, 1)) * 100.0)
-        scaled = np.clip(scaled, 1.0, 100.0)
-        scaled = scaled.astype("int64")
-
-        out = pd.Series(scaled, index=sorted_sub.index, dtype="Int64")
-        # Force all-zero rows to 0
-        out.loc[sorted_sub.sum(axis=1) == 0] = 0
-        result.loc[out.index] = out
+    out = pd.Series(scaled, index=sorted_df.index, dtype="Int64")
+    # Force all-zero rows to 0
+    out.loc[sorted_df.sum(axis=1) == 0] = 0
+    result.loc[out.index] = out
 
     return result
 
@@ -3536,20 +3532,17 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
         metric = tbl_flat.to_crs("EPSG:3035")
         tbl_flat["area_m2"] = metric.geometry.area.astype("float64").round().astype("Int64")
 
-    # 6. Final Scores Scaling
-    group_map = None
+    # 6b. OWA index (precautionary addition) scaled 0..100, ranked over the whole
+    # project (see _compute_index_owa_from_counts and the wiki's Indexes page).
     try:
-        if "code" in tbl_flat.columns and "name_gis_geocodegroup" in tbl_flat.columns:
-            unique_groups = tbl_flat[["code", "name_gis_geocodegroup"]].drop_duplicates(subset=["code"])
-            group_map = unique_groups.set_index("code")["name_gis_geocodegroup"].astype("string")
-    except Exception:
-        group_map = None
-
-    # 6b. OWA index (precautionary addition) scaled 0..100
-    try:
-        owa = _compute_index_owa_from_counts(tbl_flat, group_map, min_score=1, max_score=25)
+        owa = _compute_index_owa_from_counts(tbl_flat, min_score=1, max_score=25)
         tbl_flat["index_owa"] = owa.reindex(tbl_flat.index).fillna(0)
-    except Exception:
+    except Exception as e:
+        # A zeroed analytical column is indistinguishable from "no overlaps
+        # anywhere", so never fail quietly here.
+        log_to_gui(log_widget,
+                   f"[tbl_flat] index_owa computation FAILED ({type(e).__name__}: {e}); "
+                   f"the column is written as 0 for all {len(tbl_flat):,} rows and must not be read as data.")
         tbl_flat["index_owa"] = 0
     tbl_flat["index_owa"] = pd.to_numeric(tbl_flat["index_owa"], errors="coerce").fillna(0).round().astype("Int64")
 
