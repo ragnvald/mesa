@@ -714,6 +714,38 @@ def run_data_process(
 
 # ---- Lines processing: integrated from code/lines_process.py (Parquet-only)
 
+def _repair_invalid_segments(segs, label: str):
+    """Repair invalid line segments instead of discarding them.
+
+    A dropped segment is a hole in that line's sensitivity profile which nothing
+    downstream reports, so repair first and drop only what make_valid cannot
+    save - and say so either way. Returns (segments, message_or_None).
+    """
+    from shapely.validation import make_valid
+    if segs is None or len(segs) == 0 or "geometry" not in segs.columns:
+        return segs, None
+    try:
+        bad = ~segs.is_valid
+        n_bad = int(bad.sum())
+        if not n_bad:
+            return segs, None
+        segs = segs.copy()
+        segs.loc[bad, "geometry"] = segs.loc[bad, "geometry"].apply(
+            lambda g: make_valid(g) if g is not None else None)
+        # make_valid can return a Point/LineString for a collapsed segment. Those
+        # are "valid" but carry no area, and a non-polygonal row in tbl_segments
+        # would travel on into the segment intersect - drop them.
+        still_bad = (segs.geometry.isna() | segs.geometry.is_empty | ~segs.is_valid
+                     | ~segs.geometry.geom_type.isin(["Polygon", "MultiPolygon"]))
+        n_lost = int(still_bad.sum())
+        if n_lost:
+            segs = segs[~still_bad]
+        return segs, (f"Segments {label}: repaired {n_bad - n_lost} invalid segment(s)"
+                      + (f"; dropped {n_lost} beyond repair" if n_lost else ""))
+    except Exception as e:
+        return segs, f"Segment validity pass failed {label}: {e}"
+
+
 def run_lines_process(
     base_dir: Path,
     cfg: configparser.ConfigParser,
@@ -729,6 +761,7 @@ def run_lines_process(
     from shapely import wkb as _shp_wkb
     from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
     from shapely.ops import polygonize, transform, unary_union
+    from shapely.validation import make_valid
 
     gpq = parquet_dir(base_dir, cfg)
 
@@ -1114,10 +1147,9 @@ def run_lines_process(
                 except Exception as e:
                     _log_line(base_dir, log_fn, f"Segmentation failed {name_gis}: {e}")
                     continue
-                try:
-                    segs = segs[segs.is_valid]
-                except Exception:
-                    pass
+                segs, seg_msg = _repair_invalid_segments(segs, name_gis)
+                if seg_msg:
+                    _log_line(base_dir, log_fn, seg_msg)
                 if segs.empty:
                     continue
                 segs["segment_id"] = [f"{name_gis}_{counter[name_gis] + i}" for i in range(len(segs))]
