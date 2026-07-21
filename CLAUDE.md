@@ -2,6 +2,12 @@
 
 Guidance for Claude (and any AI assistant) working in this repo.
 
+## Git: the user initiates commits and pushes
+
+Do not run `git commit` or `git push` on your own. Finish the work, leave the changes in the working tree, and *ask* — "should I commit this?" — then wait. A "yes" authorises that one action; it is not standing permission for the next one, and permission to commit is never permission to push.
+
+This holds even when the change is small, obviously correct, or already verified, and even when an earlier task in the same session ended in a commit. Attribute commits to the user only (`ragnvald@mindland.com`), no AI co-author trailer, and keep them granular: one purpose per commit, with a message that explains why.
+
 ## Where to put what
 
 - **Code comments**: explain the "what" and the technical "why" (hidden constraints, non-obvious invariants, references to a learning.md section). Keep them tight - a sentence or two max. Never write multi-paragraph comment blocks.
