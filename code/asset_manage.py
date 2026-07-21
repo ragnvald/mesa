@@ -165,7 +165,7 @@ def _ensure_cfg() -> configparser.ConfigParser:
     d.setdefault("workingprojection_epsg", "4326")
     d.setdefault("input_folder_asset", "input/asset")
     d.setdefault("asset_group_parquet_file", "tbl_asset_group.parquet")
-    d.setdefault("import_validate_geometries", "false")
+    d.setdefault("import_validate_geometries", "true")
     d.setdefault("import_simplify_geometries", "false")
     d.setdefault("import_simplify_tolerance_m", "1.0")
     d.setdefault("import_simplify_preserve_topology", "true")
@@ -253,7 +253,7 @@ def load_settings() -> dict:
         "input_folder_asset": d.get("input_folder_asset", "input/asset"),
         "working_epsg": int(d.get("workingprojection_epsg", "4326")),
         "asset_group_file": d.get("asset_group_parquet_file", "tbl_asset_group.parquet"),
-        "import_validate_geometries": _bool_setting(d.get("import_validate_geometries", "false"), False),
+        "import_validate_geometries": _bool_setting(d.get("import_validate_geometries", "true"), True),
         "import_simplify_geometries": _bool_setting(d.get("import_simplify_geometries", "false"), False),
         "import_simplify_tolerance_m": float(d.get("import_simplify_tolerance_m", "1.0")),
         "import_simplify_preserve_topology": _bool_setting(d.get("import_simplify_preserve_topology", "true"), True),

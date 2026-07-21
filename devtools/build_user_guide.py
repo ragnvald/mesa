@@ -573,10 +573,10 @@ def build_blocks():
 
     add(H(2, "5.5 What MESA does at import", "5.5 O que o MESA faz na importação"))
     add(OL(
-        ["Geometry validation — every geometry passes through make_valid() with a buffer(0) fallback.",
+        ["Geometry validation (on by default; \"Validate geometries\" in the import window) — every geometry passes through make_valid() with a buffer(0) fallback.",
          "Smart-key dissolve — classifies attribute columns as uniform or diverging; merges touching polygons that share uniform-attribute values.",
          "Buffer points and lines (always on for non-polygon inputs) — Points and LineStrings are buffered using default_point_buffer_m and default_line_buffer_m before intersection."],
-        ["Validação geométrica — toda a geometria passa por make_valid() com um buffer(0) como recurso.",
+        ["Validação geométrica (activa por omissão; \"Validate geometries\" na janela de importação) — toda a geometria passa por make_valid() com um buffer(0) como recurso.",
          "Dissolução por chave inteligente — classifica colunas de atributos como uniformes ou divergentes; combina polígonos contíguos que partilham valores uniformes.",
          "Amortecimento de pontos e linhas (sempre activo para entradas não-poligonais) — Pontos e LineStrings recebem um amortecimento usando default_point_buffer_m e default_line_buffer_m antes da intersecção."]))
 
