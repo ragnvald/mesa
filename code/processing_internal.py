@@ -1108,6 +1108,13 @@ def _auto_run_tiles_stage(minzoom, maxzoom):
         log_to_gui(log_widget, f"[Tiles] Skipped due to error: {e}")
         update_progress(100.0)
     finally:
+        # Refresh the per-geocode QGIS results project from the freshly written
+        # tbl_flat. Best-effort and self-guarded: must never affect run status.
+        try:
+            from qgis_results_project import build_results_project
+            build_results_project(base_dir(), log=lambda m: log_to_gui(log_widget, m))
+        except Exception as e:
+            log_to_gui(log_widget, f"[QGIS] Results project step skipped: {e}")
         _update_status_phase("completed")
         try:
             log_to_gui(log_widget, "[Process] COMPLETED")
