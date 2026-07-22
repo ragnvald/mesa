@@ -1192,6 +1192,8 @@ HTML = r"""<!doctype html>
   .assetlist{max-height:240px;overflow:auto;margin:4px 0}
   .assetlist label{display:flex;align-items:center;gap:6px;margin:2px 0;font-size:12px;cursor:pointer}
   .assetlist .sw{flex:0 0 auto}
+  .assetall{float:right;font-weight:normal;font-size:11px;color:#5c4a2f;cursor:pointer}
+  .assetall input{vertical-align:middle;margin-right:3px}
   .pbtn{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-right:6px}
   .pbtn:hover{background:#eadbbd}
   .pbtn:active{transform:translateY(1px)}
@@ -1256,7 +1258,8 @@ HTML = r"""<!doctype html>
         <div class="mapctl">
           <div class="mapctl-hd"><span>Layers</span><span class="mapctl-arrow">▾</span></div>
           <div class="mapctl-body">
-            <div class="ctlrow"><b>Asset groups</b> <span class="muted">(none selected)</span></div>
+            <div class="ctlrow"><b>Asset groups</b>
+              <label class="assetall" title="Turn all asset layers on or off"><input type="checkbox" id="assetAll"> all</label></div>
             <div id="assetList" class="assetlist muted">…</div>
             <div class="ctlrow"><b>Basemap</b><br>
               <select id="assetBasemap">
@@ -1608,15 +1611,37 @@ HTML = r"""<!doctype html>
       list.forEach(function(g){
         assetGroups[g.gid]=g;
         var lab=document.createElement('label');
+        lab.dataset.gid=g.gid;
         var cnt=(g.count!=null)?(' ('+Number(g.count).toLocaleString()+')'):'';
         lab.innerHTML='<input type="checkbox"><span class="sw" style="background:'+g.color+'"></span>'+
                       g.label+'<span class="muted">'+cnt+'</span>';
         var cb=lab.querySelector('input');
         assetSwatches[g.gid]=lab.querySelector('.sw');
-        cb.addEventListener('change', function(){ toggleAsset(g, this.checked, this); });
+        cb.addEventListener('change', function(){ toggleAsset(g, this.checked, this); syncAssetAll(); });
         box.appendChild(lab);
       });
+      var allcb=document.getElementById('assetAll');
+      if(allcb){ allcb.checked=false; allcb.indeterminate=false;
+        allcb.onchange=function(){ setAllAssets(this.checked); }; }
     });
+  }
+  // Reflect the master switch: checked if every group is on, indeterminate if some.
+  function syncAssetAll(){
+    var allcb=document.getElementById('assetAll'); if(!allcb) return;
+    var cbs=document.querySelectorAll('#assetList label input[type=checkbox]');
+    if(!cbs.length){ allcb.checked=false; allcb.indeterminate=false; return; }
+    var on=0; cbs.forEach(function(c){ if(c.checked) on++; });
+    allcb.checked = on===cbs.length;
+    allcb.indeterminate = on>0 && on<cbs.length;
+  }
+  // Master switch: turn every asset layer on or off, reusing each row's own path.
+  function setAllAssets(on){
+    document.querySelectorAll('#assetList label').forEach(function(lab){
+      var cb=lab.querySelector('input[type=checkbox]'); var g=assetGroups[lab.dataset.gid];
+      if(!cb || !g || cb.checked===on) return;
+      cb.checked=on; toggleAsset(g, on, cb);
+    });
+    syncAssetAll();
   }
   // Re-read effective colours (after styling/clear) and apply to swatches + layers.
   function refreshAssetColors(){
