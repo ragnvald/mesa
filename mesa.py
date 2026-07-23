@@ -1171,17 +1171,100 @@ def create_backup_archive(
         log_to_logfile(f"Created backup archive: {zip_path}")
     return str(zip_path)
 
-def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) -> None:
+def _read_config_mesa_version(text: str) -> "str | None":
+    """Extract the mesa_version value from raw config.ini text.
+
+    Line-based rather than configparser: config.ini uses '#' as hex-colour DATA
+    elsewhere, which a plain parser mishandles. mesa_version itself is a simple
+    value, so a targeted match is both safe and robust.
+    """
+    m = re.search(r'(?mi)^\s*mesa_version\s*=\s*(.+?)\s*$', text or "")
+    if not m:
+        return None
+    val = m.group(1).split('#', 1)[0].strip()
+    return val or None
+
+
+def _archive_mesa_version(zip_path: str) -> "str | None":
+    """The mesa_version recorded in a backup's config.ini, or None."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            member = "config.ini" if "config.ini" in names else next(
+                (n for n in names if n.endswith("/config.ini")), None)
+            if not member:
+                return None
+            return _read_config_mesa_version(zf.read(member).decode("utf-8", "ignore"))
+    except Exception:
+        return None
+
+
+def _archive_has_geoparquet_output(zip_path: str) -> bool:
+    """True if the backup carries processed output (so 'upgrade in place' is even
+    an option). Input-only backups have none, so re-import is their only path."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return any(n.startswith("output/geoparquet/") and n.endswith(".parquet")
+                       for n in zf.namelist())
+    except Exception:
+        return False
+
+
+def _version_tuple(s) -> tuple:
+    return tuple(int(p) for p in re.findall(r'\d+', str(s or ""))[:3])
+
+
+def _version_is_older(a, b) -> bool:
+    """Is version a older than b? Pads so '5.3' < '5.6.0' compares correctly."""
+    ta, tb = _version_tuple(a), _version_tuple(b)
+    n = max(len(ta), len(tb), 1)
+    return ta + (0,) * (n - len(ta)) < tb + (0,) * (n - len(tb))
+
+
+def _stamp_config_version(cfg_path: Path, version: str) -> bool:
+    """Rewrite the mesa_version value in a config.ini in place, preserving every
+    other byte. Returns True if a mesa_version line was found and updated."""
+    try:
+        text = cfg_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    new, n = re.subn(r'(?mi)^(\s*mesa_version\s*=\s*).*$',
+                     lambda m: m.group(1) + version, text)
+    if n == 0:
+        return False
+    try:
+        cfg_path.write_text(new, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def restore_backup_archive(base_dir: str, zip_path: str, *, mode: str = "as_is",
+                           stamp_version: "str | None" = None, progress_cb=None) -> None:
+    """Restore a backup into base_dir.
+
+    mode:
+      "as_is"   — restore input/, output/, config.ini as stored (same-version).
+      "upgrade" — like as_is, then stamp mesa_version to the running version
+                  (keeps the stored, older-computed results; values may predate
+                  fixes).
+      "reimport"— restore input/ + config.ini but NOT output/, then stamp
+                  mesa_version. The operator re-runs Process to regenerate a
+                  current-version result from the raw inputs.
+    See learning.md "Opening old backups in a newer MESA".
+    """
     base = Path(base_dir)
     zip_file = Path(zip_path)
     if not zip_file.is_file():
         raise FileNotFoundError(zip_path)
+    include_output = (mode != "reimport")
     with zipfile.ZipFile(zip_file, mode="r") as zf:
         safe_members = _safe_zip_member_names(zf.namelist())
         to_extract = [
             m for m in safe_members
             if m == "config.ini" or m == DEMO_README_MEMBER
-            or m.startswith("input/") or m.startswith("output/")
+            or m.startswith("input/")
+            or (include_output and m.startswith("output/"))
             or m.startswith("secrets/")  # restored only if the backup opted to include it
             or m.startswith("qgis/")     # a package may ship qgis/mesa_results.qgz (or mesa.qgz)
         ]
@@ -1236,8 +1319,14 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
                     progress_cb(i, total, member)
                 except Exception:
                     pass
+    if stamp_version:
+        ok = _stamp_config_version(base / "config.ini", stamp_version)
+        log_to_logfile(
+            f"Restore [{mode}]: stamped mesa_version={stamp_version} "
+            f"({'ok' if ok else 'no mesa_version line found — left unchanged'})"
+        )
     check_and_create_folders()
-    log_to_logfile(f"Restored backup archive: {zip_file}")
+    log_to_logfile(f"Restored backup archive: {zip_file} (mode={mode})")
 
 
 # ---------------------------------------------------------------------
@@ -5087,14 +5176,79 @@ class MesaMainWindow(QMainWindow):
         )
         if not zip_path:
             return
-        confirm = QMessageBox.question(
-            self, "Confirm restore",
-            "Restoring backup will delete and replace current input/, output/, and config.ini.\n\n"
-            "Do you want to continue?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
-            return
+
+        # Version-aware restore. An older backup's schema is compatible with the
+        # current reader (columns are a superset), but its *values* predate this
+        # version's fixes, so offer to regenerate. See learning.md "Opening old
+        # backups in a newer MESA".
+        try:
+            cur_ver = _read_config_mesa_version(
+                (Path(original_working_directory) / "config.ini").read_text(encoding="utf-8")
+            ) or ""
+        except Exception:
+            cur_ver = ""
+        arch_ver = _archive_mesa_version(zip_path)
+        restore_mode = "as_is"
+        stamp_ver = None
+
+        if arch_ver and cur_ver and _version_is_older(arch_ver, cur_ver):
+            has_output = _archive_has_geoparquet_output(zip_path)
+            if not has_output:
+                # Input-only backup: there are no stored results to keep, so
+                # re-import is the only path.
+                confirm = QMessageBox.question(
+                    self, "Older backup — re-import",
+                    f"This backup was made with MESA {arch_ver}; you are running {cur_ver}.\n\n"
+                    "It contains source data only (no processed results), so MESA will restore "
+                    "the inputs and mark them current. Run Process afterwards to generate results "
+                    "in this version.\n\n"
+                    "This replaces current input/, output/ and config.ini. Continue?",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if confirm != QMessageBox.Yes:
+                    return
+                restore_mode, stamp_ver = "reimport", cur_ver
+            else:
+                box = QMessageBox(self)
+                box.setWindowTitle("Older MESA backup")
+                box.setIcon(QMessageBox.Question)
+                box.setText(
+                    f"This backup was made with MESA {arch_ver}; you are running {cur_ver}.\n\n"
+                    "How do you want to open it?"
+                )
+                box.setInformativeText(
+                    "Re-import from inputs (recommended): restore the source data and regenerate "
+                    "results in the current version — you run Process afterwards. Slower, but the "
+                    "numbers reflect this version's fixes.\n\n"
+                    "Upgrade in place: keep the stored results and mark them current. Fast, but "
+                    "the values were computed by MESA " + str(arch_ver) + " and may predate fixes.\n\n"
+                    "Either way this replaces current input/, output/ and config.ini."
+                )
+                b_reimport = box.addButton("Re-import from inputs", QMessageBox.AcceptRole)
+                b_upgrade = box.addButton("Upgrade in place", QMessageBox.DestructiveRole)
+                b_cancel = box.addButton(QMessageBox.Cancel)
+                box.setDefaultButton(b_reimport)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is b_cancel or clicked is None:
+                    return
+                if clicked is b_reimport:
+                    restore_mode, stamp_ver = "reimport", cur_ver
+                else:
+                    restore_mode, stamp_ver = "upgrade", cur_ver
+            log_to_logfile(
+                f"Restore: archive MESA {arch_ver} < running {cur_ver}; "
+                f"operator chose mode={restore_mode}."
+            )
+        else:
+            confirm = QMessageBox.question(
+                self, "Confirm restore",
+                "Restoring backup will delete and replace current input/, output/, and config.ini.\n\n"
+                "Do you want to continue?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
 
         progress = self._make_archive_progress_dialog(
             "Restore in progress", "Importing"
@@ -5122,6 +5276,14 @@ class MesaMainWindow(QMainWindow):
             # drops any stale copy first, so this can only be THIS archive's readme.
             readme = Path(original_working_directory) / DEMO_README_MEMBER
             text = f"Backup restore completed successfully.\n\nFrom: {zip_path}"
+            if restore_mode == "reimport":
+                text += ("\n\nSource data restored and marked as MESA " + str(stamp_ver) +
+                         ". No results yet — run Process (Workflows → Process) to generate them "
+                         "in this version.")
+            elif restore_mode == "upgrade":
+                text += ("\n\nMarked as MESA " + str(stamp_ver) + ", keeping the stored results. "
+                         "Those numbers were computed by MESA " + str(arch_ver) +
+                         "; re-import (restore again, choose Re-import) for this version's fixes.")
             extra = None
             if readme.is_file():
                 text += ("\n\nThis package includes a description (sources, credits "
@@ -5152,6 +5314,7 @@ class MesaMainWindow(QMainWindow):
             try:
                 restore_backup_archive(
                     original_working_directory, zip_path,
+                    mode=restore_mode, stamp_version=stamp_ver,
                     progress_cb=lambda i, n, m: signals.progress.emit(i, n, m),
                 )
                 signals.finished.emit("")
