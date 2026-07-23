@@ -163,6 +163,12 @@ def build_main(distpath: Path, clean: bool) -> Path:
     sysres = CODE_DIR / "system_resources"
     if sysres.is_dir():
         data_args += add_data(sysres, "system_resources")
+    # Bundle config.ini as a read-only template. mesa.py seeds it into the
+    # writable working dir (~/Documents/MESA) on first run — the app itself is
+    # never written to (keeps the signature/notarization intact).
+    cfg = REPO_ROOT / "config.ini"
+    if cfg.is_file():
+        data_args += add_data(cfg, ".")
 
     # BASE_EXCLUDES (not MAIN_EXCLUDES) keeps scipy, which segmentation_setup
     # needs now that it runs in-binary via re-exec.
@@ -186,7 +192,6 @@ def build_main(distpath: Path, clean: bool) -> Path:
     run_pyinstaller(args)
     app = distpath / f"{APP_NAME}.app"
     print(f"[build_mac] built {app.name} in {time.perf_counter() - t0:.1f}s")
-    _place_config(app)
     return app
 
 
@@ -240,24 +245,6 @@ def build_helpers(app: Path, distpath: Path, clean: bool, only: list[str] | None
         shutil.copytree(produced, dest, symlinks=True)
         strip_qt_dev_tools(dest)  # drop Qt dev tools from each helper too
         print(f"[build_mac] helper '{name}' → {dest} in {time.perf_counter() - t0:.1f}s")
-
-
-def _place_config(app: Path) -> None:
-    """Copy config.ini next to the frozen executable, where mesa.py's
-    _bootstrap_config() looks (PROJECT_BASE == dirname(sys.executable) when
-    frozen). Mirrors build_all.py copying config.ini next to mesa.exe.
-
-    NOTE (Phase 3): a signed/notarized bundle is read-only, so config.ini
-    living inside Contents/MacOS/ can't be user-edited or written back. Proper
-    macOS behaviour is config in the working dir or ~/Library/Application
-    Support — that needs a config_file resolution change in mesa.py."""
-    for src in (REPO_ROOT / "config.ini", CODE_DIR / "config.ini"):
-        if src.is_file():
-            dst = app / "Contents" / "MacOS" / "config.ini"
-            shutil.copy2(src, dst)
-            print(f"[build_mac] placed config.ini → {dst}")
-            return
-    print("[build_mac] WARNING: no config.ini found to place in bundle")
 
 
 # PyInstaller ships each Qt dev tool twice: a "<Name>.app" symlink pointing at

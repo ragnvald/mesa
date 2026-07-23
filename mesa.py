@@ -1689,8 +1689,20 @@ def _format_system_capabilities_for_about(row: dict | None) -> str:
 # ---------------------------------------------------------------------
 # Main setup
 # ---------------------------------------------------------------------
-original_working_directory = PROJECT_BASE
-config_file = os.path.join(PROJECT_BASE, "config.ini")
+def _resolve_working_dir() -> str:
+    # A notarized macOS .app is read-only, so the frozen Mac build keeps its
+    # writable data (config, log, input/output, qgis) in ~/Documents/MESA rather
+    # than next to the executable. Windows and source runs are unchanged:
+    # original_working_directory stays PROJECT_BASE, so config_file below is
+    # byte-for-byte the old PROJECT_BASE/config.ini there.
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        d = os.path.join(os.path.expanduser("~"), "Documents", "MESA")
+        os.makedirs(d, exist_ok=True)
+        return d
+    return PROJECT_BASE
+
+original_working_directory = _resolve_working_dir()
+config_file = os.path.join(original_working_directory, "config.ini")
 gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
 
 # Populated by _bootstrap_config(), which only runs in the main process. Nothing
@@ -1734,6 +1746,17 @@ def _bootstrap_config() -> None:
     global config, mesa_version, mesa_version_display
     global packaged_build_info, packaged_build_timestamp
 
+    if not os.path.exists(config_file):
+        # First run in a fresh working dir (e.g. macOS ~/Documents/MESA): seed
+        # from the config.ini bundled in the app as a template. On Windows/dev
+        # the template resolves to config_file itself, so this is a no-op.
+        try:
+            template = resolve_path("config.ini")
+            if os.path.exists(template) and os.path.abspath(template) != os.path.abspath(config_file):
+                os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                shutil.copy2(template, config_file)
+        except Exception:
+            pass
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Configuration not found: {config_file}")
     config = read_config(config_file)
