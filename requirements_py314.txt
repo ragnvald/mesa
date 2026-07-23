@@ -1,15 +1,15 @@
-# MESA — Python 3.14 environment, macOS/arm64 (validated 2026-06-24).
+# MESA — Python 3.14 environment (validated 2026-06-24). Cross-platform.
 #
-# This file is macOS-specific: it pins the pyobjc-* webview backend, which
-# does NOT install on Windows/Linux. On Windows use requirements_py314_win.txt
-# instead (same versions, pyobjc dropped — pywebview pulls EdgeChromium there).
+# Single base file for macOS/arm64 and Windows/win_amd64. The only platform
+# difference is the pywebview backend: macOS uses pyobjc-* (Cocoa/WebKit),
+# marked `; sys_platform == "darwin"` so pip skips them on Windows, where
+# pywebview pulls EdgeChromium transitively. All other pins are identical.
 #
 # Exact pinned set from the .venv314 that ran a full basic_mosaic pipeline on
-# CPython 3.14 (macOS arm64). Setup on a fresh Mac:
+# CPython 3.14. Setup on a fresh machine:
 #
-#   python3.14 -m venv .venv314
-#   .venv314/bin/python -m pip install -U pip
-#   .venv314/bin/python -m pip install -r requirements_py314.txt
+#   macOS:    python3.14 -m venv .venv314 && .venv314/bin/python -m pip install -r requirements_py314.txt
+#   Windows:  py -V:3.14 -m venv .venv314 && .venv314\Scripts\python -m pip install -r requirements_py314.txt
 #
 # Notes:
 # - pyogrio replaces fiona (fiona has no cp314 wheel; pyogrio bundles GDAL and does).
@@ -47,12 +47,12 @@ pillow==12.3.0
 proxy_tools==0.1.0
 psutil==7.2.2
 pyarrow==24.0.0
-pyobjc-core==12.2.1
-pyobjc-framework-Cocoa==12.2.1
-pyobjc-framework-Quartz==12.2.1
-pyobjc-framework-Security==12.2.1
-pyobjc-framework-UniformTypeIdentifiers==12.2.1
-pyobjc-framework-WebKit==12.2.1
+pyobjc-core==12.2.1 ; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.1 ; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.2.1 ; sys_platform == "darwin"
+pyobjc-framework-Security==12.2.1 ; sys_platform == "darwin"
+pyobjc-framework-UniformTypeIdentifiers==12.2.1 ; sys_platform == "darwin"
+pyobjc-framework-WebKit==12.2.1 ; sys_platform == "darwin"
 pyogrio==0.12.1
 pyparsing==3.3.2
 pyproj==3.7.2

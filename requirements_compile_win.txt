@@ -5,9 +5,9 @@
 # and the setuptools/pkg_resources shims that frozen builds load at runtime.
 #
 # fiona is intentionally absent (no cp314 wheel) — pyogrio bundles GDAL and is
-# what build_all.py now --collect-all's. See requirements_py314_win.txt.
+# what build_all.py now --collect-all's. See requirements_py314.txt.
 
--r requirements_py314_win.txt
+-r requirements_py314.txt
 
 # Build toolchain. Pinned to the set that produced the first green 3.14 frozen
 # build (2026-07-17, CPython 3.14.6): full clean build_all.py in 7m16s, and the

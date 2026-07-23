@@ -43,7 +43,7 @@ Use this document as the first stop before editing the `mesa` repository. Update
    - Development: `.venv` with `requirements_py314_win.txt`
    - Compilation: `.venv_compile` with `requirements_compile_win.txt`
 3. To bootstrap both on Windows, run: `devtools\setup_venvs.bat`
-4. `requirements_py314_win.txt` is the canonical Windows runtime/development set; the compile set pulls it in via `-r`.
+4. `requirements_py314.txt` is the canonical runtime/development set for both macOS and Windows (pyobjc is macOS-only via environment markers); the compile set pulls it in via `-r`.
 5. Launch the UI with development venv Python: `python mesa.py`.
 6. Keep ttkbootstrap as the primary UI framework; discuss before adding new GUI toolkits.
 

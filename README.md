@@ -160,7 +160,7 @@ Recommended setup:
 4. Run the launcher with `python mesa.py`.
 
 Important requirements files:
-- [requirements_py314_win.txt](requirements_py314_win.txt): primary Windows runtime/development environment (Python 3.14)
+- [requirements_py314.txt](requirements_py314.txt): runtime/development environment, Python 3.14 (macOS + Windows; pyobjc is macOS-only via markers)
 - [requirements_compile_win.txt](requirements_compile_win.txt): compile/build environment (runtime set + PyInstaller)
 
 ## Build Model

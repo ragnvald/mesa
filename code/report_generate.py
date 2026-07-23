@@ -59,7 +59,7 @@ except ModuleNotFoundError as exc:
         "Install it in the same environment that runs MESA, for example:\n"
         "  pip install python-docx\n\n"
         "If you use the bundled MESA requirements, add/install it from:\n"
-        "  requirements_compile_win.txt (or requirements_py314_win.txt)\n\n"
+        "  requirements_compile_win.txt (or requirements_py314.txt)\n\n"
         f"Original error: {exc}"
     )
     print(msg, file=sys.stderr, flush=True)
