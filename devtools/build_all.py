@@ -709,6 +709,7 @@ MESA_INPROCESS_HIDDEN_IMPORTS: list[str] = [
     "--hidden-import", "mesa_constants",
     "--hidden-import", "analysis_setup",   # imported by processing_pipeline_run
     "--hidden-import", "mesa_osm_tiles",   # optional shared helper
+    "--hidden-import", "qgis_results_project",  # lazy import in processing_internal's tiles finally
     # matplotlib TkAgg backend (needed by atlas_manage + analysis_present)
     "--hidden-import", "matplotlib.backends.backend_tkagg",
     "--hidden-import", "matplotlib.backends.backend_agg",
