@@ -40,7 +40,7 @@ Use this document as the first stop before editing the `mesa` repository. Update
 ## 3. Environment & tooling
 1. Use Python 3.14 (matches the packaged interpreter bundled in releases).
 2. Use dedicated Windows venvs:
-   - Development: `.venv` with `requirements_py314_win.txt`
+   - Development: `.venv` with `requirements_py314.txt`
    - Compilation: `.venv_compile` with `requirements_compile_win.txt`
 3. To bootstrap both on Windows, run: `devtools\setup_venvs.bat`
 4. `requirements_py314.txt` is the canonical runtime/development set for both macOS and Windows (pyobjc is macOS-only via environment markers); the compile set pulls it in via `-r`.

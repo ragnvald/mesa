@@ -12,7 +12,7 @@ set "REPO_ROOT=%SCRIPT_PATH%\.."
 set "DEV_VENV=%REPO_ROOT%\.venv"
 set "COMPILE_VENV=%REPO_ROOT%\.venv_compile"
 
-set "DEV_REQ=%REPO_ROOT%\requirements_py314_win.txt"
+set "DEV_REQ=%REPO_ROOT%\requirements_py314.txt"
 set "COMPILE_REQ=%REPO_ROOT%\requirements_compile_win.txt"
 
 call :setup_one "%DEV_VENV%" "%DEV_REQ%" "development"
