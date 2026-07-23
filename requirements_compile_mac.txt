@@ -1,0 +1,27 @@
+# MESA — macOS compile/build environment, Python 3.14 (arm64, Apple Silicon).
+# Used by devtools/build_mac.py. macOS counterpart of requirements_compile_win.txt.
+#
+# Installs the validated 3.14 runtime set, then the PyInstaller build toolchain
+# and the setuptools/pkg_resources shims that frozen builds load at runtime.
+#
+# Unlike Windows, no Tk is bundled: this environment's Python has no _tkinter,
+# and MESA renders through PySide6 (QtAgg) + Agg. build_mac.py excludes tkinter.
+#
+# fiona is intentionally absent — pyogrio bundles GDAL and is what the build
+# --collect-all's. See requirements_py314.txt.
+
+-r requirements_py314.txt
+
+# Build toolchain. Same pins as the Windows build (first green 3.14 frozen build).
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+
+# setuptools/pkg_resources runtime deps needed inside frozen builds (pure-python).
+# Mirror build_mac.py PKG_RESOURCES_HIDDEN_IMPORTS.
+jaraco.text
+jaraco.functools
+jaraco.context
+more-itertools
+platformdirs
+autocommand
+backports.tarfile
