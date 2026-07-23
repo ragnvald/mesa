@@ -119,6 +119,20 @@ MESA_INPROCESS_HIDDEN_IMPORTS = [
     "--hidden-import", "matplotlib.backends.backend_agg",
 ]
 
+# On macOS the subprocess helpers run via re-exec of the main binary
+# (mesa --run-helper <name>), not as separate bundles, so the main app must
+# import them and their extra deps. This makes the main app a bit larger but
+# removes ~3 full duplicated stacks (~2.5 GB saved). See mesa.py _maybe_run_helper.
+RUN_HELPER_IMPORTS = [
+    "--hidden-import", "combined_map",
+    "--hidden-import", "segmentation_setup",
+    "--hidden-import", "special_focus",
+    # segmentation_setup needs the sklearn/scipy stack; special_focus uses pywebview.
+    "--collect-all", "sklearn",
+    "--collect-all", "scipy",
+    "--collect-all", "webview",
+]
+
 
 def run_pyinstaller(args: list[str]) -> None:
     # PyInstaller's analysis recurses past Python's default 1000-frame limit on
@@ -150,8 +164,10 @@ def build_main(distpath: Path, clean: bool) -> Path:
     if sysres.is_dir():
         data_args += add_data(sysres, "system_resources")
 
+    # BASE_EXCLUDES (not MAIN_EXCLUDES) keeps scipy, which segmentation_setup
+    # needs now that it runs in-binary via re-exec.
     args = (
-        flags + COLLECTS + MAIN_EXCLUDES
+        flags + COLLECTS + RUN_HELPER_IMPORTS + BASE_EXCLUDES
         + [
             "--name", APP_NAME,
             "--distpath", str(distpath),
@@ -191,11 +207,11 @@ def build_helpers(app: Path, distpath: Path, clean: bool, only: list[str] | None
         # segmentation needs a working sklearn/scipy stack; others don't.
         excludes = BASE_EXCLUDES if name == "segmentation_setup" else MAIN_EXCLUDES
         extra = ["--collect-all", "sklearn", "--collect-all", "scipy"] if name == "segmentation_setup" else []
-        # onedir (NOT --windowed): produces a plain <name>/ folder with the
-        # executable and _internal/ adjacent, so the Python dylib resolves and
-        # the layout is codesign-clean. mesa.py resolves system/<name>/<name>.
-        # The helper is launched as a subprocess, so it needs no .app wrapper.
-        flags = ["--noconfirm", "--log-level=WARN"]
+        # --windowed onedir → a proper <name>.app bundle. codesign recognizes a
+        # nested .app and seals it recursively; a bare onedir folder under
+        # Contents/MacOS/ cannot be sealed (notarization blocker). mesa.py
+        # resolves system/<name>.app/Contents/MacOS/<name>.
+        flags = ["--windowed", "--noconfirm", "--log-level=WARN"]
         if clean:
             flags.append("--clean")
         args = (
@@ -209,16 +225,20 @@ def build_helpers(app: Path, distpath: Path, clean: bool, only: list[str] | None
             ]
             + PKG_RESOURCES_HIDDEN_IMPORTS + [str(pyfile)]
         )
+        icon = resolve_icon()
+        if icon is not None:
+            args[0:0] = ["--icon", str(icon)]
         run_pyinstaller(args)
 
-        onedir = staging / name  # PyInstaller onedir output folder
-        dest = system_dir / name
+        produced = staging / f"{name}.app"  # PyInstaller --windowed bundle
+        dest = system_dir / f"{name}.app"
         if dest.exists():
             shutil.rmtree(dest)
-        if not onedir.is_dir():
-            print(f"[build_mac] WARNING: expected onedir output missing: {onedir}")
+        if not produced.is_dir():
+            print(f"[build_mac] WARNING: expected .app output missing: {produced}")
             continue
-        shutil.copytree(onedir, dest, symlinks=True)
+        shutil.copytree(produced, dest, symlinks=True)
+        strip_qt_dev_tools(dest)  # drop Qt dev tools from each helper too
         print(f"[build_mac] helper '{name}' → {dest} in {time.perf_counter() - t0:.1f}s")
 
 
@@ -240,66 +260,109 @@ def _place_config(app: Path) -> None:
     print("[build_mac] WARNING: no config.ini found to place in bundle")
 
 
-def _is_macho(p: Path) -> bool:
-    try:
-        with open(p, "rb") as f:
-            magic = f.read(4)
-    except Exception:
-        return False
-    # arm64 thin (cf fa ed fe) or universal/fat (ca fe ba be / be ba fe ca).
-    return magic in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+# PyInstaller ships each Qt dev tool twice: a "<Name>.app" symlink pointing at
+# the real "<Name>__dot__app" directory (its '.'→'__dot__' name mangling).
+# Strip both forms, or the real dir's dangling internal symlinks break
+# codesign --verify.
+QT_DEV_APPS = (
+    "Assistant.app", "Designer.app", "Linguist.app",
+    "Assistant__dot__app", "Designer__dot__app", "Linguist__dot__app",
+)
 
 
-def _codesign(path: Path) -> tuple[int, str]:
-    r = subprocess.run(
-        ["codesign", "--force", "--timestamp=none", "--sign", "-", str(path)],
-        capture_output=True, text=True,
-    )
+def strip_qt_dev_tools(app: Path) -> int:
+    """Remove the PySide6 developer-tool .app bundles (Qt Designer/Assistant/
+    Linguist). MESA never uses them, and their symlinked Contents/MacOS breaks
+    codesign ('main executable must be a regular file' / verify 'No such file').
+
+    PyInstaller cross-links Frameworks/ and Resources/, so a match can be either
+    a symlink (unlink) or the real directory (rmtree) — shutil.rmtree refuses a
+    symlink, which silently no-op'd the old version. Walk without following
+    symlinks and handle both. Returns count removed."""
+    targets = set(QT_DEV_APPS)
+    removed = 0
+    for root, dirs, _files in os.walk(app, followlinks=False):
+        for entry in list(dirs):
+            if entry in targets:
+                p = Path(root) / entry
+                if p.is_symlink():
+                    p.unlink()
+                else:
+                    shutil.rmtree(p, ignore_errors=True)
+                removed += 1
+                dirs.remove(entry)  # don't descend into what we just removed
+    return removed
+
+
+def _codesign_deep(bundle: Path, identity: str, entitlements: Path | None,
+                   runtime: bool, timestamp: bool) -> tuple[int, str]:
+    """One --deep pass over a bundle. --deep recurses all nested Mach-O in a
+    single process (fast; no per-file network round-trips) and, because the
+    helpers are now proper nested .app bundles, seals them recursively."""
+    cmd = ["codesign", "--force", "--deep", "--sign", identity]
+    if runtime:
+        cmd += ["--options", "runtime"]
+    cmd += ["--timestamp"] if timestamp else ["--timestamp=none"]
+    if entitlements is not None:
+        cmd += ["--entitlements", str(entitlements)]
+    cmd.append(str(bundle))
+    r = subprocess.run(cmd, capture_output=True, text=True)
     return r.returncode, r.stderr.strip()
 
 
-def adhoc_sign(app: Path) -> None:
-    """Ad-hoc, inside-out signature so Gatekeeper lets it launch locally.
-    `codesign --deep` chokes on the PyInstaller onedir helpers embedded under
-    Contents/MacOS/system/, so sign the nested Mach-O binaries deepest-first,
-    then the outer bundle. Replace with a Developer ID + notarization for
-    distribution — see devtools/MAC_BUILD.md (Phase 3)."""
+def sign_bundle(app: Path, identity: str, entitlements: Path | None,
+                runtime: bool, timestamp: bool) -> None:
+    """Sign each nested helper .app first (so they get hardened runtime +
+    entitlements of their own), then the main bundle. Pass a real
+    'Developer ID Application: …' identity for a notarizable build; '-' is a
+    local ad-hoc signature. `timestamp=False` skips the (slow, networked)
+    secure timestamp — use it for fast local validation, on for notarization."""
+    strip_qt_dev_tools(app)
     system = app / "Contents" / "MacOS" / "system"
-    if system.is_dir():
-        machos = [p for p in system.rglob("*")
-                  if p.is_file() and not p.is_symlink() and _is_macho(p)]
-        machos.sort(key=lambda p: len(p.parts), reverse=True)  # deepest first
-        failed = 0
-        for m in machos:
-            rc, err = _codesign(m)
-            if rc != 0:
-                failed += 1
-        print(f"[build_mac] signed {len(machos) - failed}/{len(machos)} nested helper binaries")
-    rc, err = _codesign(app)
+    helpers = sorted(system.glob("*.app")) if system.is_dir() else []
+    for h in helpers:
+        rc, err = _codesign_deep(h, identity, entitlements, runtime, timestamp)
+        print(f"[build_mac] helper {h.name}: {'signed' if rc == 0 else 'FAILED — ' + err}")
+    rc, err = _codesign_deep(app, identity, entitlements, runtime, timestamp)
     if rc == 0:
-        print(f"[build_mac] ad-hoc signed {app.name}")
+        print(f"[build_mac] signed {app.name} ({'Developer ID' if identity != '-' else 'ad-hoc'}"
+              f"{', timestamped' if timestamp else ''})")
     else:
-        print(f"[build_mac] ad-hoc sign warning (outer bundle): {err}")
+        print(f"[build_mac] bundle sign FAILED: {err}")
+
+
+def adhoc_sign(app: Path) -> None:
+    sign_bundle(app, "-", None, runtime=False, timestamp=False)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build macOS mesa.app")
     ap.add_argument("--distpath", default=str(REPO_ROOT / "dist_mac"),
                     help="output dir for mesa.app (default: <repo>/dist_mac)")
-    ap.add_argument("--no-helpers", action="store_true", help="skip subprocess helpers")
-    ap.add_argument("--helpers", default="", help="comma list of helpers to build (subset)")
-    ap.add_argument("--no-sign", action="store_true", help="skip ad-hoc codesign")
+    ap.add_argument("--separate-helpers", action="store_true",
+                    help="legacy: build helpers as separate nested .app bundles "
+                         "instead of embedding them in the main binary (re-exec)")
+    ap.add_argument("--helpers", default="", help="comma list of helpers (with --separate-helpers)")
+    ap.add_argument("--no-sign", action="store_true", help="skip codesign")
+    ap.add_argument("--sign-id", default="-",
+                    help="codesign identity (default '-' = ad-hoc; pass "
+                         "'Developer ID Application: … (TEAMID)' for a notarizable build)")
+    ap.add_argument("--timestamp", action="store_true",
+                    help="secure (networked) timestamp — required for notarization, slow")
     ap.add_argument("--clean", action="store_true", help="PyInstaller --clean")
     ns = ap.parse_args()
 
     distpath = Path(ns.distpath).resolve()
     distpath.mkdir(parents=True, exist_ok=True)
     app = build_main(distpath, clean=ns.clean)
-    if not ns.no_helpers:
+    if ns.separate_helpers:
         only = [h.strip() for h in ns.helpers.split(",") if h.strip()] or None
         build_helpers(app, distpath, clean=ns.clean, only=only)
     if not ns.no_sign:
-        adhoc_sign(app)  # sign last so it covers the helpers too
+        devid = ns.sign_id != "-"
+        ent = (REPO_ROOT / "devtools" / "mesa.entitlements") if devid else None
+        sign_bundle(app, ns.sign_id, ent if (ent and ent.is_file()) else None,
+                    runtime=devid, timestamp=ns.timestamp)
     print(f"\n[build_mac] DONE → {app}")
     print("[build_mac] launch:  open " + str(app))
 

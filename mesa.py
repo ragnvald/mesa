@@ -681,10 +681,11 @@ def get_script_paths(file_name: str):
         f"{file_name}.py",
     )
     if sys.platform == "darwin":
-        # macOS frozen helpers are bare Mach-O executables (no .exe), bundled
-        # under system/ next to the main app binary (onedir nests one deeper).
-        # See devtools/build_mac.py / MAC_BUILD.md.
+        # macOS frozen helpers are bundled under system/ next to the main app
+        # binary. Preferred layout is a nested .app (codesign can seal it), with
+        # bare onedir/onefile paths kept as fallbacks. See devtools/build_mac.py.
         exe_file = _resolve_tool_path(
+            os.path.join("system", f"{file_name}.app", "Contents", "MacOS", file_name),
             os.path.join("system", file_name),
             os.path.join("system", file_name, file_name),
             file_name,
@@ -739,10 +740,38 @@ def _launch_helper_inprocess(file_name: str, base_dir: str | None = None):
     return _track_helper_window(run_fn(launch_base, master=None))
 
 
+def _maybe_run_helper() -> None:
+    """macOS size optimization: rather than shipping a separate frozen bundle
+    per subprocess helper (each duplicating the full Python/Qt/GIS stack,
+    ~0.9 GB apiece), the frozen main binary re-execs ITSELF with
+    --run-helper <name>. Run that helper module as __main__ and exit, before the
+    main UI launches. No-op off macOS and whenever the flag is absent, so
+    Windows and source runs are byte-for-byte unaffected. See devtools/build_mac.py."""
+    if sys.platform != "darwin" or "--run-helper" not in sys.argv:
+        return
+    idx = sys.argv.index("--run-helper")
+    try:
+        helper_name = sys.argv[idx + 1]
+    except IndexError:
+        return
+    # Present argv to the helper as if it had been launched directly.
+    sys.argv = [helper_name] + sys.argv[idx + 2:]
+    _ensure_code_dir_on_syspath()
+    import runpy
+    runpy.run_module(helper_name, run_name="__main__")
+    raise SystemExit(0)
+
+
 def _launch_helper_subprocess(file_name: str, extra_args: list[str] | None = None):
     """Launch a helper tool as a subprocess. Works for both source and frozen."""
-    python_script, exe_file = get_script_paths(file_name)
     args = list(extra_args or [])
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        # Re-exec this binary as the helper — no separate bundle to duplicate
+        # the stack. Handled by _maybe_run_helper at entry.
+        _launch_gui_process([sys.executable, "--run-helper", file_name, *args],
+                            f"{file_name} (self)")
+        return
+    python_script, exe_file = get_script_paths(file_name)
     if getattr(sys, "frozen", False):
         _launch_gui_process([exe_file, *args], f"{file_name} exe")
     else:
@@ -1718,6 +1747,7 @@ def _bootstrap_config() -> None:
 # Kept here rather than in the __main__ block at the foot of the file so the
 # globals are ready before the module-level UI code below runs.
 if __name__ == "__main__":
+    _maybe_run_helper()  # macOS: dispatch --run-helper re-exec before UI bootstrap (no-op elsewhere)
     _bootstrap_config()
 
 

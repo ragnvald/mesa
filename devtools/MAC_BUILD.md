@@ -44,46 +44,55 @@ Only the MAIN app is frozen. The subprocess helpers (`combined_map`,
 launch on macOS yet. The seven in-process helpers (geocode/asset/atlas/
 processing/report/analysis) work, because they're bundled as hidden imports.
 
-## Phase 2 — subprocess-helper parity (DONE)
+## Phase 2 + size optimization — subprocess helpers via re-exec (DONE)
 
 The three subprocess helpers (`combined_map`, `segmentation_setup`,
-`special_focus`) now build and resolve on macOS.
+`special_focus`) run on macOS by **re-exec of the main frozen binary**, not as
+separate bundles — so the Python/Qt/GIS stack isn't duplicated. Result: the
+signed bundle is **~1.1 GB** instead of ~3.6 GB (3 duplicated stacks removed).
 
-- **`mesa.py` change (the only existing-code edit):** `get_script_paths` gained
-  a `sys.platform == "darwin"` branch resolving bare executables under
-  `system/<name>` / `system/<name>/<name>`. The `else` branch is the original
-  `.exe` code verbatim, so Windows behaviour is byte-identical. Nothing else in
-  `mesa.py` needed changing — `_launch_gui_process` already branches on
-  `os.name` (`start_new_session=True` on non-Windows).
-- **`build_mac.py`:** builds each helper as **onedir (not `--windowed`)** into
-  `Contents/MacOS/system/<name>/`, keeping `_internal/` (and the `Python`
-  framework symlink) adjacent to the executable. `build_all.py` is untouched.
+- **`mesa.py` changes (guarded, Windows byte-identical):**
+  - `_maybe_run_helper()` — at `__main__`, if `sys.platform == "darwin"` and
+    `--run-helper <name>` is present, `runpy.run_module(name, "__main__")` and
+    exit. No-op off macOS / without the flag.
+  - `_launch_helper_subprocess` — on frozen macOS launches
+    `[sys.executable, "--run-helper", <name>, …]` instead of a separate exe.
+    The Windows/frozen and source branches are unchanged.
+  - (`get_script_paths` also kept its earlier Darwin `.app` fallback, now
+    unused by the re-exec path but harmless.)
+- **`build_mac.py`:** the main build imports the three helpers
+  (`RUN_HELPER_IMPORTS`) plus sklearn/scipy (segmentation) and webview
+  (special_focus), and keeps scipy (`BASE_EXCLUDES`). No separate helper bundles
+  by default (`--separate-helpers` keeps the legacy nested-`.app` path).
+  `build_all.py` is untouched.
 
-Verified: `combined_map` builds, lands at the resolved path, and launches. The
-other two use the same path; `segmentation_setup` additionally collects
-sklearn/scipy (untested end-to-end — build all three with a full run).
+Verified end-to-end: all three helpers launch via `mesa --run-helper <name>`;
+the main app launches; the bundle passes `codesign --verify --strict`.
 
 Still deferred (config location): the frozen app reads `config.ini` next to the
-executable. `build_mac.py` copies it into `Contents/MacOS/`, which runs, but a
-signed/notarized `.app` is read-only and MESA writes config back, so this needs
-a Darwin branch in `mesa.py` resolving config to the working dir or
-`~/Library/Application Support/MESA/`. Folded into Phase 3.
+executable; `build_mac.py` copies it into `Contents/MacOS/`. A signed/notarized
+`.app` is read-only and MESA writes config back, so this needs a Darwin branch
+resolving config to the working dir or `~/Library/Application Support/MESA/`.
 
-### Signing blockers found during Phase 2 (real Phase-3 work)
+## Phase 3a — Developer ID signing (DONE)
 
-Ad-hoc `codesign` of the whole bundle does **not** succeed yet — two known
-PyInstaller + PySide6 issues surface, both needing Phase-3 attention:
+`build_mac.py --sign-id "Developer ID Application: … (TEAMID)"` produces a
+bundle that passes `codesign --verify --strict` and that `spctl` reports as a
+valid (un-notarized) Developer ID signature. What it took:
 
-1. **onedir helpers embedded under `Contents/MacOS/system/`** are not a valid
-   nested structure for `codesign` to seal the outer bundle (it walks into
-   `_internal/…/*.pyx` etc.). Options: make each helper a proper nested `.app`
-   under `Contents/Resources/`, or use a helper-tool layout, then sign
-   inside-out. `build_mac.py` already signs the nested Mach-O binaries
-   individually; the outer seal is the remaining piece.
-2. **PySide6 bundles `Designer.app` / `Assistant.app` with symlinks** that
-   `codesign` rejects ("main executable … must be a regular file"). Strip the
-   Qt dev-tool apps from the bundle (they're dead weight for MESA) or fix up
-   their layout before signing.
+- **Strip the Qt dev tools** (`strip_qt_dev_tools`): PySide6 ships Designer /
+  Assistant / Linguist as **both** a `<Name>.app` symlink and the real
+  `<Name>__dot__app` directory. Removing only the `.app` left dangling symlinks
+  that broke `codesign --verify`; strip **both** forms (symlink → unlink, real
+  dir → rmtree).
+- **Hardened runtime + entitlements** (`devtools/mesa.entitlements`):
+  disable-library-validation, allow-unsigned-executable-memory,
+  allow-dyld-environment-variables — PyInstaller apps fail the hardened runtime
+  without these.
+- **One `codesign --deep` pass** per bundle (not per-file): ~2700 nested Mach-O
+  timestamped individually took far too long; a single `--deep` process is the
+  way. `--timestamp` (networked, slow) is applied only for the notarization
+  build (`--timestamp`), off for fast local validation.
 
 ## Phase 3 — Developer ID signing + notarization
 
