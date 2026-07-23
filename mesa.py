@@ -248,10 +248,12 @@ def read_config(abs_or_rel_path: str):
 
 def check_and_create_folders():
     folders = [
+        os.path.join(original_working_directory, "input", "asset"),
         os.path.join(original_working_directory, "input", "geocode"),
+        os.path.join(original_working_directory, "input", "lines"),
+        os.path.join(original_working_directory, "input", "images"),
         os.path.join(original_working_directory, "output"),
         os.path.join(original_working_directory, "qgis"),
-        os.path.join(original_working_directory, "input", "lines"),
     ]
     for folder in folders:
         if not os.path.exists(folder):
@@ -1741,22 +1743,35 @@ packaged_build_info: dict = {}
 packaged_build_timestamp = ""
 
 
+def _seed_working_dir() -> None:
+    """First run in a fresh working dir: copy the read-only reference material
+    bundled in the app (config.ini, docs, qgis templates, system_resources) into
+    original_working_directory, the way build_all.py stages them next to mesa.exe
+    on Windows. Only what's missing is copied; on Windows/dev the bundled path
+    resolves to the working dir itself, so every copy is a no-op. Empty runtime
+    folders (input/*, output) are made by check_and_create_folders instead."""
+    for name in ("config.ini", "docs", "qgis", "system_resources"):
+        dst = os.path.join(original_working_directory, name)
+        if os.path.exists(dst):
+            continue
+        try:
+            src = resolve_path(name)
+            if os.path.abspath(src) == os.path.abspath(dst) or not os.path.exists(src):
+                continue
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        except Exception:
+            pass
+
+
 def _bootstrap_config() -> None:
     """Read config.ini and prepare project folders. Main process only."""
     global config, mesa_version, mesa_version_display
     global packaged_build_info, packaged_build_timestamp
 
-    if not os.path.exists(config_file):
-        # First run in a fresh working dir (e.g. macOS ~/Documents/MESA): seed
-        # from the config.ini bundled in the app as a template. On Windows/dev
-        # the template resolves to config_file itself, so this is a no-op.
-        try:
-            template = resolve_path("config.ini")
-            if os.path.exists(template) and os.path.abspath(template) != os.path.abspath(config_file):
-                os.makedirs(os.path.dirname(config_file), exist_ok=True)
-                shutil.copy2(template, config_file)
-        except Exception:
-            pass
+    _seed_working_dir()
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Configuration not found: {config_file}")
     config = read_config(config_file)

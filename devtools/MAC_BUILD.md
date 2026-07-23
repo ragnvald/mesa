@@ -69,10 +69,28 @@ signed bundle is **~1.1 GB** instead of ~3.6 GB (3 duplicated stacks removed).
 Verified end-to-end: all three helpers launch via `mesa --run-helper <name>`;
 the main app launches; the bundle passes `codesign --verify --strict`.
 
-Still deferred (config location): the frozen app reads `config.ini` next to the
-executable; `build_mac.py` copies it into `Contents/MacOS/`. A signed/notarized
-`.app` is read-only and MESA writes config back, so this needs a Darwin branch
-resolving config to the working dir or `~/Library/Application Support/MESA/`.
+### Runtime data layout (macOS)
+
+A notarized `.app` is read-only, so the frozen Mac build keeps all writable data
+in **`~/Documents/MESA/`** (`mesa.py` `_resolve_working_dir`), not next to the
+executable. On first run `_seed_working_dir` copies the reference material
+bundled in the app (config.ini, docs, qgis templates, system_resources) into it,
+and `check_and_create_folders` makes the empty `input/{asset,geocode,lines,
+images}` and `output` folders — mirroring what `build_all.py` stages next to
+`mesa.exe` on Windows. The 1.5 GB `input/` working data is NOT bundled. Because
+the app never writes into its own bundle, the signature/notarization survives
+every run. On Windows/dev these paths resolve to the working dir itself, so the
+seeding is a no-op.
+
+Resources are bundled from the repo root (`system_resources/`, `docs/`,
+`qgis/`), not `code/` — bundling `code/system_resources` (which doesn't exist)
+silently dropped the top banner.
+
+### .dmg
+
+`build_mac.py --dmg` (or `make_dmg`) builds a compressed `.dmg` with a
+drag-to-Applications layout and a custom volume icon (mesa.icns). Build the dmg
+*after* notarizing + stapling the app so the copy inside carries the staple.
 
 ## Phase 3a — Developer ID signing (DONE)
 

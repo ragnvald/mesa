@@ -160,15 +160,26 @@ def build_main(distpath: Path, clean: bool) -> Path:
         flags.append("--clean")
 
     data_args: list[str] = []
-    sysres = CODE_DIR / "system_resources"
+    # The real resources (top_graphics.png banner, mesa.ico window icon, …) live
+    # at the repo root, not under code/. Bundling code/system_resources (which
+    # doesn't exist) silently dropped the top banner in the frozen app.
+    sysres = REPO_ROOT / "system_resources"
+    if not sysres.is_dir():
+        sysres = CODE_DIR / "system_resources"
     if sysres.is_dir():
         data_args += add_data(sysres, "system_resources")
-    # Bundle config.ini as a read-only template. mesa.py seeds it into the
-    # writable working dir (~/Documents/MESA) on first run — the app itself is
-    # never written to (keeps the signature/notarization intact).
+    # Bundle read-only reference material as templates. mesa.py seeds these into
+    # the writable working dir (~/Documents/MESA) on first run — mirrors what
+    # build_all.py copies next to mesa.exe on Windows. The app is never written
+    # to, so its signature/notarization stays intact. input/ (1.5 GB of working
+    # data) is NOT bundled; its empty subfolders are created at runtime.
     cfg = REPO_ROOT / "config.ini"
     if cfg.is_file():
         data_args += add_data(cfg, ".")
+    for name in ("docs", "qgis"):
+        d = REPO_ROOT / name
+        if d.is_dir():
+            data_args += add_data(d, name)
 
     # BASE_EXCLUDES (not MAIN_EXCLUDES) keeps scipy, which segmentation_setup
     # needs now that it runs in-binary via re-exec.
@@ -322,6 +333,49 @@ def adhoc_sign(app: Path) -> None:
     sign_bundle(app, "-", None, runtime=False, timestamp=False)
 
 
+def make_dmg(app: Path, out: Path, volname: str) -> None:
+    """Compressed .dmg with a drag-to-Applications layout and a custom volume
+    icon (mesa.icns). ditto preserves the app's notarization staple."""
+    icns = REPO_ROOT / "system_resources" / "mesa.icns"
+    stage = out.parent / "_dmg_stage"
+    rw = out.parent / "_dmg_rw.dmg"
+    for p in (stage, rw, out):
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        elif p.exists():
+            p.unlink()
+    stage.mkdir(parents=True)
+    subprocess.run(["ditto", str(app), str(stage / "MESA.app")], check=True)
+    (stage / "Applications").symlink_to("/Applications")
+    if icns.is_file():
+        shutil.copy2(icns, stage / ".VolumeIcon.icns")
+    subprocess.run(["hdiutil", "create", "-format", "UDRW", "-volname", volname,
+                    "-srcfolder", str(stage), str(rw)], check=True, capture_output=True)
+    r = subprocess.run(["hdiutil", "attach", str(rw), "-nobrowse", "-noverify"],
+                       capture_output=True, text=True)
+    mp = next((ln.split("\t")[-1].strip() for ln in r.stdout.splitlines()
+               if "/Volumes/" in ln), None)
+    if mp and icns.is_file():
+        subprocess.run(["SetFile", "-a", "C", mp], capture_output=True)
+    if mp:
+        subprocess.run(["hdiutil", "detach", mp], capture_output=True)
+    subprocess.run(["hdiutil", "convert", str(rw), "-format", "UDZO", "-o", str(out)],
+                   check=True, capture_output=True)
+    rw.unlink()
+    shutil.rmtree(stage, ignore_errors=True)
+    print(f"[build_mac] dmg → {out}")
+
+
+def _config_version() -> str:
+    try:
+        for line in (REPO_ROOT / "config.ini").read_text().splitlines():
+            if line.strip().startswith("mesa_version"):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return "dev"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build macOS mesa.app")
     ap.add_argument("--distpath", default=str(REPO_ROOT / "dist_mac"),
@@ -336,6 +390,10 @@ def main() -> None:
                          "'Developer ID Application: … (TEAMID)' for a notarizable build)")
     ap.add_argument("--timestamp", action="store_true",
                     help="secure (networked) timestamp — required for notarization, slow")
+    ap.add_argument("--dmg", action="store_true",
+                    help="also build a compressed .dmg with a custom volume icon")
+    ap.add_argument("--dmg-out", default="",
+                    help="output path for the .dmg (default ~/Desktop/MESA-<version>.dmg)")
     ap.add_argument("--clean", action="store_true", help="PyInstaller --clean")
     ns = ap.parse_args()
 
@@ -350,6 +408,11 @@ def main() -> None:
         ent = (REPO_ROOT / "devtools" / "mesa.entitlements") if devid else None
         sign_bundle(app, ns.sign_id, ent if (ent and ent.is_file()) else None,
                     runtime=devid, timestamp=ns.timestamp)
+    if ns.dmg:
+        ver = _config_version()
+        out = Path(ns.dmg_out).expanduser() if ns.dmg_out else \
+            Path.home() / "Desktop" / f"MESA-{ver}.dmg"
+        make_dmg(app, out, f"MESA {ver}")
     print(f"\n[build_mac] DONE → {app}")
     print("[build_mac] launch:  open " + str(app))
 
