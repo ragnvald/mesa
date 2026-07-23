@@ -680,10 +680,20 @@ def get_script_paths(file_name: str):
         os.path.join("system", f"{file_name}.py"),
         f"{file_name}.py",
     )
-    exe_file = _resolve_tool_path(
-        os.path.join("system", f"{file_name}.exe"),
-        f"{file_name}.exe",
-    )
+    if sys.platform == "darwin":
+        # macOS frozen helpers are bare Mach-O executables (no .exe), bundled
+        # under system/ next to the main app binary (onedir nests one deeper).
+        # See devtools/build_mac.py / MAC_BUILD.md.
+        exe_file = _resolve_tool_path(
+            os.path.join("system", file_name),
+            os.path.join("system", file_name, file_name),
+            file_name,
+        )
+    else:
+        exe_file = _resolve_tool_path(
+            os.path.join("system", f"{file_name}.exe"),
+            f"{file_name}.exe",
+        )
     log_to_logfile(f"Python script path: {python_script}")
     log_to_logfile(f"Executable file path: {exe_file}")
     return python_script, exe_file
