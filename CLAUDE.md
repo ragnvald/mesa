@@ -2,6 +2,12 @@
 
 Guidance for Claude (and any AI assistant) working in this repo.
 
+## Scope: work only inside mesa, never other projects
+
+This session works on **mesa only**. Never write, edit, commit, or push in any other project — even a sibling repo on the same disk (e.g. `/Volumes/Beelink 1/code/rag-mepa`), and even when the user pastes an error whose traceback points outside mesa. Other projects share this machine and drive; a fix that looks obvious here is unowned context there.
+
+When a problem clearly originates outside mesa, **stop and tell the user** — name the project and file, explain what's wrong, and let them open that project to fix it themselves. Diagnosing across the boundary (reading logs, pointing at the culprit line) is fine; *modifying* across it is not.
+
 ## Git: the user initiates commits and pushes
 
 Do not run `git commit` or `git push` on your own. Finish the work, leave the changes in the working tree, and *ask* — "should I commit this?" — then wait. A "yes" authorises that one action; it is not standing permission for the next one, and permission to commit is never permission to push.
