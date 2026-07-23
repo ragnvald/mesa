@@ -1183,6 +1183,7 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, progress_cb=None) ->
             if m == "config.ini" or m == DEMO_README_MEMBER
             or m.startswith("input/") or m.startswith("output/")
             or m.startswith("secrets/")  # restored only if the backup opted to include it
+            or m.startswith("qgis/")     # a package may ship qgis/mesa_results.qgz (or mesa.qgz)
         ]
         has_config = "config.ini" in to_extract
         for folder_name in ("input", "output"):
