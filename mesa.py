@@ -1781,21 +1781,102 @@ def _format_system_capabilities_for_about(row: dict | None) -> str:
 # ---------------------------------------------------------------------
 # Main setup
 # ---------------------------------------------------------------------
+def _known_documents_dir() -> str:
+    """The user's real Documents folder. On Windows this must come from the OS
+    (SHGetKnownFolderPath) rather than expanduser("~/Documents"): the folder is
+    frequently OneDrive-redirected or localized ("Dokumenter", "Documentos"),
+    and the naive join would silently point at a wrong or non-existent path."""
+    if sys.platform == "win32":
+        try:
+            from ctypes import windll, byref, c_wchar_p, Structure
+            from ctypes import c_ulong, c_ushort, c_ubyte
+
+            class _GUID(Structure):
+                _fields_ = [("Data1", c_ulong), ("Data2", c_ushort),
+                            ("Data3", c_ushort), ("Data4", c_ubyte * 8)]
+
+            # FOLDERID_Documents = {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
+            fid = _GUID(0xFDD39AD0, 0x238F, 0x46AF,
+                        (c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7))
+            ptr = c_wchar_p()
+            if windll.shell32.SHGetKnownFolderPath(byref(fid), 0, None, byref(ptr)) == 0:
+                value = ptr.value
+                windll.ole32.CoTaskMemFree(ptr)
+                if value:
+                    return value
+        except Exception:
+            pass
+    return os.path.join(os.path.expanduser("~"), "Documents")
+
+
+def _workspace_pointer_path() -> str:
+    """Where MESA remembers the workspace location — deliberately OUTSIDE the
+    workspace itself (chicken-and-egg: we cannot read a setting stored in a
+    folder whose location is the setting). Lives in the per-user app-config area,
+    so relocating the workspace never loses the pointer to it."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config")
+    return os.path.join(base, "MESA", "workspace.txt")
+
+
+def _read_workspace_pointer() -> str | None:
+    try:
+        p = _workspace_pointer_path()
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+            if val and os.path.isdir(val):
+                return os.path.abspath(val)
+    except Exception:
+        pass
+    return None
+
+
+def _write_workspace_pointer(path: str) -> None:
+    p = _workspace_pointer_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(os.path.abspath(path))
+
+
 def _resolve_working_dir() -> str:
-    # A notarized macOS .app is read-only, so the frozen Mac build keeps its
-    # writable data (config, log, input/output, qgis) in ~/Documents/MESA rather
-    # than next to the executable. Windows and source runs are unchanged:
-    # original_working_directory stays PROJECT_BASE, so config_file below is
-    # byte-for-byte the old PROJECT_BASE/config.ini there.
-    if sys.platform == "darwin" and getattr(sys, "frozen", False):
-        d = os.path.join(os.path.expanduser("~"), "Documents", "MESA")
-        os.makedirs(d, exist_ok=True)
-        return d
-    return PROJECT_BASE
+    """Where MESA keeps writable data (config, log, input/output, qgis, secrets).
+
+    Running from source (dev) is unchanged: the working dir is PROJECT_BASE (the
+    repo), so config_file below stays byte-for-byte PROJECT_BASE/config.ini.
+
+    Frozen builds — the Windows .exe and the notarized macOS .app — must NOT
+    write next to the executable (Program Files / the signed .app are read-only).
+    They keep writable data under <Documents>/MESA, or wherever the user has
+    relocated it (recorded in the workspace pointer file). The read-only
+    reference material shipped next to the executable is copied in on first run
+    by _seed_working_dir(). Nothing here ever deletes or overwrites existing
+    data: os.makedirs(exist_ok=True) leaves a populated folder untouched."""
+    if not getattr(sys, "frozen", False):
+        return PROJECT_BASE
+    pinned = _read_workspace_pointer()
+    if pinned:
+        os.makedirs(pinned, exist_ok=True)
+        return pinned
+    d = os.path.join(_known_documents_dir(), "MESA")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 original_working_directory = _resolve_working_dir()
 config_file = os.path.join(original_working_directory, "config.ini")
 gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
+
+# First-run / migration outcome, recorded by _bootstrap_config() before the UI
+# exists and surfaced to the user once the main window is up (see
+# _maybe_show_workspace_notice). None/False until bootstrap runs.
+_ws_first_run = False
+_ws_migrated_from: str | None = None
 
 # Populated by _bootstrap_config(), which only runs in the main process. Nothing
 # here may read config.ini or touch disk at import time: in-process helpers spawn
@@ -1833,17 +1914,91 @@ packaged_build_info: dict = {}
 packaged_build_timestamp = ""
 
 
+def _has_user_data(base: str) -> bool:
+    """True when `base` holds data someone actually produced — real input or
+    output, not empty scaffolding. Kept deliberately conservative: it gates both
+    first-run seeding and legacy migration, so it must never mistake a fresh dir
+    for a populated one (which would strand the real data) or vice-versa."""
+    try:
+        if os.path.isfile(os.path.join(base, "output", "mesa.gpkg")):
+            return True
+        gp = os.path.join(base, "output", "geoparquet")
+        if os.path.isdir(gp) and any(f.endswith(".parquet") for f in os.listdir(gp)):
+            return True
+        for sub in ("asset", "geocode", "lines"):
+            d = os.path.join(base, "input", sub)
+            if os.path.isdir(d) and any(not f.startswith(".") for f in os.listdir(d)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _migrate_legacy_workspace() -> str | None:
+    """One-time upgrade path. Older frozen builds wrote input/output/config next
+    to the executable; from 5.6 the working dir is <Documents>/MESA. If the
+    legacy data still sits beside the exe AND the new working dir is still fresh,
+    move it in so nothing 'disappears' for the user on upgrade.
+
+    Fires at most once and NEVER writes into a populated workspace: it bails the
+    moment the target already holds user data, and skips any item whose target
+    already exists. Additive and non-destructive by construction. Returns the
+    source path when something was moved, else None. Must run BEFORE
+    _seed_working_dir() — otherwise seeded sample data would make the target look
+    populated and suppress the migration."""
+    if not getattr(sys, "frozen", False):
+        return None
+    legacy = PROJECT_BASE
+    dst = original_working_directory
+    if os.path.abspath(legacy) == os.path.abspath(dst):
+        return None
+    # log.txt is written at runtime and never shipped, so its presence beside the
+    # exe means an OLDER MESA was actually run from this folder (an in-place
+    # upgrade) — as opposed to a fresh extraction, whose shipped sample
+    # input/output would otherwise look like user data and trigger a false move.
+    if not os.path.isfile(os.path.join(legacy, "log.txt")):
+        return None
+    if not _has_user_data(legacy) or _has_user_data(dst):
+        return None
+    # config.ini carries the user's edited settings; input/output/secrets/log are
+    # their data. docs/qgis/system_resources are shipped templates — left behind
+    # and re-seeded fresh rather than moved.
+    moved = False
+    for name in ("config.ini", "input", "output", "secrets", "log.txt"):
+        src = os.path.join(legacy, name)
+        tgt = os.path.join(dst, name)
+        if not os.path.exists(src) or os.path.exists(tgt):
+            continue
+        try:
+            shutil.move(src, tgt)  # copy+delete across devices
+            moved = True
+        except Exception:
+            # Deleting the source can fail (e.g. Program Files); a copy still
+            # rescues the data, and the stale original is harmless.
+            try:
+                if os.path.isdir(src):
+                    shutil.copytree(src, tgt)
+                else:
+                    shutil.copy2(src, tgt)
+                moved = True
+            except Exception:
+                pass
+    return legacy if moved else None
+
+
 def _seed_working_dir() -> None:
     """First run in a fresh working dir: copy the read-only reference material
-    bundled in the app (config.ini, docs, qgis templates, system_resources) into
-    original_working_directory, the way build_all.py stages them next to mesa.exe
-    on Windows. Only what's missing is copied; on Windows/dev the bundled path
-    resolves to the working dir itself, so every copy is a no-op. Empty runtime
-    folders (input/*, output) are made by check_and_create_folders instead."""
-    for name in ("config.ini", "docs", "qgis", "system_resources"):
+    bundled in the app (config.ini, docs, qgis templates, system_resources, and
+    the sample input data) into original_working_directory, the way build_all.py
+    stages them next to mesa.exe on Windows. Only what's MISSING is copied — seed
+    is additive, never destructive: it must never overwrite or clear an existing
+    item. On Windows/dev the bundled path resolves to the working dir itself, so
+    every copy is a no-op. Empty runtime folders (input/*, output) are made by
+    check_and_create_folders instead."""
+    for name in ("config.ini", "docs", "qgis", "system_resources", "input"):
         dst = os.path.join(original_working_directory, name)
         if os.path.exists(dst):
-            continue
+            continue  # already present → never touch it
         try:
             src = resolve_path(name)
             if os.path.abspath(src) == os.path.abspath(dst) or not os.path.exists(src):
@@ -1860,7 +2015,12 @@ def _bootstrap_config() -> None:
     """Read config.ini and prepare project folders. Main process only."""
     global config, mesa_version, mesa_version_display
     global packaged_build_info, packaged_build_timestamp
+    global _ws_first_run, _ws_migrated_from
 
+    # Frozen first run = the working dir has no config.ini yet (checked before we
+    # seed one in). Recorded here, surfaced to the user once the UI is up.
+    _ws_first_run = getattr(sys, "frozen", False) and not os.path.exists(config_file)
+    _ws_migrated_from = _migrate_legacy_workspace()
     _seed_working_dir()
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Configuration not found: {config_file}")
@@ -1870,6 +2030,13 @@ def _bootstrap_config() -> None:
     packaged_build_info = _read_packaged_build_info()
     packaged_build_timestamp = str(packaged_build_info.get("build_timestamp", "") or "").strip()
     check_and_create_folders()
+
+    if _ws_migrated_from:
+        log_to_logfile(
+            f"Workspace: migrated existing data from {_ws_migrated_from} "
+            f"into {original_working_directory}")
+    elif _ws_first_run:
+        log_to_logfile(f"Workspace: initialised a new working folder at {original_working_directory}")
 
 
 # Kept here rather than in the __main__ block at the foot of the file so the
@@ -3473,6 +3640,9 @@ class MesaMainWindow(QMainWindow):
         self._build_header()
         self._build_tabs()
 
+        # Tell the user where their data lives — once, after the window is up.
+        QTimer.singleShot(0, self._maybe_show_workspace_notice)
+
         # System capabilities snapshot (background thread)
         try:
             threading.Thread(
@@ -4548,6 +4718,9 @@ class MesaMainWindow(QMainWindow):
         self._config_status_label.setWordWrap(True)
         layout.addWidget(self._config_status_label)
 
+        # Workspace location — where all input/output/config actually lives.
+        layout.addWidget(self._build_workspace_box())
+
         # AI connection — a single box on top spanning the three setting columns.
         layout.addWidget(self._build_ai_connection_box())
 
@@ -4626,6 +4799,142 @@ class MesaMainWindow(QMainWindow):
 
         self._tabs.addTab(tab, "Config")
         self._load_config_editor()
+
+    # ------------------------------------------------------------------
+    # Workspace location
+    # ------------------------------------------------------------------
+    def _build_workspace_box(self):
+        """Config-tab box that shows where MESA stores its data and lets the user
+        move it. Installed builds keep the workspace under <Documents>/MESA (so
+        the app dir stays read-only and signed); running from source it is fixed
+        to the project folder, so the Move button is disabled there."""
+        box = QGroupBox("Workspace (data location)")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(10, 8, 10, 10)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        intro = QLabel(
+            "MESA keeps your <b>input</b>, <b>output</b>, settings and reports in the "
+            "folder below. It is created automatically on first run and is kept "
+            "separate from the application so upgrades never touch your data.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #6a5533; font-size: 10px;")
+        grid.addWidget(intro, 0, 0, 1, 3)
+
+        grid.addWidget(QLabel("Location:"), 1, 0, Qt.AlignRight)
+        self._workspace_path_field = QLineEdit(os.path.abspath(original_working_directory))
+        self._workspace_path_field.setReadOnly(True)
+        self._workspace_path_field.setCursorPosition(0)
+        grid.addWidget(self._workspace_path_field, 1, 1)
+
+        open_btn = QPushButton("Open folder")
+        open_btn.setToolTip("Open the workspace folder in your file manager.")
+        open_btn.clicked.connect(self._open_workspace_folder)
+        grid.addWidget(open_btn, 1, 2)
+
+        move_btn = QPushButton("Move workspace…")
+        move_btn.setToolTip(
+            "Move all MESA data to another location. MESA closes afterwards; "
+            "reopen it to continue at the new location.")
+        move_btn.clicked.connect(self._relocate_workspace)
+        grid.addWidget(move_btn, 2, 2)
+
+        if not getattr(sys, "frozen", False):
+            move_btn.setEnabled(False)
+            note = QLabel("Running from source — the workspace is fixed to the project folder.")
+            note.setProperty("role", "muted")
+            note.setWordWrap(True)
+            grid.addWidget(note, 2, 0, 1, 2)
+
+        grid.setColumnStretch(1, 1)
+        return box
+
+    def _open_workspace_folder(self):
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(original_working_directory)))
+        except Exception as e:
+            self._config_status_label.setText(f"Could not open workspace folder: {e}")
+
+    def _relocate_workspace(self):
+        """Move the whole workspace to a user-chosen folder, then restart. Refuses
+        to write into a non-empty target so an existing workspace can never be
+        overwritten. Falls back to a copy if the live folder cannot be moved
+        (e.g. an open file handle); the pointer is only written once the data is
+        safely in place."""
+        if not getattr(sys, "frozen", False):
+            return
+        cur = os.path.abspath(original_working_directory)
+        parent = QFileDialog.getExistingDirectory(
+            self, "Choose a folder to hold the MESA workspace",
+            os.path.dirname(cur))
+        if not parent:
+            return
+        target = os.path.join(parent, "MESA")
+        if os.path.abspath(target) == cur:
+            QMessageBox.information(self, "Workspace", "That is already the current location.")
+            return
+        if os.path.isdir(target) and os.listdir(target):
+            QMessageBox.warning(
+                self, "Workspace",
+                f"{target}\n\nalready exists and is not empty. Choose a different "
+                "folder — MESA never writes into an existing workspace, to avoid "
+                "overwriting data.")
+            return
+        if QMessageBox.question(
+                self, "Move workspace",
+                f"Move your MESA data\n\nfrom:  {cur}\nto:      {target}\n\n"
+                "MESA will close afterwards; reopen it to use the new location.",
+                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
+            return
+
+        copied_only = False
+        try:
+            os.makedirs(parent, exist_ok=True)
+            shutil.move(cur, target)
+        except Exception:
+            try:
+                shutil.copytree(cur, target)
+                copied_only = True
+            except Exception as e:
+                QMessageBox.critical(self, "Workspace", f"Could not move the workspace:\n{e}")
+                return
+        try:
+            _write_workspace_pointer(target)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Workspace",
+                f"Your data was placed at:\n{target}\n\nbut the new location could "
+                f"not be saved:\n{e}\n\nMESA may still open the old location.")
+            return
+
+        tail = ("\n\nThe original folder was copied, not moved — delete it once you have "
+                f"confirmed everything works:\n{cur}") if copied_only else ""
+        QMessageBox.information(
+            self, "Workspace moved",
+            f"Your workspace is now at:\n{target}\n\nMESA will close now. "
+            f"Reopen it to continue.{tail}")
+        self.close()
+
+    def _maybe_show_workspace_notice(self):
+        """Once, on first run or after an upgrade migration, tell the user where
+        their data now lives. Installed builds only — from source the location
+        never changes, so there is nothing to announce."""
+        if not getattr(sys, "frozen", False):
+            return
+        loc = os.path.abspath(original_working_directory)
+        if _ws_migrated_from:
+            QMessageBox.information(
+                self, "Workspace moved to your Documents",
+                f"Your existing MESA data has been moved into:\n\n{loc}\n\n"
+                "Keeping it here (separate from the application) means future "
+                "upgrades never touch your data. You can move it elsewhere under "
+                "the Config tab.")
+        elif _ws_first_run:
+            QMessageBox.information(
+                self, "Welcome to MESA",
+                f"MESA stores your input, output and settings in:\n\n{loc}\n\n"
+                "You can open or move this folder any time under the Config tab.")
 
     def _build_ai_connection_box(self):
         """Top box on the Config tab (spans the three setting columns). Configures
