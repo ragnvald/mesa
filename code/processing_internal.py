@@ -4461,6 +4461,14 @@ def _map_process_entry(status_path_str: str):
             except Exception:
                 pass
 
+    # Hard-exit once the window is gone. The proxy's per-request handler threads
+    # are non-daemon, so a slow/hung in-flight OSM tile fetch would otherwise be
+    # joined at interpreter shutdown and keep this process alive after the window
+    # closed — leaving open_minimap_window()'s is_alive() guard stuck on "already
+    # open". os._exit skips that join (the finally above already released the
+    # proxy). See learning.md "Progress map stuck as 'already open'".
+    os._exit(0)
+
 def open_minimap_window():
     """Spawn the map helper process (single instance)."""
     global _MAP_PROC
