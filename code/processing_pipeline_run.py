@@ -471,13 +471,21 @@ def _find_helper_runner(base_dir: Path, stem: str) -> tuple[Path | None, bool]:
             out.append(resolved)
         return out
 
+    # The base_dir/* entries only find helpers when the workspace and the install
+    # share a folder. Since 5.6 the workspace is <Documents>/MESA while the
+    # helpers stay beside the exe in tools/, so the install-relative candidates
+    # below are the ones that actually hit. See learning.md "Workspace relocation
+    # broke helper lookup and the Maps window".
+    install_dir = Path(sys.executable).resolve().parent if frozen else None
     exe_candidates = _dedup(
         [
             base_dir / "tools" / f"{stem}.exe",
             base_dir / f"{stem}.exe",
             base_dir / "code" / f"{stem}.exe",
             base_dir / "system" / f"{stem}.exe",
-            Path(sys.executable).resolve().parent / f"{stem}.exe" if frozen else None,
+            (install_dir / "tools" / f"{stem}.exe") if install_dir else None,
+            (install_dir / "system" / f"{stem}.exe") if install_dir else None,
+            (install_dir / f"{stem}.exe") if install_dir else None,
         ]
     )
     py_candidates = _dedup(
