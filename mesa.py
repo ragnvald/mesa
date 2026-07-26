@@ -832,7 +832,11 @@ def open_combined_map():
     # former standalone viewers (map_overview, asset_map_view), which are no
     # longer built — see devtools/build_all.py helpers list.
     log_to_logfile("Launching combined_map subprocess")
-    _launch_helper_subprocess("combined_map")
+    # Must pass the working dir like every other helper: without it the child
+    # falls back to PROJECT_BASE (the exe folder), which since 5.6 is no longer
+    # the workspace. See learning.md "Workspace relocation broke helper lookup
+    # and the Maps window".
+    _launch_helper_subprocess("combined_map", ["--original_working_directory", original_working_directory])
 
 def open_present_files():
     log_to_logfile("Launching report_generate")
