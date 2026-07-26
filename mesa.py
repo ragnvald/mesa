@@ -5180,14 +5180,14 @@ class MesaMainWindow(QMainWindow):
         backup_layout.setSpacing(8)
 
         backup_intro = QLabel(
-            "A backup saves your complete project state as a single ZIP file. "
-            "It includes all imported data (input/), processed results (output/), "
-            "and your configuration (config.ini). Use this before major changes "
-            "or to transfer a project to another computer.\n\n"
-            "Restoring data replaces the current project entirely — this can be "
-            "one of your own backups, a demo-data package, or a project shared by "
-            "a colleague. The existing input/, output/, and config.ini are removed "
-            "and replaced with the contents of the selected ZIP."
+            "A MESA package is a single ZIP file holding exactly one project: "
+            "all imported data (input/), processed results (output/), and the "
+            "configuration (config.ini). Create one as a backup before major changes, "
+            "or to move a project to another computer.\n\n"
+            "Restoring reads a package back in and replaces the current project "
+            "entirely — your own backup, a demo package, or an export from MESA "
+            "server. The existing input/, output/, and config.ini are removed and "
+            "replaced with the contents of the selected ZIP."
         )
         backup_intro.setWordWrap(True)
         backup_intro.setStyleSheet("color: #6a5533; font-size: 10px;")
@@ -5342,7 +5342,7 @@ class MesaMainWindow(QMainWindow):
         fmt_combo.addItem("Smaller (.zip, LZMA)", userData="lzma")
         layout.addWidget(fmt_combo)
         fmt_hint = QLabel(
-            "LZMA produces a ~30-40% smaller archive on text + parquet data. "
+            "LZMA produces a ~30-40% smaller package on text + parquet data. "
             "Modern unzip tools (7-Zip on Windows, macOS, Linux) open it. "
             "Windows Explorer's built-in Extract does NOT — pick Compatible "
             "if recipients only have that."
@@ -5429,7 +5429,7 @@ class MesaMainWindow(QMainWindow):
             progress.setValue(current)
             leaf = arcname.rsplit("/", 1)[-1]
             progress.setLabelText(
-                f"Archiving file {current:,} of {total:,}…\n{leaf}"
+                f"Packing file {current:,} of {total:,}…\n{leaf}"
             )
 
         def _on_finished(result_path: str) -> None:
@@ -5483,7 +5483,7 @@ class MesaMainWindow(QMainWindow):
 
     def _do_restore(self):
         zip_path, _ = QFileDialog.getOpenFileName(
-            self, "Select backup ZIP",
+            self, "Select MESA package or backup ZIP",
             original_working_directory,
             "ZIP files (*.zip);;All files (*.*)",
         )
@@ -5510,8 +5510,8 @@ class MesaMainWindow(QMainWindow):
                 # Input-only backup: there are no stored results to keep, so
                 # re-import is the only path.
                 confirm = QMessageBox.question(
-                    self, "Older backup — re-import",
-                    f"This backup was made with MESA {arch_ver}; you are running {cur_ver}.\n\n"
+                    self, "Older package — re-import",
+                    f"This package was made with MESA {arch_ver}; you are running {cur_ver}.\n\n"
                     "It contains source data only (no processed results), so MESA will restore "
                     "the inputs and mark them current. Run Process afterwards to generate results "
                     "in this version.\n\n"
@@ -5523,10 +5523,10 @@ class MesaMainWindow(QMainWindow):
                 restore_mode, stamp_ver = "reimport", cur_ver
             else:
                 box = QMessageBox(self)
-                box.setWindowTitle("Older MESA backup")
+                box.setWindowTitle("Older MESA package")
                 box.setIcon(QMessageBox.Question)
                 box.setText(
-                    f"This backup was made with MESA {arch_ver}; you are running {cur_ver}.\n\n"
+                    f"This package was made with MESA {arch_ver}; you are running {cur_ver}.\n\n"
                     "How do you want to open it?"
                 )
                 box.setInformativeText(
@@ -5556,7 +5556,8 @@ class MesaMainWindow(QMainWindow):
         else:
             confirm = QMessageBox.question(
                 self, "Confirm restore",
-                "Restoring backup will delete and replace current input/, output/, and config.ini.\n\n"
+                "Restoring a package replaces the current project: input/, output/, and "
+                "config.ini are deleted and replaced.\n\n"
                 "Do you want to continue?",
                 QMessageBox.Yes | QMessageBox.No,
             )
@@ -5582,13 +5583,13 @@ class MesaMainWindow(QMainWindow):
             )
 
         def _on_finished(_unused: str) -> None:
-            self._manage_status.setText(f"Backup restored: {zip_path}")
+            self._manage_status.setText(f"Package restored: {zip_path}")
             progress.setWindowTitle("Restore complete")
             # Demo packages describe themselves; ordinary projects have no such file,
             # so nothing extra appears for a normal restore. restore_backup_archive
             # drops any stale copy first, so this can only be THIS archive's readme.
             readme = Path(original_working_directory) / DEMO_README_MEMBER
-            text = f"Backup restore completed successfully.\n\nFrom: {zip_path}"
+            text = f"Package restored successfully.\n\nFrom: {zip_path}"
             if restore_mode == "reimport":
                 text += ("\n\nSource data restored and marked as MESA " + str(stamp_ver) +
                          ". No results yet — run Process (Workflows → Process) to generate them "
