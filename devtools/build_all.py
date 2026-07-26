@@ -860,6 +860,26 @@ def flatten_onedir_output() -> None:
 # ---------------------------------------------------------------------------
 # Copy resources next to the app (runtime layout)
 # ---------------------------------------------------------------------------
+
+# input/ and output/ ship as an empty SKELETON — the folder tree and its
+# readme.txt placeholders, never the project data that happens to sit in the
+# repo while developing. Users bring their own data by restoring a package;
+# whatever the developer last imported or processed is not a distributable.
+SKELETON_ONLY_FOLDERS = ("input", "output")
+
+
+def _skeleton_ignore(src_dir, names):
+    """copytree ignore-callable: keep subfolders and readme.txt, drop data files."""
+    ignored = []
+    for name in names:
+        if (Path(src_dir) / name).is_dir():
+            continue
+        if name.lower() == "readme.txt":
+            continue
+        ignored.append(name)
+    return ignored
+
+
 def copy_resources() -> None:
     # Copy runtime dirs next to mesa.exe (recursive)
     for folder in ["qgis", "docs", "input", "output", "system_resources"]:
@@ -875,8 +895,16 @@ def copy_resources() -> None:
         if not src:
             continue
         dst = FINAL_DIST / folder
-        log(f"Copying '{folder}/' from {src} ...")
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+        if folder in SKELETON_ONLY_FOLDERS:
+            # Clear first: on a helpers-only build FINAL_DIST is preserved, and
+            # dirs_exist_ok would otherwise leave data from an earlier build in
+            # place. dst is always inside FINAL_DIST (build output, regenerable).
+            shutil.rmtree(dst, ignore_errors=True)
+            log(f"Copying '{folder}/' skeleton (folders + readme.txt only) from {src} ...")
+            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_skeleton_ignore)
+        else:
+            log(f"Copying '{folder}/' from {src} ...")
+            shutil.copytree(src, dst, dirs_exist_ok=True)
 
     # Also include legacy QGIS packages if they live outside the repo (e.g. "qgis older")
     qgis_older_names = ["qgis older", "qgis_older"]
