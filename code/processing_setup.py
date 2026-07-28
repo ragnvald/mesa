@@ -338,6 +338,21 @@ def enforce_vuln_dtypes_inplace(df) -> None:
         if c in df.columns:
             df[c] = df[c].astype('string')
 
+def _strip_name(v) -> str:
+    """Join-key normaliser for parameter workbooks: surrounding whitespace removed,
+    case PRESERVED. Case-different names ("Coral" vs "coral") are distinct asset
+    layers, so folding case would merge two of them. Mirrors mesa-server
+    param_io._strip_name so a workbook joins identically on both sides."""
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
+
 def sanitize_vulnerability(df,
                            valid_vals: list[int],
                            fallback: int):
@@ -638,6 +653,23 @@ def save_all_to_excel(gdf, excel_path: str):
         vuln_cols = ['id','name_original','susceptibility','importance','sensitivity','sensitivity_code','sensitivity_description']
         vcols = [c for c in vuln_cols if c in gdf.columns]
         vuln = gdf[vcols].copy() if vcols else pd.DataFrame(columns=vuln_cols)
+        # Unassessed groups go out BLANK, never 0. The asset import seeds 0, which is
+        # below the valid scale; mesa-server's reader refuses out-of-scale values, so
+        # exporting the seeded 0 would make the workbook unreadable there. Blank is
+        # what round-trips as "not assessed" on both sides.
+        allowed = set(valid_input_values)
+        unset = None
+        for c in ('importance', 'susceptibility'):
+            if c in vuln.columns:
+                s = pd.to_numeric(vuln[c], errors='coerce')
+                keep = s.isin(allowed)
+                vuln[c] = s.where(keep)
+                unset = ~keep if unset is None else (unset | ~keep)
+        if unset is not None and unset.any():
+            for c in ('sensitivity', 'sensitivity_code', 'sensitivity_description'):
+                if c in vuln.columns:
+                    vuln.loc[unset, c] = None
+            log_to_file(f"Excel save: {int(unset.sum())} group(s) exported blank (not assessed).")
         with pd.ExcelWriter(excel_path, engine='openpyxl') as xw:
             vuln.to_excel(xw, sheet_name='vulnerability', index=False)
         _set_status_message(f"Saved Excel workbook: {excel_path}")
@@ -676,22 +708,80 @@ def _apply_vulnerability_from_df(df_x):
         return
     df_x = df_x[keep_cols]
 
+    # A present value outside the scale is a data error, refused rather than clamped:
+    # mesa-server's read_vulnerability_xlsx raises on the same input, so clamping here
+    # would make the two ends disagree about what a workbook means. A blank cell is
+    # "not assessed" and leaves the group's current value alone.
     for col in ['importance','susceptibility']:
         if col in df_x.columns:
-            s = pd.to_numeric(df_x[col], errors='coerce').round().astype('Int64')
-            s = s.where(s.notna(), FALLBACK_VULN)
-            s = s.clip(min(valid_input_values), max(valid_input_values))
-            s = s.apply(lambda v: min(valid_input_values, key=lambda vv: abs(int(v)-vv)))
-            df_x[col] = s.astype(int)
-    key = 'id' if 'id' in gdf_asset_group.columns else 'name_original'
-    kx = 'id' if 'id' in df_x.columns else 'name_original'
-    upd = df_x[[kx]+[c for c in ['importance','susceptibility'] if c in df_x.columns]].drop_duplicates(subset=[kx])
-    merged = gdf_asset_group.merge(upd, left_on=key, right_on=kx, how='left', suffixes=('', '_xlsx'))
-    for col in ['importance','susceptibility']:
-        xc = f"{col}_xlsx"
-        if xc in merged.columns:
-            merged[col] = merged[xc].where(merged[xc].notna(), merged[col])
-            merged.drop(columns=[xc], inplace=True, errors='ignore')
+            df_x[col] = pd.to_numeric(df_x[col], errors='coerce').round().astype('Int64')
+    allowed = set(valid_input_values)
+    bad = []
+    for _, r in df_x.iterrows():
+        for col in ['importance','susceptibility']:
+            v = r.get(col)
+            if v is not None and pd.notna(v) and int(v) not in allowed:
+                label = _strip_name(r.get('name_original')) or f"id {r.get('id')}"
+                bad.append(f"{label}: {col}={int(v)}")
+    if bad:
+        lo, hi = min(allowed), max(allowed)
+        msg = (f"Excel load refused: values outside the valid scale {lo}..{hi} - "
+               + "; ".join(bad[:20]) + (" ..." if len(bad) > 20 else ""))
+        log_to_file(msg)
+        _set_status_message(msg)
+        return
+
+    # Join on name_original, matched exactly. id is informational and is NEVER joined
+    # on, except for a legacy row that carries no name at all: id is import order, not a
+    # stable identity, so a sheet that has been sorted or came from another extract
+    # points at different layers. Mirrors mesa-server param_io.join_valuations.
+    by_name, by_id = {}, {}
+    for _, r in df_x.iterrows():
+        vals = (r.get('importance'), r.get('susceptibility'))
+        name = _strip_name(r.get('name_original'))
+        if name:
+            by_name[name] = vals
+        elif pd.notna(r.get('id')):
+            by_id[int(r['id'])] = vals
+
+    merged = gdf_asset_group.copy()
+    matched, id_fallback, unmatched_groups = [], [], []
+    used_name, used_id = set(), set()
+    for idx in merged.index:
+        gname = _strip_name(merged.at[idx, 'name_original']) if 'name_original' in merged.columns else ""
+        gid = merged.at[idx, 'id'] if 'id' in merged.columns else None
+        if gname and gname in by_name:
+            src, bucket = by_name[gname], matched
+            used_name.add(gname)
+        elif gid is not None and pd.notna(gid) and int(gid) in by_id:
+            src, bucket = by_id[int(gid)], id_fallback
+            used_id.add(int(gid))
+        else:
+            unmatched_groups.append(gname or f"id {gid}")
+            continue
+        for col, v in zip(['importance','susceptibility'], src):
+            if v is not None and pd.notna(v):
+                merged.at[idx, col] = int(v)
+        bucket.append(gname or f"id {gid}")
+
+    unmatched_sheet = [n for n in by_name if n not in used_name]
+    unmatched_sheet += [f"id {i}" for i in by_id if i not in used_id]
+    # Loud on both sides: a wholly mis-keyed sheet leaves every group unmatched, and
+    # that must not look like a successful import.
+    summary = (f"Excel load: joined on name_original - {len(matched)} matched, "
+               f"{len(id_fallback)} by id-fallback, {len(unmatched_sheet)} sheet row(s) "
+               f"unmatched, {len(unmatched_groups)} asset group(s) unmatched")
+    log_to_file(summary)
+    if id_fallback:
+        log_to_file("  id-fallback (sheet row had no name_original): " + ", ".join(map(str, id_fallback)))
+    if unmatched_sheet:
+        log_to_file("  !! sheet rows with NO matching asset group: " + ", ".join(map(str, unmatched_sheet)))
+    if unmatched_groups:
+        log_to_file("  !! asset groups with NO sheet row (kept existing value): "
+                    + ", ".join(map(str, unmatched_groups)))
+    _set_status_message(summary + (" - see log for the unmatched names"
+                                   if (unmatched_sheet or unmatched_groups) else ""))
+
     merged = sanitize_vulnerability(merged, valid_input_values, FALLBACK_VULN)
     enforce_vuln_dtypes_inplace(merged)
     gdf_asset_group = merged
