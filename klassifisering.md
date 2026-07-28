@@ -360,6 +360,7 @@ retries are idempotent.
 
 ```sql
 CREATE TABLE mesa.seg_mv (
+    id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     run_id         text   NOT NULL,
     layer          text   NOT NULL,
     code           text   NOT NULL,
@@ -369,13 +370,18 @@ CREATE TABLE mesa.seg_mv (
     entropy        float8,
     coverage_index bigint NOT NULL DEFAULT 0,
     top_bins       text,
-    PRIMARY KEY (run_id, layer, code)
+    UNIQUE (run_id, layer, code)
 );
 ```
 
-The primary key gives you §5.3 for free — `INSERT … ON CONFLICT (run_id, layer, code) DO
-UPDATE` replaces one run's slice of one layer and leaves every other run untouched. Do **not**
-key on `(layer, code)` alone: run history is a product feature, not debris.
+The unique constraint gives you §5.3 for free — `INSERT … ON CONFLICT (run_id, layer, code)
+DO UPDATE` replaces one run's slice of one layer and leaves every other run untouched. Do
+**not** key on `(layer, code)` alone: run history is a product feature, not debris.
+
+The natural key is a `UNIQUE` constraint rather than the primary key on purpose. Three text
+columns as PK put that width into every secondary index and every row pointer; a narrow
+`bigint` identity keeps those small and keeps inserts appending to the end of the tree. On a
+table of this size the difference is modest, but it costs nothing to get right at DDL time.
 
 For the profile table, prefer `fingerprint float8[]` over 25 wide columns, with `mesa.hist_bins`
 as the positional key. Widen to `h_i{i}_s{s}` only at the export boundary (§7.2).
@@ -388,6 +394,29 @@ Indexes and layout worth having up front:
   pipeline is single-layer, so partition pruning is total
 - refresh `mesa.cell_hist` per layer (or partition it) — a global `REFRESH MATERIALIZED VIEW`
   on a national dataset is wasted work
+
+**On UUID keys.** The familiar warning — a random UUID primary key scatters every insert
+across the B-tree, splitting pages until the index is a patchwork — is about *per-row*
+randomness in a transactional table. Apply it where it belongs, and not where it doesn't:
+
+- **It does not apply to the analytical tables here.** `stacked`, `flat`, `geocode_object` and
+  `seg_mv` are written in bulk and read by layer-scoped scan, not by point lookup. Their row
+  cost is geometry, overwhelmingly: measured on a 980,418-row `asset_object`, geometry is
+  963.7 bytes/row (92% of the table) against 8.3 bytes for the integer id. A 16-byte key
+  versus 8 moves nothing at that ratio. The lever for these tables is BRIN plus partitioning
+  by layer, as above — not key width.
+- **A shared random prefix is not the pathology either.** In `(run_id, layer, code)` every row
+  of one run carries the same `run_id`, so the batch lands as one dense contiguous range. That
+  is one random placement per run, not per row. Do not contort the schema to avoid it.
+- **It does apply to the server's own transactional tables** — projects, packages, users, job
+  queue, run history — which grow row by row over years. There, use a `bigint` identity
+  primary key and keep the UUID as a separate indexed column for external references, or use
+  UUID v7, which sorts by timestamp and so appends like a sequence while staying globally
+  unique.
+
+MESA's own identities are already non-random and need no migration: `code` is derived,
+`id`/`ref_asset_group` are integers, and `run_id` from `segmentation_run` is a
+`YYYY-MM-DD_HHMMSS` stamp, which sorts chronologically.
 
 ### 6.4 Determinism across engines
 
