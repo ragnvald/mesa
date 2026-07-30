@@ -125,3 +125,54 @@ are input-only and unaffected.
 Open at the end of the session: whether to reject a `valid_input` containing `0`, which is coherent
 with neither the sensitivity bands nor the "0 means not assessed" convention. mesa-server has said
 they will follow whichever way desktop decides.
+
+## 2026-07-27 to 2026-07-28 — Albertine Graben on the Mac: tiling the 35-layer mosaic
+
+Ran the same Uganda dataset the Windows box ran, but the full 35 asset layers and through the
+processing pipeline rather than the mosaic build, on an M4 Max (16 cores, 64 GB).
+
+The 2026-07-26 run had died during Tiles. The log stopped at `building basic_mosaic_sensitivity_max`
+while the tiles child kept going and finished at 15:00 — what died was the *parent* that streamed
+stdout into `log.txt`, so the failure was invisible in the record. Two casualties only surfaced by
+counting tiles afterwards: `basic_mosaic_segmv` held **0 tiles**, and its `_cert` companion and both
+`_latest` aliases were never written. The join keys were fine (verified: both sides use
+`basic_mosaic_NNNNNN`, 2,015,450 of 18,466,569 cells carry a `cluster_id`) — the block's broad
+`except … log("skipped")` had turned an OOM into silence.
+
+Cause, measured rather than reasoned: `tiles_create_raster.py` shipped its per-feature payload
+through `Pool(initargs=…)` under spawn, so every worker unpickled a private copy. **15.43 GB per
+worker** on basic_mosaic's 17,590,032 features; at the helper's own `cpu//2` default that is
+**123 GB of worker memory on a 64 GB host**, on top of a parent holding all of `tbl_flat` (~18 GB)
+plus a second copy of the group slice. Rewritten to a WKB blob + int64 offsets with numpy value and
+colour arrays: **2.58 GB per worker**, peak tree RSS >64 GB → **39.2 GB**, swap → 0. `EXIT 0` in
+1 h 53 m. Output byte-identical across 21 layers on unchanged input; segmv went 0 → 1,123 tiles.
+
+Also found: `run_tiles_process` never passed `--procs`, so the RAM-aware sizing in
+`processing_internal._tiles_procs_from_config()` was dead on the live path and `tiles_max_workers`
+was an inert knob — the string "worker process(es) for MBTiles" appears **0 times in 62 MB of log**
+before 2026-07-28. Wired through; it now logs the count it chose.
+
+The 2026-07-28 re-run then deadlocked in Stage 3b: `backfill_max_workers = 0` auto-picked **16**
+workers, RAM hit 81 %, the panic watchdog killed the pool, and the parent sat waiting on workers
+that no longer existed — 75 minutes at 0 % CPU with no output. The key's own comment already said
+*"Pinned at 4"*; the value had drifted to `0`. Set to 4: the same 801 partitions completed in
+**7 minutes** with no throttle and no panic — fewer workers was both safer and faster, the phase
+being I/O-bound. Resumed with `--no-prep --no-intersect --no-flatten`, which saved the 21 h of
+intersect and flatten already on disk, and the pipeline completed clean.
+
+Packaged as `basic_mosaic_35_assets.zip` (6.12 GB, 1,207 members, restore round-trip verified against
+`mesa.restore_backup_archive`). **Withdrawn on 2026-07-30**: the 35-layer run was superseded once the
+Windows box had delivered the 30-layer mosaic the Uganda team actually asked for, so the package was
+deleted and never reached Drive. The memory findings below stand on their own and are what the run
+was worth keeping for.
+
+One measurement worth keeping for comparison with the Windows run: rebuilding `tbl_flat` changes the
+tiles even though no value changes. 248 of 1,123 tiles differed byte-wise, but only **0.11 % of
+pixels**, and **no tile gained or lost a colour**. The 801 intersect partitions are written by a
+parallel pool and complete in non-deterministic order, so row order in `tbl_flat` differs between
+runs; at ~530 polygons per pixel at z6 the last one painted wins. Byte-identity is only expected
+when the input `tbl_flat` is identical.
+
+Not exercised here: the mosaic build itself. `tbl_geocode_object` was reused from 2026-07-25
+throughout, so nothing on this side tested the pre-flight gate that Windows found underestimating by
+an order of magnitude.
