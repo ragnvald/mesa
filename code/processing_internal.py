@@ -2701,7 +2701,17 @@ def _compute_owa_counts_from_stacked(df: pd.DataFrame, min_score: int = 1, max_s
         return pd.DataFrame(columns=cols)
 
     sens = pd.to_numeric(tmp["sensitivity"], errors="coerce").round()
-    sens = sens.clip(min_score, max_score)
+    # Drop out-of-scale values instead of clipping them in. Clipping turned a 0
+    # ("not assessed" - the value the asset import seeds) into a real lowest-bin
+    # count, so index_owa ranked cells by overlap COUNT and reported a 17..100
+    # spread on a project whose every sensitivity was 0. An unassessed project must
+    # produce no index, not a plausible-looking one.
+    n_before = int(sens.notna().sum())
+    sens = sens.where((sens >= min_score) & (sens <= max_score))
+    n_dropped = n_before - int(sens.notna().sum())
+    if n_dropped:
+        print(f"[mesa] owa: dropped {n_dropped:,} row(s) with sensitivity outside "
+              f"{min_score}..{max_score} (not assessed / invalid)", flush=True)
     tmp = tmp.assign(__sens__=sens)
     tmp = tmp.dropna(subset=["__sens__"])
     if tmp.empty:
