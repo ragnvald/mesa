@@ -17,7 +17,8 @@ This holds even when the change is small, obviously correct, or already verified
 ## Where to put what
 
 - **Code comments**: explain the "what" and the technical "why" (hidden constraints, non-obvious invariants, references to a learning.md section). Keep them tight - a sentence or two max. Never write multi-paragraph comment blocks.
-- **Incident write-ups, post-mortems, historical narrative, dated decision logs**: go in [learning.md](learning.md), not in source files. Code comments rot; learning.md is the durable record. When a fix is informed by a past incident, the comment should *point at* the learning.md section (e.g. `# See learning.md "Parent-side memory in the pipeline"`), not retell the story.
+- **Durable rules distilled from an incident**: go in [learning.md](learning.md), not in source files. Code comments rot; learning.md is the durable record. When a fix is informed by a past incident, the comment should *point at* the learning.md section (e.g. `# See learning.md "Parent-side memory in the pipeline"`), not retell the story.
+- **What happened, and in what order**: goes in [history.md](history.md) — sessions, incidents, deliveries, decisions and what was reported to the sibling projects. The split is: history.md is the *narrative* ("on 2026-07-28 a 25-hour mosaic peaked at 85.65 GB"); learning.md is the *rule* extracted from it ("the pre-flight gate scales on asset count, but memory is driven by vertex count"). A one-off event with no reusable lesson belongs only in history.md; a rule with no incident behind it is usually not worth an entry at all.
 - **Operator-facing tuning notes**: belong inline near the relevant `config.ini` key, but kept short (one sentence on what it does, plus a pointer to learning.md if there's a known failure mode behind it).
 
 ## Why this rule exists
@@ -38,6 +39,21 @@ Each entry is a level-2 section dated by the day the lesson landed:
 ```
 
 Append, do not rewrite history. Mark a previous entry as superseded inline if a newer entry overrides it.
+
+## history.md format
+
+Each entry is a level-2 section headed by the date (or date range) and what happened:
+
+```
+## YYYY-MM-DD — <what happened, in a few words>
+
+<Narrative. What was observed, what it turned out to be, what was decided, what shipped.
+Cite commits and measured numbers. Say what was reported to mesa-server / mesa_demodata.>
+```
+
+Append at the bottom, newest last. Never rewrite an earlier entry — if a later one overturns
+something, say so in the later entry. Both sibling projects (`mesa-server`, `mesa_demodata`) keep
+the same file, so an incident that crosses the boundary should be logged on both sides.
 
 ## Pipeline-specific gotchas worth knowing about
 
