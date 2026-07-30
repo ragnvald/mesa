@@ -2858,35 +2858,31 @@ def _flatten_worker(args):
 
     # Helpers (same as original)
     def _pick_base_category(frame, base):
+        # A bare "category" branch used to sit between these two. It was dead — no
+        # MESA table carries such a column — and would have been wrong if it ever
+        # fired, since it would hand the same code to all three bases.
         if f"{base}_code" in frame.columns:
             return frame[f"{base}_code"].astype("string").str.strip().str.upper()
-        elif "category" in frame.columns:
-            return frame["category"].astype("string").str.strip().str.upper()
-        else:
-            # sensitivity is the product (1..25) and uses the config bands; importance
-            # and susceptibility are single factors (1..5) and need their own bands,
-            # or every value lands in E.
-            bands = ranges_map if base == "sensitivity" else value_ranges_map
-            return frame[base].apply(lambda value: map_num_to_code(value, bands)).astype("string").str.upper()
-
-    def _pick_rank(frame, base):
-        if f"{base}_category_rank" in frame.columns:
-            return pd.to_numeric(frame[f"{base}_category_rank"], errors="coerce").fillna(0.0)
-        elif "category_rank" in frame.columns:
-            return pd.to_numeric(frame["category_rank"], errors="coerce").fillna(0.0)
-        return pd.Series(0.0, index=frame.index, dtype="float64")
+        # sensitivity is the product (1..25) and uses the config bands; importance
+        # and susceptibility are single factors (1..5) and need their own bands,
+        # or every value lands in E.
+        bands = ranges_map if base == "sensitivity" else value_ranges_map
+        return frame[base].apply(lambda value: map_num_to_code(value, bands)).astype("string").str.upper()
 
     def _select_extreme_local(frame, base, pick):
+        # A "rnk" term used to sit in the sort key, fed by a _pick_rank helper whose
+        # three branches all returned 0.0: neither category_rank nor
+        # <base>_category_rank is produced anywhere in MESA. Dropping it is
+        # behaviour-preserving — a constant column cannot affect the ordering.
         numeric_values = pd.to_numeric(frame[base], errors="coerce")
         category_codes = _pick_base_category(frame, base)
-        category_ranks = _pick_rank(frame, base)
-        local_df = pd.DataFrame({"code": frame["code"], "val": numeric_values, "cat": category_codes, "rnk": category_ranks})
+        local_df = pd.DataFrame({"code": frame["code"], "val": numeric_values, "cat": category_codes})
         if pick == "max":
             local_df["sv"] = local_df["val"].fillna(-np.inf)
-            local_df = local_df.sort_values(["code","sv","rnk","cat"], ascending=[True, False, False, True], kind="mergesort")
+            local_df = local_df.sort_values(["code","sv","cat"], ascending=[True, False, True], kind="mergesort")
         else:
             local_df["sv"] = local_df["val"].fillna(np.inf)
-            local_df = local_df.sort_values(["code","sv","rnk","cat"], ascending=[True, True, False, True], kind="mergesort")
+            local_df = local_df.sort_values(["code","sv","cat"], ascending=[True, True, True], kind="mergesort")
         return local_df.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].rename(
             columns={"val": f"{base}_{pick}", "cat": f"{base}_code_{pick}"}
         )
