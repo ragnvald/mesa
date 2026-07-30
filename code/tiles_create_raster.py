@@ -23,7 +23,7 @@ Usage examples:
 
 INDEX_GRADIENT_STEPS = 100  # number of discrete colors for 1..100 index layers
 
-import argparse, json, math, os, sqlite3, re, multiprocessing as mp, sys, io
+import argparse, gc, json, math, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Iterable
 
@@ -55,8 +55,41 @@ import pandas as pd
 from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
 _ensure_geo_data()  # repair a machine-wide PROJ/GDAL env before the GIS stack loads
 import geopandas as gpd
+import shapely
 from shapely.geometry import Polygon, MultiPolygon
 from PIL import Image, ImageDraw  # Pillow
+
+# Candidate geometries are decoded from WKB in batches of this many per tile, so a
+# worker's live shapely footprint stays bounded by the batch rather than by the
+# group size. See learning.md "Tiles worker payload".
+WKB_DECODE_BATCH = 20000
+
+
+def pack_wkb(geoms, chunk: int = 500_000) -> Tuple[bytes, np.ndarray]:
+    """Pack a geometry array into one WKB blob plus int64 offsets.
+
+    The pool runs under 'spawn', so everything in initargs is pickled once per
+    worker and each worker keeps a private copy. Shipping live shapely objects
+    cost ~15.4 GB per worker on basic_mosaic (17.6M features); the blob form is
+    ~3.2 GB. Callers should drop the source GeoDataFrame once packed.
+
+    Encoding runs in chunks so the intermediate per-geometry bytes objects are
+    never all live at once. The blob must end up as `bytes`: shapely.from_wkb
+    rejects bytearray and memoryview slices (it reads them as sequences of int).
+    """
+    arr = np.asarray(geoms, dtype=object)
+    n = len(arr)
+    offsets = np.zeros(n + 1, dtype=np.int64)
+    blob = bytearray()
+    for start in range(0, n, chunk):
+        parts = shapely.to_wkb(arr[start:start + chunk])
+        stop = start + len(parts)
+        lengths = np.fromiter((len(p) for p in parts), dtype=np.int64, count=len(parts))
+        np.cumsum(lengths, out=offsets[start + 1:stop + 1])
+        offsets[start + 1:stop + 1] += offsets[start]
+        blob += b"".join(parts)
+        del parts, lengths
+    return bytes(blob), offsets
 
 
 def _swap_xy_geom(geom):
@@ -402,7 +435,9 @@ def build_importance_max_palette(alpha: float = 0.8) -> Dict[str, Tuple[int,int,
     return pal
 
 def importance_max_color(val: Optional[float], palette: Dict) -> Tuple[int,int,int,int]:
-    if val is None:
+    # Missing values arrive as NaN from the float64 value arrays; guard explicitly
+    # so the common case does not go through the exception path below.
+    if val is None or not np.isfinite(val):
         return (0, 0, 0, 0)
     try:
         v = int(round(float(val)))
@@ -576,28 +611,38 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
             pass
 
 # ----------------------- Worker globals & worker -----------------------
-_G_GEOMS: List = []
-_G_SENS_CODES: List[Optional[str]] = []
-_G_VALS_BY_MODE: Dict[str, List[Optional[float]]] = {}
+# Everything here is pickled once per worker under 'spawn', so all per-feature
+# state is held as compact buffers (WKB blob, numpy arrays) rather than Python
+# objects. See pack_wkb() and learning.md "Tiles worker payload".
+_G_WKB: bytes = b""
+_G_WKB_OFF: np.ndarray = np.zeros(1, dtype=np.int64)
+_G_SENS_CODES: np.ndarray = np.zeros(0, dtype=np.int16)   # -1 = missing
+_G_SENS_CATS: List[Optional[str]] = []                     # code -> label
+_G_VALS_BY_MODE: Dict[str, np.ndarray] = {}                # mode -> float64, NaN = missing
 _G_PALETTES_BY_MODE: Dict[str, Dict] = {}
 _G_STROKE_RGBA: Tuple[int,int,int,int] = (0,0,0,0)
 _G_STROKE_W: float = 0.0
 # Per-feature precomputed RGBA for categorical layers (seg_signatures, seg_clusters):
-# mode -> list of (r,g,b,a) aligned to feature index.
-_G_COLORS_BY_MODE: Dict[str, List[Tuple[int,int,int,int]]] = {}
+# mode -> uint8 (N,4) array aligned to feature index.
+_G_COLORS_BY_MODE: Dict[str, np.ndarray] = {}
 
 def _worker_init(
-    geoms,
+    wkb_blob,
+    wkb_offsets,
     sens_codes,
+    sens_cats,
     vals_by_mode,
     palettes_by_mode,
     stroke_rgba,
     stroke_w,
     colors_by_mode=None,
 ):
-    global _G_GEOMS, _G_SENS_CODES, _G_VALS_BY_MODE, _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W, _G_COLORS_BY_MODE
-    _G_GEOMS = geoms
+    global _G_WKB, _G_WKB_OFF, _G_SENS_CODES, _G_SENS_CATS, _G_VALS_BY_MODE
+    global _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W, _G_COLORS_BY_MODE
+    _G_WKB = wkb_blob
+    _G_WKB_OFF = wkb_offsets
     _G_SENS_CODES = sens_codes
+    _G_SENS_CATS = list(sens_cats or [])
     _G_VALS_BY_MODE = vals_by_mode or {}
     _G_PALETTES_BY_MODE = palettes_by_mode or {}
     _G_STROKE_RGBA = stroke_rgba
@@ -617,84 +662,75 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
 
         palette = _G_PALETTES_BY_MODE.get(mode, {})
         numvals = _G_VALS_BY_MODE.get(mode)
+        colors = _G_COLORS_BY_MODE.get(mode)
 
-        for i in cand_idx:
-            geom = _G_GEOMS[i]
-            if geom is None or geom.is_empty:
-                continue
+        # Decode candidates from the WKB blob in batches: one vectorised
+        # shapely call per batch, and never more than WKB_DECODE_BATCH live
+        # geometries at a time even when a coarse tile covers the whole AOI.
+        off = _G_WKB_OFF
+        blob = _G_WKB
+        for start in range(0, len(cand_idx), WKB_DECODE_BATCH):
+            batch = cand_idx[start:start + WKB_DECODE_BATCH]
+            geoms = shapely.from_wkb([blob[off[i]:off[i + 1]] for i in batch])
 
-            if mode == "sensitivity":
-                code = _G_SENS_CODES[i]
-                fill_rgba = palette.get(code, (0,0,0,0)) if code is not None else (0,0,0,0)
-            elif mode in ("groupstotal", "assetstotal"):
-                alpha = palette.get("blue_alpha", 0.70)
-                v = None
-                if numvals is not None:
-                    try:
-                        v = numvals[i]
-                    except Exception:
-                        v = None
-                scale = "log1p" if mode == "assetstotal" else "linear"
-                fill_rgba = blue_ramp_rgba(v, float(num_min), float(num_max), alpha=alpha, scale=scale)
-            elif mode == "importance_max":
-                imp_pal = palette.get("importance_max_colors", {})
-                v = None
-                if numvals is not None:
-                    try:
-                        v = numvals[i]
-                    except Exception:
-                        v = None
-                fill_rgba = importance_max_color(v, imp_pal)
-            elif mode == "index_owa":
-                gradient = palette.get("gradient", [])
-                v = None
-                if numvals is not None:
-                    try:
-                        v = numvals[i]
-                    except Exception:
-                        v = None
-                fill_rgba = index_layer_color(v, gradient)
-            elif mode in _G_COLORS_BY_MODE:
-                # Categorical layers (seg_signatures, seg_clusters, segmv): per-feature
-                # RGBA precomputed in main() (signature ramp / cluster palette). Cells
-                # with no value get a transparent colour and are skipped.
-                colors = _G_COLORS_BY_MODE.get(mode)
-                try:
-                    fill_rgba = colors[i] if colors is not None else (0, 0, 0, 0)
-                except Exception:
-                    fill_rgba = (0, 0, 0, 0)
-            else:
-                continue
-
-            for ring in polygon_rings_lonlat(geom):
-                path = ring_lonlat_to_pixels(ring, z, x, y, tol=0.35 if z>=9 else 0.6)
-                if len(path) < 3:
+            for geom, i in zip(geoms, batch):
+                if geom is None or geom.is_empty:
                     continue
 
-                # Fast reject: if the pixel bbox is fully outside the tile, skip.
-                # This prevents writing many fully-transparent tiles when bbox-based
-                # candidate selection includes geometries that don't actually affect
-                # the current tile after projection/rounding.
-                try:
-                    xs = [p[0] for p in path]
-                    ys = [p[1] for p in path]
-                    if (max(xs) < 0.0) or (min(xs) > float(TILE_SIZE)) or (max(ys) < 0.0) or (min(ys) > float(TILE_SIZE)):
-                        continue
-                except Exception:
-                    pass
+                if mode == "sensitivity":
+                    c = _G_SENS_CODES[i]
+                    code = _G_SENS_CATS[c] if c >= 0 else None
+                    fill_rgba = palette.get(code, (0,0,0,0)) if code is not None else (0,0,0,0)
+                elif mode in ("groupstotal", "assetstotal"):
+                    alpha = palette.get("blue_alpha", 0.70)
+                    v = numvals[i] if numvals is not None else None
+                    scale = "log1p" if mode == "assetstotal" else "linear"
+                    fill_rgba = blue_ramp_rgba(v, float(num_min), float(num_max), alpha=alpha, scale=scale)
+                elif mode == "importance_max":
+                    imp_pal = palette.get("importance_max_colors", {})
+                    v = numvals[i] if numvals is not None else None
+                    fill_rgba = importance_max_color(v, imp_pal)
+                elif mode == "index_owa":
+                    gradient = palette.get("gradient", [])
+                    v = numvals[i] if numvals is not None else None
+                    fill_rgba = index_layer_color(v, gradient)
+                elif colors is not None:
+                    # Categorical layers (seg_signatures, seg_clusters, segmv): per-feature
+                    # RGBA precomputed in main() (signature ramp / cluster palette). Cells
+                    # with no value get a transparent colour and are skipped.
+                    fill_rgba = tuple(colors[i].tolist())
+                else:
+                    continue
 
-                if fill_rgba[3] > 0:
+                for ring in polygon_rings_lonlat(geom):
+                    path = ring_lonlat_to_pixels(ring, z, x, y, tol=0.35 if z>=9 else 0.6)
+                    if len(path) < 3:
+                        continue
+
+                    # Fast reject: if the pixel bbox is fully outside the tile, skip.
+                    # This prevents writing many fully-transparent tiles when bbox-based
+                    # candidate selection includes geometries that don't actually affect
+                    # the current tile after projection/rounding.
                     try:
-                        draw.polygon(path, fill=fill_rgba)
-                        painted = True
+                        xs = [p[0] for p in path]
+                        ys = [p[1] for p in path]
+                        if (max(xs) < 0.0) or (min(xs) > float(TILE_SIZE)) or (max(ys) < 0.0) or (min(ys) > float(TILE_SIZE)):
+                            continue
                     except Exception:
                         pass
-                if _G_STROKE_RGBA[3] > 0 and _G_STROKE_W > 0:
-                    try:
-                        draw.line(path + [path[0]], fill=_G_STROKE_RGBA, width=int(max(1, round(_G_STROKE_W))))
-                        painted = True
-                    except Exception:
-                        pass
+
+                    if fill_rgba[3] > 0:
+                        try:
+                            draw.polygon(path, fill=fill_rgba)
+                            painted = True
+                        except Exception:
+                            pass
+                    if _G_STROKE_RGBA[3] > 0 and _G_STROKE_W > 0:
+                        try:
+                            draw.line(path + [path[0]], fill=_G_STROKE_RGBA, width=int(max(1, round(_G_STROKE_W))))
+                            painted = True
+                        except Exception:
+                            pass
 
         if not painted:
             return None
@@ -714,13 +750,17 @@ def slugify(value: str | int) -> str:
     return s[:120] if len(s) > 120 else s
 
 def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int,
-                    sindex, gdf: gpd.GeoDataFrame) -> List[Tuple[int,int,int, List[int]]]:
+                    sindex, n_features: int) -> List[Tuple[int,int,int, np.ndarray]]:
     """
     Build full task list and print schedule summary for z in [minz..maxz].
-    Each task: (z, x, y, candidate_indexes)
+    Each task: (z, x, y, candidate_indexes as an int32 array)
+
+    Candidates are kept as int32 arrays, not Python lists: a coarse tile over a
+    large group can hold millions of them, and a list costs ~64 B per entry
+    against 4 B here (and pickles ~5x larger per task).
     """
     minx, miny, maxx, maxy = bounds
-    tasks: List[Tuple[int,int,int, List[int]]] = []
+    tasks: List[Tuple[int,int,int, np.ndarray]] = []
     total = 0
     for z in range(minz, maxz+1):
         tx0, ty0, tx1, ty1 = tiles_covering_bounds((minx, miny, maxx, maxy), z)
@@ -729,8 +769,11 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
         for x in range(tx0, tx1+1):
             for y in range(ty0, ty1+1):
                 tminlon, tminlat, tmaxlon, tmaxlat = tile_bounds_lonlat(z, x, y)
-                idx = list(sindex.intersection((tminlon, tminlat, tmaxlon, tmaxlat))) if sindex is not None else list(range(len(gdf)))
-                if not idx:
+                if sindex is not None:
+                    idx = np.asarray(sindex.intersection((tminlon, tminlat, tmaxlon, tmaxlat)), dtype=np.int32)
+                else:
+                    idx = np.arange(n_features, dtype=np.int32)
+                if idx.size == 0:
                     continue
                 tasks.append((z, x, y, idx))
                 total += 1
@@ -738,132 +781,6 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
     return tasks
 
 # ----------------------- Core -----------------------
-def run_one_layer(group_name: str,
-                  gdf: gpd.GeoDataFrame,
-                  layer_mode: str,      # "sensitivity" | "groupstotal" | "assetstotal" | "importance_max" | "index_owa"
-                  palette: Dict[str, Tuple[int,int,int,int]],
-                  ranges_map: Dict[str, range],
-                  out_dir: Path,
-                  minzoom: int,
-                  maxzoom: int,
-                  stroke_rgba: Tuple[int,int,int,int],
-                  stroke_w: float,
-                  procs: int,
-                  tasks: List[Tuple[int,int,int, List[int]]],
-                  progress_every: int = 1000):
-    """
-    Prepare MBTiles writer, enumerate tiles, use worker pool to render, stream to writer.
-    """
-    # Attributes & output naming
-    if layer_mode == "sensitivity":
-        sens_codes = gdf.get("sensitivity_code_max", pd.Series(index=gdf.index, dtype="string")).astype("string").str.strip().str.upper()
-        if sens_codes.isna().any() or (sens_codes == "<NA>").any():
-            fallback = []
-            sens_num = pd.to_numeric(gdf.get("sensitivity_max", pd.Series(index=gdf.index, dtype="float")), errors="coerce")
-            for i in gdf.index:
-                c = None
-                if pd.notna(sens_codes.at[i]) and sens_codes.at[i] != "<NA>":
-                    c = str(sens_codes.at[i]).strip().upper()
-                else:
-                    c = build_code_from_numeric_if_missing(sens_num.at[i], ranges_map)
-                fallback.append(c)
-            sens_codes = pd.Series(fallback, index=gdf.index, dtype="object")
-        numvals = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_sensitivity_max"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-
-        vmin = 0.0; vmax = 1.0  # unused for sensitivity
-    elif layer_mode == "groupstotal":
-        numvals = pd.to_numeric(gdf.get("asset_groups_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_groupstotal"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-        vmin = float(np.nanmin(numvals.values)) if len(numvals) else 0.0
-        vmax = float(np.nanmax(numvals.values)) if len(numvals) else 1.0
-        if not np.isfinite(vmin): vmin = 0.0
-        if not np.isfinite(vmax): vmax = 1.0
-    elif layer_mode == "assetstotal":
-        numvals = pd.to_numeric(gdf.get("assets_overlap_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_assetstotal"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-        vmin = float(np.nanmin(numvals.values)) if len(numvals) else 0.0
-        vmax = assetstotal_vmax(numvals.values)   # p99 cap for skew; see helper
-        if not np.isfinite(vmin): vmin = 0.0
-        if not np.isfinite(vmax) or vmax <= vmin: vmax = vmin + 1.0
-    elif layer_mode == "importance_max":
-        numvals = pd.to_numeric(gdf.get("importance_max", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_importance_max"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-        vmin = 1.0; vmax = 5.0
-    elif layer_mode == "index_owa":
-        numvals = pd.to_numeric(gdf.get("index_owa", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-        sens_codes = pd.Series([None]*len(gdf), index=gdf.index, dtype="object")
-        mbt_name = f"{group_name}_index_owa"
-        out_path = out_dir / f"{mbt_name}.mbtiles"
-        vmin = 1.0; vmax = 100.0
-    else:
-        raise ValueError(f"Unknown layer_mode: {layer_mode}")
-
-    # Geometry & bounds
-    minx, miny, maxx, maxy = gdf.total_bounds
-    miny = clamp_lat(miny); maxy = clamp_lat(maxy)
-    bounds = (float(minx), float(miny), float(maxx), float(maxy))
-
-    # Writer process
-    in_q = mp.Queue(maxsize=1000)
-    done_q = mp.Queue()
-    wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
-    wp.start()
-    scale = "log1p" if layer_mode == "assetstotal" else "linear"
-    metadata = None
-    if layer_mode in ("groupstotal", "assetstotal"):
-        metadata = {
-            "mesa_scale": scale,
-            "mesa_value_min": vmin,
-            "mesa_value_max": vmax,
-            "mesa_legend": json.dumps(blue_ramp_legend(vmin, vmax, scale=scale), separators=(",", ":")),
-        }
-    in_q.put(("__INIT__", mbt_name, int(minzoom), int(maxzoom), bounds, metadata))
-
-    # Use pre-calculated tasks
-    total_tiles = len(tasks)
-    written = 0
-
-    try:
-        progress_every = int(progress_every)
-    except Exception:
-        progress_every = 1000
-    progress_every = max(1, progress_every)
-
-    # Fallback implementation (kept for direct calls) now renders via a short-lived pool.
-    # The main() path uses a shared pool per group for performance.
-    geoms = list(gdf.geometry.values)
-    senslst = list(sens_codes.values)
-    vals_by_mode = {layer_mode: list(numvals.values)}
-    palettes_by_mode = {layer_mode: palette}
-    init_args = (geoms, senslst, vals_by_mode, palettes_by_mode, stroke_rgba, stroke_w)
-
-    layer_tasks = [(z, x, y, idx, layer_mode, vmin, vmax) for (z, x, y, idx) in tasks]
-
-    procs = max(1, int(procs))
-    with mp.get_context("spawn").Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
-        for i, out in enumerate(pool.imap_unordered(_render_one_tile, layer_tasks, chunksize=64), 1):
-            if out is not None:
-                in_q.put(out)
-                written += 1
-            if i % progress_every == 0 or i == total_tiles:
-                log(f"[progress] {mbt_name}: {i}/{total_tiles}")
-
-    # Close writer and confirm
-    in_q.put("__CLOSE__")
-    status = done_q.get()
-    if status[0] != "ok":
-        raise RuntimeError(f"Writer failed: {status[1] if len(status)>1 else 'unknown'}")
-
-    log(f"    {mbt_name}: tiles written {written:,} / scheduled {total_tiles:,} → {out_path}")
-
 def main():
     ap = argparse.ArgumentParser(description="Raster MBTiles (PNG) from tbl_flat.parquet per group (sensitivity, totals, and indexes).")
     ap.add_argument("--group-col", default="name_gis_geocodegroup", help="Grouping column (default: name_gis_geocodegroup)")
@@ -925,27 +842,14 @@ def main():
             ordered_cols.append(col)
             seen.add(col)
 
-    try:
-        gdf_all = gpd.read_parquet(parquet, columns=ordered_cols)
-    except (TypeError, ValueError):
-        gdf_all = gpd.read_parquet(parquet)
-
-    # EPSG:4326 expected
-    try:
-        if gdf_all.crs is None or str(gdf_all.crs).upper() not in ("EPSG:4326", "WGS84", "EPSG: 4326"):
-            gdf_all = gdf_all.to_crs("EPSG:4326")
-    except Exception:
-        pass
-
-    # Optional debug escape hatch: swap X/Y only if explicitly enabled.
-    try:
-        gdf_all = maybe_swap_xy(gdf_all)
-    except Exception:
-        pass
-
-    # Groups
-    all_groups = [str(x) for x in gdf_all[args.group_col].dropna().unique().tolist()]
-    all_groups.sort()
+    # Enumerate groups from the group column alone. Reading the whole of tbl_flat
+    # here used to hold ~18 GB of geometry for the entire run on top of the
+    # per-group copy below; each group is now read on demand inside the loop.
+    gcol_tbl = pq.read_table(parquet, columns=[args.group_col])
+    all_groups = sorted(
+        str(x) for x in gcol_tbl[args.group_col].unique().to_pylist() if x is not None
+    )
+    del gcol_tbl
     if args.only_groups:
         allow = set([s.strip() for s in args.only_groups.split(",") if s.strip()])
         groups = [g for g in all_groups if g in allow]
@@ -1015,10 +919,10 @@ def main():
     importance_max_palette = {"importance_max_colors": build_importance_max_palette(importance_max_alpha)}
     ranges_map = read_ranges_map(cfg_path)
     stroke_rgba = hex_to_rgba(args.stroke, args.stroke_alpha)
-    groups_total_available = "asset_groups_total" in gdf_all.columns
-    assets_total_available = "assets_overlap_total" in gdf_all.columns
-    index_owa_available = "index_owa" in gdf_all.columns
-    importance_max_available = "importance_max" in gdf_all.columns
+    groups_total_available = "asset_groups_total" in ordered_cols
+    assets_total_available = "assets_overlap_total" in ordered_cols
+    index_owa_available = "index_owa" in ordered_cols
+    importance_max_available = "importance_max" in ordered_cols
     blue_palette = {"blue_alpha": blue_alpha}
 
     out_dir = mbtiles_dir()
@@ -1030,11 +934,33 @@ def main():
 
     for gv in groups:
         slug = slugify(gv)
-        gdf = gdf_all[gdf_all[args.group_col] == gv]
+        # Read just this group. basic_mosaic alone is ~18 GB as a GeoDataFrame, so
+        # nothing but the current group may be resident, and it is dropped again
+        # before the worker pool starts (see the del below).
+        try:
+            gdf = gpd.read_parquet(parquet, columns=ordered_cols,
+                                   filters=[(args.group_col, "=", gv)])
+        except (TypeError, ValueError):
+            gdf = gpd.read_parquet(parquet, filters=[(args.group_col, "=", gv)])
+
+        # EPSG:4326 expected
+        try:
+            if gdf.crs is None or str(gdf.crs).upper() not in ("EPSG:4326", "WGS84", "EPSG: 4326"):
+                gdf = gdf.to_crs("EPSG:4326")
+        except Exception:
+            pass
+
+        # Optional debug escape hatch: swap X/Y only if explicitly enabled.
+        try:
+            gdf = maybe_swap_xy(gdf)
+        except Exception:
+            pass
+
         gdf = gdf[is_polygon_like_gdf(gdf)]
         gdf = gdf[gdf.geometry.notna()]
         if gdf.empty:
             log(f"[{gv}] no polygonal features — skipping.")
+            del gdf
             continue
 
         minx, miny, maxx, maxy = gdf.total_bounds
@@ -1049,8 +975,9 @@ def main():
         except Exception:
             sindex = None
 
-        tasks = plan_tile_tasks(bounds_c, args.minzoom, args.maxzoom, sindex, gdf)
+        tasks = plan_tile_tasks(bounds_c, args.minzoom, args.maxzoom, sindex, len(gdf))
         log(f"  → planned {len(tasks):,} tiles (shared across layers)")
+        del sindex   # ~1.8 GB on basic_mosaic; only plan_tile_tasks needs it
 
         # Precompute per-feature values for all supported layers once per group.
         sens_codes = gdf.get("sensitivity_code_max", pd.Series(index=gdf.index, dtype="string")).astype("string").str.strip().str.upper()
@@ -1065,15 +992,21 @@ def main():
                     c = build_code_from_numeric_if_missing(sens_num.at[i], ranges_map)
                 fallback.append(c)
             sens_codes = pd.Series(fallback, index=gdf.index, dtype="object")
-        senslst = list(sens_codes.values)
+        # Ship sensitivity as categorical codes + a small label table rather than
+        # one Python string reference per feature.
+        sens_cat = pd.Categorical(sens_codes)
+        sens_code_arr = sens_cat.codes.astype(np.int16)          # -1 = missing
+        sens_cats = [None if pd.isna(c) else str(c) for c in sens_cat.categories]
+        del sens_codes, sens_cat
 
-        vals_by_mode: Dict[str, List[Optional[float]]] = {}
+        # float64 with NaN for missing: 8 B/feature against ~44 B for a list of
+        # float/None, and it pickles as one contiguous buffer per worker.
+        vals_by_mode: Dict[str, np.ndarray] = {}
         group_minmax: Dict[str, Tuple[float, float]] = {}
 
         if groups_total_available:
             s = pd.to_numeric(gdf.get("asset_groups_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-            vals = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
-            vals_by_mode["groupstotal"] = vals
+            vals_by_mode["groupstotal"] = s.to_numpy(dtype=np.float64, na_value=np.nan)
             try:
                 vmin = float(np.nanmin(s.values)) if len(s) else 0.0
                 vmax = float(np.nanmax(s.values)) if len(s) else 1.0
@@ -1087,8 +1020,7 @@ def main():
 
         if assets_total_available:
             s = pd.to_numeric(gdf.get("assets_overlap_total", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-            vals = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
-            vals_by_mode["assetstotal"] = vals
+            vals_by_mode["assetstotal"] = s.to_numpy(dtype=np.float64, na_value=np.nan)
             try:
                 vmin = float(np.nanmin(s.values)) if len(s) else 0.0
                 vmax = assetstotal_vmax(s.values)   # p99 cap for skew; see helper
@@ -1102,11 +1034,11 @@ def main():
 
         if importance_max_available:
             s = pd.to_numeric(gdf.get("importance_max", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-            vals_by_mode["importance_max"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
+            vals_by_mode["importance_max"] = s.to_numpy(dtype=np.float64, na_value=np.nan)
 
         if index_owa_available:
             s = pd.to_numeric(gdf.get("index_owa", pd.Series([None]*len(gdf), index=gdf.index)), errors="coerce")
-            vals_by_mode["index_owa"] = [None if (v is None or not np.isfinite(v)) else float(v) for v in s.values]
+            vals_by_mode["index_owa"] = s.to_numpy(dtype=np.float64, na_value=np.nan)
 
         palettes_by_mode: Dict[str, Dict] = {
             "sensitivity": sensitivity_palette,
@@ -1120,7 +1052,7 @@ def main():
         # exists. Per-feature RGBA is precomputed here (signature ramp / cluster
         # palette) and shipped to workers via colors_by_mode; cells with no
         # segmentation get a transparent colour so they are not painted.
-        colors_by_mode: Dict[str, List[Tuple[int,int,int,int]]] = {}
+        colors_by_mode: Dict[str, np.ndarray] = {}
         seg_part = gpq_dir() / "tbl_segmentation" / f"{slug}.parquet"
         if seg_part.exists() and "code" in gdf.columns:
             try:
@@ -1130,24 +1062,34 @@ def main():
                 codes = gdf["code"].astype(str).values
                 a = int(round(255 * sens_alpha))
                 sig_by_code = dict(zip(seg_df["code"], seg_df["signature"].fillna("")))
-                sig_colors = []
-                for c in codes:
+                # uint8 (N,4) rather than a list of tuples: 4 B/feature against ~80 B.
+                sig_colors = np.zeros((len(codes), 4), dtype=np.uint8)
+                sig_cache: Dict[str, Tuple[int,int,int,int]] = {}
+                for n, c in enumerate(codes):
                     sig = sig_by_code.get(c, "")
                     if not sig:
-                        sig_colors.append((0, 0, 0, 0))
-                    else:
+                        continue
+                    rgba = sig_cache.get(sig)
+                    if rgba is None:
                         r, g, b = _segmod._signature_colour(sig)
-                        sig_colors.append((int(r), int(g), int(b), a))
+                        rgba = (int(r), int(g), int(b), a)
+                        sig_cache[sig] = rgba
+                    sig_colors[n] = rgba
                 colors_by_mode["seg_signatures"] = sig_colors
                 if "cluster_id" in seg_df.columns and seg_df["cluster_id"].notna().any():
                     clu_by_code = dict(zip(seg_df["code"], seg_df["cluster_id"]))
-                    clu_colors = []
-                    for c in codes:
+                    clu_colors = np.zeros((len(codes), 4), dtype=np.uint8)
+                    clu_cache: Dict[int, Tuple[int,int,int,int]] = {}
+                    for n, c in enumerate(codes):
                         cid = clu_by_code.get(c)
                         if cid is None or (isinstance(cid, float) and cid != cid):
-                            clu_colors.append((0, 0, 0, 0))
-                        else:
-                            clu_colors.append(hex_to_rgba(_segmod._overview_colour(f"cluster {int(cid)}", "clusters"), sens_alpha))
+                            continue
+                        cid = int(cid)
+                        rgba = clu_cache.get(cid)
+                        if rgba is None:
+                            rgba = hex_to_rgba(_segmod._overview_colour(f"cluster {cid}", "clusters"), sens_alpha)
+                            clu_cache[cid] = rgba
+                        clu_colors[n] = rgba
                     colors_by_mode["seg_clusters"] = clu_colors
                 log(f"  → segmentation tiles enabled for '{gv}' "
                     f"({'signatures' + ('+clusters' if 'seg_clusters' in colors_by_mode else '')})")
@@ -1155,9 +1097,16 @@ def main():
                 log(f"  → segmentation tiles skipped for '{gv}': {exc}")
                 colors_by_mode = {}
 
-        # Shared worker pool for this group (reused across all layers)
-        geoms = list(gdf.geometry.values)
-        init_args = (geoms, senslst, vals_by_mode, palettes_by_mode, stroke_rgba, args.stroke_width, colors_by_mode)
+        # Shared worker pool for this group (reused across all layers). Pack the
+        # geometry into a WKB blob and drop the GeoDataFrame *before* spawning, so
+        # the parent is not holding ~18 GB while N workers each unpickle a copy.
+        wkb_blob, wkb_off = pack_wkb(gdf.geometry.values)
+        del gdf
+        gc.collect()
+        log(f"  → payload {len(wkb_blob)/1024**3:.2f} GB WKB shared with each worker")
+
+        init_args = (wkb_blob, wkb_off, sens_code_arr, sens_cats, vals_by_mode,
+                     palettes_by_mode, stroke_rgba, args.stroke_width, colors_by_mode)
 
         procs = max(1, int(args.procs))
         with ctx.Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
@@ -1267,29 +1216,43 @@ def main():
                     sgeo = maybe_swap_xy(sgeo)
                     sgeo = sgeo[sgeo.geometry.notna()]
                     nodata_cert = hex_to_rgba("#cccccc", sens_alpha)
-                    clu_colors, cert_colors = [], []
-                    for c in sgeo["code"].astype(str).values:
+                    s_codes = sgeo["code"].astype(str).values
+                    # uint8 (N,4) per layer; this grid is the largest payload in the
+                    # script (basic_mosaic has ~18.5M cells here, more than tbl_flat).
+                    clu_colors = np.zeros((len(s_codes), 4), dtype=np.uint8)
+                    cert_colors = np.zeros((len(s_codes), 4), dtype=np.uint8)
+                    clu_cache: Dict[int, Tuple[int,int,int,int]] = {}
+                    for n, c in enumerate(s_codes):
                         cid = clu_by_code.get(c)
                         if cid is None or (isinstance(cid, float) and cid != cid):
-                            clu_colors.append((0, 0, 0, 0))    # Types: transparent (no cluster)
-                            cert_colors.append(nodata_cert)    # Certainty: grey (no data)
-                        else:
-                            clu_colors.append(hex_to_rgba(_segmod._overview_colour(f"cluster {int(cid)}", "clusters"), sens_alpha))
-                            cert_colors.append(cert_rgba(pmax_by_code.get(c), sens_alpha))
+                            cert_colors[n] = nodata_cert       # Certainty: grey (no data)
+                            continue                           # Types: transparent (no cluster)
+                        cid = int(cid)
+                        rgba = clu_cache.get(cid)
+                        if rgba is None:
+                            rgba = hex_to_rgba(_segmod._overview_colour(f"cluster {cid}", "clusters"), sens_alpha)
+                            clu_cache[cid] = rgba
+                        clu_colors[n] = rgba
+                        cert_colors[n] = cert_rgba(pmax_by_code.get(c), sens_alpha)
                     s_modes = [(f"{slug}_segmv_{run_id}", "segmv", clu_colors)]
                     if has_pmax:
                         s_modes.append((f"{slug}_segmv_{run_id}_cert", "segmv_cert", cert_colors))
                     s_colors = {mode: cols for (_, mode, cols) in s_modes}
                     log(f"  → classification tiles enabled for '{gv}' (run {run_id}, full grid {len(sgeo):,} cells)")
-                    s_geoms = list(sgeo.geometry.values)
+                    del mv, clu_by_code, pmax_by_code, s_codes
                     s_minx, s_miny, s_maxx, s_maxy = sgeo.total_bounds
                     s_bounds = (float(s_minx), float(clamp_lat(s_miny)), float(s_maxx), float(clamp_lat(s_maxy)))
                     try:
                         s_sindex = sgeo.sindex
                     except Exception:
                         s_sindex = None
-                    s_tasks = plan_tile_tasks(s_bounds, args.minzoom, args.maxzoom, s_sindex, sgeo)
-                    s_init = (s_geoms, [], {}, {}, stroke_rgba, args.stroke_width, s_colors)
+                    s_tasks = plan_tile_tasks(s_bounds, args.minzoom, args.maxzoom, s_sindex, len(sgeo))
+                    del s_sindex
+                    s_wkb, s_off = pack_wkb(sgeo.geometry.values)
+                    del sgeo
+                    gc.collect()
+                    s_init = (s_wkb, s_off, np.zeros(0, dtype=np.int16), [], {}, {},
+                              stroke_rgba, args.stroke_width, s_colors)
                     with ctx.Pool(processes=procs, initializer=_worker_init, initargs=s_init) as spool:
                         for nm, mode, _cols in s_modes:
                             out_path = out_dir / f"{nm}.mbtiles"
