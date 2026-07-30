@@ -78,3 +78,6 @@ output/segmentation_mv/
 config.ini.bak
 # Generated during processing (per-geocode results project); rebuilt each Process run.
 qgis/mesa_results.qgz
+
+# Machine-local config memo (see config.mac.ini header); never committed.
+config.mac.ini
