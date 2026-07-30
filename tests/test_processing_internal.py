@@ -107,7 +107,15 @@ def test_regular_grid_fast_path_assigns_single_cell_to_multi_cell_geometry() -> 
     assert int(fast.iloc[0]["grid_cell"]) == 1
 
 
-def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path) -> None:
+def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path, monkeypatch) -> None:
+    # _flatten_worker backfills from tbl_asset_group via _get_asset_group_lookup(),
+    # which reads gpq_dir()/tbl_asset_group.parquet — resolved from the working
+    # directory. Run from the repo root, this test therefore read whatever project
+    # happened to be sitting in output/geoparquet, and the ref_asset_group values
+    # below collide with real ids there. Prime the module cache with an empty frame
+    # so the fixture below is the only input.
+    monkeypatch.setattr(pi, "_ASSET_GROUP_LOOKUP", pd.DataFrame(), raising=False)
+
     gdf = gpd.GeoDataFrame(
         {
             "code": ["A", "A", "A", "B"],
@@ -146,7 +154,14 @@ def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path) 
     # flatten output; min/max plus the owa_n* histogram carry the same content.
     assert int(row_a["sensitivity_min"]) == 1
     assert int(row_a["sensitivity_max"]) == 25
-    assert row_a["sensitivity_code_max"] == "B"
+    # 25 is the top of A (21-25). The expectation used to read "B", which no
+    # reading of the ranges above supports.
+    assert row_a["sensitivity_code_max"] == "A"
+    assert row_a["sensitivity_code_min"] == "E"
+    # importance/susceptibility are single factors and get their own 1-5 bands:
+    # 5 -> A, 1 -> E. These were constant "E" before derive_value_class_ranges.
+    assert row_a["importance_code_max"] == "A"
+    assert row_a["importance_code_min"] == "E"
     assert int(row_a["owa_n25"]) == 2
 
     row_b = result.loc[result["code"] == "B"].iloc[0]
