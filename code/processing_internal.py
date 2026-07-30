@@ -1145,6 +1145,34 @@ def read_class_ranges(cfg_path: Path):
     order = {"A":5,"B":4,"C":3,"D":2,"E":1}
     return ranges, desc, order
 
+def derive_value_class_ranges(ranges_map: dict, scale_values=None) -> dict:
+    """A-E bands for a single-factor scale (importance / susceptibility).
+
+    The config's [A]..[E] ranges band SENSITIVITY, which is importance x
+    susceptibility and so runs 1..25. Applying those bands to a 1..5 factor puts
+    every value in E - which is why importance_code_* and susceptibility_code_*
+    were constant "E" in every project. Distribute the factor's own scale over
+    the same category letters instead, worst-first, so 5 -> A and 1 -> E.
+
+    scale_values: the project's valid_input (default 1..len(categories)).
+    """
+    if not ranges_map:
+        return {}
+    # Worst-first: order the letters by where their sensitivity band starts.
+    letters = sorted(ranges_map.keys(), key=lambda k: min(ranges_map[k]) if len(ranges_map[k]) else 0)
+    values = sorted({int(v) for v in (scale_values or [])}) or list(range(1, len(letters) + 1))
+    per = max(1, len(values) // len(letters))
+    out: dict[str, range] = {}
+    for i, letter in enumerate(letters):
+        lo_idx = i * per
+        hi_idx = len(values) if i == len(letters) - 1 else min(len(values), (i + 1) * per)
+        chunk = values[lo_idx:hi_idx]
+        if chunk:
+            out[letter] = range(chunk[0], chunk[-1] + 1)
+    # Return in the same A-first order map_num_to_code iterates, for readability.
+    return {k: out[k] for k in ranges_map.keys() if k in out}
+
+
 def map_num_to_code(val, ranges_map: dict) -> str | None:
     if pd.isna(val): return None
     try:
@@ -2768,7 +2796,11 @@ def _flatten_worker(args):
     Process one tbl_stacked parquet file and return aggregated stats per code.
     args: (parquet_path, ranges_map, desc_map)
     """
-    parquet_path, ranges_map, desc_map = args
+    parquet_path, ranges_map, desc_map = args[:3]
+    # Optional 4th element: the A-E bands for a single-factor scale (importance /
+    # susceptibility). Derived here when a caller passes the older 3-tuple, so the
+    # correct bands are used either way. See derive_value_class_ranges.
+    value_ranges_map = (args[3] if len(args) > 3 else None) or derive_value_class_ranges(ranges_map)
     try:
         df = gpd.read_parquet(parquet_path)
     except Exception:
@@ -2821,7 +2853,11 @@ def _flatten_worker(args):
         elif "category" in frame.columns:
             return frame["category"].astype("string").str.strip().str.upper()
         else:
-            return frame[base].apply(lambda value: map_num_to_code(value, ranges_map)).astype("string").str.upper()
+            # sensitivity is the product (1..25) and uses the config bands; importance
+            # and susceptibility are single factors (1..5) and need their own bands,
+            # or every value lands in E.
+            bands = ranges_map if base == "sensitivity" else value_ranges_map
+            return frame[base].apply(lambda value: map_num_to_code(value, bands)).astype("string").str.upper()
 
     def _pick_rank(frame, base):
         if f"{base}_category_rank" in frame.columns:
@@ -3068,6 +3104,15 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
 
     # 2. Prepare config/maps
     ranges_map, desc_map, _ = read_class_ranges(config_file)
+    # Separate bands for the single-factor columns, from the project's own scale.
+    _vv_cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False)
+    try:
+        _vv_cfg.read(config_file, encoding="utf-8")
+        _scale = [int(x.strip()) for x in
+                  str(_vv_cfg["VALID_VALUES"]["valid_input"]).split(",") if x.strip().isdigit()]
+    except Exception:
+        _scale = []
+    value_ranges_map = derive_value_class_ranges(ranges_map, _scale)
     if cfg is not None:
         # Use the auto-tuned in-memory cfg from the caller so flatten /
         # flatten-large / flatten-small / backfill all see the values
@@ -3331,7 +3376,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                 try:
                     with multiprocessing.get_context("spawn").Pool(current_workers) as pool:
                         pstate["pool"] = pool
-                        args = [(Path(p), ranges_map, desc_map) for p in todo]
+                        args = [(Path(p), ranges_map, desc_map, value_ranges_map) for p in todo]
                         try:
                             for fname, res in pool.imap_unordered(_flatten_worker_named, args, chunksize=1):
                                 if pstate["triggered"]:
@@ -3382,7 +3427,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                 except Exception: pass
         else:
             for f in paths:
-                res = _flatten_worker((f, ranges_map, desc_map))
+                res = _flatten_worker((f, ranges_map, desc_map, value_ranges_map))
                 if res is not None:
                     partials.append(res)
 
