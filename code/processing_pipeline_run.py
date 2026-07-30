@@ -536,6 +536,58 @@ def _find_classification_runner(base_dir: Path) -> tuple[Path | None, bool]:
     return _find_helper_runner(base_dir, "segmentation_run")
 
 
+def _tiles_procs_from_cfg(cfg: configparser.ConfigParser) -> int:
+    """Worker count for tiles_create_raster, honouring the config.ini knobs.
+
+    Mirrors processing_internal._tiles_procs_from_config(); duplicated rather
+    than imported so the headless pipeline does not pull in the GUI module.
+    Resolution order: tiles_max_workers > max_workers > auto (CPU and RAM).
+    Without this the helper falls back to its own cpu//2 default and
+    tiles_max_workers / tiles_approx_gb_per_worker are inert.
+    """
+    try:
+        cpu = int(os.cpu_count() or 8)
+    except Exception:
+        cpu = 8
+
+    def _int(key: str, default: int = 0) -> int:
+        try:
+            raw = (cfg["DEFAULT"].get(key, "") or "").strip()
+            return int(raw) if raw else default
+        except Exception:
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            raw = (cfg["DEFAULT"].get(key, "") or "").strip()
+            return float(raw) if raw else default
+        except Exception:
+            return default
+
+    tiles_override = _int("tiles_max_workers", 0)
+    max_workers    = _int("max_workers", 0)
+    auto_max       = _int("auto_workers_max", 0)
+    tiles_gb       = max(0.5, _float("tiles_approx_gb_per_worker", 3.0))
+    mem_frac       = min(0.95, max(0.30, _float("mem_target_frac", 0.70)))
+
+    if tiles_override > 0:
+        workers = tiles_override
+    elif max_workers > 0:
+        workers = max_workers
+    else:
+        workers = max(1, cpu // 2)
+        try:
+            import psutil  # type: ignore
+            avail_gb = float(psutil.virtual_memory().available) / (1024 ** 3)
+            workers = min(workers, max(1, int((avail_gb * mem_frac) // tiles_gb)))
+        except Exception:
+            pass
+        if auto_max > 0:
+            workers = min(workers, auto_max)
+
+    return max(1, min(workers, cpu))
+
+
 def run_tiles_process(
     base_dir: Path,
     cfg: configparser.ConfigParser,
@@ -563,6 +615,10 @@ def run_tiles_process(
             args += ["--maxzoom", str(maxzoom)]
     except Exception:
         pass
+
+    procs = _tiles_procs_from_cfg(cfg)
+    args += ["--procs", str(procs)]
+    _log_line(base_dir, log_fn, f"[Tiles] Using {procs} worker process(es) for MBTiles rendering.")
 
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
