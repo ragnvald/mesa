@@ -173,9 +173,63 @@ _FI_RESULTS_SPECIFIC = {
         ("Importance description", "importance_description_max", None, None),
     ],
     "index_owa": [("OWA index", "index_owa", None, None)],
-    "groupstotal": [("Asset group names", "asset_group_names", None, None)],
+    # groupstotal used to add "Asset group names" as one comma-joined row. The names
+    # are now listed on every results popup instead - see _fi_asset_names.
+    "groupstotal": [],
     "assetstotal": [("# asset objects", "assets_overlap_total", None, None)],
 }
+
+
+_ASSET_TITLE_CACHE: dict | None = None
+
+
+def _asset_group_titles() -> dict:
+    """name_gis_assetgroup -> the name a human recognises.
+
+    tbl_flat carries the synthetic GIS name the import assigns (layer_002); the
+    readable one ("Seagrass meadow") lives in tbl_asset_group. Cached for the life
+    of the map process, which is launched per session, so a re-import cannot leave
+    a stale mapping behind."""
+    global _ASSET_TITLE_CACHE
+    if _ASSET_TITLE_CACHE is not None:
+        return _ASSET_TITLE_CACHE
+    out: dict = {}
+    try:
+        import pandas as pd
+        p = _BASE_DIR / "output" / "geoparquet" / "tbl_asset_group.parquet"
+        if p.exists():
+            df = pd.read_parquet(p, columns=["name_gis_assetgroup", "name_original",
+                                             "title_fromuser"])
+            for _, r in df.iterrows():
+                key = str(r.get("name_gis_assetgroup") or "").strip()
+                title = (str(r.get("title_fromuser") or "").strip()
+                         or str(r.get("name_original") or "").strip())
+                if key and title:
+                    out[key] = title
+    except Exception:
+        pass
+    _ASSET_TITLE_CACHE = out
+    return out
+
+
+def _fi_asset_names(row) -> list:
+    """The cell's asset groups, as readable names for the popup to bullet.
+
+    tbl_flat stores them comma-joined, already sorted and de-duplicated at flatten
+    time, so splitting is enough. Each is then mapped to its human title, falling
+    back to the raw name when the group is not in tbl_asset_group. A group name
+    containing a comma would split wrongly; none do today, and the joined form in
+    tbl_flat has the same limitation."""
+    raw = row.get("asset_group_names")
+    try:
+        import pandas as pd
+        if pd.isna(raw):
+            return []
+    except Exception:
+        pass
+    titles = _asset_group_titles()
+    names = [part.strip() for part in str(raw or "").split(",") if part.strip()]
+    return [titles.get(n, n) for n in names]
 
 
 def _fi_clean_value(val):
@@ -224,6 +278,7 @@ def _fi_results_info(row, overlay, group):
         "title": str(row.get("code") or "Cell"),
         "subtitle": f"{group} · {_FI_RESULTS_OVERLAY_LABELS[overlay]}",
         "metrics": _fi_metrics(row, fields),
+        "assets": _fi_asset_names(row),
     }
 
 
@@ -1536,6 +1591,13 @@ HTML = r"""<!doctype html>
            '</td><td style="padding:1px 0;text-align:right;font-weight:500">'+fiFmt(m[i].value)+(m[i].unit?(' '+fiEsc(m[i].unit)):'')+'</td></tr>';
       }
       h+='</table>'; }
+    var a=info.assets||[];
+    if(a.length){
+      h+='<div style="margin-top:6px;color:#555;font-size:12px">Asset details:</div>'+
+         '<ul style="margin:2px 0 0 0;padding-left:16px;font-size:12px">';
+      for(var j=0;j<a.length;j++){ h+='<li>'+fiEsc(a[j])+'</li>'; }
+      h+='</ul>';
+    }
     h+='</div>'; return h;
   }
   function fiShow(mapKey, latlng, info){
