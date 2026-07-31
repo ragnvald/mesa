@@ -3144,7 +3144,7 @@ def suggest_h3_levels_by_size(min_km: float, max_km: float) -> list[int]:
 def format_level_size_list(levels: list[int]) -> str:
     if not levels:
         return "(none)"
-    return ", ".join(f"R{r} ({H3_RES_ACROSS_FLATS_M[r]:,.0f} m)" for r in levels)
+    return ", ".join(format_h3_level(r) for r in levels)
 
 def suggest_qdgc_levels_by_size(min_km: float, max_km: float) -> list[int]:
     """QDGC analogue of suggest_h3_levels_by_size. Matches by equator cell side;
@@ -3158,7 +3158,17 @@ def suggest_qdgc_levels_by_size(min_km: float, max_km: float) -> list[int]:
 def format_qdgc_level_size_list(levels: list[int]) -> str:
     if not levels:
         return "(none)"
-    return ", ".join(f"L{z} ({QDGC_SIDE_M[z]:,.0f} m @eq)" for z in levels)
+    return ", ".join(format_qdgc_level(z) for z in levels)
+
+
+# Per-level labels, used for the suggestion checkboxes. The list formatters above
+# join these, so a level reads the same whether it appears in a box or a sentence.
+def format_h3_level(r: int) -> str:
+    return f"R{r} ({H3_RES_ACROSS_FLATS_M[r]:,.0f} m)"
+
+
+def format_qdgc_level(z: int) -> str:
+    return f"L{z} ({QDGC_SIDE_M[z]:,.0f} m @eq)"
 
 # -----------------------------------------------------------------------------
 # GUI
@@ -3488,9 +3498,19 @@ class GeocodeManagerWindow(QMainWindow):
         self.h3_max_edit.setFixedWidth(100)
         gen_layout.addWidget(self.h3_max_edit, 0, 3)
 
+        # Suggest fills this with one checkbox per matching level, all ticked, so the
+        # operator can drop the ones they do not want before generating. The label
+        # stays for the empty and library-missing states.
         self.h3_levels_label = QLabel("(none)")
-        gen_layout.addWidget(QLabel("Matching levels:"), 1, 0, Qt.AlignRight)
-        gen_layout.addWidget(self.h3_levels_label, 1, 1, 1, 3)
+        self.h3_level_checks: list[QCheckBox] = []
+        self.h3_levels_box = QWidget()
+        self.h3_levels_layout = QGridLayout(self.h3_levels_box)
+        self.h3_levels_layout.setContentsMargins(0, 0, 0, 0)
+        self.h3_levels_layout.setHorizontalSpacing(14)
+        self.h3_levels_layout.setVerticalSpacing(2)
+        self.h3_levels_layout.addWidget(self.h3_levels_label, 0, 0, 1, 4)
+        gen_layout.addWidget(QLabel("Matching levels:"), 1, 0, Qt.AlignRight | Qt.AlignTop)
+        gen_layout.addWidget(self.h3_levels_box, 1, 1, 1, 3)
 
         self.h3_clear_check = QCheckBox("Delete existing H3 before generating")
         gen_layout.addWidget(self.h3_clear_check, 2, 0, 1, 4)
@@ -3547,9 +3567,17 @@ class GeocodeManagerWindow(QMainWindow):
         self.qdgc_max_edit.setFixedWidth(100)
         gen_layout.addWidget(self.qdgc_max_edit, 0, 3)
 
+        # Same picker as the H3 tab: Suggest fills it with one checkbox per level.
         self.qdgc_levels_label = QLabel("(none)")
-        gen_layout.addWidget(QLabel("Matching levels:"), 1, 0, Qt.AlignRight)
-        gen_layout.addWidget(self.qdgc_levels_label, 1, 1, 1, 3)
+        self.qdgc_level_checks: list[QCheckBox] = []
+        self.qdgc_levels_box = QWidget()
+        self.qdgc_levels_layout = QGridLayout(self.qdgc_levels_box)
+        self.qdgc_levels_layout.setContentsMargins(0, 0, 0, 0)
+        self.qdgc_levels_layout.setHorizontalSpacing(14)
+        self.qdgc_levels_layout.setVerticalSpacing(2)
+        self.qdgc_levels_layout.addWidget(self.qdgc_levels_label, 0, 0, 1, 4)
+        gen_layout.addWidget(QLabel("Matching levels:"), 1, 0, Qt.AlignRight | Qt.AlignTop)
+        gen_layout.addWidget(self.qdgc_levels_box, 1, 1, 1, 3)
 
         self.qdgc_clear_check = QCheckBox("Delete existing QDGC before generating")
         gen_layout.addWidget(self.qdgc_clear_check, 2, 0, 1, 4)
@@ -3881,6 +3909,38 @@ class GeocodeManagerWindow(QMainWindow):
     # ------------------------------------------------------------------
     # H3
     # ------------------------------------------------------------------
+    # ---- suggestion pickers -------------------------------------------------
+    def _fill_level_picker(self, layout, checks, label, levels, fmt, on_toggle, per_row=4):
+        """Rebuild a picker as one checkbox per suggested level, all ticked.
+
+        Ticking is what Generate reads, so the operator can drop levels they do not
+        want. A wide size range matches many levels (50 m to 50 km spans R5..R12),
+        hence the wrap."""
+        for cb in checks:
+            layout.removeWidget(cb)
+            cb.setParent(None)
+            cb.deleteLater()
+        checks.clear()
+        if not levels:
+            label.setText("(none)")
+            label.show()
+            return
+        label.hide()
+        for i, level in enumerate(levels):
+            cb = QCheckBox(fmt(level))
+            cb.setChecked(True)
+            cb.toggled.connect(on_toggle)
+            layout.addWidget(cb, i // per_row, i % per_row)
+            checks.append(cb)
+
+    @staticmethod
+    def _picked_levels(checks, levels) -> list[int]:
+        return [lv for cb, lv in zip(checks, levels) if cb.isChecked()]
+
+    def _sync_h3_generate_enabled(self, *_):
+        self.h3_generate_btn.setEnabled(
+            bool(self._picked_levels(self.h3_level_checks, self._h3_levels)))
+
     def _suggest_h3(self):
         log_to_gui("[H3] Suggest requested.", "INFO")
         try:
@@ -3893,20 +3953,22 @@ class GeocodeManagerWindow(QMainWindow):
             return
         min_km, max_km = min_m / 1000.0, max_m / 1000.0
         self._h3_levels = suggest_h3_levels_by_size(min_km, max_km)
-        self.h3_levels_label.setText(format_level_size_list(self._h3_levels))
-        self.h3_generate_btn.setEnabled(bool(self._h3_levels))
+        self._fill_level_picker(self.h3_levels_layout, self.h3_level_checks,
+                                self.h3_levels_label, self._h3_levels,
+                                format_h3_level, self._sync_h3_generate_enabled)
+        self._sync_h3_generate_enabled()
         log_to_gui(
             f"Suggested H3 levels: {self._h3_levels}" if self._h3_levels
             else "No H3 levels for that size range.", "INFO"
         )
 
     def _generate_h3(self):
-        if not self._h3_levels:
-            log_to_gui("No suggested levels to generate.", "WARN")
+        levels = self._picked_levels(self.h3_level_checks, self._h3_levels)
+        if not levels:
+            log_to_gui("No levels ticked to generate.", "WARN")
             return
         self._active_log_widget = self.h3_log
-        log_to_gui(f"[H3] Generate requested for levels: {self._h3_levels}", "INFO")
-        levels = list(self._h3_levels)
+        log_to_gui(f"[H3] Generate requested for levels: {levels}", "INFO")
         clear = self.h3_clear_check.isChecked()
         _run_in_thread(write_h3_levels, self.base, levels, clear_existing=clear, on_done=True)
 
@@ -3922,20 +3984,26 @@ class GeocodeManagerWindow(QMainWindow):
             return
         min_km, max_km = min_m / 1000.0, max_m / 1000.0
         self._qdgc_levels = suggest_qdgc_levels_by_size(min_km, max_km)
-        self.qdgc_levels_label.setText(format_qdgc_level_size_list(self._qdgc_levels))
-        self.qdgc_generate_btn.setEnabled(bool(self._qdgc_levels))
+        self._fill_level_picker(self.qdgc_levels_layout, self.qdgc_level_checks,
+                                self.qdgc_levels_label, self._qdgc_levels,
+                                format_qdgc_level, self._sync_qdgc_generate_enabled)
+        self._sync_qdgc_generate_enabled()
         log_to_gui(
             f"Suggested QDGC levels: {self._qdgc_levels}" if self._qdgc_levels
             else "No QDGC levels for that size range.", "INFO"
         )
 
+    def _sync_qdgc_generate_enabled(self, *_):
+        self.qdgc_generate_btn.setEnabled(
+            bool(self._picked_levels(self.qdgc_level_checks, self._qdgc_levels)))
+
     def _generate_qdgc(self):
-        if not self._qdgc_levels:
-            log_to_gui("No suggested levels to generate.", "WARN")
+        levels = self._picked_levels(self.qdgc_level_checks, self._qdgc_levels)
+        if not levels:
+            log_to_gui("No levels ticked to generate.", "WARN")
             return
         self._active_log_widget = self.qdgc_log
-        log_to_gui(f"[QDGC] Generate requested for levels: {self._qdgc_levels}", "INFO")
-        levels = list(self._qdgc_levels)
+        log_to_gui(f"[QDGC] Generate requested for levels: {levels}", "INFO")
         clear = self.qdgc_clear_check.isChecked()
         _run_in_thread(write_qdgc_levels, self.base, levels, clear_existing=clear, on_done=True)
 
