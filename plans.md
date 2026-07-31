@@ -55,6 +55,72 @@ ships. Full design documents for individual items live in `devtools/docs/`, whic
 - **To do:** re-run basic_mosaic on the 3.53 M-asset project and fill the result
   into `devtools/docs/basic_mosaic_capacity.md` ("Expected effect" → measured).
 
+### A5. Windows installer + splash (parity with the macOS .dmg)
+
+- **State:** Windows ships a flattened onedir folder (2.19 GB) that the recipient
+  must open to find `mesa.exe`. macOS already gets a signed, drag-to-Applications
+  `.dmg` from `build_mac.py` (`_codesign_deep` → `make_dmg(app, out, f"MESA {ver}")`).
+  Decided 2026-07-31 to close the gap with Inno Setup. Not to be landed until
+  5.6.0 is tagged — a new build dependency the week of a release is the kind of
+  risk one regrets.
+- **Why it is possible now:** two prerequisites arrived by other routes.
+  `e5ddada` moved writable data to `<Documents>/MESA`, so an install into a
+  read-only location works at all; before it, the app wrote next to the exe.
+  `bf45e3f` made helper lookup search `<exe dir>/tools`, so the install layout
+  must preserve that folder exactly or Classification and Tiles grey out again.
+- **Measured starting point:** `tools/` 1.00 GB, `_internal/` 0.97 GB,
+  `mesa.exe` 0.02 GB, `docs/` 0.03 GB. `system_resources/mesa.ico` exists.
+  Inno Setup is *not* installed on the Windows build host.
+
+**Phase 1 — installer, unsigned (~1 day).** New `devtools/mesa.iss` plus
+`devtools/build_installer.py`, which stamps the version from `config.ini` and
+calls `iscc`. Hook it into `build_all.py:main()` after `strip_developer_only_files()`
+and before `append_build_history()` — the same position `make_dmg` occupies on
+macOS, i.e. once the distribution is complete and stripped. Guard the missing
+`iscc` the way `ensure_pyinstaller()` guards its own dependency: fail loudly, not
+silently. Proposed settings, all reversible:
+
+| Choice | Proposal | Reason |
+| --- | --- | --- |
+| Scope | per-user (`PrivilegesRequired=lowest`) | no UAC, no admin; analysts rarely have local admin |
+| Directory | `%LocalAppData%\Programs\MESA` | follows the per-user convention |
+| Compression | `lzma2/max`, `SolidCompression=yes` | 2.19 GB → ~1.2-1.5 GB; costs 10-20 min of build time |
+| Shortcuts | Start menu always, desktop optional | ordinary expectation |
+| Uninstall | removes the install directory **only** | `<Documents>/MESA` is the user's data and must survive — test this explicitly |
+| Upgrade | fixed `AppId` GUID across versions | 5.7 replaces 5.6 instead of leaving two entries |
+
+Acceptance: install on a host with no `.venv`, launch from the Start menu, run
+Process on a restored package, uninstall, confirm `<Documents>/MESA` is untouched.
+
+**Phase 2 — splash (~0.5 day).** Two layers, because one cannot do both jobs.
+PyInstaller's `--splash` is an image painted by the bootloader before Python
+starts: it covers the unpack wait, which is noticeable at 2.19 GB, and it cannot
+be interactive. Static text only — product name, version, `GPL-3.0`, the wiki
+URL as text. Anything clickable belongs in the **Welcome tab**, which already
+exists and already carries wiki info-icons: put "import a data package to try
+MESA" there, with a real link and ideally a button straight to Manage data →
+Restore data.
+
+**Phase 3 — code signing (procurement + ~2 h).** The only item that decides
+whether the installer feels like the macOS one; see the certificate note below.
+An unsigned installer can feel *worse* than today's zip, because SmartScreen's
+"Windows protected your PC" appears at the moment of installing rather than
+never.
+
+- **Licence, settled 2026-07-31:** the repo is **GPL-3.0** (`LICENSE`, the full
+  674-line text). Two consequences: the splash and the installer's About/licence
+  page must name GPL-3.0 and ship `LICENSE` with the program, and binary
+  distribution obliges us to keep the corresponding source available — satisfied
+  by the public GitHub repo, but it stops being satisfied if a build is ever cut
+  from unpublished sources. Note that MESA carries **no copyright line of its
+  own** anywhere in the repo or the UI; the About tab lists third-party licences
+  only. A copyright holder needs deciding before it can be printed on a splash.
+- **Risks:** `iscc` is a new build dependency; build time roughly doubles (add
+  `MESA_BUILD_INSTALLER=0` for fast iterations); and the 2.19 GB becomes visible
+  as disk *consumed* rather than merely downloaded, which raises the value of the
+  helper-footprint work — `tools/` alone is 1.00 GB across five helpers that
+  share most of the same GIS stack.
+
 ---
 
 ## B. Ideas — candidates, not yet decided
