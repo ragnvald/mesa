@@ -176,3 +176,59 @@ when the input `tbl_flat` is identical.
 Not exercised here: the mosaic build itself. `tbl_geocode_object` was reused from 2026-07-25
 throughout, so nothing on this side tested the pre-flight gate that Windows found underestimating by
 an order of magnitude.
+
+## 2026-07-31 — vocabulary: backup becomes store, and the 5.6.0 release checklist
+
+The Mac side landed five commits during the day — tiles shipping geometry as a WKB blob rather than
+per-worker Python objects, `--procs` finally reaching `tiles_create_raster` so its worker caps apply
+at all, and `backfill_max_workers` pinned to 4 after auto-sizing picked 16 on a 16-core/64 GB host
+and tripped the panic watchdog into a deadlock. A push from this side collided with them; rebased
+after checking that neither touched the same file and that their `config.ini` hunk sat far from the
+uncommitted one here.
+
+Two UI additions from live use of the app:
+
+- **H3/QDGC level picker** (`5e38c6a`). Suggest wrote its matching levels into a read-only label and
+  Generate built all of them — seven levels for the default 50 m to 50 km range. It is now one
+  checkbox per level, all ticked, and Generate reads the ticks. The capability had always existed in
+  the CLI (`--h3-levels`); only the GUI hardcoded "all". Never a regression — no level selector has
+  ever been in that file, checked against history rather than memory.
+- **Asset names in the map popup.** The cell popup showed counts but not which assets. First attempt
+  listed `layer_002, layer_003` — `tbl_flat.asset_group_names` carries the synthetic GIS name, not
+  the readable one — so it now looks up `title_fromuser` from `tbl_asset_group`, falling back to
+  `name_original` and then the raw name.
+
+**The vocabulary change.** "Backup" is out of the user-facing Manage-data flow, in the app and in the
+wiki. The rule: the verb is *store* / *restore*, the noun is *MESA package*. `Create backup` →
+**Store data**, `Backup and restore` → **Store and restore data**, `Backup options` → **Options**,
+and the default filename from `mesa_backup_<ts>.zip` to `mesa_package_<ts>.zip` — accepted as
+harmless with roughly two users today. 19 visible strings in `mesa.py`, five wiki pages.
+
+Two things deliberately left alone. `Mesa-changelog-overview.md` keeps its seven occurrences: it
+records what earlier versions were called, and rewriting it would falsify that. Log lines and the
+internal identifiers they mirror (`create_backup_archive`, `restore_backup_archive`) also stay —
+they move together, in an identifier pass, not before it. This supersedes the vocabulary settled on
+2026-07-26, which kept "backup" for a package you made of your own project.
+
+A question about `In MESA 5.1` in Troubleshooting turned out to be a provenance marker, not a stale
+version — the wiki uses that form throughout (`added in MESA 5.1`, `From MESA 5.5 the template…`).
+Tightened to `From MESA 5.1` to match the dominant phrasing. But it surfaced three markers that
+genuinely are stale.
+
+**Open for the 5.6.0 release.** Version is already bumped in `config.ini`; there is no 5.6.0 tag.
+
+1. **Full build against HEAD.** `D:\dist\mesa` is from 2026-07-26 and is now eleven commits behind,
+   including both `tbl_flat` value fixes, the parameter-workbook join key, and the skeleton filter
+   for `input/`/`output/`. None of it has been seen in a frozen build.
+2. **Smoke-test the frozen fixes**: Maps opens on the workspace rather than the install folder;
+   Classification and Tiles are not greyed out; the distribution's `input/`/`output/` contain only
+   the folder tree and `readme.txt`.
+3. **Run the test suite** — `pytest tests/ -q`, green at 4 passed. It is not in CI, so it only
+   protects a release if somebody runs it.
+4. **Wiki version markers.** `Home.md:5`, `Home.md:14` and `Technical.md:6` still say MESA 5.5 is the
+   current release line. Move them to 5.6.0 *when the tag exists*, not before — a wiki announcing an
+   unreleased version is worse than one a step behind.
+5. **Screenshots.** `images/ui_backup_restore.png` shows buttons that no longer exist after the
+   vocabulary change. Needs the GUI and `devtools/capture_ui_active_batch.py`; the 5.2 screenshot
+   refresh is also still outstanding. Picked up as its own pass, not as part of the release.
+6. **Tag 5.6.0.**
