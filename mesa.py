@@ -4957,7 +4957,7 @@ class MesaMainWindow(QMainWindow):
             "Optional. Connect an AI backend for plain-language descriptions "
             "(e.g. Classification class summaries). The access token is stored only "
             "in <b>secrets/</b> — it survives “Clear output” and is left out of "
-            "backups unless you tick “Include AI token” when creating one.")
+            "packages unless you tick “Include AI token” when creating one.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #6a5533; font-size: 10px;")
         grid.addWidget(intro, 0, 0, 1, 5)
@@ -5164,7 +5164,7 @@ class MesaMainWindow(QMainWindow):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Manage your project data with backup, restore, and cleanup operations."
+            "Store, restore and clean up your project data."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -5175,18 +5175,18 @@ class MesaMainWindow(QMainWindow):
         layout.addWidget(self._manage_status)
 
         # --- Backup section ---
-        backup_group = QGroupBox("Backup and restore")
+        backup_group = QGroupBox("Store and restore data")
         backup_layout = QVBoxLayout(backup_group)
         backup_layout.setSpacing(8)
 
         backup_intro = QLabel(
             "A MESA package is a single ZIP file holding exactly one project: "
             "all imported data (input/), processed results (output/), and the "
-            "configuration (config.ini). Create one as a backup before major changes, "
-            "or to move a project to another computer.\n\n"
+            "configuration (config.ini). Store one before major changes, or to move a "
+            "project to another computer.\n\n"
             "Restoring reads a package back in and replaces the current project "
-            "entirely — your own backup, a demo package, or an export from MESA "
-            "server. The existing input/, output/, and config.ini are removed and "
+            "entirely — one you stored yourself, a demo package, or an export from "
+            "MESA server. The existing input/, output/, and config.ini are removed and "
             "replaced with the contents of the selected ZIP."
         )
         backup_intro.setWordWrap(True)
@@ -5195,7 +5195,7 @@ class MesaMainWindow(QMainWindow):
 
         backup_btn_row = QHBoxLayout()
         backup_btn_row.setSpacing(10)
-        create_btn = QPushButton("Create backup")
+        create_btn = QPushButton("Store data")
         create_btn.setProperty("role", "primary")
         create_btn.setFixedWidth(160)
         create_btn.clicked.connect(self._do_backup)
@@ -5289,14 +5289,14 @@ class MesaMainWindow(QMainWindow):
         or None if the user cancelled.
         """
         dlg = QDialog(self)
-        dlg.setWindowTitle("Backup options")
+        dlg.setWindowTitle("Options")
         dlg.setModal(True)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(16, 16, 16, 12)
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Choose what to include in the backup and how to compress it."
+            "Choose what to include in the package and how to compress it."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -5326,7 +5326,7 @@ class MesaMainWindow(QMainWindow):
 
         out_hint = QLabel(
             "Tiles are large (often gigabytes) and regenerable from tbl_flat — "
-            "untick them for a small backup. The downloaded basemap cache "
+            "untick them for a small package. The downloaded basemap cache "
             "(output/cache/) is never included."
         )
         out_hint.setWordWrap(True)
@@ -5355,7 +5355,7 @@ class MesaMainWindow(QMainWindow):
         ai_token_cb = QCheckBox("Include AI token (secrets/)")
         ai_token_cb.setChecked(False)
         ai_token_hint = QLabel(
-            "Off by default: your AI access token is stripped from the backup. "
+            "Off by default: your AI access token is stripped from the package. "
             "Tick only if the recipient should inherit your token."
         )
         ai_token_hint.setWordWrap(True)
@@ -5394,11 +5394,11 @@ class MesaMainWindow(QMainWindow):
 
         # Step 2: file dialog for save path.
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        default_name = f"mesa_backup_{ts}.zip"
+        default_name = f"mesa_package_{ts}.zip"
         default_path = os.path.join(original_working_directory, default_name)
         chosen_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save backup as",
+            "Store package as",
             default_path,
             "ZIP files (*.zip);;All files (*.*)",
         )
@@ -5411,7 +5411,7 @@ class MesaMainWindow(QMainWindow):
         # previews of the growing .zip) stays responsive. LZMA in particular
         # can take many seconds per file on the GUI thread.
         progress = self._make_archive_progress_dialog(
-            "Backup in progress", "Exporting"
+            "Storing data", "Exporting"
         )
         progress.show()
 
@@ -5433,28 +5433,28 @@ class MesaMainWindow(QMainWindow):
             )
 
         def _on_finished(result_path: str) -> None:
-            fname = os.path.basename(result_path) if result_path else "backup"
+            fname = os.path.basename(result_path) if result_path else "package"
             fdir = os.path.dirname(result_path) if result_path else ""
             try:
                 size_mb = os.path.getsize(result_path) / (1024 * 1024)
                 size_str = f"  ·  {size_mb:.1f} MB"
             except Exception:
                 size_str = ""
-            self._manage_status.setText(f"Backup created: {result_path}")
-            progress.setWindowTitle("Backup complete")
+            self._manage_status.setText(f"Package stored: {result_path}")
+            progress.setWindowTitle("Data stored")
             self._finalize_archive_dialog(
                 progress,
-                f"Backup saved successfully.{size_str}\n\n"
+                f"Package stored successfully.{size_str}\n\n"
                 f"File: {fname}\nLocation: {fdir}",
                 success=True,
             )
 
         def _on_failed(error_msg: str) -> None:
-            self._manage_status.setText(f"Backup failed: {error_msg}")
-            progress.setWindowTitle("Backup failed")
+            self._manage_status.setText(f"Storing failed: {error_msg}")
+            progress.setWindowTitle("Storing failed")
             self._finalize_archive_dialog(
                 progress,
-                f"Backup failed.\n\n{error_msg}",
+                f"Storing failed.\n\n{error_msg}",
                 success=False,
             )
 
@@ -5483,7 +5483,7 @@ class MesaMainWindow(QMainWindow):
 
     def _do_restore(self):
         zip_path, _ = QFileDialog.getOpenFileName(
-            self, "Select MESA package or backup ZIP",
+            self, "Select MESA package",
             original_working_directory,
             "ZIP files (*.zip);;All files (*.*)",
         )

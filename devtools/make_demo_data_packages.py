@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """make_demo_data_packages.py — wrap the sample data into MESA import packages.
 
-MESA imports a project via **Manage data → Restore backup**, which reads a zip
+MESA imports a project via **Manage data → Restore data**, which reads a zip
 whose members are `config.ini`, `input/...`, and `output/...` (anything else in
 the zip is ignored on restore — see mesa.create_backup_archive / restore_backup_archive).
 
 This tool turns each theme under `sample_data/` (built by make_sample_packages.py)
 into one such zip, so the demo data can be published *separately* from the packaged
-software and loaded with Restore backup. Packages are INPUTS ONLY — no processed
+software and loaded with Restore data. Packages are INPUTS ONLY — no processed
 output — so a recipient runs the normal workflow:
 
-    Restore backup  →  Assets ▸ Import assets  →  Parameters ▸ Load from Excel
+    Restore data  →  Assets ▸ Import assets  →  Parameters ▸ Load from Excel
     (pick input/<theme>_vulnerability.xlsx)  →  Process
 
 Each zip contains:
@@ -24,7 +24,7 @@ Each zip contains:
 Run:  python devtools/make_demo_data_packages.py
       python devtools/make_demo_data_packages.py --out some/dir   (default: dist/demo_data)
 
-NOTE: Restore backup REPLACES the current project's input/ + output/ + config.ini.
+NOTE: Restore data REPLACES the current project's input/ + output/ + config.ini.
 Restore a demo into a fresh/dedicated MESA copy (or accept that it overwrites).
 """
 from __future__ import annotations
@@ -73,7 +73,7 @@ def _readme_text(theme: str, region: str) -> str:
         "INPUTS ONLY - no processed results are included.\n"
         "\n"
         "How to load (MESA 5):\n"
-        "  1. Manage data  >  Restore backup  >  pick this .zip.\n"
+        "  1. Manage data  >  Restore data  >  pick this .zip.\n"
         "     (Restore REPLACES the current project's input/, output/ and config.ini -\n"
         "      use a fresh/dedicated MESA copy if you want to keep your current project.)\n"
         "  2. Assets  >  Import assets   (reads input/asset/" + theme + ".gpkg;\n"
@@ -115,11 +115,11 @@ def build(out_dir: Path) -> None:
         print(f"[{theme}] -> {zip_path}  ({size_kb:.0f} KB)")
 
     print(f"\n{len(made)} demo package(s) written to {out_dir}")
-    print("Each loads via MESA -> Manage data -> Restore backup (inputs only).")
+    print("Each loads via MESA -> Manage data -> Restore data (inputs only).")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Wrap sample_data themes into MESA import packages (Restore-backup zips).")
+    ap = argparse.ArgumentParser(description="Wrap sample_data themes into MESA import packages (MESA package zips).")
     ap.add_argument("--out", default=str(DEFAULT_OUT),
                     help=f"output directory for the zips (default: {DEFAULT_OUT})")
     args = ap.parse_args()
