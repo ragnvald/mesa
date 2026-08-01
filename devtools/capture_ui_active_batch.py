@@ -297,13 +297,54 @@ def find_popup_window(root_pid: int, title_hint: str, timeout: float = 60.0,
     return None, None
 
 
-def capture_hwnd(hwnd: int, out_path: Path) -> str:
+def grab_hwnd(hwnd: int):
     left, top, right, bottom = window_bounds(hwnd)
     if right <= left or bottom <= top:
         raise RuntimeError("Invalid bounds")
-    img = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
+    return ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
+
+
+def frame_digest(img) -> str:
+    return hashlib.md5(img.tobytes()).hexdigest()
+
+
+def capture_hwnd(hwnd: int, out_path: Path) -> str:
+    img = grab_hwnd(hwnd)
     img.save(out_path)
     return hashlib.md5(out_path.read_bytes()).hexdigest()
+
+
+def capture_hwnd_repainted(hwnd: int, out_path: Path, baseline: str,
+                           poll: float = 0.6, timeout: float = 60.0) -> tuple[str, bool]:
+    """Save the window once it has repainted away from `baseline` and settled.
+
+    A tab that loads project statistics blocks Qt's paint loop, so a fixed
+    sleep can grab the *previous* tab still on screen and write it under the
+    new tab's filename. Waiting for the pixels to stop changing is not enough
+    on its own - a frozen window is perfectly stable - so require a change
+    from the baseline frame first, then stability.
+
+    Returns (digest, repainted); repainted is False when the timeout hit,
+    which means the saved frame may be stale.
+    """
+    deadline = time.monotonic() + timeout
+    img = grab_hwnd(hwnd)
+    prev = None
+    repainted = False
+    while time.monotonic() < deadline:
+        time.sleep(poll)
+        img = grab_hwnd(hwnd)
+        digest = frame_digest(img)
+        if not repainted:
+            if digest != baseline:
+                repainted = True
+                prev = digest
+            continue
+        if digest == prev:
+            break
+        prev = digest
+    img.save(out_path)
+    return hashlib.md5(out_path.read_bytes()).hexdigest(), repainted
 
 
 def click_client(hwnd: int, x: int, y: int) -> None:
@@ -335,7 +376,12 @@ def send_ctrl_tab(reverse: bool = False) -> None:
 
 def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
     # Tab order and filenames must match what User-interface.md references.
-    # Current launcher (mesa.py) addTab order: Welcome / Workflows / Status / Config / Manage data / About.
+    # Current launcher (mesa.py) tab order: Welcome / Workflows / Status / Manage data / Config / About.
+    # Read that from the _build_*_tab CALL order at mesa.py:3700-3705, not from where
+    # the methods are defined — addTab is the last statement in each builder, so the
+    # call order decides. Deriving it from definition order had Config and Manage data
+    # swapped, and since this tool walks the tabs positionally with Ctrl+Tab, the two
+    # screenshots were written under each other's filenames.
     # mesa.py now sets the window title to the bare version from config.ini
     # (e.g. "5.1") — read it dynamically so this tool keeps working across
     # version bumps. The pid-tree match in find_app_window is the primary
@@ -344,8 +390,8 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
         ("ui_welcome.png", "Welcome"),
         ("ui_workflows.png", "Workflows"),
         ("ui_status.png", "Status"),
-        ("ui_config.png", "Config"),
         ("ui_manage.png", "Manage data"),
+        ("ui_config.png", "Config"),
         ("ui_about.png", "About"),
     ]
 
@@ -377,11 +423,13 @@ def capture_mesa_tabs(repo: Path, py: Path, wiki_images: Path) -> None:
 
         for filename, label in desktop_tabs[1:]:
             ensure_on_screen(hwnd)
+            baseline = frame_digest(grab_hwnd(hwnd))
             send_ctrl_tab(reverse=False)
-            time.sleep(1.2)
             out_path = wiki_images / filename
-            capture_hwnd(hwnd, out_path)
-            print(f"OK   mesa_desktop ({label}) -> {filename}")
+            _, repainted = capture_hwnd_repainted(hwnd, out_path, baseline)
+            status = "OK  " if repainted else "STALE"
+            print(f"{status} mesa_desktop ({label}) -> {filename}"
+                  + ("" if repainted else "  <- window never repainted, check this one"))
 
         # Return to first tab for predictable end-state before cleanup.
         for _ in desktop_tabs[1:]:
