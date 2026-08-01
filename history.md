@@ -232,3 +232,44 @@ genuinely are stale.
    vocabulary change. Needs the GUI and `devtools/capture_ui_active_batch.py`; the 5.2 screenshot
    refresh is also still outstanding. Picked up as its own pass, not as part of the release.
 6. **Tag 5.6.0.**
+
+## 2026-08-01 — MESA 5.6.0 released
+
+The release checklist opened on 2026-07-31 is closed. Screenshots were refreshed first, against a
+new demonstration project with continuous coverage across the Kampala area — 16 asset layers, 5
+geocode layers, 26,975 cells in `basic_mosaic`. The earlier demo left half the map empty, which made
+the Overview and Segmentation captures read as broken rather than sparse.
+
+The refresh found a real defect in `devtools/capture_ui_active_batch.py`. `ui_status.png` came out
+showing the Workflows tab: the Status tab reads project statistics synchronously and blocked Qt's
+paint loop for longer than the tool's fixed 1.2 s wait, so the grab returned the previous tab still
+on screen, tab bar included. Waiting for the pixels to settle would not have caught it either — a
+frozen window is perfectly stable. The tool now requires a change from the pre-keystroke frame first,
+then stability, and logs `STALE` when the timeout hits (050f7ab). The H3 level picker still needs a
+one-off script, since the batch never clicks inside a helper and the checkboxes only appear after
+*Suggest*.
+
+`config.ini` arrived from the demodata side carrying a generated-file header pointing at
+`tools/make_demo_config.py`, a script that does not exist in this repo. The header was dropped and
+the two intended tuning changes kept (`backfill_max_workers = 0`, `segmv_k_range = 5`). Two things
+were caught in the same diff: the incoming comment said "Pinned at 4" above a value of 0, and
+`segmv_ai_enabled` had been flipped to 1, which would have shipped AI cluster descriptions on by
+default against a comment two lines above stating they are opt-in so Process never depends on a
+running Ollama. Reverted to 0 by the user's decision.
+
+`docs/readme_demodata.txt` also appeared in the tree and was *not* committed. It is a member of a
+demo package, written by mesa_demodata and read by MESA on restore; `mesa.py` deliberately omits it
+when storing a package and deletes any stale copy before extracting, so the description exists
+exactly while it is true. Tracking it would ship one package's measured overlap as the description
+of every project.
+
+Published to Zenodo as 10.5281/zenodo.21745481 — `MESA_560_win11_2026_08_01.zip` (1.5 GB) and
+`MESA_560_macos_2026_08_01.dmg` (469.6 MB), the first release with a macOS build. The Windows build
+is unsigned and the macOS build is Developer-ID signed and notarised, which the release notes and
+the Zenodo description both state. Demonstration data moved out of the software record into two of
+its own: 10.5281/zenodo.21744273 (real open data, East Africa) and 10.5281/zenodo.21744040
+(synthetic). The wiki was swept for Zenodo references in the same pass, which surfaced two claims
+that had been wrong since 5.6 changed the workspace layout: `Data.md` and `Advanced.md` both still
+said the workspace sits next to `mesa.exe`.
+
+`pytest tests/ -q` green at 4 passed before tagging.
