@@ -27,7 +27,7 @@ DOCS = REPO / "docs"
 
 AUTHOR = "Ragnvald Larsen"
 AFFILIATION = "Norwegian Environment Agency"
-VERSION = "MESA 5.2.0"
+VERSION = "MESA 5.6.0"
 
 PT_MONTHS = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
