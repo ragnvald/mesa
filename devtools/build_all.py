@@ -869,7 +869,9 @@ SKELETON_ONLY_FOLDERS = ("input", "output")
 
 
 def _skeleton_ignore(src_dir, names):
-    """copytree ignore-callable: keep subfolders and readme.txt, drop data files."""
+    """copytree ignore-callable for input/: keep the subfolders and their
+    readme.txt, drop data files. Those folders and readmes are instructions to the
+    operator about what goes where, so they are the point of shipping a skeleton."""
     ignored = []
     for name in names:
         if (Path(src_dir) / name).is_dir():
@@ -878,6 +880,16 @@ def _skeleton_ignore(src_dir, names):
             continue
         ignored.append(name)
     return ignored
+
+
+def _output_skeleton_ignore(src_dir, names):
+    """copytree ignore-callable for output/: ship the bare folder, nothing under it.
+
+    Everything below output/ is produced by a run and recreated on demand, so a
+    distribution has no use for it — and a per-run directory like
+    segmentation_mv/<run_id> is a timestamp from the developer's last session,
+    which is exactly the kind of thing a build must not carry to users."""
+    return list(names)
 
 
 def copy_resources() -> None:
@@ -900,8 +912,12 @@ def copy_resources() -> None:
             # dirs_exist_ok would otherwise leave data from an earlier build in
             # place. dst is always inside FINAL_DIST (build output, regenerable).
             shutil.rmtree(dst, ignore_errors=True)
-            log(f"Copying '{folder}/' skeleton (folders + readme.txt only) from {src} ...")
-            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_skeleton_ignore)
+            if folder == "output":
+                log(f"Copying '{folder}/' as an empty folder ...")
+                shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_output_skeleton_ignore)
+            else:
+                log(f"Copying '{folder}/' skeleton (folders + readme.txt only) from {src} ...")
+                shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_skeleton_ignore)
         else:
             log(f"Copying '{folder}/' from {src} ...")
             shutil.copytree(src, dst, dirs_exist_ok=True)
