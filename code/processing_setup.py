@@ -369,6 +369,27 @@ def sanitize_vulnerability(df,
     df['sensitivity'] = (pd.to_numeric(df['importance'], errors='coerce').fillna(fallback)
                          * pd.to_numeric(df['susceptibility'], errors='coerce').fillna(fallback)).astype(int)
 
+    # determine_category reads the module-level `classification`, which only run()
+    # populates. Called from anywhere else — a helper, a script, an entry point that
+    # is not the GUI — every lookup returns ('', '') and the A-E code silently
+    # becomes an empty string. load_asset_group then persists that to disk, and the
+    # blank propagates through tbl_stacked into tbl_flat, where the sensitivity
+    # raster has no class to colour and renders nothing. Load on demand, and if the
+    # bins are still unavailable, keep whatever codes the frame already carries
+    # rather than overwriting good values with empty ones.
+    if not classification:
+        try:
+            read_config_classification(config_file)
+        except Exception:
+            pass
+    if not classification:
+        log_to_file("sanitize_vulnerability: no [A]..[E] bins available — leaving "
+                    "sensitivity_code/description untouched rather than blanking them.")
+        for col in ('sensitivity_code', 'sensitivity_description'):
+            if col not in df.columns:
+                df[col] = ''
+        return df
+
     def _cls(s):
         try:
             score = int(s)
