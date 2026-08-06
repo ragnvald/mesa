@@ -273,3 +273,70 @@ that had been wrong since 5.6 changed the workspace layout: `Data.md` and `Advan
 said the workspace sits next to `mesa.exe`.
 
 `pytest tests/ -q` green at 4 passed before tagging.
+
+## 2026-08-05 — Two 3D landscape categories in the generated QGIS project
+
+The interactive 3D views in `qgis/mesa_results.qgz` were reported as hexagons rendering "walls
+without a roof, more like pipes stretching upward". They were pipes. Column height came from the
+dataset span alone, computed once and reused for every view, while cell width varies twentyfold
+between the grids in one project: QDGC L11's 54 m cells carried 1733 m columns, 32:1, and H3 R10's
+156 m cells 11:1. At that aspect the top face never turns toward the camera, and at scene distance
+the cell is under a pixel wide, so only the lit side walls register. Height is now capped at four
+times the cell width, derived from the grid level (H3 edge = 1107.7 km / sqrt(7)^r, QDGC = 2^-n
+degrees) so nothing reads geometry. Only the finest grids move: H3 R8 stayed at 1733 m.
+
+Two mechanisms were ruled out along the way, and one claim had to be withdrawn. The tessellation of
+the top face was not failing — the cells are clean closed polygons, 7 vertices for H3 and 5 for
+QDGC — and `rendered-facade="3"` is Walls|Roof in both QGIS 3 and 4, verified against the QGIS
+source. The claim that `opacity="0.99"` pushed the columns into QGIS' transparent render pass was
+written into learning.md as fact before the source was checked; the pass exists and runs with
+`QNoDepthMask`, but no code was found routing vector symbol entities into it, and the entry was
+corrected the same session.
+
+Each geocode group now gets two landscapes instead of one: the existing asset-overlap view, and a
+second extruded by the A–E sensitivity code, A tallest and E short but present, on the seed's own
+sensitivity palette so it matches the 2D map. Every group is included, `basic_mosaic` and uploaded
+layers among them. Mosaic cells inherit the size distribution of the assets they were cut from, so
+a few are enormous: on the Albertine Graben project the largest is 186 km², 153,000 times the
+median and 34% of the mosaic's area, and at full height it roofed over the whole scene. Cells past
+100 times the group's median area keep their height but drop to 0.3 opacity. Filtering them out was
+considered and rejected — 435 of 26,975 cells carry 76% of the area. Shipped as bc74e79 and
+e13b224.
+
+## 2026-08-06 — Generating H3/QDGC silently deleted the mosaic
+
+The Albertine Graben project was set up in the development rig from
+`2026_07_28_albertinegraben_basic_mosaic_30assets.zip`, a MESA package holding the 30-asset run:
+17,853,399 `basic_mosaic` faces, 980,418 asset objects across 30 groups, and the three parameter
+workbooks. Processing was then run in the belief that the mosaic was in place. It was not.
+`tbl_geocode_object` held 1,568,725 rows across eight generated H3/QDGC layers and not one mosaic
+face, while `tbl_geocode_group` still listed `basic_mosaic` at id 1. The project therefore looked
+registered and processed without it.
+
+The cause is `_load_existing_geocodes` in `geocode_manage.py`, unchanged since 2026-05-06: it
+caught every exception from `gpd.read_parquet(tbl_geocode_object)` and returned an empty frame,
+which `_merge_and_write_geocodes` then concatenated the new grid objects onto and wrote back. A
+failed read and an empty table were indistinguishable, and nothing was logged. What was new was
+not the code but the data — decoding that table costs 1,269 bytes a row, measured, so 23 GB for
+19.4 million rows before `pd.concat` copies it, against 64 GB free while a mosaic build was
+running. Earlier projects had mosaics small enough to read.
+
+Both halves are fixed. The group loader no longer swallows, and object merging streams row groups
+through pyarrow, leaving geometry as the WKB it already is on disk: the same merge that would have
+cost 23 GB adds 250,000 objects to the real 2.3 GB table in 15 s at a peak of 0.50 GB, measured on
+a copy. Objects now commit before groups, so a failure leaves both tables as they were rather than
+a group listed with no cells. Six tests cover it in `tests/test_geocode_merge.py`; two of them
+failed first because `gpq_dir()` caches its directory in a module global, so every test after the
+first wrote into the first one's tmp_path — the same isolation trap recorded on 2026-07-30.
+
+The lost mosaic was restored by streaming it back in from the package alongside the eight grids,
+19,422,124 rows in 15 s. Processing results from the run without it — `tbl_flat`, `tbl_stacked`,
+the segmentation and `tbl_data_extent` — are stale and need a re-run. A mosaic rebuild that had
+been started as a workaround was stopped at 96% of round 5 of 6, after 6,221 s, before it wrote
+anything.
+
+This one is worth stating plainly in the next release notes: any project that generated H3 or QDGC
+layers on top of a large `basic_mosaic` may have lost the mosaic without being told, and any
+results computed afterwards exclude it.
+
+`pytest tests/ -q` green at 19 passed.
