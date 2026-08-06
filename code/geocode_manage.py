@@ -47,6 +47,7 @@ from mesa_constants import TABLE_GEOCODE_GROUP, TABLE_GEOCODE_OBJECT
 import argparse
 import configparser
 import datetime
+import json
 import os
 import sys
 import threading
@@ -2090,47 +2091,159 @@ def _bbox_polygon_from(thing) -> Optional[Polygon]:
     except Exception:
         return None
 
-def _load_existing_geocodes(
-    base_dir: Path,
-    load_objects: bool = True,
-) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    # tbl_geocode_object can be multi-GB once geocoding has run; callers that
-    # only need the groups (admin/list views) should pass load_objects=False to
-    # avoid decoding the geometry column.
-    geodir = gpq_dir(base_dir)
+def _load_existing_geocode_groups(base_dir: Path) -> gpd.GeoDataFrame:
+    """The geocode group table, or an empty frame when the project has none yet.
+
+    Objects are deliberately not loaded here. tbl_geocode_object reaches tens of
+    millions of rows on a real mosaic, and a read failure used to be swallowed
+    into an empty frame — which the callers then wrote back, deleting the table.
+    See learning.md "A swallowed read is a delete".
+    """
     pg = _existing_parquet_path(base_dir, "tbl_geocode_group")
     if pg is None:
-        pg = geodir / TABLE_GEOCODE_GROUP
-    if pg.exists():
-        try:
-            g = gpd.read_parquet(pg)
-            if g.crs is None: g.set_crs("EPSG:4326", inplace=True)
-        except Exception:
-            g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-    else:
-        g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+        pg = gpq_dir(base_dir) / TABLE_GEOCODE_GROUP
+    if not pg.exists():
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    if load_objects:
-        po = _existing_parquet_path(base_dir, "tbl_geocode_object")
-        if po is None:
-            po = geodir / TABLE_GEOCODE_OBJECT
-        if po.exists():
-            try:
-                o = gpd.read_parquet(po)
-                if o.crs is None: o.set_crs("EPSG:4326", inplace=True)
-            except Exception:
-                o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-        else:
-            o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-        o = ensure_wgs84(o)
-    else:
-        o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-
+    g = gpd.read_parquet(pg)
+    if g.crs is None:
+        g.set_crs("EPSG:4326", inplace=True)
     g = ensure_wgs84(g)
     if "id" not in g.columns:
         log_to_gui("Existing geocode group table lacks 'id' — treating as empty.", "WARN")
-        g = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326"); o = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-    return g, o
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    return g
+
+
+def _rewrite_geocode_objects(base_dir: Path,
+                             drop_ids: set[int],
+                             drop_names: set[str],
+                             new_objects_gdf: gpd.GeoDataFrame | None) -> int:
+    """Rewrite tbl_geocode_object: drop whole groups, append new objects.
+
+    Streams the existing table one row group at a time and never decodes a
+    geometry, so memory is bounded by the row group rather than the table. The
+    geometry stays the WKB it already is on disk. Reading it through geopandas
+    instead costs 1.3 kB a row, which a 17.9-million-face mosaic turns into
+    23 GB before the merge has copied anything. See learning.md
+    "Merging geocode objects".
+
+    Returns the number of rows written. Raises rather than writing a partial
+    table: every caller replaces the file, so a failure that looks like "no
+    existing objects" is indistinguishable from a delete.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    out_dir = gpq_dir(base_dir)
+    final_path = out_dir / TABLE_GEOCODE_OBJECT
+    existing_path = _existing_parquet_path(base_dir, "tbl_geocode_object") or final_path
+
+    new_table = None
+    new_bounds = None
+    if new_objects_gdf is not None and not new_objects_gdf.empty:
+        prepared = ensure_wgs84(new_objects_gdf)
+        new_bounds = list(prepared.total_bounds)
+        new_table = pa.table(prepared.to_arrow(geometry_encoding="WKB"))
+
+    existing = pq.ParquetFile(existing_path) if existing_path.exists() else None
+    if existing is None and new_table is None:
+        gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(final_path, index=False)
+        return 0
+
+    try:
+        base_schema = existing.schema_arrow if existing is not None else new_table.schema
+        fields = list(base_schema)
+        known = {field.name for field in fields}
+        if new_table is not None:
+            fields += [field for field in new_table.schema if field.name not in known]
+        schema = pa.schema(fields, metadata=_geo_metadata_extended(base_schema, new_bounds))
+        compression = "snappy"
+        if existing is not None and existing.metadata.num_row_groups:
+            compression = existing.metadata.row_group(0).column(0).compression.lower()
+
+        def _aligned(table):
+            arrays = []
+            for field in schema:
+                if field.name in table.column_names:
+                    column = table.column(field.name)
+                    arrays.append(column if column.type.equals(field.type)
+                                  else column.cast(field.type))
+                else:
+                    arrays.append(pa.nulls(table.num_rows, field.type))
+            return pa.Table.from_arrays(arrays, schema=schema)
+
+        def _kept(table):
+            """Rows that survive the group removal. Nulls are kept, not dropped."""
+            mask = None
+            for column_name, values, in (("ref_geocodegroup", drop_ids),
+                                         ("name_gis_geocodegroup", drop_names)):
+                if not values or column_name not in table.column_names:
+                    continue
+                column = table.column(column_name)
+                targets = pa.array(sorted(values)).cast(column.type)
+                hit = pc.fill_null(pc.is_in(column, value_set=targets), False)
+                mask = pc.invert(hit) if mask is None else pc.and_(mask, pc.invert(hit))
+            return mask
+
+        tmp_path = final_path.with_name(final_path.name + f".tmp_{uuid.uuid4().hex}")
+        rows = 0
+        with pq.ParquetWriter(tmp_path, schema, compression=compression) as writer:
+            if existing is not None:
+                for group_index in range(existing.num_row_groups):
+                    table = _aligned(existing.read_row_group(group_index))
+                    mask = _kept(table)
+                    if mask is not None:
+                        table = table.filter(mask)
+                    if table.num_rows:
+                        writer.write_table(table)
+                        rows += table.num_rows
+            if new_table is not None:
+                table = _aligned(new_table)
+                writer.write_table(table)
+                rows += table.num_rows
+    finally:
+        # Windows will not let the file be replaced while it is still open.
+        if existing is not None:
+            existing.close()
+
+    last_err: Exception | None = None
+    for delay_s in (0.0, 0.25, 0.75, 1.5):
+        if delay_s:
+            time.sleep(delay_s)
+        try:
+            os.replace(tmp_path, final_path)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+    if last_err is not None:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise last_err
+    return rows
+
+
+def _geo_metadata_extended(base_schema, extra_bounds: list[float] | None) -> dict:
+    """The source schema's metadata, with the GeoParquet bbox grown to fit."""
+    metadata = dict(base_schema.metadata or {})
+    raw = metadata.get(b"geo")
+    if not raw or not extra_bounds:
+        return metadata
+    try:
+        geo = json.loads(raw)
+        column = geo["columns"][geo["primary_column"]]
+        bbox = column.get("bbox")
+        if bbox and len(bbox) >= 4:
+            column["bbox"] = [min(bbox[0], extra_bounds[0]), min(bbox[1], extra_bounds[1]),
+                              max(bbox[2], extra_bounds[2]), max(bbox[3], extra_bounds[3])]
+            metadata[b"geo"] = json.dumps(geo).encode("utf-8")
+    except Exception:
+        pass  # A bbox we could not widen is cosmetic; never fail the write for it.
+    return metadata
 
 
 def _load_geocode_object_counts(base_dir: Path) -> tuple[dict[int, int], int]:
@@ -2159,7 +2272,7 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
     names = sorted({(n or "").strip() for n in group_names if (n or "").strip()})
     if not names:
         return
-    existing_g, existing_o = _load_existing_geocodes(base_dir)
+    existing_g = _load_existing_geocode_groups(base_dir)
     if existing_g.empty or "name_gis_geocodegroup" not in existing_g.columns:
         log_to_gui(f"No existing geocode data to clear for {', '.join(names)}.")
         return
@@ -2171,7 +2284,6 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
 
     removed_groups = existing_g.loc[mask].copy()
     remaining_groups = existing_g.loc[~mask].copy()
-    remaining_objects = existing_o.copy()
 
     removed_ids: set[int] = set()
     if "id" in removed_groups.columns:
@@ -2180,22 +2292,11 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
         except Exception:
             removed_ids = set()
 
-    if not remaining_objects.empty:
-        if removed_ids and "ref_geocodegroup" in remaining_objects.columns:
-            try:
-                remaining_objects = remaining_objects.loc[
-                    ~remaining_objects["ref_geocodegroup"].astype(int).isin(removed_ids)
-                ].copy()
-            except Exception:
-                pass
-        if "name_gis_geocodegroup" in remaining_objects.columns:
-            remaining_objects = remaining_objects.loc[
-                ~remaining_objects["name_gis_geocodegroup"].astype(str).isin(names)
-            ].copy()
-
-    out_dir = gpq_dir(base_dir)
-    ensure_wgs84(remaining_groups).to_parquet(out_dir / TABLE_GEOCODE_GROUP, index=False)
-    ensure_wgs84(remaining_objects).to_parquet(out_dir / TABLE_GEOCODE_OBJECT, index=False)
+    # Objects first: it is the write that can fail on size, and it commits
+    # atomically, so a failure leaves both tables as they were.
+    remaining_objects = _rewrite_geocode_objects(base_dir, removed_ids, set(names), None)
+    ensure_wgs84(remaining_groups).to_parquet(gpq_dir(base_dir) / TABLE_GEOCODE_GROUP, index=False)
+    log_to_gui(f"Geocode objects remaining after clear: {remaining_objects}.", "INFO")
 
     log_to_gui(
         f"Cleared existing geocode groups: {', '.join(names)} (removed {len(removed_groups)} group record(s)).",
@@ -2203,7 +2304,7 @@ def _clear_geocode_groups(base_dir: Path, group_names: list[str]) -> None:
     )
 
 def _list_existing_group_names_with_prefix(base_dir: Path, prefix: str) -> list[str]:
-    g, _ = _load_existing_geocodes(base_dir, load_objects=False)
+    g = _load_existing_geocode_groups(base_dir)
     if g.empty or "name_gis_geocodegroup" not in g.columns:
         return []
     try:
@@ -2244,15 +2345,11 @@ def _merge_and_write_geocodes(base_dir: Path,
                               new_groups_gdf: gpd.GeoDataFrame,
                               new_objects_gdf: gpd.GeoDataFrame,
                               refresh_group_names: List[str]) -> tuple[int,int,int,int]:
-    existing_g, existing_o = _load_existing_geocodes(base_dir)
+    existing_g = _load_existing_geocode_groups(base_dir)
     out_dir = gpq_dir(base_dir)
+    rm_ids: set[int] = set()
 
     # Geocode objects should not carry source attributes.
-    if not existing_o.empty and "attributes" in existing_o.columns:
-        try:
-            existing_o = existing_o.drop(columns=["attributes"]).copy()
-        except Exception:
-            pass
     if new_objects_gdf is not None and "attributes" in new_objects_gdf.columns:
         try:
             new_objects_gdf = new_objects_gdf.drop(columns=["attributes"]).copy()
@@ -2264,8 +2361,6 @@ def _merge_and_write_geocodes(base_dir: Path,
         rm_ids = set(existing_g.loc[rm_mask, "id"].astype(int).tolist())
         if rm_ids:
             existing_g = existing_g.loc[~rm_mask].copy()
-            if not existing_o.empty and "ref_geocodegroup" in existing_o:
-                existing_o = existing_o.loc[~existing_o["ref_geocodegroup"].astype(int).isin(rm_ids)].copy()
             log_to_gui(f"Refreshed existing groups removed: {len(rm_ids)}", "INFO")
 
     start_id = int(existing_g["id"].max()) + 1 if ("id" in existing_g.columns and not existing_g.empty) else 1
@@ -2306,12 +2401,13 @@ def _merge_and_write_geocodes(base_dir: Path,
 
     # Filter empty frames so pandas 3.x's all-NA dtype change doesn't warn.
     g_parts = [df for df in (existing_g, new_groups_gdf) if df is not None and not df.empty]
-    o_parts = [df for df in (existing_o, new_objects_gdf) if df is not None and not df.empty]
-    groups_out  = g_parts[0] if len(g_parts) == 1 else (pd.concat(g_parts, ignore_index=True) if g_parts else existing_g)
-    objects_out = o_parts[0] if len(o_parts) == 1 else (pd.concat(o_parts, ignore_index=True) if o_parts else existing_o)
-
+    groups_out = g_parts[0] if len(g_parts) == 1 else (pd.concat(g_parts, ignore_index=True) if g_parts else existing_g)
     groups_out = ensure_wgs84(gpd.GeoDataFrame(groups_out, geometry="geometry"))
-    objects_out = ensure_wgs84(gpd.GeoDataFrame(objects_out, geometry="geometry"))
+
+    # Objects first. It is the write that can fail on size, it commits
+    # atomically, and it leaves both tables untouched when it raises. Writing
+    # the groups first is what left basic_mosaic listed with no cells.
+    total_objects = _rewrite_geocode_objects(base_dir, rm_ids, set(), new_objects_gdf)
 
     def _atomic_to_parquet(gdf: gpd.GeoDataFrame, final_path: Path) -> None:
         tmp_path = final_path.with_name(final_path.name + f".tmp_{uuid.uuid4().hex}")
@@ -2325,7 +2421,6 @@ def _merge_and_write_geocodes(base_dir: Path,
             time.sleep(delay_s)
         try:
             _atomic_to_parquet(groups_out, out_dir / TABLE_GEOCODE_GROUP)
-            _atomic_to_parquet(objects_out, out_dir / TABLE_GEOCODE_OBJECT)
             last_err = None
             break
         except Exception as e:
@@ -2333,7 +2428,7 @@ def _merge_and_write_geocodes(base_dir: Path,
     if last_err is not None:
         raise last_err
 
-    return len(new_groups_gdf), len(new_objects_gdf), len(groups_out), len(objects_out)
+    return len(new_groups_gdf), len(new_objects_gdf), len(groups_out), total_objects
 
 # -----------------------------------------------------------------------------
 # Assets (GeoParquet)
@@ -4017,7 +4112,7 @@ class GeocodeManagerWindow(QMainWindow):
 
     def _refresh_group_list(self):
         try:
-            existing_g, _ = _load_existing_geocodes(self.base, load_objects=False)
+            existing_g = _load_existing_geocode_groups(self.base)
         except Exception as exc:
             self.manage_status_label.setText(f"Failed to load geocode groups: {exc}")
             return
@@ -4100,7 +4195,7 @@ class GeocodeManagerWindow(QMainWindow):
     def _load_geocode_group_df(self):
         cols = ["id", "name", "name_gis_geocodegroup", "geocode_origin", "title_user", "description", "geometry"]
         try:
-            gdf, _ = _load_existing_geocodes(self.base, load_objects=False)
+            gdf = _load_existing_geocode_groups(self.base)
             for c in cols:
                 if c not in gdf.columns:
                     gdf[c] = ""
