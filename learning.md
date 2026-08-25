@@ -1086,6 +1086,19 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - How to apply: this is the same class as the pipeline's parent-side reads, and the same question applies anywhere in the desktop code that touches `tbl_geocode_object`, `tbl_stacked` or `tbl_flat`: does this need geometry as objects, or only as bytes to copy? Row group streaming keeps the cost proportional to the row group.
 - Non-regression guarantee: writing order changed so objects commit before groups. A failure now leaves both tables as they were, where before it could leave a group listed with no cells.
 
+## macOS helpers are re-execs, not files on disk (2026-08-25)
+
+- Rule: never resolve a helper on frozen macOS by looking for `<stem>.py` / `<stem>.exe`. Go through `_helper_argv()` in `processing_pipeline_run.py`, which returns `[sys.executable, "--run-helper", stem]` when `sys.platform == "darwin"` and `sys.frozen`.
+- Why: the .app ships one binary that re-execs itself per helper (`mesa.py _maybe_run_helper`), so no per-helper file exists next to it. `_find_helper_runner` only knew the Windows layouts (`tools/<stem>.exe`, `<stem>.py`), so on macOS it returned nothing and both helper-backed stages died at the gate: Tiles raised "Missing tiles_create_raster helper" and Classification "Missing segmentation_run helper". Nothing crashed and the data stages ran, so a full Process pass looked successful while `output/mbtiles` stayed empty — which surfaces in the Maps window as an Overview tab with an empty geocode-group dropdown and no layer but Line segments, since `mbtiles_catalog()` scans that folder. Reported against the 5.6.0 macOS build.
+- How to apply: any new stage that shells out to a sibling helper gets its argv from `_helper_argv`, not from a path search. When a macOS build reports a feature "missing" that works from source, check the helper-resolution path before the feature itself.
+- Non-regression guarantee: the branch is guarded on frozen-and-darwin; the source and Windows paths still go through `_find_helper_runner` unchanged.
+
+## --run-helper must own __main__ (2026-08-25)
+
+- Rule: `_maybe_run_helper` runs the helper with `runpy.run_module(name, run_name="__main__", alter_sys=True)`. The `alter_sys` argument is load-bearing, not cosmetic.
+- Why: without it runpy executes the helper's code under the name `__main__` but leaves `sys.modules["__main__"]` pointing at mesa.py. Any helper that opens a spawn `Pool` then fails to pickle its own module-level callables — `tiles_create_raster` died with `PicklingError: Can't pickle <function _worker_init>: it's not found as __main__._worker_init` the moment it built its worker pool. `alter_sys=True` installs the helper as the real `__main__` for the duration, so pickling resolves and the spawned children re-create it from `__spec__.name`. Verified end to end on an isolated workspace: 5 mbtiles built with `--procs 3`.
+- How to apply: applies to every helper reachable through `--run-helper`, so treat spawn-based multiprocessing as the default assumption for new ones. Symptom to recognise: a pickling error naming a function that plainly exists in the running module.
+
 ## One report run at a time (2026-09-16)
 
 - Rule: a long GUI job that writes to fixed paths must claim an exclusive slot before it starts, and the button that starts it must go insensitive until it finishes. `report_generate.py` takes `_report_run_lock`/`_report_running` in `_spawn_report()` and releases it in `_run_report_guarded`'s `finally`.
