@@ -248,8 +248,7 @@ def validate_setup_parameters(
 
 
 def detect_tiles_processing(base_dir: Path, cfg: configparser.ConfigParser) -> ProcessAvailability:
-    runner_path, _is_exe = _find_tiles_runner(base_dir)
-    if not runner_path:
+    if not _helper_argv(base_dir, "tiles_create_raster"):
         return ProcessAvailability(False, ["Missing: tiles_create_raster helper"])
 
     gpq = parquet_dir(base_dir, cfg)
@@ -265,8 +264,7 @@ def detect_classification_processing(base_dir: Path, cfg: configparser.ConfigPar
     geocode layer is configured (Configure → Classification writes
     segmv_geocode_layer). tbl_stacked is produced by Intersect, so a missing
     one is only a soft reason — a full Process pass builds it before this stage."""
-    runner_path, _is_exe = _find_classification_runner(base_dir)
-    if not runner_path:
+    if not _helper_argv(base_dir, "segmentation_run"):
         return ProcessAvailability(False, ["Missing: segmentation_run helper"])
 
     layer = str(cfg["DEFAULT"].get("segmv_geocode_layer", "")).strip()
@@ -526,14 +524,19 @@ def _find_helper_runner(base_dir: Path, stem: str) -> tuple[Path | None, bool]:
     return None, False
 
 
-def _find_tiles_runner(base_dir: Path) -> tuple[Path | None, bool]:
-    """Find tiles_create_raster (returns path, is_executable)."""
-    return _find_helper_runner(base_dir, "tiles_create_raster")
+def _helper_argv(base_dir: Path, stem: str) -> list[str] | None:
+    """argv prefix that runs helper `stem`, or None when it cannot be found.
 
-
-def _find_classification_runner(base_dir: Path) -> tuple[Path | None, bool]:
-    """Find segmentation_run, the headless Classification (segmv) helper."""
-    return _find_helper_runner(base_dir, "segmentation_run")
+    The frozen macOS .app ships a single binary that re-execs itself as a
+    helper, so there is no `<stem>.py`/`.exe` on disk for _find_helper_runner
+    to hit — without this branch every helper-backed stage reports "missing".
+    See learning.md "macOS helpers are re-execs, not files on disk"."""
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        return [sys.executable, "--run-helper", stem]
+    runner_path, is_exe = _find_helper_runner(base_dir, stem)
+    if not runner_path:
+        return None
+    return [str(runner_path)] if is_exe else [sys.executable, str(runner_path)]
 
 
 def _tiles_procs_from_cfg(cfg: configparser.ConfigParser) -> int:
@@ -599,12 +602,10 @@ def run_tiles_process(
     progress_fn(5.0)
     _log_line(base_dir, log_fn, "TILES PROCESS START")
 
-    runner_path, is_exe = _find_tiles_runner(base_dir)
-    if not runner_path:
+    args = _helper_argv(base_dir, "tiles_create_raster")
+    if not args:
         _log_line(base_dir, log_fn, "ERROR: tiles_create_raster helper not found")
         raise RuntimeError("Missing tiles_create_raster helper")
-
-    args = [str(runner_path)] if is_exe else [sys.executable, str(runner_path)]
 
     try:
         minzoom = int(str(cfg["DEFAULT"].get("tiles_minzoom", "")).strip() or 0)
@@ -662,12 +663,10 @@ def run_classification_process(
     progress_fn(5.0)
     _log_line(base_dir, log_fn, "CLASSIFICATION PROCESS START")
 
-    runner_path, is_exe = _find_classification_runner(base_dir)
-    if not runner_path:
+    args = _helper_argv(base_dir, "segmentation_run")
+    if not args:
         _log_line(base_dir, log_fn, "ERROR: segmentation_run helper not found")
         raise RuntimeError("Missing segmentation_run helper")
-
-    args = [str(runner_path)] if is_exe else [sys.executable, str(runner_path)]
     args += ["--original_working_directory", str(base_dir)]
 
     env = dict(os.environ)

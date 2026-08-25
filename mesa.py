@@ -760,7 +760,11 @@ def _maybe_run_helper() -> None:
     sys.argv = [helper_name] + sys.argv[idx + 2:]
     _ensure_code_dir_on_syspath()
     import runpy
-    runpy.run_module(helper_name, run_name="__main__")
+    # alter_sys=True installs the helper as sys.modules['__main__'] for the run.
+    # Without it a spawn Pool cannot pickle the helper's own module-level
+    # functions (they resolve against mesa.py's __main__ and are not found).
+    # See learning.md "--run-helper must own __main__".
+    runpy.run_module(helper_name, run_name="__main__", alter_sys=True)
     raise SystemExit(0)
 
 

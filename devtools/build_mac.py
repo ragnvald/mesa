@@ -127,6 +127,11 @@ RUN_HELPER_IMPORTS = [
     "--hidden-import", "combined_map",
     "--hidden-import", "segmentation_setup",
     "--hidden-import", "special_focus",
+    # The pipeline stages run through the same re-exec (there is no per-helper
+    # .py/.exe on disk in the .app). Named explicitly rather than left to a
+    # transitive import from report_generate.
+    "--hidden-import", "tiles_create_raster",
+    "--hidden-import", "segmentation_run",
     # segmentation_setup needs the sklearn/scipy stack; special_focus uses pywebview.
     "--collect-all", "sklearn",
     "--collect-all", "scipy",
