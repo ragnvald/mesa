@@ -408,14 +408,268 @@ _IMAGE_MIME = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Generated geocode group names (H3_R07, QDGC_L06)
+# ---------------------------------------------------------------------------
+# The level is zero-padded to two digits so names sort in level order as plain
+# strings. Only the group label is MESA's; the cell codes stay in the H3 / QDGC
+# libraries' own formats. See learning.md "Generated geocode names are zero-padded".
+_LEGACY_GRID_NAME_RE = re.compile(r"^(H3_R|QDGC_L)(\d)$")
+_LEGACY_GRID_TOKEN_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])(h3_r|qdgc_l)(\d)(?![A-Za-z0-9])")
+# RE2 (pyarrow) spelling of _LEGACY_GRID_NAME_RE; "\10\2" is group 1, a literal 0, group 2.
+_LEGACY_GRID_NAME_RE2 = r"^(H3_R|QDGC_L)(\d)$"
+_LEGACY_GRID_NAME_RE2_REPL = r"\10\2"
+_LEGACY_GRID_FILE_RE = re.compile(r"^(H3_R|QDGC_L)(\d)((?:_[^/\\]*)?\.(?:mbtiles|parquet))$")
+
+
+def h3_group_name(resolution: int) -> str:
+    """Geocode group name for an H3 resolution (0-15), e.g. 7 -> 'H3_R07'."""
+    return f"H3_R{int(resolution):02d}"
+
+
+def qdgc_group_name(level: int) -> str:
+    """Geocode group name for a QDGC level (0-12), e.g. 6 -> 'QDGC_L06'."""
+    return f"QDGC_L{int(level):02d}"
+
+
+def canonical_geocode_group_name(name) -> str:
+    """Map a pre-5.7 generated name ('H3_R7') to its padded form; others unchanged."""
+    s = str(name)
+    return _LEGACY_GRID_NAME_RE.sub(lambda m: f"{m.group(1)}0{m.group(2)}", s)
+
+
+def _canonical_grid_tokens(text: str) -> str:
+    """Pad legacy grid names inside free text such as a comma-separated config list."""
+    return _LEGACY_GRID_TOKEN_RE.sub(lambda m: f"{m.group(1).upper()}0{m.group(2)}", text)
+
+
+def _geoparquet_dir_for(base_dir: Path) -> Path:
+    sub = "output/geoparquet"
+    try:
+        cp = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), strict=False, interpolation=None)
+        cp.read(Path(base_dir) / "config.ini", encoding="utf-8")
+        sub = (cp["DEFAULT"].get("parquet_folder", sub) or sub).strip()
+    except Exception:
+        pass
+    p = Path(sub)
+    return p if p.is_absolute() else Path(base_dir) / p
+
+
+def _legacy_geocode_names_pending(base_dir: Path) -> bool:
+    """Cheap gate: small reads and directory listings only, never the big tables."""
+    base = Path(base_dir)
+    gpq = _geoparquet_dir_for(base)
+    try:
+        import pyarrow.parquet as pq
+
+        grp = gpq / "tbl_geocode_group.parquet"
+        if grp.is_file():
+            names = pq.read_table(grp, columns=["name_gis_geocodegroup"]).column(0).to_pylist()
+            if any(_LEGACY_GRID_NAME_RE.match(str(n)) for n in names if n is not None):
+                return True
+    except Exception:
+        pass
+    for folder in (base / "output" / "mbtiles", gpq / "tbl_segmentation"):
+        try:
+            if any(_LEGACY_GRID_FILE_RE.match(p.name) for p in folder.iterdir()):
+                return True
+        except Exception:
+            pass
+    for text_file in (base / "config.ini",):
+        try:
+            for line in text_file.read_text(encoding="utf-8").splitlines():
+                if not line.lstrip().startswith(("#", ";")) and _LEGACY_GRID_TOKEN_RE.search(line):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _rewrite_parquet_legacy_names(path: Path, *, free_text: bool = False) -> bool:
+    """Pad legacy grid names in every string column of one parquet file.
+
+    Streams row group by row group and writes the original Arrow schema back, so
+    geometry stays as WKB bytes and the schema-level 'geo' header survives.
+    Returns True when '<name>.renaming' was written; the caller swaps it in once
+    the source handle is closed (Windows will not replace an open file).
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    with open(path, "rb") as fh:
+        return _rewrite_parquet_legacy_names_open(pq.ParquetFile(fh), path, free_text=free_text)
+
+
+def _rewrite_parquet_legacy_names_open(pf, path: Path, *, free_text: bool) -> bool:
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    schema = pf.schema_arrow
+
+    def _is_text(t) -> bool:
+        if pa.types.is_dictionary(t):
+            t = t.value_type
+        return pa.types.is_string(t) or pa.types.is_large_string(t)
+
+    text_cols = [f.name for f in schema if _is_text(f.type)]
+    if not text_cols:
+        return False
+
+    def _fix(arr):
+        if pa.types.is_dictionary(arr.type):
+            return pa.DictionaryArray.from_arrays(arr.indices, _fix(arr.dictionary))
+        if free_text:
+            return pa.array([None if v is None else _canonical_grid_tokens(v) for v in arr.to_pylist()],
+                            type=arr.type)
+        return pc.replace_substring_regex(arr, _LEGACY_GRID_NAME_RE2, _LEGACY_GRID_NAME_RE2_REPL)
+
+    def _has_legacy(arr) -> bool:
+        if pa.types.is_dictionary(arr.type):
+            arr = arr.dictionary
+        if free_text:
+            return any(v is not None and _LEGACY_GRID_TOKEN_RE.search(v) for v in arr.to_pylist())
+        return bool(pc.any(pc.match_substring_regex(arr, _LEGACY_GRID_NAME_RE2)).as_py() or False)
+
+    found = False
+    for rg in range(pf.num_row_groups):
+        t = pf.read_row_group(rg, columns=text_cols)
+        if any(_has_legacy(chunk) for col in t.columns for chunk in col.chunks):
+            found = True
+            break
+    if not found:
+        return False
+
+    compression = "snappy"
+    try:
+        if pf.metadata.num_row_groups:
+            compression = str(pf.metadata.row_group(0).column(0).compression).lower()
+    except Exception:
+        pass
+    tmp = path.with_name(path.name + ".renaming")
+    with pq.ParquetWriter(tmp, schema, compression=compression) as writer:
+        for rg in range(pf.num_row_groups):
+            t = pf.read_row_group(rg)
+            for name in text_cols:
+                i = t.schema.get_field_index(name)
+                col = t.column(i)
+                t = t.set_column(i, t.schema.field(i), pa.chunked_array([_fix(c) for c in col.chunks], type=col.type))
+            writer.write_table(t)
+    return True
+
+
+def migrate_geocode_group_names(base_dir, log=None) -> dict:
+    """Rename pre-5.7 generated geocode groups (H3_R7 -> H3_R07) throughout a project.
+
+    Idempotent and cheap when there is nothing to do. tbl_geocode_group is rewritten
+    last, so an interrupted run leaves the gate open and is completed next time.
+    Returns counts of what was changed.
+    """
+    base = Path(base_dir)
+    summary = {"tables": 0, "files": 0, "config": 0}
+    if not _legacy_geocode_names_pending(base):
+        return summary
+
+    def _log(msg: str) -> None:
+        if log is not None:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    gpq = _geoparquet_dir_for(base)
+    _log("Geocode names: renaming pre-5.7 H3/QDGC groups to zero-padded names (e.g. H3_R7 -> H3_R07) …")
+
+    # Files named after a group. An existing padded file is newer output, so it wins.
+    for folder in (gpq / "tbl_segmentation", base / "output" / "mbtiles"):
+        if not folder.is_dir():
+            continue
+        for p in sorted(folder.iterdir()):
+            m = _LEGACY_GRID_FILE_RE.match(p.name)
+            if not m:
+                continue
+            target = p.with_name(f"{m.group(1)}0{m.group(2)}{m.group(3)}")
+            try:
+                if target.exists():
+                    p.unlink()
+                    _log(f"Geocode names: removed stale {p.name} ({target.name} already exists).")
+                else:
+                    os.replace(p, target)
+                summary["files"] += 1
+            except Exception as exc:
+                _log(f"Geocode names: could not rename {p.name}: {exc}")
+                continue
+            if target.suffix == ".mbtiles" and target.exists():
+                try:
+                    import sqlite3
+
+                    con = sqlite3.connect(target)
+                    try:
+                        rows = con.execute("SELECT name, value FROM metadata").fetchall()
+                        for key, value in rows:
+                            if isinstance(value, str):
+                                new = _canonical_grid_tokens(value)
+                                if new != value:
+                                    con.execute("UPDATE metadata SET value=? WHERE name=?", (new, key))
+                        con.commit()
+                    finally:
+                        con.close()
+                except Exception as exc:
+                    _log(f"Geocode names: metadata of {target.name} not updated: {exc}")
+
+    # Tables. tbl_geocode_group goes last: it is the gate's marker.
+    group_table = gpq / "tbl_geocode_group.parquet"
+    tables = [p for p in sorted(gpq.rglob("*.parquet")) if p.resolve() != group_table.resolve()] if gpq.is_dir() else []
+    if group_table.is_file():
+        tables.append(group_table)
+    for p in tables:
+        try:
+            if _rewrite_parquet_legacy_names(p, free_text=(p.name == "tbl_settings.parquet")):
+                os.replace(p.with_name(p.name + ".renaming"), p)
+                summary["tables"] += 1
+                _log(f"Geocode names: updated {p.relative_to(gpq) if gpq in p.parents else p.name}")
+        except Exception as exc:
+            _log(f"Geocode names: could not update {p.name}: {exc}")
+
+    # config.ini values (lists such as segment_geocode_layer); comments are left alone.
+    cfg_path = base / "config.ini"
+    try:
+        with open(cfg_path, "r", encoding="utf-8", newline="") as fh:
+            lines = fh.read().splitlines(keepends=True)
+        changed = 0
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith(("#", ";")):
+                continue
+            new = _canonical_grid_tokens(line)
+            if new != line:
+                lines[i] = new
+                changed += 1
+        if changed:
+            with open(cfg_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write("".join(lines))
+            summary["config"] = changed
+            _log(f"Geocode names: updated {changed} line(s) in config.ini")
+    except Exception:
+        pass
+
+    _log(
+        f"Geocode names: done — {summary['tables']} table(s), {summary['files']} file(s), "
+        f"{summary['config']} config line(s)."
+    )
+    return summary
+
+
 def choose_primary_geocode(available_groups, *, prefer: str = "basic_mosaic") -> str:
     """Pick the geocode group that downstream consumers should treat as the
     project's primary analytical unit.
 
     When `prefer` (default `basic_mosaic`) is in `available_groups`, return it.
     Otherwise return the first sorted group name — sorted lexicographically,
-    which puts H3_R6 < H3_R7 < … < H3_R10 ahead of arbitrary imported set
-    names. That matches operator intuition that the coarsest-resolution H3
+    which puts H3_R06 < H3_R07 < … < H3_R10 ahead of arbitrary imported set
+    names. That ordering relies on the zero-padded names from
+    `h3_group_name()`; see learning.md "Generated geocode names are zero-padded".
+    It matches operator intuition that the coarsest-resolution H3
     grid covers the most area and is the safest fallback when the
     asset-shaped mosaic is absent.
 

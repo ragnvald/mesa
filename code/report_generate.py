@@ -238,7 +238,7 @@ def _analysis_primary_geocode(flat_df: pd.DataFrame) -> str:
     """Pick the geocode group the report should treat as primary.
 
     Prefers ``basic_mosaic`` if it appears in ``analysis_geocode``, otherwise
-    the first sorted distinct value (puts ``H3_R6`` < ``H3_R7`` < … <
+    the first sorted distinct value (puts ``H3_R06`` < ``H3_R07`` < … <
     ``H3_R10`` ahead of arbitrary imported set names — coarsest-resolution
     H3 grid covers the most area, safest fallback when basic_mosaic was
     skipped per the project's geocode-strategy setting).
@@ -3978,7 +3978,7 @@ def export_to_excel(df, fp):
 def build_geocode_overview_table(parquet_dir: str) -> list | None:
     """Return a list-of-rows (header + body) summarising every geocode group.
 
-    One row per geocode group (basic_mosaic, H3_R6, ..., custom grids) with
+    One row per geocode group (basic_mosaic, H3_R06, ..., custom grids) with
     object count drawn from tbl_geocode_object.parquet. Friendly title and
     description come from tbl_geocode_group.parquet when available. Returns
     None when neither source file is available, so callers can skip the
@@ -5273,12 +5273,12 @@ def generate_report(base_dir: str,
                         "it is the default basis for the &ldquo;Other maps&rdquo;, Index, and Atlas "
                         "sections of this report."),
                     ('text',
-                        "<b>H3 hexagon grids (H3_R6 … H3_R9).</b> These are standardised hierarchical "
+                        "<b>H3 hexagon grids (H3_R06 … H3_R09).</b> These are standardised hierarchical "
                         "hex tessellations from Uber's open H3 spec. R6 is the coarsest (cells "
                         "≈36 km², about the size of a small district); each level halves the cell "
                         "size, so R9 cells are ≈0.1 km². H3 grids are useful when you need consistent "
-                        "cell sizes across runs or when comparing study areas — a value at H3_R8 in "
-                        "one project is directly comparable to H3_R8 in another, regardless of the "
+                        "cell sizes across runs or when comparing study areas — a value at H3_R08 in "
+                        "one project is directly comparable to H3_R08 in another, regardless of the "
                         "asset footprint. The fields used for ranking and weighting are identical to "
                         "those on basic_mosaic, only aggregated to a different polygon set."),
                     ('text',

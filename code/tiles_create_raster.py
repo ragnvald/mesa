@@ -17,7 +17,7 @@ Per group in name_gis_geocodegroup, produces seven MBTiles:
 
 Usage examples:
     python tiles_create_raster.py --minzoom 6 --maxzoom 12
-    python tiles_create_raster.py --only-groups "geocode_001,H3_R8"
+    python tiles_create_raster.py --only-groups "geocode_001,H3_R08"
     python tiles_create_raster.py --procs 8 --stroke-alpha 0.6
 """
 

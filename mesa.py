@@ -1243,6 +1243,16 @@ def _stamp_config_version(cfg_path: Path, version: str) -> bool:
         return False
 
 
+def _migrate_geocode_group_names(base_dir: str) -> None:
+    """Pad pre-5.7 H3/QDGC group names in a workspace (no-op when already current)."""
+    try:
+        _ensure_code_dir_on_syspath()
+        from mesa_shared import migrate_geocode_group_names
+        migrate_geocode_group_names(base_dir, log=log_to_logfile)
+    except Exception as exc:
+        log_to_logfile(f"Geocode names: migration skipped: {exc}")
+
+
 def restore_backup_archive(base_dir: str, zip_path: str, *, mode: str = "as_is",
                            stamp_version: "str | None" = None, progress_cb=None) -> None:
     """Restore a backup into base_dir.
@@ -1329,6 +1339,8 @@ def restore_backup_archive(base_dir: str, zip_path: str, *, mode: str = "as_is",
             f"Restore [{mode}]: stamped mesa_version={stamp_version} "
             f"({'ok' if ok else 'no mesa_version line found — left unchanged'})"
         )
+    # Packages from MESA 5.6 and earlier carry unpadded names (H3_R7).
+    _migrate_geocode_group_names(str(base))
     check_and_create_folders()
     log_to_logfile(f"Restored backup archive: {zip_file} (mode={mode})")
 
@@ -2028,6 +2040,8 @@ def _bootstrap_config() -> None:
     _seed_working_dir()
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Configuration not found: {config_file}")
+    # Before read_config: the migration may rewrite group names held in config.ini.
+    _migrate_geocode_group_names(original_working_directory)
     config = read_config(config_file)
     mesa_version = config['DEFAULT'].get('mesa_version', 'MESA 5')
     mesa_version_display = _format_display_version(mesa_version)

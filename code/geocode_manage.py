@@ -40,7 +40,7 @@ Config (<base>/config.ini, [DEFAULT]) knobs (defaults shown):
 
 from __future__ import annotations
 
-from mesa_shared import find_base_dir
+from mesa_shared import find_base_dir, h3_group_name, migrate_geocode_group_names, qdgc_group_name
 from mesa_constants import TABLE_GEOCODE_GROUP, TABLE_GEOCODE_OBJECT
 # locale_bootstrap no longer needed for PySide6
 
@@ -2930,6 +2930,8 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
         groups_rows = []
         objects_parts = []
         levels_sorted = sorted(set(int(r) for r in levels))
+        # Pre-5.7 names must be padded first, or H3_R07 would land beside H3_R7.
+        migrate_geocode_group_names(base_dir, log=lambda m: log_to_gui(m, "INFO"))
         if clear_existing:
             existing_h3 = _list_existing_h3_group_names(base_dir)
             if existing_h3:
@@ -2954,7 +2956,7 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
                     "WARN",
                 )
                 continue
-            group_name = f"H3_R{r}"
+            group_name = h3_group_name(r)
             gdf = h3_from_union(union_geom, r)
             if gdf.empty:
                 log_to_gui(f"No H3 cells produced for resolution {r}.", "WARN")
@@ -3007,7 +3009,7 @@ def write_h3_levels(base_dir: Path, levels: List[int], clear_existing: bool = Fa
                 log_to_gui("Step [H3] COMPLETED")
 
 def write_qdgc_levels(base_dir: Path, levels: List[int], clear_existing: bool = False) -> int:
-    """Generate QDGC geocode groups (QDGC_L{level}) over the asset AOI.
+    """Generate QDGC geocode groups (QDGC_L{level:02d}) over the asset AOI.
 
     Mirrors write_h3_levels: same AOI union, same per-level cap pre-flight, same
     merge/write into tbl_geocode_group / tbl_geocode_object. Cells come from the
@@ -3038,6 +3040,7 @@ def write_qdgc_levels(base_dir: Path, levels: List[int], clear_existing: bool = 
         groups_rows = []
         objects_parts = []
         levels_sorted = sorted(set(int(z) for z in levels))
+        migrate_geocode_group_names(base_dir, log=lambda m: log_to_gui(m, "INFO"))
         if clear_existing:
             existing_qdgc = _list_existing_qdgc_group_names(base_dir)
             if existing_qdgc:
@@ -3070,7 +3073,7 @@ def write_qdgc_levels(base_dir: Path, levels: List[int], clear_existing: bool = 
                     "WARN",
                 )
                 continue
-            group_name = f"QDGC_L{z}"
+            group_name = qdgc_group_name(z)
             gdf = qdgc_from_union(union_geom, z)
             if gdf.empty:
                 log_to_gui(f"No QDGC cells produced for level {z}.", "WARN")

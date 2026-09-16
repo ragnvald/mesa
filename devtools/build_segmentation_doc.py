@@ -413,9 +413,9 @@ def build():
     code = doc.add_paragraph()
     cr = code.add_run(
         "python devtools/signature_analysis.py \\\n"
-        "    --working_dir <project> --geocode_layer H3_R5\n\n"
+        "    --working_dir <project> --geocode_layer H3_R05\n\n"
         "python devtools/test_segmentation.py \\\n"
-        "    --working_dir <project> --geocode_layer H3_R5 \\\n"
+        "    --working_dir <project> --geocode_layer H3_R05 \\\n"
         "    --methods both --spatial_method agglomerative --dissolve")
     cr.font.name = "Consolas"
     cr.font.size = Pt(9.5)

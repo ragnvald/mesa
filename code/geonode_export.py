@@ -1094,7 +1094,7 @@ def export_layers(
 
     selected_ids contains any mix of:
       - SUPPORTING_LAYERS ids  ("analysis_results", "routes", ...)
-      - sensitivity layer ids  ("sensitivity:basic_mosaic", "sensitivity:H3_R6", ...)
+      - sensitivity layer ids  ("sensitivity:basic_mosaic", "sensitivity:H3_R06", ...)
 
     all_layers, if provided, is the flat list of all available layer dicts
     (sensitivity + supporting).  If omitted the function rebuilds it from
