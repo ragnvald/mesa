@@ -113,9 +113,17 @@ class _ReportSignals(QObject):
     log_message = Signal(str)
     progress_update = Signal(float)
     link_update = Signal(str)
+    busy_changed = Signal(bool)
 
 
 _signals: _ReportSignals | None = None
+
+# Only one report run at a time. Two concurrent runs render into the same
+# output/tmp/ scratch files and pick the same minute-stamped .docx name, so
+# their writes interleave and the resulting file is a corrupt zip that Word
+# refuses to open. See learning.md "One report run at a time".
+_report_run_lock = threading.Lock()
+_report_running = False
 
 # When running long jobs in a background thread, set_progress() messages were
 # only written to the GUI widget (not to log.txt). Keep a best-effort base_dir
@@ -5847,6 +5855,12 @@ def generate_report(base_dir: str,
         set_progress(86, "Composing Word report …")
         ts_docx = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
         output_docx_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_docx}.docx")
+        # Never write over an existing file: the minute stamp repeats, and two
+        # writers on one path produce a corrupt .docx rather than a loser.
+        _seq = 2
+        while output_docx_path.exists():
+            output_docx_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_docx}_{_seq}.docx")
+            _seq += 1
         output_docx = str(output_docx_path)
         compile_docx(output_docx, order_list)
         engine.cleanup()
@@ -5887,13 +5901,61 @@ def generate_report(base_dir: str,
                 pass
 
 # ---------------- GUI runner ----------------
+def _claim_report_run(base_dir) -> bool:
+    """Take the single report slot. Returns False if a run is already going."""
+    global _report_running
+    with _report_run_lock:
+        if _report_running:
+            write_to_log("A report is already being generated - ignoring this request.", base_dir)
+            return False
+        _report_running = True
+    try:
+        if _signals is not None:
+            _signals.busy_changed.emit(True)
+    except Exception:
+        pass
+    return True
+
+
+def _release_report_run() -> None:
+    global _report_running
+    with _report_run_lock:
+        _report_running = False
+    try:
+        if _signals is not None:
+            _signals.busy_changed.emit(False)
+    except Exception:
+        pass
+
+
+def _run_report_guarded(**kwargs) -> None:
+    try:
+        generate_report(**kwargs)
+    finally:
+        _release_report_run()
+
+
+def _spawn_report(base_dir, kwargs: dict) -> None:
+    """Start one report run, or do nothing if one is already in flight."""
+    if not _claim_report_run(base_dir):
+        return
+    try:
+        threading.Thread(target=_run_report_guarded, kwargs=kwargs, daemon=True).start()
+    except Exception:
+        # Never leave the slot taken - that would disable the button for good.
+        _release_report_run()
+        raise
+
+
 def _start_report_thread(base_dir, config_file, palette, desc, report_mode):
     # Backwards-compatible helper for old call sites.
-    threading.Thread(
-        target=generate_report,
-        args=(base_dir, config_file, palette, desc, report_mode),
-        daemon=True
-    ).start()
+    _spawn_report(base_dir, {
+        'base_dir': base_dir,
+        'config_file': config_file,
+        'palette_A2E': palette,
+        'desc_A2E': desc,
+        'report_mode': report_mode,
+    })
 
 def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  include_assets: bool,
@@ -5909,30 +5971,26 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  analysis_mode: str = "single",
                                  analysis_area_left: str | None = None,
                                  analysis_area_right: str | None = None):
-    threading.Thread(
-        target=generate_report,
-        kwargs={
-            'base_dir': base_dir,
-            'config_file': config_file,
-            'palette_A2E': palette,
-            'desc_A2E': desc,
-            'report_mode': None,
-            'include_assets': include_assets,
-            'include_other_maps': include_other_maps,
-            'include_index_statistics': include_index_statistics,
-            'include_lines_and_segments': include_lines_and_segments,
-            'include_segmentation': include_segmentation,
-            'include_segmentation_mv': include_segmentation_mv,
-            'segmentation_layers': segmentation_layers,
-            'report_geocode_groups': report_geocode_groups,
-            'include_atlas_maps': include_atlas_maps,
-            'include_analysis_presentation': include_analysis_presentation,
-            'analysis_mode': analysis_mode,
-            'analysis_area_left': analysis_area_left,
-            'analysis_area_right': analysis_area_right,
-        },
-        daemon=True
-    ).start()
+    _spawn_report(base_dir, {
+        'base_dir': base_dir,
+        'config_file': config_file,
+        'palette_A2E': palette,
+        'desc_A2E': desc,
+        'report_mode': None,
+        'include_assets': include_assets,
+        'include_other_maps': include_other_maps,
+        'include_index_statistics': include_index_statistics,
+        'include_lines_and_segments': include_lines_and_segments,
+        'include_segmentation': include_segmentation,
+        'include_segmentation_mv': include_segmentation_mv,
+        'segmentation_layers': segmentation_layers,
+        'report_geocode_groups': report_geocode_groups,
+        'include_atlas_maps': include_atlas_maps,
+        'include_analysis_presentation': include_analysis_presentation,
+        'analysis_mode': analysis_mode,
+        'analysis_area_left': analysis_area_left,
+        'analysis_area_right': analysis_area_right,
+    })
 
 class ReportGeneratorWindow(QMainWindow):
     """PySide6 main window for the MESA report generator."""
@@ -6154,6 +6212,7 @@ class ReportGeneratorWindow(QMainWindow):
         create_btn = QPushButton("Create report")
         create_btn.setProperty("role", "primary")
         btn_row.addWidget(create_btn)
+        self._create_btn = create_btn
         hint_label = QLabel("The report will include only the selected sections.")
         btn_row.addWidget(hint_label)
         btn_row.addStretch()
@@ -6189,6 +6248,7 @@ class ReportGeneratorWindow(QMainWindow):
         _signals.log_message.connect(self._on_log_message)
         _signals.progress_update.connect(self._on_progress_update)
         _signals.link_update.connect(self._on_link_update)
+        _signals.busy_changed.connect(self._on_busy_changed)
 
         # --- Control wiring ---
         self._chk_analysis.stateChanged.connect(self._sync_analysis_controls)
@@ -6216,6 +6276,13 @@ class ReportGeneratorWindow(QMainWindow):
     def _on_link_update(self, text: str):
         if link_var is not None:
             link_var.setText(text)
+
+    def _on_busy_changed(self, busy: bool):
+        btn = getattr(self, "_create_btn", None)
+        if btn is None:
+            return
+        btn.setEnabled(not busy)
+        btn.setText("Creating report …" if busy else "Create report")
 
     def _sync_analysis_controls(self, *_args):
         enabled = self._chk_analysis.isChecked()
