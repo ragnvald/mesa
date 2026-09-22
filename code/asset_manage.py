@@ -10,6 +10,7 @@ import argparse
 import configparser
 import datetime
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -44,7 +45,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QPlainTextEdit, QLineEdit,
     QCheckBox, QProgressBar, QFrame, QSizePolicy,
-    QMessageBox,
+    QMessageBox, QFileDialog,
 )
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
@@ -105,6 +106,30 @@ ASSET_GROUP_COLUMNS = [
     PURPOSE_COLUMN,
     STYLING_COLUMN,
 ]
+
+
+# Everything a shapefile may need alongside the .shp. Copying only the .shp
+# produces a file GDAL cannot open, so an upload always takes the whole set.
+_SHAPEFILE_SIDECARS = {
+    "shp", "shx", "dbf", "prj", "cpg", "qix", "sbn", "sbx", "qmd",
+    "fix", "aih", "ain", "atx", "idx", "shp.xml",
+}
+
+
+def _shapefile_members(path: Path) -> list[Path]:
+    """The files that must travel with *path*: just itself, unless it's a .shp."""
+    if path.suffix.lower() != ".shp":
+        return [path]
+    stem = path.stem.lower() + "."
+    members = []
+    try:
+        for sibling in path.parent.iterdir():
+            name = sibling.name.lower()
+            if sibling.is_file() and name.startswith(stem) and name[len(stem):] in _SHAPEFILE_SIDECARS:
+                members.append(sibling)
+    except Exception:
+        return [path]
+    return members or [path]
 
 
 def _force_2d_geom(geom):
@@ -550,8 +575,17 @@ class AssetManagerWindow(QMainWindow):
 
         # Action buttons
         btn_row = QHBoxLayout()
-        import_btn = QPushButton("Import assets")
+        upload_btn = QPushButton("Upload assets")
+        upload_btn.setToolTip(
+            "Pick .gpkg / .shp / .parquet files anywhere on disk and copy them "
+            "into the asset input folder, ready to import."
+        )
+        upload_btn.clicked.connect(self._upload_assets)
+        btn_row.addWidget(upload_btn)
+
+        import_btn = QPushButton("Import assets from folder")
         import_btn.setProperty("role", "primary")
+        import_btn.setToolTip(f"Import every supported file found in {self.input_folder_asset}")
         import_btn.clicked.connect(self._start_import)
         btn_row.addWidget(import_btn)
 
@@ -561,6 +595,94 @@ class AssetManagerWindow(QMainWindow):
 
         btn_row.addStretch()
         layout.addLayout(btn_row)
+
+    def _upload_assets(self):
+        """Copy files chosen in a file dialog into the asset input folder.
+
+        A shapefile is unreadable without its sidecars, so selecting the .shp
+        brings every file sharing its stem along. Nothing is imported here —
+        the copied files are picked up by the next folder import.
+        """
+        if self._import_running:
+            QMessageBox.warning(self, "Import running",
+                                "Import is still running. Wait for it to finish before uploading.")
+            return
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select asset files to copy into the input folder",
+            str(self.input_folder_asset),
+            "Spatial data (*.gpkg *.shp *.parquet);;GeoPackage (*.gpkg);;"
+            "Shapefile (*.shp);;GeoParquet (*.parquet);;All files (*.*)",
+        )
+        if not paths:
+            return
+
+        target = self.input_folder_asset
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "Upload assets",
+                                 f"Could not create the asset folder:\n{target}\n\n{exc}")
+            return
+
+        sources: list[Path] = []
+        for p in paths:
+            for member in _shapefile_members(Path(p)):
+                if member not in sources:
+                    sources.append(member)
+
+        already = [s for s in sources if (target / s.name).exists()]
+        overwrite = True
+        if already:
+            listing = "\n".join(f"  {s.name}" for s in already[:8])
+            if len(already) > 8:
+                listing += f"\n  ... and {len(already) - 8} more"
+            overwrite = QMessageBox.question(
+                self, "Files already in the asset folder",
+                f"{len(already)} of the selected file(s) already exist in\n{target}:\n\n"
+                f"{listing}\n\nOverwrite them?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) == QMessageBox.Yes
+
+        copied, skipped, failed = 0, 0, []
+        for src in sources:
+            dst = target / src.name
+            try:
+                if dst.exists():
+                    # samefile guards the case where the operator browsed to the
+                    # asset folder itself and "uploaded" a file onto itself.
+                    if src.resolve() == dst.resolve() or not overwrite:
+                        skipped += 1
+                        continue
+                shutil.copy2(src, dst)
+                copied += 1
+                self._log(f"Uploaded {src} -> {dst}")
+            except Exception as exc:
+                failed.append(f"{src.name}: {exc}")
+                self._log(f"Upload failed for {src}: {exc}", "ERROR")
+
+        summary = f"Copied {copied} file(s) into {target}."
+        if skipped:
+            summary += f"\nSkipped {skipped} file(s) already present."
+        if failed:
+            details = "\n".join(failed[:6])
+            if len(failed) > 6:
+                details += f"\n... and {len(failed) - 6} more"
+            QMessageBox.warning(self, "Upload finished with errors",
+                                f"{summary}\nFailed: {len(failed)}\n\n{details}")
+            return
+        if not copied:
+            QMessageBox.information(self, "Upload assets", summary)
+            return
+
+        run_now = QMessageBox.question(
+            self, "Upload assets",
+            f"{summary}\n\nImport the asset folder now?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if run_now == QMessageBox.Yes:
+            self._start_import()
 
     # ------------------------------------------------------------------
     # Edit tab
