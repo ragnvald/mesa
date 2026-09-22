@@ -5229,26 +5229,39 @@ class MesaMainWindow(QMainWindow):
         layout.addWidget(backup_group)
 
         # --- Clear output section ---
-        clear_group = QGroupBox("Clear generated data")
+        clear_group = QGroupBox("Clear data")
         clear_layout = QVBoxLayout(clear_group)
         clear_layout.setSpacing(8)
 
         clear_intro = QLabel(
-            "Remove all imported and processed data from the output/ folder. "
-            "Your original source files in input/ and your configuration are "
-            "kept intact. Use this to start fresh or free disk space after "
-            "a completed project cycle."
+            "<b>Clear output</b> removes all imported and processed data from the "
+            "output/ folder. Your original source files in input/ and your "
+            "configuration are kept intact. Use this to start fresh or free disk "
+            "space after a completed project cycle.<br><br>"
+            "<b>Delete all data</b> additionally empties the source folders "
+            "input/asset, input/geocode, input/lines and input/images, leaving an "
+            "empty project. config.ini and input/settings.xlsx are kept, so the "
+            "project keeps its settings."
         )
         clear_intro.setWordWrap(True)
         clear_intro.setStyleSheet("color: #6a5533; font-size: 10px;")
         clear_layout.addWidget(clear_intro)
 
         clear_btn_row = QHBoxLayout()
+        clear_btn_row.setSpacing(10)
         clear_btn = QPushButton("Clear output")
         clear_btn.setProperty("role", "danger")
         clear_btn.setFixedWidth(160)
         clear_btn.clicked.connect(self._do_clear_output)
         clear_btn_row.addWidget(clear_btn)
+
+        delete_all_btn = QPushButton("Delete all data")
+        delete_all_btn.setProperty("role", "danger")
+        delete_all_btn.setFixedWidth(160)
+        delete_all_btn.setToolTip("Empty both input/ and output/ — the project keeps its configuration.")
+        delete_all_btn.clicked.connect(self._do_delete_all_data)
+        clear_btn_row.addWidget(delete_all_btn)
+
         clear_btn_row.addStretch()
         clear_layout.addLayout(clear_btn_row)
 
@@ -5657,6 +5670,29 @@ class MesaMainWindow(QMainWindow):
         progress.set_worker_thread(self._restore_worker_thread)
         self._restore_worker_thread.start()
 
+    @staticmethod
+    def _purge_directory(directory: str) -> tuple[int, list[str], list[str]]:
+        """Delete the contents of *directory*, keeping .git* entries and the
+        directory itself. Returns (removed, kept, failures)."""
+        removed, kept, failed = 0, [], []
+        if not os.path.isdir(directory):
+            return removed, kept, failed
+        for name in os.listdir(directory):
+            lname = name.strip().lower()
+            if lname.startswith(".git") or lname == ".github":
+                kept.append(name)
+                continue
+            path = os.path.join(directory, name)
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+                removed += 1
+            except Exception as exc:
+                failed.append(f"{name}: {exc}")
+        return removed, kept, failed
+
     def _do_clear_output(self):
         output_dir = os.path.join(original_working_directory, "output")
         if not os.path.isdir(output_dir):
@@ -5673,26 +5709,7 @@ class MesaMainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        def _keep_github_related(name: str) -> bool:
-            lname = (name or "").strip().lower()
-            return lname.startswith(".git") or lname == ".github"
-
-        removed = 0
-        kept: list[str] = []
-        failed: list[str] = []
-        for name in os.listdir(output_dir):
-            path = os.path.join(output_dir, name)
-            if _keep_github_related(name):
-                kept.append(name)
-                continue
-            try:
-                if os.path.isdir(path):
-                    shutil.rmtree(path)
-                else:
-                    os.remove(path)
-                removed += 1
-            except Exception as exc:
-                failed.append(f"{name}: {exc}")
+        removed, kept, failed = self._purge_directory(output_dir)
 
         log_to_logfile(f"Clear output executed. removed={removed}, kept={len(kept)}, failed={len(failed)}")
         if failed:
@@ -5710,6 +5727,68 @@ class MesaMainWindow(QMainWindow):
             self, "Clear output completed",
             f"Removed: {removed} items\nKept: {len(kept)} system files",
         )
+
+    def _do_delete_all_data(self):
+        """Empty both the source folders and output/, leaving a configured but
+        empty project. config.ini and input/settings.xlsx are deliberately kept:
+        they are settings, not data, and re-entering them by hand is the one
+        thing an operator cannot recover from a fresh import."""
+        input_dir = os.path.join(original_working_directory, "input")
+        targets = [os.path.join(original_working_directory, "output")]
+        targets += [os.path.join(input_dir, sub)
+                    for sub in ("asset", "geocode", "lines", "images")]
+
+        confirm = QMessageBox.question(
+            self, "Confirm delete all data",
+            "This will permanently delete both your source files and everything "
+            "MESA has generated from them:\n\n"
+            "  • input/asset, input/geocode, input/lines, input/images — emptied\n"
+            "  • output/ — emptied\n\n"
+            "Your configuration (config.ini) and input/settings.xlsx are kept.\n\n"
+            "This cannot be undone. If you may need this project again, cancel and "
+            "use “Store data” first.\n\n"
+            "Do you want to continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        removed = 0
+        kept: list[str] = []
+        failed: list[str] = []
+        for target in targets:
+            r, k, f = self._purge_directory(target)
+            removed += r
+            kept.extend(k)
+            failed.extend(f"{os.path.basename(target)}/{item}" for item in f)
+
+        # The emptied folders survive (only their contents go), but output/ and
+        # any missing input folder are re-created so the rest of MESA finds them.
+        check_and_create_folders()
+
+        log_to_logfile(f"Delete all data executed. removed={removed}, kept={len(kept)}, failed={len(failed)}")
+        if failed:
+            details = "\n".join(failed[:6])
+            if len(failed) > 6:
+                details += f"\n... and {len(failed) - 6} more"
+            QMessageBox.warning(
+                self, "Delete all data completed with issues",
+                f"Removed: {removed} items\nKept: {len(kept)} system files"
+                f"\nFailed: {len(failed)}\n\n{details}",
+            )
+        else:
+            self._manage_status.setText(
+                f"Deleted all data. Removed: {removed} items, kept: {len(kept)} system files."
+            )
+            QMessageBox.information(
+                self, "Delete all data completed",
+                f"Removed: {removed} items\nKept: {len(kept)} system files\n\n"
+                "The project is empty. Import new data to start over.",
+            )
+        try:
+            self._refresh_status_tab()
+        except Exception:
+            pass
 
     def _open_geonode_publisher(self):
         """Show the standalone GeoNode publish window (lazily constructed)."""
