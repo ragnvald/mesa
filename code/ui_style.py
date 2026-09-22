@@ -125,6 +125,19 @@ QPushButton[role="success"]:hover {
 QPushButton[role="success"]:pressed {
     background-color: #d9e3c7;
 }
+/* Destructive actions — same muted red-brown the main window uses. */
+QPushButton[role="danger"] {
+    background-color: #efdfd5;
+    color: #5c3825;
+    border: 1px solid #c4a08d;
+}
+QPushButton[role="danger"]:hover {
+    background-color: #f4e4da;
+    border-color: #b58672;
+}
+QPushButton[role="danger"]:pressed {
+    background-color: #e6d2c5;
+}
 QLabel {
     background: transparent;
     color: #3f3528;

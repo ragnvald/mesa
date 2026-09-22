@@ -754,6 +754,14 @@ class AssetManagerWindow(QMainWindow):
         next_btn.clicked.connect(lambda: self._navigate(1))
         controls.addWidget(next_btn)
 
+        delete_btn = QPushButton("Delete asset")
+        delete_btn.setProperty("role", "danger")
+        delete_btn.setToolTip(
+            "Remove this asset group from the asset tables. The source file is not touched."
+        )
+        delete_btn.clicked.connect(self._delete_current_asset_group)
+        controls.addWidget(delete_btn)
+
         controls.addStretch()
 
         reload_btn = QPushButton("Reload")
@@ -1386,6 +1394,87 @@ class AssetManagerWindow(QMainWindow):
             return True
         QMessageBox.critical(self, "Save failed", "Could not write asset group GeoParquet.")
         return False
+
+    def _delete_current_asset_group(self):
+        """Drop the current asset group and its objects from the asset tables.
+
+        Registration only: the file under input/asset stays put, so a later
+        folder import brings the group straight back. That asymmetry is spelled
+        out in the dialog — deleting source data from a record editor with
+        Previous/Next would be far too easy to do by accident, and one .gpkg
+        can carry several groups, so a file is not the operator's unit anyway.
+        """
+        if self._import_running:
+            QMessageBox.warning(self, "Import running",
+                                "Import is still running. Wait for it to finish.")
+            return
+        if len(self.df) == 0:
+            QMessageBox.information(self, "Nothing to delete", "There are no asset groups.")
+            return
+
+        row = self.df.iloc[self.idx]
+        group_id = row.get("id")
+        label = str(row.get("title_fromuser") or row.get("name_original") or
+                    row.get("name_gis_assetgroup") or f"row {self.idx + 1}")
+        try:
+            n_objects = int(row.get("total_asset_objects") or 0)
+        except Exception:
+            n_objects = 0
+
+        confirm = QMessageBox.question(
+            self, "Delete asset group",
+            f"Delete the asset group “{label}”?\n\n"
+            f"This removes 1 row from tbl_asset_group and its "
+            f"{n_objects:,} object(s) from tbl_asset_object.\n\n"
+            "The source file in the asset input folder is NOT deleted — importing "
+            "the folder again brings this group back. Delete the file first if you "
+            "want it gone for good.\n\n"
+            "Results already in output/ still refer to this group; re-run Process "
+            "to bring them in line.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            remaining = self.df.drop(self.df.index[self.idx]).reset_index(drop=True)
+            if not save_asset_group_df(self.asset_group_file, remaining):
+                QMessageBox.critical(self, "Delete failed",
+                                     "Could not write the asset group table. Nothing was changed.")
+                return
+            self.df = remaining
+            removed_objects = self._drop_asset_objects(group_id)
+            self._log(f"Deleted asset group '{label}' (id={group_id}); "
+                      f"removed {removed_objects} object row(s).")
+        except Exception as exc:
+            self._log(f"Delete failed for asset group '{label}': {exc}", "ERROR")
+            QMessageBox.critical(self, "Delete failed", f"{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._refresh_edit_data()
+        self.edit_state_label.setText(f"Deleted “{label}”.")
+
+    def _drop_asset_objects(self, group_id) -> int:
+        """Remove the objects belonging to *group_id*. Returns rows removed.
+
+        Reads tbl_asset_object whole — it carries every asset geometry, so this
+        is the one expensive step of a delete. Acceptable here because a delete
+        is a deliberate, occasional act; do not call it in a loop.
+        """
+        path = _parquet_path("tbl_asset_object.parquet")
+        if group_id is None or not path.exists():
+            return 0
+        gdf = gpd.read_parquet(path)
+        if "ref_asset_group" not in gdf.columns:
+            return 0
+        keep = gdf["ref_asset_group"] != group_id
+        removed = int((~keep).sum())
+        if removed:
+            _atomic_write_parquet(gdf[keep], _parquet_path("tbl_asset_object.parquet", for_write=True))
+        return removed
 
     def _save_and_next(self):
         if self._save_current():
