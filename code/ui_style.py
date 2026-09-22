@@ -8,9 +8,10 @@ their packaged exe. See learning.md "Stylesheet import dragged GIS into helpers"
 """
 
 import os
+import sys
 import webbrowser
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, qInstallMessageHandler
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QLabel
 
@@ -348,8 +349,46 @@ QRadioButton::indicator:checked {{ image: url("{du}"); }}
 '''
 
 
+_message_filter_installed = False
+_previous_message_handler = None
+
+# Qt complains about these, and only these, because MESA sizes every widget in
+# px. See install_font_warning_filter.
+_FONT_WARNING_MARKERS = ("QFont::setPointSize", "QFont::setPointSizeF")
+
+
+def _mesa_message_handler(mode, context, message):
+    try:
+        if any(marker in message for marker in _FONT_WARNING_MARKERS):
+            return
+        if _previous_message_handler is not None:
+            _previous_message_handler(mode, context, message)
+        elif sys.stderr is not None:
+            sys.stderr.write(str(message) + "\n")
+    except Exception:
+        pass  # a raise here would propagate into Qt's C++ logging path
+
+
+def install_font_warning_filter() -> None:
+    """Drop Qt's "QFont::setPointSize: Point size <= 0 (-1)" chatter.
+
+    Every MESA stylesheet sizes text in px, so QFont.pointSize() is -1 on every
+    widget. Whenever Qt scales a font relatively — menu and combo-box popups do,
+    on Windows and macOS alike — it feeds that -1 back into setPointSize, which
+    Qt rejects with a warning and no effect: the px size stands, nothing renders
+    wrong. Only that message is swallowed; everything else Qt says gets through.
+    See learning.md "px font sizes make QFont.pointSize() -1".
+    """
+    global _message_filter_installed, _previous_message_handler
+    if _message_filter_installed:
+        return
+    _previous_message_handler = qInstallMessageHandler(_mesa_message_handler)
+    _message_filter_installed = True
+
+
 def apply_shared_stylesheet(app) -> None:
     """Apply ASSET_STYLESHEET plus generated indicator images to a QApplication."""
+    install_font_warning_filter()
     css = ASSET_STYLESHEET + _generate_indicator_stylesheet()
     app.setStyleSheet(css)
 

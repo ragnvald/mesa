@@ -6069,6 +6069,14 @@ QRadioButton::indicator:checked {{
 """
     app.setStyleSheet(MESA_STYLESHEET + _indicator_css)
 
+    # MESA_STYLESHEET sizes text in px like the shared helper stylesheet does,
+    # so it inherits the same harmless Qt font warning. Same filter, one source.
+    try:
+        from ui_style import install_font_warning_filter
+        install_font_warning_filter()
+    except Exception:
+        pass
+
     # Set application-wide icon
     icon_path = resolve_path(os.path.join("system_resources", "mesa.ico"))
     if os.path.exists(icon_path):
