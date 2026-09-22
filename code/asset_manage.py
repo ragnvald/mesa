@@ -340,13 +340,54 @@ def update_project_info(base_dir: Path, updates: dict) -> None:
         pass  # best-effort; never let metadata write break the importer
 
 
+def _working_crs() -> str:
+    try:
+        return f"EPSG:{int(_ensure_cfg()['DEFAULT'].get('workingprojection_epsg', '4326'))}"
+    except Exception:
+        return "EPSG:4326"
+
+
+def _as_geodataframe(df: pd.DataFrame) -> gpd.GeoDataFrame:
+    """Give *df* a real geometry column and a CRS so it writes as GeoParquet.
+
+    The editor round-trips this table through plain pandas, which turns the
+    geometries into WKB bytes; writing that back drops the file's geo metadata
+    and every geopandas reader downstream then refuses it. See learning.md
+    "tbl_asset_group must stay GeoParquet".
+    """
+    if isinstance(df, gpd.GeoDataFrame) and df.crs is not None:
+        return df
+    out = df.copy()
+    if "geometry" not in out.columns:
+        out["geometry"] = None
+
+    def _to_geom(value):
+        if value is None or isinstance(value, float):  # NaN
+            return None
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            try:
+                return _shp_wkb.loads(bytes(value))
+            except Exception:
+                return None
+        return value
+
+    out["geometry"] = out["geometry"].map(_to_geom)
+    crs = df.crs if isinstance(df, gpd.GeoDataFrame) and df.crs is not None else _working_crs()
+    return gpd.GeoDataFrame(out, geometry="geometry", crs=crs)
+
+
 def load_asset_group_df(file_name: str) -> pd.DataFrame:
     path = _parquet_path(file_name)
     if path.exists():
         try:
-            df = pd.read_parquet(path)
+            df = gpd.read_parquet(path)
         except Exception:
-            df = pd.DataFrame(columns=REQUIRED_COLUMNS)
+            # Either a pre-5.7 file already stripped of its geo metadata, or a
+            # read geopandas cannot do; pandas still gets the rows out.
+            try:
+                df = pd.read_parquet(path)
+            except Exception:
+                df = pd.DataFrame(columns=REQUIRED_COLUMNS)
     else:
         df = pd.DataFrame(columns=REQUIRED_COLUMNS)
 
@@ -374,7 +415,9 @@ def load_asset_group_df(file_name: str) -> pd.DataFrame:
 def save_asset_group_df(file_name: str, df: pd.DataFrame) -> bool:
     path = _parquet_path(file_name, for_write=True)
     try:
-        _atomic_write_parquet(df, path)
+        # Always through _as_geodataframe: a plain pandas write here is what
+        # silently strips the geo metadata that atlas and processing need.
+        _atomic_write_parquet(_as_geodataframe(df), path)
         return True
     except Exception:
         return False
