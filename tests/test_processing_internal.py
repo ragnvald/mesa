@@ -167,3 +167,42 @@ def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path, 
     row_b = result.loc[result["code"] == "B"].iloc[0]
     assert int(row_b["assets_overlap_total"]) == 1
     assert set(row_b["ref_asset_group"]) == {30}
+
+
+def test_running_chunk_ids_skips_chunks_that_returned_out_of_order() -> None:
+    # imap_unordered: chunk 3 came back before 1 and 2.
+    assert pi._running_chunk_ids({3}, total_chunks=6, max_workers=3) == [1, 2, 4]
+    assert pi._running_chunk_ids({1, 2, 3, 4, 5}, total_chunks=6, max_workers=3) == [6]
+    assert pi._running_chunk_ids(set(range(1, 7)), total_chunks=6, max_workers=3) == []
+
+
+def test_flatten_minimap_tracker_marks_a_chunk_done_only_when_all_its_parts_are() -> None:
+    status = {
+        "cells": [
+            {"id": 10, "state": "intersected"},
+            {"id": 11, "state": "intersected"},
+            {"id": 20, "state": "intersected"},
+        ],
+        # chunk 1 wrote two parts (split write), chunk 2 one.
+        "part_chunks": {"part_a.parquet": 1, "part_b.parquet": 1, "part_c.parquet": 2},
+        "chunk_cells": {"1": [10, 11], "2": [20]},
+    }
+    tracker = pi._FlattenMinimapTracker(status)
+    assert tracker.active
+
+    # Flatten reports full paths under tbl_stacked/, intersect recorded basenames.
+    assert tracker.partition_done("/x/tbl_stacked/part_c.parquet") is True
+    assert tracker.partition_done("/x/tbl_stacked/part_a.parquet") is False
+    assert [c["state"] for c in status["cells"]] == ["intersected", "intersected", "done"]
+
+    assert tracker.partition_done("/x/tbl_stacked/part_b.parquet") is True
+    assert [c["state"] for c in status["cells"]] == ["done", "done", "done"]
+    # A repeat (soft-throttle resubmit) or an unknown file changes nothing.
+    assert tracker.partition_done("/x/tbl_stacked/part_b.parquet") is False
+    assert tracker.partition_done("/x/tbl_stacked/other.parquet") is False
+
+
+def test_flatten_minimap_tracker_is_inert_without_intersect_maps() -> None:
+    tracker = pi._FlattenMinimapTracker({"cells": [{"id": 1, "state": "done"}]})
+    assert not tracker.active
+    assert tracker.partition_done("part.parquet") is False

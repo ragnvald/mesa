@@ -1539,7 +1539,9 @@ def _update_status_phase(new_phase: str):
     except Exception:
         existing = {}
     try:
+        # Carry every existing key: flatten needs part_chunks/chunk_cells from intersect.
         payload = {
+            **existing,
             "phase": (new_phase or "").strip().lower() or "idle",
             "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "chunks_total": int(existing.get("chunks_total", 0) or 0),
@@ -1551,6 +1553,57 @@ def _update_status_phase(new_phase: str):
         _write_status_atomic(payload)
     except Exception:
         pass
+
+
+def _running_chunk_ids(done_idx: set[int], total_chunks: int, max_workers: int) -> list[int]:
+    """Best guess at the chunks in flight: the pool hands tasks out in index order,
+    so they are the lowest indices that have not come back yet."""
+    running: list[int] = []
+    for i in range(1, total_chunks + 1):
+        if len(running) >= max_workers:
+            break
+        if i not in done_idx:
+            running.append(i)
+    return running
+
+
+class _FlattenMinimapTracker:
+    """Turns minimap cells from 'intersected' to 'done' as flatten finishes every
+    tbl_stacked partition that an intersect chunk wrote. Needs the part_chunks and
+    chunk_cells maps intersect left in the status file; without them it is inert."""
+
+    def __init__(self, status: dict):
+        self.status = status or {}
+        part_chunks = self.status.get("part_chunks") or {}
+        chunk_cells = self.status.get("chunk_cells") or {}
+        self.part_to_chunk = {str(k): str(v) for k, v in part_chunks.items()}
+        self.remaining: dict[str, set[str]] = {}
+        for part, idx in self.part_to_chunk.items():
+            self.remaining.setdefault(idx, set()).add(part)
+        self.chunk_cells = {str(k): [int(c) for c in v] for k, v in chunk_cells.items()}
+        self.cell_index = {int(c.get("id")): i for i, c in enumerate(self.status.get("cells") or [])
+                           if isinstance(c, dict) and c.get("id") is not None}
+
+    @property
+    def active(self) -> bool:
+        return bool(self.remaining) and bool(self.cell_index)
+
+    def partition_done(self, path) -> bool:
+        """Record one finished partition; True when that completed a chunk."""
+        name = os.path.basename(str(path))
+        idx = self.part_to_chunk.get(name)
+        if idx is None or idx not in self.remaining:
+            return False
+        self.remaining[idx].discard(name)
+        if self.remaining[idx]:
+            return False
+        del self.remaining[idx]
+        cells = self.status["cells"]
+        for cid in self.chunk_cells.get(idx, []):
+            i = self.cell_index.get(cid)
+            if i is not None:
+                cells[i]["state"] = "done"
+        return True
 
 # ----------------------------
 # Assign grid + tag and return tagged geocodes
@@ -2330,6 +2383,7 @@ def process_tbl_stacked(cfg: configparser.ConfigParser,
                     with open(p, "r", encoding="utf-8") as f:
                         existing = json.load(f) or {}
                 payload = {
+                    **existing,
                     "phase": "error",
                     "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                     "chunks_total": int(existing.get("chunks_total", 0) or 0),
@@ -3363,6 +3417,27 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
 
     panic_pct, panic_grace_s, soft_pct, soft_grace = _panic_cfg(cfg_local)
 
+    try:
+        with open(_status_path(), "r", encoding="utf-8") as f:
+            _mm_status = json.load(f) or {}
+    except Exception:
+        _mm_status = {}
+    minimap = _FlattenMinimapTracker(_mm_status)
+
+    def _publish_minimap() -> None:
+        try:
+            _mm_status["phase"] = "flatten"
+            _mm_status["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+            _write_status_atomic(_mm_status)
+        except Exception:
+            pass
+
+    def _partition_finished(path) -> None:
+        if minimap.active and minimap.partition_done(path):
+            _publish_minimap()
+
+    _publish_minimap()
+
     def _run_flatten_pool(paths, n_workers: int, label: str) -> None:
         if not paths:
             return
@@ -3394,6 +3469,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                                 done_this_round.add(fname)
                                 if res is not None:
                                     partials.append(res)
+                                _partition_finished(fname)
                                 if pstate["soft_throttle"]:
                                     try: pool.terminate()
                                     except Exception: pass
@@ -3436,6 +3512,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                 res = _flatten_worker((f, ranges_map, desc_map, value_ranges_map))
                 if res is not None:
                     partials.append(res)
+                _partition_finished(f)
 
     # Heaviest phase first, with progressively wider parallelism. gc.collect
     # between phases gives the OS a chance to reclaim pages before the next
@@ -3709,13 +3786,20 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                 prev = json.load(f) or {}
         except Exception:
             prev = {}
+        # tbl_flat is written, so every area is computed - including any the
+        # partition tracker could not map (e.g. a flatten-only rerun on old parts).
+        cells = prev.get("cells", []) or []
+        for c in cells:
+            if isinstance(c, dict):
+                c["state"] = "done"
         _write_status_atomic({
+            **prev,
             "phase": "done",
             "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "chunks_total": int(prev.get("chunks_total", 0) or 0),
             "done": int(prev.get("done", 0) or 0),
             "running": [],
-            "cells": prev.get("cells", []),
+            "cells": cells,
             "home_bounds": prev.get("home_bounds")
         })
     except Exception:
@@ -4280,9 +4364,10 @@ __MESA_LEAFLET_BODY_OPEN__
 
 <!-- Legend -->
 <div class="legend">
-  <div><span class="swatch" style="background: rgba(34,197,94,0.22); border-color: transparent;"></span>Done</div>
-    <div><span class="swatch" style="background: rgba(255,138,0,0.28); border-color: transparent;"></span>Running</div>
-    <div><span class="swatch" style="background: transparent; border-color: #ff8c00;"></span>Queued</div>
+  <div><span class="swatch" style="background: rgba(21,128,61,0.55); border-color: transparent;"></span>Computed (sensitivity ready)</div>
+  <div><span class="swatch" style="background: rgba(134,239,172,0.45); border-color: transparent;"></span>Intersected, awaiting sensitivity</div>
+  <div><span class="swatch" style="background: rgba(255,138,0,0.9); border-color: transparent;"></span>Intersecting</div>
+  <div><span class="swatch" style="background: transparent; border-color: #ff8c00;"></span>Queued</div>
 </div>
 
 <script>
@@ -4317,7 +4402,10 @@ function boundsFromSWNE(swne){
 
 function styleFor(state){
   if (state === 'done') {
-    return { stroke:false, fill:true,  fillColor:'#22c55e', fillOpacity:0.25 };
+    return { stroke:false, fill:true,  fillColor:'#15803d', fillOpacity:0.55 };
+  }
+  if (state === 'intersected') {
+    return { stroke:false, fill:true,  fillColor:'#86efac', fillOpacity:0.45 };
   }
   if (state === 'running') {
         return { stroke:false, fill:true,  fillColor:'#ff8c00', fillOpacity:0.9 };
@@ -4327,10 +4415,11 @@ function styleFor(state){
 
 function summarize(status){
   const cells = (status && Array.isArray(status.cells)) ? status.cells : [];
-  let queued=0, running=0, done=0;
+  let queued=0, running=0, intersected=0, done=0;
   for (const c of cells){
     const st = (c && c.state) ? String(c.state) : '';
     if (st === 'done') done++;
+    else if (st === 'intersected') intersected++;
     else if (st === 'running') running++;
     else queued++;
   }
@@ -4338,17 +4427,20 @@ function summarize(status){
   const tsRaw = status && status.updated_at ? status.updated_at : null;
   let ts = tsRaw;
   try { if (tsRaw) ts = new Date(tsRaw).toLocaleString(); } catch(_){}
-  return { total, queued, running, done, ts };
+  const phase = (status && status.phase) ? String(status.phase) : '';
+  return { total, queued, running, intersected, done, ts, phase };
 }
 
 function updateFacts(status){
   const s = summarize(status || {});
   const parts = [
     (s.ts ? `Updated: ${s.ts}` : 'Updated: —'),
+    (s.phase ? `Phase: ${s.phase}` : 'Phase: —'),
     `Cells: ${s.total}`,
     `queued ${s.queued}`,
-    `processing ${s.running}`,
-    `done ${s.done}`
+    `intersecting ${s.running}`,
+    `awaiting ${s.intersected}`,
+    `computed ${s.done}`
   ];
   safeSetFacts(parts.join('  •  '));
 }
@@ -4368,7 +4460,7 @@ function render(status){
       const b = boundsFromSWNE(c.bbox);
       if (!b) continue;
       const r = L.rectangle(b, styleFor(c.state));
-      const human = (c.state === 'running') ? 'processing' : (c.state || 'queued');
+      const human = ({running:'intersecting', intersected:'intersected, awaiting sensitivity', done:'computed'})[c.state] || 'queued';
       const nrows = (c.n!=null && isFinite(Number(c.n))) ? String(c.n) : '';
       const tip = `Cell #${String(c.id ?? '')}<br>State: <b>${human}</b>${nrows ? ('<br>Rows: '+nrows) : ''}`;
       try { r.bindTooltip(tip, {sticky:true}); } catch(_){}
@@ -4817,11 +4909,19 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
         home_bounds = [float(minx), float(miny), float(maxx), float(maxy)]
     except Exception:
         home_bounds = None
+    # Only cells that belong to a chunk have work to show; empty grid cells are left off the map.
     cells_meta = []
     try:
+        worked_cells = set().union(*chunk_cells.values()) if chunk_cells else set()
         for cid, bbox in _GRID_BBOX_MAP.items():
+            if int(cid) not in worked_cells:
+                continue
             cells_meta.append({"id": int(cid), "state": "queued", "n": 0, "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]})
     except Exception: pass
+    cell_pos = {c["id"]: i for i, c in enumerate(cells_meta)}
+    done_chunks: set[int] = set()
+    chunks_with_parts: set[int] = set()
+    part_chunks: dict[str, int] = {}
     tmp_parts = _dataset_dir("__stacked_parts"); _rm_rf(tmp_parts); tmp_parts.mkdir(parents=True, exist_ok=True)
     try: geom_types = sorted(set(asset_data.geometry.geom_type.dropna().unique().tolist()))
     except Exception: geom_types = ["Polygon","MultiPolygon","LineString","Point"]
@@ -4891,18 +4991,25 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     try:
         _write_status_atomic({"phase":"intersect","updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z","chunks_total": total_chunks,"done":0,"running": list(range(1, min(max_workers, total_chunks)+1)),"cells": cells_meta,"home_bounds": home_bounds})
     except Exception: pass
+    def _chunk_finished(idx: int, paths) -> None:
+        # Cells are coloured by the chunk that actually returned (imap_unordered), not by count.
+        # A chunk with no output has nothing left for flatten, so its cells are final at once.
+        done_chunks.add(int(idx))
+        plist = paths if isinstance(paths, list) else ([paths] if paths else [])
+        for p in plist:
+            part_chunks[os.path.basename(str(p))] = int(idx)
+        if plist:
+            chunks_with_parts.add(int(idx))
+        state = "intersected" if plist else "done"
+        for cid in chunk_cells.get(int(idx), ()):
+            i = cell_pos.get(int(cid))
+            if i is not None: cells_meta[i]["state"] = state
     def _update_status(done_count:int):
         try:
-            running_chunk_ids = list(range(done_count+1, min(done_count+max_workers, total_chunks)+1))
-            running_cells = set().union(*(chunk_cells.get(i,set()) for i in running_chunk_ids)) if running_chunk_ids else set()
-            done_cells = set().union(*(chunk_cells.get(i,set()) for i in range(1, done_count+1))) if done_count else set()
-            id_to_idx = {c["id"]: i for i, c in enumerate(cells_meta)}
-            for cid in done_cells:
-                i = id_to_idx.get(int(cid))
-                if i is not None: cells_meta[i]["state"] = "done"
-            for cid in running_cells:
-                i = id_to_idx.get(int(cid))
-                if i is not None and cells_meta[i]["state"] != "done": cells_meta[i]["state"] = "running"
+            running_chunk_ids = _running_chunk_ids(done_chunks, total_chunks, max_workers)
+            for cid in set().union(*(chunk_cells.get(i,set()) for i in running_chunk_ids)) if running_chunk_ids else ():
+                i = cell_pos.get(int(cid))
+                if i is not None and cells_meta[i]["state"] == "queued": cells_meta[i]["state"] = "running"
             _write_status_atomic({"phase":"intersect","updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z","chunks_total": total_chunks,"done": done_count,"running": running_chunk_ids,"cells": cells_meta,"home_bounds": home_bounds})
         except Exception: pass
     def _tick_progress(done_count:int, written:int, started_at:float):
@@ -4972,6 +5079,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                     if paths:
                         if isinstance(paths, list): files.extend(paths)
                         else: files.append(paths)
+                    _chunk_finished(idx, paths)
                     _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
                     if done_count % 8 == 0: gc.collect()
             except Exception as e:
@@ -4997,6 +5105,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
             if paths:
                 if isinstance(paths, list): files.extend(paths)
                 else: files.append(paths)
+            _chunk_finished(idx, paths)
             _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
             if done_count % 8 == 0: gc.collect()
     try:
@@ -5006,8 +5115,18 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
         except Exception: pass
     except Exception: pass
     try:
-        for c in cells_meta: c["state"] = "done"
-        _write_status_atomic({"phase": "flatten_pending" if error_msg is None else "error","updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z","chunks_total": total_chunks,"done": progress_state["done"],"running": [],"cells": cells_meta,"home_bounds": home_bounds})
+        # Cells stay 'intersected' until flatten computes them; part_chunks/chunk_cells let
+        # flatten (possibly a later flatten-only run) map each partition back to its cells.
+        for c in cells_meta:
+            if c["state"] == "running": c["state"] = "queued"
+        _write_status_atomic({
+            "phase": "flatten_pending" if error_msg is None else "error",
+            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()+"Z",
+            "chunks_total": total_chunks, "done": progress_state["done"], "running": [],
+            "cells": cells_meta, "home_bounds": home_bounds,
+            "part_chunks": part_chunks,
+            "chunk_cells": {str(i): sorted(int(c) for c in chunk_cells.get(i, ())) for i in chunks_with_parts},
+        })
     except Exception: pass
     if error_msg: raise RuntimeError(error_msg)
     if not files:
