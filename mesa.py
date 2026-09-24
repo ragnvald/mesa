@@ -2686,7 +2686,9 @@ class GeoNodePublishWindow(QMainWindow):
                 detail_parts.append("not yet generated")
             if layer.get("size_note"):
                 detail_parts.append(layer["size_note"])
-            if layer.get("sld_field"):
+            if str(layer.get("id", "")).startswith("sensitivity:"):
+                detail_parts.append("dataset + map, 5 layers")
+            elif layer.get("sld_field"):
                 detail_parts.append("A-E styled")
             if detail_parts:
                 detail = QLabel("    " + "  ·  ".join(detail_parts))
@@ -2700,7 +2702,7 @@ class GeoNodePublishWindow(QMainWindow):
 
         # Section 1: sensitivity (one per geocode group)
         if sens_layers:
-            _add_section_header("Geocode layers (A-E styled)")
+            _add_section_header("Geocode groups (one map each)")
             for layer in sens_layers:
                 _add_layer_row(layer)
         else:
@@ -2795,7 +2797,9 @@ class GeoNodePublishWindow(QMainWindow):
         right.addLayout(pub_row)
 
         # Map option
-        self._geonode_create_map_cb = QCheckBox("Combine published layers into a GeoNode Map")
+        self._geonode_create_map_cb = QCheckBox(
+            "Create a GeoNode map per geocode group (Sensitivity, OWA index, "
+            "Importance, # asset groups, # asset objects)")
         self._geonode_create_map_cb.setChecked(True)
         right.addWidget(self._geonode_create_map_cb)
 
