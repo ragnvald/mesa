@@ -24,7 +24,8 @@ Geocode-group layers:
   (field: name_gis_geocodegroup).  Each group is published as its own
   GeoNode dataset. Its default style is the A-E sensitivity palette; the
   other RESULT_STYLES are added as alternative GeoServer styles, and a map
-  "MESA - <group>" shows one layer per style (only Sensitivity visible).
+  (default title "MESA - <group>") shows one layer per style (only
+  Sensitivity visible). Dataset and map titles can be set per export.
   SLDs are saved to output/geonode_styles/.
 
 Supporting layers (optional, no style):
@@ -624,6 +625,30 @@ def _dataset_info(base_url: str, username: str, password: str, pk: int) -> dict:
                 "default_style": (ds.get("default_style") or {}).get("name")}
     except Exception:
         return {}
+
+
+def _set_dataset_title(
+    base_url: str,
+    username: str,
+    password: str,
+    pk: int,
+    title: str,
+    log: Callable[[str], None],
+) -> bool:
+    """Set the catalogue title of a dataset; its technical name is left unchanged."""
+    base = base_url.rstrip("/")
+    for path in (f"/api/v2/datasets/{pk}/", f"/api/v2/resources/{pk}/"):
+        try:
+            r = requests.patch(base + path, auth=(username, password),
+                               json={"title": title}, timeout=30)
+            if r.status_code in (200, 201, 204):
+                log(f"  Title set to '{title}'.")
+                return True
+            last = f"HTTP {r.status_code}: {r.text[:100]}"
+        except Exception as exc:
+            last = str(exc)
+    log(f"  Warning: could not set title ({last}).")
+    return False
 
 
 def _delete_dataset(
@@ -1277,6 +1302,11 @@ def build_group_map_config(
     return data, maplayers
 
 
+def default_map_title(layer: dict) -> str:
+    """Map title used when the operator gives none."""
+    return f"MESA - {layer['label']}"
+
+
 def _delete_generated_maps(base: str, auth, title: str, log: Callable[[str], None]) -> None:
     """Remove earlier MESA-generated maps with this exact title (marker in abstract)."""
     try:
@@ -1366,6 +1396,8 @@ def export_layers(
     all_layers: Optional[list[dict]] = None,
     confirm_cb: Optional[Callable[[str, int], bool]] = None,
     create_map: bool = True,
+    dataset_titles: Optional[dict[str, str]] = None,
+    map_titles: Optional[dict[str, str]] = None,
 ) -> list[dict]:
     """
     Export selected layers to GeoNode.
@@ -1383,6 +1415,11 @@ def export_layers(
       Return True to delete and replace it, False to skip.
       If not provided, existing layers are always skipped.
 
+    dataset_titles / map_titles map a layer id to the title shown on GeoNode.
+    The technical dataset name (layer_name) is never changed. A missing or
+    blank dataset title keeps GeoNode's default; a missing map title gives
+    default_map_title(layer).
+
     For each selected layer:
       1. Check if dataset already exists on GeoNode; ask user if so
       2. Read GeoParquet (optionally filtered by filter_field/filter_value)
@@ -1391,7 +1428,8 @@ def export_layers(
          the other RESULT_STYLES; save them to styles_output_dir
       5. Upload GeoPackage -> poll
       6. Push the default and alternative styles to GeoServer
-      7. For geocode groups (create_map): one map "MESA - <group>" with a layer per style
+      7. Set the dataset title, if one was given
+      8. For geocode groups (create_map): one map (default "MESA - <group>") with a layer per style
 
     Returns list of result dicts {id, success, message, url}.
     """
@@ -1535,6 +1573,10 @@ def export_layers(
             elif ok and not dataset_pk and sld_xml:
                 log("  Style: could not apply (dataset pk unknown after upload).")
 
+            ds_title = ((dataset_titles or {}).get(lid) or "").strip()
+            if ok and dataset_pk and ds_title and ds_title != layer_name:
+                _set_dataset_title(base_url, username, password, dataset_pk, ds_title, log)
+
             results.append({"id": lid, "success": ok, "message": msg, "url": url})
 
             # ── One map per geocode group ────────────────────────────────
@@ -1547,8 +1589,9 @@ def export_layers(
                     bbox = [float(v) for v in g4326.total_bounds]
                 except Exception:
                     bbox = None
+                map_title = ((map_titles or {}).get(lid) or "").strip() or default_map_title(layer)
                 map_url = create_group_map(
-                    base_url, username, password, f"MESA - {label}",
+                    base_url, username, password, map_title,
                     alternate, dataset_pk, styles, bbox, log,
                 )
                 if map_url:

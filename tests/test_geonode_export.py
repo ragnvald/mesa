@@ -76,3 +76,34 @@ def test_group_map_shows_only_the_first_style_and_keeps_it_on_top() -> None:
     # GeoNode's MapLayer.dataset is a pk relation; anything else is an HTTP 500.
     assert all(m["dataset"] == 42 for m in maplayers)
     assert 1 <= data["map"]["zoom"] <= 16
+
+
+class _Resp:
+    def __init__(self, status: int) -> None:
+        self.status_code = status
+        self.text = ""
+
+
+def test_dataset_title_falls_back_to_resources_endpoint(monkeypatch) -> None:
+    calls = []
+
+    def fake_patch(url, auth=None, json=None, timeout=None):
+        calls.append((url, json))
+        return _Resp(405 if "/datasets/" in url else 200)
+
+    monkeypatch.setattr(ge.requests, "patch", fake_patch)
+    assert ge._set_dataset_title("http://gn/", "u", "p", 7, "Ghana distrikter", lambda m: None)
+    assert [u for u, _ in calls] == ["http://gn/api/v2/datasets/7/", "http://gn/api/v2/resources/7/"]
+    # Only the title is sent; the technical dataset name must stay untouched.
+    assert all(body == {"title": "Ghana distrikter"} for _, body in calls)
+
+
+def test_dataset_title_failure_is_reported_not_raised(monkeypatch) -> None:
+    monkeypatch.setattr(ge.requests, "patch", lambda *a, **k: _Resp(403))
+    logged = []
+    assert not ge._set_dataset_title("http://gn", "u", "p", 7, "T", logged.append)
+    assert any("could not set title" in m for m in logged)
+
+
+def test_default_map_title_is_unchanged() -> None:
+    assert ge.default_map_title({"label": "basic_mosaic"}) == "MESA - basic_mosaic"

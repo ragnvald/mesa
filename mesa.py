@@ -2595,11 +2595,14 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_log_queue: _queue.Queue = _queue.Queue()
         self._geonode_cancel_event = __import__("threading").Event()
         self._geonode_layer_checkboxes: dict = {}   # id → QCheckBox
+        self._geonode_dataset_title_edits: dict = {}   # id → QLineEdit
+        self._geonode_map_title_edits: dict = {}       # id → QLineEdit (geocode groups)
+        saved_ds_titles, saved_map_titles = self._geonode_load_titles()
         self._geonode_confirm_event = __import__("threading").Event()
         self._geonode_confirm_result: str = "skip"  # "replace" or "skip"
 
         self.setWindowTitle("Publish to GeoNode")
-        self.resize(900, 640)
+        self.resize(1000, 640)
         self.setMinimumSize(700, 500)
         try:
             ico = Path(original_working_directory) / "system_resources" / "mesa.ico"
@@ -2621,7 +2624,7 @@ class GeoNodePublishWindow(QMainWindow):
 
         # ── LEFT: layer list ─────────────────────────────────────────────
         layers_group = QGroupBox("Layers to publish")
-        layers_group.setFixedWidth(272)
+        layers_group.setFixedWidth(380)
         layers_outer = QVBoxLayout(layers_group)
         layers_outer.setContentsMargins(8, 8, 8, 8)
         layers_outer.setSpacing(0)
@@ -2698,6 +2701,39 @@ class GeoNodePublishWindow(QMainWindow):
                 )
                 row_layout.addWidget(detail)
 
+            if available:
+                import geonode_export as _ge  # type: ignore[import]
+                title_grid = QGridLayout()
+                title_grid.setContentsMargins(20, 2, 0, 4)
+                title_grid.setHorizontalSpacing(6)
+                title_grid.setVerticalSpacing(3)
+                title_grid.setColumnStretch(1, 1)
+
+                def _title_row(r: int, caption: str, text: str, tip: str) -> QLineEdit:
+                    lbl = QLabel(caption)
+                    lbl.setStyleSheet("color: #6a5533; font-size: 9px;")
+                    edit = QLineEdit(text)
+                    edit.setToolTip(tip)
+                    edit.setEnabled(cb.isChecked())
+                    cb.toggled.connect(edit.setEnabled)
+                    title_grid.addWidget(lbl, r, 0)
+                    title_grid.addWidget(edit, r, 1)
+                    return edit
+
+                lid = layer["id"]
+                self._geonode_dataset_title_edits[lid] = _title_row(
+                    0, "Dataset title",
+                    saved_ds_titles.get(lid, layer["layer_name"]),
+                    f"Title shown on GeoNode. The technical name stays "
+                    f"'{layer['layer_name']}'.")
+                if lid.startswith("sensitivity:"):
+                    self._geonode_map_title_edits[lid] = _title_row(
+                        1, "Map title",
+                        saved_map_titles.get(lid, _ge.default_map_title(layer)),
+                        "Title of the GeoNode map for this geocode group. Re-publishing "
+                        "replaces an earlier MESA map with the same title.")
+                row_layout.addLayout(title_grid)
+
             inner_vbox.addWidget(row_widget)
 
         # Section 1: sensitivity (one per geocode group)
@@ -2725,6 +2761,15 @@ class GeoNodePublishWindow(QMainWindow):
         inner_vbox.addStretch()
         scroll.setWidget(inner_widget)
         layers_outer.addWidget(scroll)
+
+        uncheck_row = QHBoxLayout()
+        uncheck_row.setContentsMargins(0, 6, 0, 0)
+        uncheck_btn = QPushButton("Uncheck all")
+        uncheck_btn.clicked.connect(
+            lambda: [cb.setChecked(False) for cb in self._geonode_layer_checkboxes.values()])
+        uncheck_row.addWidget(uncheck_btn)
+        uncheck_row.addStretch()
+        layers_outer.addLayout(uncheck_row)
         body.addWidget(layers_group)
 
         # ── RIGHT: connection + actions + log ────────────────────────────
@@ -2828,11 +2873,34 @@ class GeoNodePublishWindow(QMainWindow):
         os.makedirs(secrets_dir, exist_ok=True)
         return os.path.join(secrets_dir, "geonode.ini")
 
+    def _geonode_settings_cfg(self):
+        # Layer ids contain ':' and titles may contain '%', so only '=' delimits
+        # and interpolation is off; optionxform keeps the ids' case.
+        import configparser as _cp
+        cfg = _cp.ConfigParser(interpolation=None, delimiters=("=",))
+        cfg.optionxform = str
+        try:
+            cfg.read(self._geonode_settings_path(), encoding="utf-8")
+        except Exception:
+            pass
+        return cfg
+
+    def _geonode_load_titles(self) -> tuple[dict, dict]:
+        try:
+            cfg = self._geonode_settings_cfg()
+            return (dict(cfg["dataset_titles"]) if cfg.has_section("dataset_titles") else {},
+                    dict(cfg["map_titles"]) if cfg.has_section("map_titles") else {})
+        except Exception:
+            return {}, {}
+
+    def _geonode_titles(self) -> tuple[dict, dict]:
+        """Current dataset and map titles from the dialog, keyed by layer id."""
+        return ({lid: e.text().strip() for lid, e in self._geonode_dataset_title_edits.items()},
+                {lid: e.text().strip() for lid, e in self._geonode_map_title_edits.items()})
+
     def _geonode_load_settings(self):
         try:
-            import configparser as _cp
-            cfg = _cp.ConfigParser()
-            cfg.read(self._geonode_settings_path(), encoding="utf-8")
+            cfg = self._geonode_settings_cfg()
             url = cfg.get("connection", "url", fallback="")
             username = cfg.get("connection", "username", fallback="")
             if url:
@@ -2844,12 +2912,21 @@ class GeoNodePublishWindow(QMainWindow):
 
     def _geonode_save_settings(self):
         try:
-            import configparser as _cp
-            cfg = _cp.ConfigParser()
+            cfg = self._geonode_settings_cfg()
             cfg["connection"] = {
                 "url": self._geonode_url.text().strip(),
                 "username": self._geonode_username.text().strip(),
             }
+            # Keep titles of layers not shown this time (e.g. a group not yet processed).
+            ds_titles, map_titles = self._geonode_titles()
+            for section, titles in (("dataset_titles", ds_titles), ("map_titles", map_titles)):
+                merged = dict(cfg[section]) if cfg.has_section(section) else {}
+                for k, v in titles.items():
+                    if v:
+                        merged[k] = v
+                    else:
+                        merged.pop(k, None)   # blank = back to the default title
+                cfg[section] = merged
             with open(self._geonode_settings_path(), "w", encoding="utf-8") as f:
                 cfg.write(f)
         except Exception:
@@ -2894,6 +2971,26 @@ class GeoNodePublishWindow(QMainWindow):
                                 "Select at least one layer to publish.")
             return
 
+        import geonode_export as _ge  # type: ignore[import]
+        ds_titles, map_titles = self._geonode_titles()
+        create_map = self._geonode_create_map_cb.isChecked()
+        if create_map:
+            # Publishing a map replaces earlier MESA maps with the same title, so
+            # two groups sharing a title would leave only the last one.
+            layers_by_id = {l["id"]: l for l in getattr(self, "_geonode_all_layers", [])}
+            seen: dict = {}
+            for lid in selected:
+                if lid not in self._geonode_map_title_edits:
+                    continue
+                t = map_titles.get(lid) or _ge.default_map_title(layers_by_id[lid])
+                if t in seen:
+                    QMessageBox.warning(
+                        self, "Duplicate map title",
+                        f"'{seen[t]}' and '{layers_by_id[lid]['label']}' both have the map "
+                        f"title '{t}'. Give each geocode group its own map title.")
+                    return
+                seen[t] = layers_by_id[lid]["label"]
+
         self._geonode_log.clear()
         self._geonode_cancel_event.clear()
         self._geonode_export_btn.setEnabled(False)
@@ -2928,7 +3025,9 @@ class GeoNodePublishWindow(QMainWindow):
                     styles_output_dir=styles_dir,
                     all_layers=getattr(self, "_geonode_all_layers", None),
                     confirm_cb=_confirm_cb,
-                    create_map=self._geonode_create_map_cb.isChecked(),
+                    create_map=create_map,
+                    dataset_titles=ds_titles,
+                    map_titles=map_titles,
                 )
                 success_count = sum(1 for r in results if r["success"])
                 fail_count = len(results) - success_count
