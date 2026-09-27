@@ -2615,12 +2615,18 @@ class GeoNodePublishWindow(QMainWindow):
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(0)
+        outer.setSpacing(10)
 
-        # ── two-column body ──────────────────────────────────────────────
-        body = QHBoxLayout()
+        # Connection (shared by both tabs) is inserted above the tabs further down.
+        self._geonode_tabs = QTabWidget()
+        outer.addWidget(self._geonode_tabs, stretch=1)
+
+        # ── Publish tab: two-column body ─────────────────────────────────
+        publish_page = QWidget()
+        body = QHBoxLayout(publish_page)
+        body.setContentsMargins(8, 8, 8, 8)
         body.setSpacing(12)
-        outer.addLayout(body, stretch=1)
+        self._geonode_tabs.addTab(publish_page, "Publish")
 
         # ── LEFT: layer list ─────────────────────────────────────────────
         layers_group = QGroupBox("Layers to publish")
@@ -2810,7 +2816,7 @@ class GeoNodePublishWindow(QMainWindow):
         conn_btn_row.addWidget(self._geonode_conn_status)
         conn_btn_row.addStretch()
         conn_layout.addLayout(conn_btn_row, 3, 0, 1, 2)
-        right.addWidget(conn_group)
+        outer.insertWidget(0, conn_group)
 
         # Publish / cancel / exit buttons
         pub_row = QHBoxLayout()
@@ -2826,6 +2832,10 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_cancel_btn.clicked.connect(self._geonode_cancel)
         pub_row.addWidget(self._geonode_cancel_btn)
         pub_row.addStretch()
+        right.addLayout(pub_row)
+
+        exit_row = QHBoxLayout()
+        exit_row.addStretch()
         exit_btn = QPushButton("Exit")
         exit_btn.setObjectName("CornerExitButton")
         exit_btn.setStyleSheet("""
@@ -2838,8 +2848,8 @@ class GeoNodePublishWindow(QMainWindow):
             QPushButton#CornerExitButton:pressed { background: #d4c094; }
         """)
         exit_btn.clicked.connect(self.close)
-        pub_row.addWidget(exit_btn)
-        right.addLayout(pub_row)
+        exit_row.addWidget(exit_btn)
+        outer.addLayout(exit_row)
 
         # Map option
         self._geonode_create_map_cb = QCheckBox(
@@ -2860,6 +2870,8 @@ class GeoNodePublishWindow(QMainWindow):
         log_layout.addWidget(self._geonode_log)
         right.addWidget(log_group, stretch=1)
 
+        self._geonode_build_manage_tab()
+
         # Load saved connection settings
         self._geonode_load_settings()
 
@@ -2867,6 +2879,236 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_log_timer = QTimer(self)
         self._geonode_log_timer.timeout.connect(self._geonode_drain_log)
         self._geonode_log_timer.start(200)
+
+    # ── Manage server tab ────────────────────────────────────────────────
+    _MANAGE_COLS = ["", "Type", "Title", "Name", "Owner", "Updated", "MESA", "ID"]
+
+    def _geonode_build_manage_tab(self):
+        import queue as _queue
+        self._geonode_manage_queue: _queue.Queue = _queue.Queue()
+        self._geonode_manage_loaded = False
+        self._geonode_manage_busy = False
+
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
+        self._geonode_tabs.addTab(page, "Manage server")
+
+        top = QHBoxLayout()
+        self._geonode_refresh_btn = QPushButton("Refresh list")
+        self._geonode_refresh_btn.setFixedWidth(120)
+        self._geonode_refresh_btn.clicked.connect(self._geonode_manage_refresh)
+        top.addWidget(self._geonode_refresh_btn)
+        top.addWidget(QLabel("Show"))
+        self._geonode_kind_combo = QComboBox()
+        self._geonode_kind_combo.addItems(["Datasets and maps", "Datasets", "Maps"])
+        self._geonode_kind_combo.currentIndexChanged.connect(self._geonode_manage_apply_filter)
+        top.addWidget(self._geonode_kind_combo)
+        self._geonode_filter_edit = QLineEdit()
+        self._geonode_filter_edit.setPlaceholderText("Filter on title, name or owner")
+        self._geonode_filter_edit.textChanged.connect(self._geonode_manage_apply_filter)
+        top.addWidget(self._geonode_filter_edit, stretch=1)
+        lay.addLayout(top)
+
+        self._geonode_res_table = QTableWidget(0, len(self._MANAGE_COLS))
+        self._geonode_res_table.setHorizontalHeaderLabels(self._MANAGE_COLS)
+        self._geonode_res_table.horizontalHeaderItem(6).setToolTip(
+            "Published by MESA: dataset name starts with mesa_, or map created by MESA.")
+        hdr = self._geonode_res_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        self._geonode_res_table.verticalHeader().setVisible(False)
+        self._geonode_res_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._geonode_res_table.setSelectionMode(QTableWidget.NoSelection)
+        self._geonode_res_table.setSortingEnabled(True)
+        self._geonode_res_table.itemChanged.connect(lambda _i: self._geonode_manage_update_count())
+        lay.addWidget(self._geonode_res_table, stretch=3)
+
+        sel_row = QHBoxLayout()
+        for text, fn in (("Select all shown", lambda: self._geonode_manage_check("all")),
+                         ("Select MESA-published", lambda: self._geonode_manage_check("mesa")),
+                         ("Select none", lambda: self._geonode_manage_check("none"))):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            sel_row.addWidget(b)
+        sel_row.addStretch()
+        self._geonode_manage_count = QLabel("")
+        self._geonode_manage_count.setProperty("role", "muted")
+        sel_row.addWidget(self._geonode_manage_count)
+        self._geonode_delete_btn = QPushButton("Delete selected")
+        self._geonode_delete_btn.setStyleSheet(
+            "QPushButton { background: #b03a2e; color: white; border: 1px solid #8e2b21;"
+            " border-radius: 4px; padding: 6px 14px; }"
+            "QPushButton:disabled { background: #d9b3ae; border-color: #c9a39e; }")
+        self._geonode_delete_btn.setEnabled(False)
+        self._geonode_delete_btn.clicked.connect(self._geonode_manage_delete)
+        sel_row.addWidget(self._geonode_delete_btn)
+        lay.addLayout(sel_row)
+
+        self._geonode_manage_log = QPlainTextEdit()
+        self._geonode_manage_log.setReadOnly(True)
+        self._geonode_manage_log.setStyleSheet("font-family: Consolas, monospace; font-size: 10px;")
+        lay.addWidget(self._geonode_manage_log, stretch=1)
+
+        self._geonode_tabs.currentChanged.connect(self._geonode_tab_changed)
+
+    def _geonode_credentials(self):
+        url = self._geonode_url.text().strip()
+        username = self._geonode_username.text().strip()
+        password = self._geonode_password.text()
+        return (url, username, password) if url and username and password else None
+
+    def _geonode_tab_changed(self, index: int):
+        if index == 1 and not self._geonode_manage_loaded and self._geonode_credentials():
+            self._geonode_manage_refresh()
+
+    def _geonode_manage_set_busy(self, busy: bool):
+        self._geonode_manage_busy = busy
+        self._geonode_refresh_btn.setEnabled(not busy)
+        self._geonode_manage_update_count()
+
+    def _geonode_manage_refresh(self):
+        creds = self._geonode_credentials()
+        if not creds:
+            self._geonode_manage_log.appendPlainText("Fill in URL, username and password first.")
+            return
+        if self._geonode_manage_busy:
+            return
+        self._geonode_manage_set_busy(True)
+        self._geonode_manage_log.appendPlainText("Reading datasets and maps from the server ...")
+
+        def _run():
+            from geonode_export import list_resources as _list  # type: ignore[import]
+            try:
+                res = _list(*creds, "datasets") + _list(*creds, "maps")
+                self._geonode_manage_queue.put(("list", res, None))
+            except Exception as exc:
+                self._geonode_manage_queue.put(("list", None, str(exc)))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _geonode_manage_fill(self, resources: list):
+        t = self._geonode_res_table
+        t.blockSignals(True)
+        t.setSortingEnabled(False)
+        t.setRowCount(0)
+        for res in resources:
+            r = t.rowCount()
+            t.insertRow(r)
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk.setCheckState(Qt.Unchecked)
+            chk.setData(Qt.UserRole, res)
+            t.setItem(r, 0, chk)
+            for c, val in enumerate((res["kind"], res["title"], res["name"], res["owner"],
+                                     res["updated"], "yes" if res["mesa"] else ""), start=1):
+                t.setItem(r, c, QTableWidgetItem(str(val)))
+            pk_item = QTableWidgetItem()
+            pk_item.setData(Qt.DisplayRole, int(res["pk"]) if res["pk"] is not None else 0)
+            t.setItem(r, 7, pk_item)
+        t.setSortingEnabled(True)
+        t.blockSignals(False)
+        self._geonode_manage_apply_filter()
+
+    def _geonode_manage_apply_filter(self, *_):
+        kind = {1: "dataset", 2: "map"}.get(self._geonode_kind_combo.currentIndex())
+        needle = self._geonode_filter_edit.text().strip().lower()
+        t = self._geonode_res_table
+        for r in range(t.rowCount()):
+            res = t.item(r, 0).data(Qt.UserRole)
+            hay = f"{res['title']} {res['name']} {res['owner']}".lower()
+            t.setRowHidden(r, (kind is not None and res["kind"] != kind) or (needle not in hay))
+        self._geonode_manage_update_count()
+
+    def _geonode_manage_check(self, how: str):
+        t = self._geonode_res_table
+        t.blockSignals(True)
+        for r in range(t.rowCount()):
+            item = t.item(r, 0)
+            if how == "none":
+                on = False
+            elif t.isRowHidden(r):
+                continue
+            else:
+                on = how == "all" or item.data(Qt.UserRole)["mesa"]
+            item.setCheckState(Qt.Checked if on else Qt.Unchecked)
+        t.blockSignals(False)
+        self._geonode_manage_update_count()
+
+    def _geonode_manage_checked(self) -> list:
+        # Hidden rows are never deleted, so a filter can't hide what is about to go.
+        t = self._geonode_res_table
+        return [t.item(r, 0).data(Qt.UserRole) for r in range(t.rowCount())
+                if not t.isRowHidden(r) and t.item(r, 0).checkState() == Qt.Checked]
+
+    def _geonode_manage_update_count(self):
+        n = len(self._geonode_manage_checked())
+        self._geonode_manage_count.setText(f"{n} selected" if n else "")
+        self._geonode_delete_btn.setEnabled(n > 0 and not self._geonode_manage_busy)
+
+    def _geonode_manage_delete(self):
+        creds = self._geonode_credentials()
+        chosen = self._geonode_manage_checked()
+        if not creds or not chosen:
+            return
+        n_ds = sum(1 for c in chosen if c["kind"] == "dataset")
+        n_map = len(chosen) - n_ds
+        preview = "\n".join(f"  {c['kind']}: {c['title']}" for c in chosen[:12])
+        if len(chosen) > 12:
+            preview += f"\n  … and {len(chosen) - 12} more"
+        warn = ("\n\nMaps that use a deleted dataset will lose that layer." if n_ds else "")
+        ans = QMessageBox.warning(
+            self, "Delete from GeoNode",
+            f"Permanently delete {n_ds} dataset(s) and {n_map} map(s) from "
+            f"{creds[0]}?\n\n{preview}{warn}\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self._geonode_manage_set_busy(True)
+        # Maps first, so no map is left pointing at a dataset that is already gone.
+        ordered = sorted(chosen, key=lambda c: c["kind"] != "map")
+
+        def _run():
+            from geonode_export import delete_resource as _delete  # type: ignore[import]
+            ok_n = 0
+            for c in ordered:
+                ok, msg = _delete(*creds, c["pk"])
+                ok_n += ok
+                self._geonode_manage_queue.put(
+                    ("log", f"{'Deleted' if ok else 'FAILED'} {c['kind']} '{c['title']}' "
+                            f"(id {c['pk']}): {msg}"))
+            self._geonode_manage_queue.put(
+                ("log", f"Done. {ok_n} of {len(ordered)} deleted."))
+            self._geonode_manage_queue.put(("deleted",))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _geonode_drain_manage(self):
+        import queue as _queue
+        try:
+            while True:
+                msg = self._geonode_manage_queue.get_nowait()
+                if msg[0] == "log":
+                    self._geonode_manage_log.appendPlainText(msg[1])
+                elif msg[0] == "list":
+                    _, res, err = msg
+                    self._geonode_manage_set_busy(False)
+                    if err:
+                        self._geonode_manage_log.appendPlainText(f"Could not read the list: {err}")
+                    else:
+                        self._geonode_manage_loaded = True
+                        n_ds = sum(1 for r in res if r["kind"] == "dataset")
+                        self._geonode_manage_log.appendPlainText(
+                            f"{n_ds} dataset(s) and {len(res) - n_ds} map(s) on the server.")
+                        self._geonode_manage_fill(res)
+                elif msg[0] == "deleted":
+                    self._geonode_manage_set_busy(False)
+                    self._geonode_manage_refresh()
+        except _queue.Empty:
+            pass
 
     def _geonode_settings_path(self) -> str:
         secrets_dir = os.path.join(original_working_directory, "secrets")
@@ -3050,6 +3292,7 @@ class GeoNodePublishWindow(QMainWindow):
 
     def _geonode_drain_log(self):
         import queue as _queue
+        self._geonode_drain_manage()
         try:
             while True:
                 msg = self._geonode_log_queue.get_nowait()

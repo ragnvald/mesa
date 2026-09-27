@@ -107,3 +107,31 @@ def test_dataset_title_failure_is_reported_not_raised(monkeypatch) -> None:
 
 def test_default_map_title_is_unchanged() -> None:
     assert ge.default_map_title({"label": "basic_mosaic"}) == "MESA - basic_mosaic"
+
+
+def test_list_resources_follows_pages_and_marks_mesa(monkeypatch) -> None:
+    pages = {
+        1: {"maps": [{"pk": 1, "title": "MESA - H3", "abstract": f"x {ge._MAP_MARKER}.",
+                      "owner": {"username": "admin"}}],
+            "links": {"next": "p2"}, "total": 2},
+        2: {"maps": [{"pk": 2, "title": "Other", "abstract": ""}], "links": {"next": None}, "total": 2},
+    }
+
+    class R:
+        def __init__(self, body):
+            self.status_code, self._b = 200, body
+
+        def json(self):
+            return self._b
+
+    monkeypatch.setattr(ge.requests, "get", lambda url, params=None, **k: R(pages[params["page"]]))
+    res = ge.list_resources("http://gn", "u", "p", "maps")
+    assert [(r["pk"], r["kind"], r["mesa"]) for r in res] == [(1, "map", True), (2, "map", False)]
+
+
+def test_delete_resource_uses_resources_endpoint(monkeypatch) -> None:
+    seen = []
+    monkeypatch.setattr(ge.requests, "delete",
+                        lambda url, **k: seen.append(url) or _Resp(204))
+    assert ge.delete_resource("http://gn/", "u", "p", 5) == (True, "deleted")
+    assert seen == ["http://gn/api/v2/resources/5/"]

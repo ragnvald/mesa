@@ -16,6 +16,8 @@ API used:
   PATCH /api/v2/styles/<pk>/            update SLD content
   POST /api/v2/maps/                    create empty map
   PATCH /api/v2/maps/<pk>/              add maplayers to map
+  GET  /api/v2/{datasets,maps}/?page=   list for the Manage server tab
+  DELETE /api/v2/resources/<pk>/        delete a dataset or map
   Auth: HTTP Basic (username / password)
   Server upload limit: 100 MB per dataset
 
@@ -271,6 +273,68 @@ def test_connection(base_url: str, username: str, password: str) -> tuple[bool, 
     if r.status_code == 401:
         return False, "Authentication failed - wrong username or password."
     return False, f"Unexpected response: HTTP {r.status_code}."
+
+
+# ---------------------------------------------------------------------------
+# Server administration: list and delete datasets and maps
+# ---------------------------------------------------------------------------
+
+_LIST_PAGE_SIZE = 100
+_LIST_MAX_PAGES = 200   # guard against a server that never reports the end
+
+
+def list_resources(base_url: str, username: str, password: str, kind: str) -> list[dict]:
+    """All datasets (kind="datasets") or maps (kind="maps") visible to the user,
+    as {pk, kind, title, name, owner, updated, mesa}. Raises RuntimeError on
+    an HTTP or connection error so the caller can report it."""
+    base = base_url.rstrip("/")
+    out: list[dict] = []
+    for page in range(1, _LIST_MAX_PAGES + 1):
+        try:
+            r = requests.get(f"{base}/api/v2/{kind}/",
+                             params={"page": page, "page_size": _LIST_PAGE_SIZE},
+                             auth=(username, password), timeout=30)
+        except Exception as exc:
+            raise RuntimeError(f"listing {kind} failed: {exc}") from exc
+        if r.status_code == 404 and page > 1:
+            break   # DRF answers 404 for a page past the end
+        if r.status_code != 200:
+            raise RuntimeError(f"listing {kind} failed: HTTP {r.status_code}")
+        body = r.json()
+        items = body.get(kind, [])
+        for it in items:
+            abstract = it.get("raw_abstract") or it.get("abstract") or ""
+            name = it.get("name") or ""
+            out.append({
+                "pk": it.get("pk"),
+                "kind": "dataset" if kind == "datasets" else "map",
+                "title": it.get("title") or name,
+                "name": name,
+                "owner": (it.get("owner") or {}).get("username", ""),
+                "updated": (it.get("last_updated") or it.get("created") or "")[:16].replace("T", " "),
+                "mesa": _MAP_MARKER in abstract if kind == "maps" else name.startswith("mesa_"),
+            })
+        total = body.get("total")
+        has_next = bool((body.get("links") or {}).get("next"))
+        if not items or (not has_next and (total is None or len(out) >= total)):
+            break
+    return out
+
+
+def delete_resource(base_url: str, username: str, password: str, pk: int) -> tuple[bool, str]:
+    """Delete a dataset or map by pk. (/api/v2/datasets/{pk}/ refuses DELETE.)"""
+    try:
+        r = requests.delete(f"{base_url.rstrip('/')}/api/v2/resources/{pk}/",
+                            auth=(username, password), timeout=60)
+    except Exception as exc:
+        return False, str(exc)
+    if r.status_code in (200, 204):
+        return True, "deleted"
+    if r.status_code == 403:
+        return False, "not allowed (HTTP 403) - you need delete rights on it"
+    if r.status_code == 404:
+        return True, "already gone"
+    return False, f"HTTP {r.status_code}: {r.text[:120]}"
 
 
 # ---------------------------------------------------------------------------
