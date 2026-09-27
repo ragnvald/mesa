@@ -238,6 +238,28 @@ def generate_styles_via_llm(id_to_title, base_dir) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+FALLBACK_GROUP_COLOR = "#7f8c9b"
+
+
+def group_fill_color(styling, sensitivity_code, cfg=None) -> str:
+    """Fill colour of an asset group as the MESA map draws it: styling.fill_color,
+    else the config.ini A-E colour of its sensitivity_code, else a neutral grey."""
+    if isinstance(styling, str) and styling.strip():
+        try:
+            d = json.loads(styling)
+            fc = d.get("fill_color") or d.get("fill") or d.get("color")
+            if fc:
+                return str(fc)
+        except Exception:
+            pass
+    code = str(sensitivity_code or "").strip().upper()
+    if cfg is not None and code and cfg.has_section(code):
+        c = cfg[code].get("category_colour")
+        if c:
+            return str(c).strip()
+    return FALLBACK_GROUP_COLOR
+
+
 def _style_to_json(style: Optional[Dict[str, Any]]) -> Optional[str]:
     if not style:
         return None

@@ -2699,6 +2699,8 @@ class GeoNodePublishWindow(QMainWindow):
                 detail_parts.append("dataset + map, 5 layers")
             elif layer.get("sld_field"):
                 detail_parts.append("A-E styled")
+            elif layer.get("asset_style_field"):
+                detail_parts.append("MESA map colours")
             if detail_parts:
                 detail = QLabel("    " + "  ·  ".join(detail_parts))
                 detail.setStyleSheet(

@@ -133,6 +133,7 @@ SUPPORTING_LAYERS: list[dict] = [
         "hint": "Convex-hull footprints of each asset group with sensitivity ratings.",
         "parquet": "tbl_asset_group.parquet",
         "layer_name": "mesa_asset_groups",
+        "asset_style_field": "id",
         "default_checked": False,
         "size_note": None,
     },
@@ -142,6 +143,7 @@ SUPPORTING_LAYERS: list[dict] = [
         "hint": "All individual asset polygons - large dataset, slow to upload.",
         "parquet": "tbl_asset_object.parquet",
         "layer_name": "mesa_assets",
+        "asset_style_field": "ref_asset_group",
         "default_checked": False,
         "size_note": "~50 MB - may take several minutes",
     },
@@ -528,6 +530,88 @@ def build_class_sld(
     )
 
 
+# Asset look of the MESA map (combined_map toggleAsset): #444 0.4 px outline,
+# fill at the map's default overlay opacity 0.85 x 0.9.
+_ASSET_STROKE = "#444444"
+_ASSET_STROKE_WIDTH = 0.4
+_ASSET_FILL_OPACITY = 0.765
+
+
+def asset_group_classes(geoparquet_dir: str, config_path: Optional[str]) -> list[tuple]:
+    """(group id, fill colour, label) per asset group, coloured and labelled as
+    in the MESA map. [] if tbl_asset_group is missing or unreadable."""
+    import configparser
+    import pandas as pd
+    import asset_styling
+
+    try:
+        g = pd.read_parquet(os.path.join(geoparquet_dir, "tbl_asset_group.parquet"))
+    except Exception:
+        return []
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(";",), strict=False)
+    if config_path and os.path.isfile(config_path):
+        try:
+            cfg.read(config_path, encoding="utf-8")
+        except Exception:
+            pass
+    out = []
+    for _, r in g.iterrows():
+        gid = r.get("id")
+        if pd.isna(gid):
+            continue
+        label = str(r.get("title_fromuser") or r.get("name_original")
+                    or r.get("name_gis_assetgroup") or f"Group {gid}")
+        color = asset_styling.group_fill_color(r.get("styling"), r.get("sensitivity_code"), cfg)
+        out.append((gid, color, label))
+    out.sort(key=lambda t: t[2].lower())
+    return out
+
+
+def build_asset_sld(style_name: str, field: str, classes: list[tuple]) -> str:
+    """SLD 1.0.0 with one rule per asset group (field == group id)."""
+    rules = []
+    for gid, color, label in classes:
+        lit = int(gid) if isinstance(gid, float) and gid.is_integer() else gid
+        rules.append(
+            "    <Rule>\n"
+            f"      <Name>{_xml_escape(label)}</Name>\n"
+            f"      <Title>{_xml_escape(label)}</Title>\n"
+            "      <ogc:Filter><ogc:PropertyIsEqualTo>"
+            f"<ogc:PropertyName>{field}</ogc:PropertyName><ogc:Literal>{_xml_escape(lit)}</ogc:Literal>"
+            "</ogc:PropertyIsEqualTo></ogc:Filter>\n"
+            "      <PolygonSymbolizer>\n"
+            "        <Fill>\n"
+            f"          <CssParameter name=\"fill\">{color}</CssParameter>\n"
+            f"          <CssParameter name=\"fill-opacity\">{_ASSET_FILL_OPACITY:.3f}</CssParameter>\n"
+            "        </Fill>\n"
+            "        <Stroke>\n"
+            f"          <CssParameter name=\"stroke\">{_ASSET_STROKE}</CssParameter>\n"
+            f"          <CssParameter name=\"stroke-width\">{_ASSET_STROKE_WIDTH}</CssParameter>\n"
+            "        </Stroke>\n"
+            "      </PolygonSymbolizer>\n"
+            "    </Rule>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<StyledLayerDescriptor version="1.0.0"\n'
+        '  xsi:schemaLocation="http://www.opengis.net/sld StyledLayerDescriptor.xsd"\n'
+        '  xmlns="http://www.opengis.net/sld"\n'
+        '  xmlns:ogc="http://www.opengis.net/ogc"\n'
+        '  xmlns:xlink="http://www.w3.org/1999/xlink"\n'
+        '  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+        '  <NamedLayer>\n'
+        f'    <Name>{style_name}</Name>\n'
+        '    <UserStyle>\n'
+        '      <Title>MESA asset groups</Title>\n'
+        '      <FeatureTypeStyle>\n'
+        + "\n".join(rules) + "\n"
+        '      </FeatureTypeStyle>\n'
+        '    </UserStyle>\n'
+        '  </NamedLayer>\n'
+        '</StyledLayerDescriptor>\n'
+    )
+
+
 def _hex(rgba) -> str:
     return "#%02x%02x%02x" % tuple(int(c) for c in rgba[:3])
 
@@ -641,6 +725,21 @@ def _sanitize(gdf):
             pass
 
     return gdf
+
+
+def _read_geoparquet(path: str):
+    """gpd.read_parquet, tolerating files written without geo metadata (older
+    asset-editor saves of tbl_asset_group): WKB geometry, MESA's EPSG:4326."""
+    import geopandas as gpd
+    try:
+        return gpd.read_parquet(path)
+    except ValueError as exc:
+        if "geo metadata" not in str(exc):
+            raise
+    import pandas as pd
+    df = pd.read_parquet(path)
+    return gpd.GeoDataFrame(df.drop(columns="geometry"),
+                            geometry=gpd.GeoSeries.from_wkb(df["geometry"]), crs="EPSG:4326")
 
 
 def _write_gpkg(gdf, layer_name: str, directory: str) -> str:
@@ -1558,7 +1657,7 @@ def export_layers(
             # ── Read + filter ────────────────────────────────────────────
             try:
                 log(f"  Reading {layer['parquet']} ...")
-                gdf = gpd.read_parquet(parquet_file)
+                gdf = _read_geoparquet(parquet_file)
                 if filter_field and filter_value is not None:
                     gdf = gdf[gdf[filter_field] == filter_value].copy()
                 log(f"  {len(gdf):,} features. Writing GeoPackage ...")
@@ -1584,6 +1683,17 @@ def export_layers(
                     log(f"  SLD generation failed ({exc}), uploading without style.")
                     sld_xml = None
                     sld_path = None
+            asset_field = layer.get("asset_style_field")
+            if asset_field and not sld_xml:
+                classes = asset_group_classes(geoparquet_dir, config_path)
+                if classes and asset_field in gdf.columns:
+                    sld_xml = build_asset_sld(layer_name, asset_field, classes)
+                    sld_path = os.path.join(tmp_dir, f"{layer_name}.sld")
+                    with open(sld_path, "w", encoding="utf-8") as f:
+                        f.write(sld_xml)
+                    log(f"  Asset-group colours from the MESA map ({len(classes)} group(s)).")
+                else:
+                    log("  Asset-group colours unavailable; GeoNode's default style is used.")
             if sld_xml and is_sensitivity:
                 try:
                     classes = result_style_classes(gdf, config_path)

@@ -135,3 +135,24 @@ def test_delete_resource_uses_resources_endpoint(monkeypatch) -> None:
                         lambda url, **k: seen.append(url) or _Resp(204))
     assert ge.delete_resource("http://gn/", "u", "p", 5) == (True, "deleted")
     assert seen == ["http://gn/api/v2/resources/5/"]
+
+
+def test_asset_sld_has_one_rule_per_group_with_the_map_colours() -> None:
+    classes = [(1.0, "#0000FF", "River & banks"), (2, "#808080", "Settlements")]
+    sld = ge.build_asset_sld("mesa_assets", "ref_asset_group", classes)
+    doc = xml.dom.minidom.parseString(sld.encode("utf-8"))
+    rules = doc.getElementsByTagName("Rule")
+    assert len(rules) == 2
+    lits = [n.firstChild.data for n in doc.getElementsByTagName("ogc:Literal")]
+    assert lits == ["1", "2"]   # float ids from the GeoPackage sanitiser match integer literals
+    assert "#0000FF" in sld and "River &amp; banks" in sld
+
+
+def test_asset_group_colour_follows_the_map_rule() -> None:
+    import configparser
+    import asset_styling
+    cfg = configparser.ConfigParser()
+    cfg["B"] = {"category_colour": "#f03b20"}
+    assert asset_styling.group_fill_color('{"fill_color": "#123456"}', "B", cfg) == "#123456"
+    assert asset_styling.group_fill_color(None, "b", cfg) == "#f03b20"
+    assert asset_styling.group_fill_color("", "", cfg) == asset_styling.FALLBACK_GROUP_COLOR
