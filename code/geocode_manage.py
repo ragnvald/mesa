@@ -4174,7 +4174,7 @@ class GeocodeManagerWindow(QMainWindow):
             preview += f" (+{len(names_imported) - 4} more)"
         ok = QMessageBox.question(self, "Confirm delete",
             f"Delete selected imported geocode groups?\n\n{preview}\n\nThis also removes linked geocode objects.",
-            QMessageBox.Yes | QMessageBox.No)
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ok != QMessageBox.Yes:
             return
 
@@ -4283,7 +4283,7 @@ class GeocodeManagerWindow(QMainWindow):
             return
         ok = QMessageBox.question(self, "Confirm delete",
             f"Delete geocode group '{gis_name}'?\n\nThis also removes linked geocode objects.",
-            QMessageBox.Yes | QMessageBox.No)
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ok != QMessageBox.Yes:
             return
         _clear_geocode_groups(self.base, [gis_name])

@@ -3934,7 +3934,7 @@ class TuneProcessingWindow(QMainWindow):
         confirmed = QMessageBox.question(
             self, "Restore previous tuning",
             "Restore the previously saved values for tuned processing keys in config.ini?",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if confirmed != QMessageBox.Yes:
             return
@@ -5249,7 +5249,7 @@ class MesaMainWindow(QMainWindow):
                 self, "Move workspace",
                 f"Move your MESA data\n\nfrom:  {cur}\nto:      {target}\n\n"
                 "MESA will close afterwards; reopen it to use the new location.",
-                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Ok:
             return
 
         copied_only = False
@@ -5889,7 +5889,7 @@ class MesaMainWindow(QMainWindow):
                     "the inputs and mark them current. Run Process afterwards to generate results "
                     "in this version.\n\n"
                     "This replaces current input/, output/ and config.ini. Continue?",
-                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
                 )
                 if confirm != QMessageBox.Yes:
                     return
@@ -5932,7 +5932,7 @@ class MesaMainWindow(QMainWindow):
                 "Restoring a package replaces the current project: input/, output/, and "
                 "config.ini are deleted and replaced.\n\n"
                 "Do you want to continue?",
-                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if confirm != QMessageBox.Yes:
                 return
@@ -6046,7 +6046,7 @@ class MesaMainWindow(QMainWindow):
             "This will permanently delete imported and processed data from the output/ folder.\n\n"
             "Your source files in input/ and your configuration are not affected.\n\n"
             "Do you want to continue?",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:
             return
