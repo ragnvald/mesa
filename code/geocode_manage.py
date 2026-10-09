@@ -3479,10 +3479,10 @@ class GeocodeManagerWindow(QMainWindow):
         self.mosaic_status_label.setStyleSheet("font-weight: 600; min-width: 100px;")
         action_layout.addWidget(self.mosaic_status_label)
         action_layout.addStretch()
-        build_btn = QPushButton("Build mosaic")
-        build_btn.setProperty("role", "primary")
-        build_btn.clicked.connect(self._run_mosaic)
-        action_layout.addWidget(build_btn)
+        self.mosaic_build_btn = QPushButton("Build mosaic")
+        self.mosaic_build_btn.setProperty("role", "primary")
+        self.mosaic_build_btn.clicked.connect(self._run_mosaic)
+        action_layout.addWidget(self.mosaic_build_btn)
         layout.addWidget(self._mosaic_action_group)
 
         self._mosaic_skip_note = QLabel(
@@ -3715,10 +3715,10 @@ class GeocodeManagerWindow(QMainWindow):
         import_layout = QHBoxLayout(import_group)
         import_layout.addWidget(QLabel("Import geocode datasets from input folder into GeoParquet tables."))
         import_layout.addStretch()
-        import_btn = QPushButton("Import geocodes")
-        import_btn.setProperty("role", "primary")
-        import_btn.clicked.connect(self._run_import)
-        import_layout.addWidget(import_btn)
+        self.import_run_btn = QPushButton("Import geocodes")
+        self.import_run_btn.setProperty("role", "primary")
+        self.import_run_btn.clicked.connect(self._run_import)
+        import_layout.addWidget(self.import_run_btn)
         layout.addWidget(import_group)
 
         self.import_status_label = QLabel("")
@@ -3896,7 +3896,21 @@ class GeocodeManagerWindow(QMainWindow):
     def _on_progress(self, value: float):
         self.progress_bar.setValue(int(value))
 
+    def _set_job_running(self, running: bool):
+        """Lock every job button while a background job runs (they share logs and tables)."""
+        buttons = (self.mosaic_build_btn, self.h3_suggest_btn, self.h3_generate_btn,
+                   self.qdgc_suggest_btn, self.qdgc_generate_btn, self.import_run_btn)
+        if running:
+            self._job_prev_enabled = {b: b.isEnabled() for b in buttons}
+            for b in buttons:
+                b.setEnabled(False)
+        else:
+            for b, was in getattr(self, "_job_prev_enabled", {}).items():
+                b.setEnabled(was)
+            self._job_prev_enabled = {}
+
     def _on_task_finished(self):
+        self._set_job_running(False)
         self._active_log_widget = None
         self._refresh_group_list()
         self._refresh_edit_data()
@@ -3958,6 +3972,7 @@ class GeocodeManagerWindow(QMainWindow):
             # a non-GUI thread binds to a non-existent event loop).
             self._signals.mosaic_finished.emit()
 
+        self._set_job_running(True)
         _run_in_thread(run_mosaic, self.base, buf, grid, _after, on_done=True)
 
     def _refresh_mosaic_log_from_file(self):
@@ -4059,6 +4074,7 @@ class GeocodeManagerWindow(QMainWindow):
         self._active_log_widget = self.h3_log
         log_to_gui(f"[H3] Generate requested for levels: {levels}", "INFO")
         clear = self.h3_clear_check.isChecked()
+        self._set_job_running(True)
         _run_in_thread(write_h3_levels, self.base, levels, clear_existing=clear, on_done=True)
 
     def _suggest_qdgc(self):
@@ -4094,6 +4110,7 @@ class GeocodeManagerWindow(QMainWindow):
         self._active_log_widget = self.qdgc_log
         log_to_gui(f"[QDGC] Generate requested for levels: {levels}", "INFO")
         clear = self.qdgc_clear_check.isChecked()
+        self._set_job_running(True)
         _run_in_thread(write_qdgc_levels, self.base, levels, clear_existing=clear, on_done=True)
 
     # ------------------------------------------------------------------
@@ -4102,6 +4119,7 @@ class GeocodeManagerWindow(QMainWindow):
     def _run_import(self):
         self._active_log_widget = self.import_log
         log_to_gui("[Import] Import requested.", "INFO")
+        self._set_job_running(True)
         _run_in_thread(run_import_geocodes, self.base, self.cfg, on_done=True)
 
     def _refresh_group_list(self):

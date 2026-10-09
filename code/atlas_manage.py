@@ -186,6 +186,7 @@ class _AtlasSignals(QObject):
     log_message = Signal(str)
     progress_update = Signal(float)
     task_finished = Signal()
+    job_done = Signal()  # emitted however a job ends, unlike task_finished
 
 
 # =====================================================================
@@ -249,6 +250,7 @@ class AtlasManagerWindow(QMainWindow):
         self._signals.log_message.connect(self._append_log_line)
         self._signals.progress_update.connect(self._set_progress)
         self._signals.task_finished.connect(self._refresh_edit_data)
+        self._signals.job_done.connect(lambda: self._set_job_running(False))
 
         self._build_ui()
         self._refresh_edit_data()
@@ -457,6 +459,7 @@ class AtlasManagerWindow(QMainWindow):
         delete_btn.setProperty("role", "danger")
         delete_btn.clicked.connect(self._on_delete_clicked)
         btn_row.addWidget(delete_btn)
+        self._job_buttons = (create_btn, import_btn, delete_btn)
 
         refresh_btn = QPushButton("Refresh editor")
         refresh_btn.clicked.connect(self._refresh_edit_data)
@@ -574,7 +577,20 @@ class AtlasManagerWindow(QMainWindow):
     # Tile mode UI
     # ------------------------------------------------------------------
     def _spawn(self, fn):
-        threading.Thread(target=fn, daemon=True).start()
+        # Lock Create/Import/Delete until the job ends, so a second click cannot
+        # start a parallel write to tbl_atlas.parquet.
+        self._set_job_running(True)
+
+        def _wrap():
+            try:
+                fn()
+            finally:
+                self._signals.job_done.emit()
+        threading.Thread(target=_wrap, daemon=True).start()
+
+    def _set_job_running(self, running: bool):
+        for b in self._job_buttons:
+            b.setEnabled(not running)
 
     def _update_tile_mode_ui(self, *_args):
         if self._radio_custom.isChecked():

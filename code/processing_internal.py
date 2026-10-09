@@ -5413,9 +5413,9 @@ class ProcessingInternalWindow(QMainWindow):
 
         # Buttons
         btn_layout = QHBoxLayout()
-        btn_process = QPushButton("Process")
-        btn_process.clicked.connect(self._run)
-        btn_layout.addWidget(btn_process)
+        self._btn_process = QPushButton("Process")
+        self._btn_process.clicked.connect(self._run)
+        btn_layout.addWidget(self._btn_process)
         btn_layout.addStretch()
         left_layout.addLayout(btn_layout)
 
@@ -5463,9 +5463,21 @@ class ProcessingInternalWindow(QMainWindow):
             pass
 
     def _run(self):
+        # One run at a time: every click used to spawn another worker process.
+        if getattr(self, "_busy", False):
+            return
+        self._busy = True
+        self._btn_process.setEnabled(False)
+        self._btn_process.setText("Processing…")
         set_progress_stage("Preparations")
         update_progress(0.0)
-        _start_processing_worker(self._cfg_path)
+        try:
+            _start_processing_worker(self._cfg_path)
+        except Exception:
+            self._busy = False
+            raise
+        finally:
+            self._watch_busy()
         # Kick off periodic GUI polling of the shared status file for progress updates
         try:
             self._poll_timer = _poll_progress_periodically()
@@ -5474,16 +5486,32 @@ class ProcessingInternalWindow(QMainWindow):
         proc_snapshot = _PROC
         if proc_snapshot is not None:
             threading.Thread(target=lambda: self._await_processing_then_tiles(proc_snapshot), daemon=True).start()
+        else:
+            self._busy = False
+
+    def _watch_busy(self):
+        """Re-enable Process from the GUI thread once the worker thread clears _busy."""
+        def _check():
+            if not self._busy:
+                self._busy_timer.stop()
+                self._btn_process.setText("Process")
+                self._btn_process.setEnabled(True)
+        self._busy_timer = QTimer(self)
+        self._busy_timer.timeout.connect(_check)
+        self._busy_timer.start(1000)
 
     def _await_processing_then_tiles(self, proc_handle):
         try:
-            proc_handle.join()
-        except Exception:
-            return
-        exit_code = getattr(proc_handle, "exitcode", None)
-        if exit_code not in (0, None):
-            log_to_gui(log_widget, f"[Tiles] Skipping MBTiles stage because processing exited with code {exit_code}.")
-            update_progress(100.0)
-            return
-        _auto_run_tiles_stage(self._tiles_minzoom, self._tiles_maxzoom)
+            try:
+                proc_handle.join()
+            except Exception:
+                return
+            exit_code = getattr(proc_handle, "exitcode", None)
+            if exit_code not in (0, None):
+                log_to_gui(log_widget, f"[Tiles] Skipping MBTiles stage because processing exited with code {exit_code}.")
+                update_progress(100.0)
+                return
+            _auto_run_tiles_stage(self._tiles_minzoom, self._tiles_maxzoom)
+        finally:
+            self._busy = False
 
