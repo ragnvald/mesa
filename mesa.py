@@ -2223,6 +2223,16 @@ QPushButton[role="exit"]:hover {
 QPushButton[role="exit"]:pressed {
     background-color: #d4c094;
 }
+/* Role rules come after QPushButton:disabled and would otherwise win, so a
+   disabled primary/success/danger button looked clickable. */
+QPushButton[role="primary"]:disabled,
+QPushButton[role="success"]:disabled,
+QPushButton[role="danger"]:disabled,
+QPushButton[role="exit"]:disabled {
+    background-color: #eee5d7;
+    color: #a28f71;
+    border-color: #d4c6af;
+}
 
 /* ---- Labels ---- */
 QLabel {
