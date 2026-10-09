@@ -2956,10 +2956,7 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_manage_count.setProperty("role", "muted")
         sel_row.addWidget(self._geonode_manage_count)
         self._geonode_delete_btn = QPushButton("Delete selected")
-        self._geonode_delete_btn.setStyleSheet(
-            "QPushButton { background: #b03a2e; color: white; border: 1px solid #8e2b21;"
-            " border-radius: 4px; padding: 6px 14px; }"
-            "QPushButton:disabled { background: #d9b3ae; border-color: #c9a39e; }")
+        self._geonode_delete_btn.setProperty("role", "danger")
         self._geonode_delete_btn.setEnabled(False)
         self._geonode_delete_btn.clicked.connect(self._geonode_manage_delete)
         sel_row.addWidget(self._geonode_delete_btn)
@@ -5336,6 +5333,7 @@ class MesaMainWindow(QMainWindow):
         self._ai_token.setPlaceholderText("paste API token")
         grid.addWidget(self._ai_token, 1, 3)
         self._ai_delete_btn = QPushButton("Delete token")
+        self._ai_delete_btn.setProperty("role", "danger")
         self._ai_delete_btn.setToolTip("Remove the stored token from secrets/.")
         self._ai_delete_btn.clicked.connect(self._delete_ai_token)
         grid.addWidget(self._ai_delete_btn, 1, 4)
@@ -5398,6 +5396,12 @@ class MesaMainWindow(QMainWindow):
             self._ai_status.setText(f"Could not save AI connection: {e}")
 
     def _delete_ai_token(self):
+        if QMessageBox.question(
+                self, "Delete token",
+                "Remove the stored API token from secrets/?\n\n"
+                "AI features stop working until a new token is saved.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
         s = read_ai_connection(original_working_directory)
         s["openai_token"] = ""
         try:
@@ -5562,6 +5566,7 @@ class MesaMainWindow(QMainWindow):
         backup_btn_row.addWidget(create_btn)
 
         restore_btn = QPushButton("Restore data")
+        restore_btn.setProperty("role", "danger")
         restore_btn.setFixedWidth(160)
         restore_btn.clicked.connect(self._do_restore)
         backup_btn_row.addWidget(restore_btn)

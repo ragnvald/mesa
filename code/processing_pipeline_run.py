@@ -2649,6 +2649,13 @@ class ProcessRunnerWindow(QMainWindow):
             self._append_log(f"{_ts()} - Pause requested. Will pause after the current chunk completes.")
 
     def _on_cancel_click(self) -> None:
+        if QMessageBox.question(
+                self, "Cancel processing",
+                "Stop the run now?\n\n"
+                "Workers are force-stopped and this run's output is discarded; "
+                "the next Process starts the selected stages over.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
         try:
             import processing_internal as dpi
         except Exception as exc:

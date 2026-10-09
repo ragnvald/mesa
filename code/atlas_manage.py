@@ -454,6 +454,7 @@ class AtlasManagerWindow(QMainWindow):
         btn_row.addWidget(import_btn)
 
         delete_btn = QPushButton("Delete current atlas")
+        delete_btn.setProperty("role", "danger")
         delete_btn.clicked.connect(self._on_delete_clicked)
         btn_row.addWidget(delete_btn)
 

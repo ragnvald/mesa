@@ -1279,8 +1279,16 @@ class SetupWindow(QMainWindow):
             input_folder,
             "Excel Files (*.xlsx);;All Files (*.*)",
         )
-        if excel_path:
-            load_all_from_excel(excel_path)
+        if not excel_path:
+            return
+        if QMessageBox.question(
+                self, "Load from Excel",
+                f"Replace the current settings with the values in\n{excel_path}?\n\n"
+                "The values are saved straight away and replace the current ones, "
+                "including unsaved edits in this window.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        load_all_from_excel(excel_path)
 
     def _do_save_database(self):
         update_all_vuln_rows(entries_vuln, gdf_asset_group)
