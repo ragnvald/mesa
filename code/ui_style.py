@@ -139,6 +139,21 @@ QPushButton[role="danger"]:hover {
 QPushButton[role="danger"]:pressed {
     background-color: #e6d2c5;
 }
+/* Window Exit button, always placed top-right (tab-bar corner or header row). */
+QPushButton[role="exit"] {
+    background-color: #eadfc8;
+    color: #453621;
+    border: 1px solid #b79f73;
+    border-radius: 7px;
+    padding: 6px 16px;
+    min-width: 80px;
+}
+QPushButton[role="exit"]:hover {
+    background-color: #e1d1ae;
+}
+QPushButton[role="exit"]:pressed {
+    background-color: #d4c094;
+}
 QLabel {
     background: transparent;
     color: #3f3528;

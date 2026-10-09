@@ -1699,16 +1699,7 @@ class ComparisonWindow(QMainWindow):
 
         # Compact Exit button in tab bar corner
         exit_btn = QPushButton("Exit")
-        exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 7px; color: #453621; font-weight: 500;
-                padding: 6px 16px; min-width: 80px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
+        exit_btn.setProperty("role", "exit")
         exit_btn.clicked.connect(self.close)
         self.notebook.setCornerWidget(exit_btn, Qt.TopRightCorner)
         main_layout.addWidget(self.notebook, 1)

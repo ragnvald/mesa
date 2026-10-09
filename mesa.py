@@ -2208,6 +2208,21 @@ QPushButton[role="danger"]:hover {
 QPushButton[role="danger"]:pressed {
     background-color: #e6d2c5;
 }
+/* Window Exit button, always placed top-right (tab-bar corner or header row). */
+QPushButton[role="exit"] {
+    background-color: #eadfc8;
+    color: #453621;
+    border: 1px solid #b79f73;
+    border-radius: 7px;
+    padding: 6px 16px;
+    min-width: 80px;
+}
+QPushButton[role="exit"]:hover {
+    background-color: #e1d1ae;
+}
+QPushButton[role="exit"]:pressed {
+    background-color: #d4c094;
+}
 
 /* ---- Labels ---- */
 QLabel {
@@ -2836,22 +2851,14 @@ class GeoNodePublishWindow(QMainWindow):
         pub_row.addStretch()
         right.addLayout(pub_row)
 
+        # Exit sits top-right, above the connection group.
         exit_row = QHBoxLayout()
         exit_row.addStretch()
         exit_btn = QPushButton("Exit")
-        exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621;
-                padding: 6px 18px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
+        exit_btn.setProperty("role", "exit")
         exit_btn.clicked.connect(self.close)
         exit_row.addWidget(exit_btn)
-        outer.addLayout(exit_row)
+        outer.insertLayout(0, exit_row)
 
         # Map option
         self._geonode_create_map_cb = QCheckBox(
@@ -3424,6 +3431,11 @@ class TuneProcessingWindow(QMainWindow):
 
         btn_col.addStretch()
         top_row.addLayout(btn_col)
+
+        exit_btn = QPushButton("Exit")
+        exit_btn.setProperty("role", "exit")
+        exit_btn.clicked.connect(self.close)
+        top_row.addWidget(exit_btn, alignment=Qt.AlignTop)
         layout.addLayout(top_row)
 
         # Comparison table
@@ -3459,25 +3471,6 @@ class TuneProcessingWindow(QMainWindow):
         self._tune_text.setReadOnly(True)
         self._tune_text.setMaximumHeight(120)
         layout.addWidget(self._tune_text)
-
-
-        # Exit button matching the standard tan palette used by other windows.
-        exit_row = QHBoxLayout()
-        exit_row.addStretch()
-        exit_btn = QPushButton("Exit")
-        exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621;
-                padding: 6px 18px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
-        exit_btn.clicked.connect(self.close)
-        exit_row.addWidget(exit_btn)
-        layout.addLayout(exit_row)
 
         # Internal state
         self._pending_tune_values: dict[str, str] = {}
@@ -4048,16 +4041,7 @@ class MesaMainWindow(QMainWindow):
 
         # Compact Exit button embedded in the tab bar's corner
         exit_btn = QPushButton("Exit")
-        exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 7px; color: #453621; font-weight: 500;
-                padding: 6px 16px; min-width: 80px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
+        exit_btn.setProperty("role", "exit")
         exit_btn.clicked.connect(self.close)
         self._tabs.setCornerWidget(exit_btn, Qt.TopRightCorner)
 

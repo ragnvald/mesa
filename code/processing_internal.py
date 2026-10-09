@@ -5355,6 +5355,16 @@ class ProcessingInternalWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # Exit sits top-right, above both splitter panes.
+        exit_row = QHBoxLayout()
+        exit_row.setContentsMargins(10, 10, 10, 0)
+        exit_row.addStretch()
+        btn_exit = QPushButton("Exit")
+        btn_exit.setProperty("role", "exit")
+        btn_exit.clicked.connect(self.close)
+        exit_row.addWidget(btn_exit)
+        layout.addLayout(exit_row)
+
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter)
 
@@ -5406,20 +5416,6 @@ class ProcessingInternalWindow(QMainWindow):
         btn_process = QPushButton("Process")
         btn_process.clicked.connect(self._run)
         btn_layout.addWidget(btn_process)
-
-        btn_exit = QPushButton("Exit")
-        btn_exit.setObjectName("CornerExitButton")
-        btn_exit.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621;
-                padding: 6px 18px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
-        btn_exit.clicked.connect(self.close)
-        btn_layout.addWidget(btn_exit)
         btn_layout.addStretch()
         left_layout.addLayout(btn_layout)
 

@@ -6019,6 +6019,15 @@ class ReportGeneratorWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
+        # --- Top row: Exit, top-right ---
+        exit_row = QHBoxLayout()
+        exit_row.addStretch()
+        exit_btn = QPushButton("Exit")
+        exit_btn.setProperty("role", "exit")
+        exit_btn.clicked.connect(self.close)
+        exit_row.addWidget(exit_btn)
+        main_layout.addLayout(exit_row)
+
         # --- Log area ---
         log_group = QGroupBox("Log")
         log_lay = QVBoxLayout(log_group)
@@ -6220,7 +6229,7 @@ class ReportGeneratorWindow(QMainWindow):
 
         main_layout.addWidget(action_group)
 
-        # --- Bottom row: link + exit ---
+        # --- Bottom row: link to the report folder ---
         bottom_row = QHBoxLayout()
         link_var = QLabel("")
         link_var.setStyleSheet("QLabel { color: #4ea3ff; }")
@@ -6229,19 +6238,6 @@ class ReportGeneratorWindow(QMainWindow):
         link_var.mousePressEvent = self._open_report_folder
         bottom_row.addWidget(link_var)
         bottom_row.addStretch()
-        exit_btn = QPushButton("Exit")
-        exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621;
-                padding: 6px 18px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
-        exit_btn.clicked.connect(self.close)
-        bottom_row.addWidget(exit_btn)
         main_layout.addLayout(bottom_row)
 
         # --- Signals ---

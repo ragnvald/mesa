@@ -166,6 +166,10 @@ class SegmentationSetupWindow(QMainWindow):
                     "Segmentation-and-clustering#3-classification-segmentation_runpy",
                     "Open the Classification guide in the wiki"),
                 0, Qt.AlignTop)
+        exit_btn = QPushButton("Exit")
+        exit_btn.setProperty("role", "exit")
+        exit_btn.clicked.connect(self.close)
+        _intro_row.addWidget(exit_btn, 0, Qt.AlignTop)
         layout.addLayout(_intro_row)
 
         form = QGridLayout()
@@ -276,7 +280,7 @@ class SegmentationSetupWindow(QMainWindow):
 
         layout.addStretch()
 
-        # Config-only: Save settings to the far left, Exit bottom-right. The
+        # Config-only: Save settings to the far left (Exit is top-right). The
         # clustering itself runs as the Classification stage of Process (step 3).
         btn_row = QHBoxLayout()
         self._save_btn = QPushButton("Save settings")
@@ -284,9 +288,6 @@ class SegmentationSetupWindow(QMainWindow):
         self._save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(self._save_btn)
         btn_row.addStretch()
-        exit_btn = QPushButton("Exit")
-        exit_btn.clicked.connect(self.close)
-        btn_row.addWidget(exit_btn)
         layout.addLayout(btn_row)
 
     # -- helpers ---------------------------------------------------------

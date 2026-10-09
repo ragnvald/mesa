@@ -2173,6 +2173,15 @@ class ProcessRunnerWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
+        # Exit sits top-right, above the log.
+        exit_row = QHBoxLayout()
+        exit_row.addStretch()
+        exit_btn = QPushButton("Exit")
+        exit_btn.setProperty("role", "exit")
+        exit_btn.clicked.connect(self.close)
+        exit_row.addWidget(exit_btn)
+        layout.addLayout(exit_row)
+
         # Log area
         log_group = QGroupBox("Log output")
         log_lay = QVBoxLayout(log_group)
@@ -2498,17 +2507,6 @@ class ProcessRunnerWindow(QMainWindow):
         self._pause_btn = QPushButton("Pause")
         self._cancel_btn = QPushButton("Cancel")
         self._map_btn = QPushButton("Progress map")
-        exit_btn = QPushButton("Exit")
-        exit_btn.setObjectName("CornerExitButton")
-        exit_btn.setStyleSheet("""
-            QPushButton#CornerExitButton {
-                background: #eadfc8; border: 1px solid #b79f73;
-                border-radius: 4px; color: #453621;
-                padding: 6px 18px;
-            }
-            QPushButton#CornerExitButton:hover { background: #e1d1ae; }
-            QPushButton#CornerExitButton:pressed { background: #d4c094; }
-        """)
 
         # Pause and Cancel are disabled until a run is in progress.
         self._pause_btn.setEnabled(False)
@@ -2519,7 +2517,6 @@ class ProcessRunnerWindow(QMainWindow):
         btn_row.addWidget(self._cancel_btn)
         btn_row.addWidget(self._map_btn)
         btn_row.addStretch()
-        btn_row.addWidget(exit_btn)
         # Absorb leftover vertical space above the button row so the form
         # sits compactly at the top once the log is capped at 180px.
         layout.addStretch(1)
@@ -2530,7 +2527,6 @@ class ProcessRunnerWindow(QMainWindow):
         self._pause_btn.clicked.connect(self._on_pause_click)
         self._cancel_btn.clicked.connect(self._on_cancel_click)
         self._map_btn.clicked.connect(self._open_progress_map)
-        exit_btn.clicked.connect(self.close)
 
         # Mode toggle: hide the per-stage grid + rename the button in Normal.
         def _apply_mode():
