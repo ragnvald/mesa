@@ -3606,7 +3606,6 @@ class GeocodeManagerWindow(QMainWindow):
 
         btn_col = QVBoxLayout()
         self.h3_suggest_btn = QPushButton("Suggest H3")
-        self.h3_suggest_btn.setProperty("role", "primary")
         self.h3_suggest_btn.clicked.connect(self._suggest_h3)
         btn_col.addWidget(self.h3_suggest_btn)
         self.h3_generate_btn = QPushButton("Generate H3")
@@ -3673,7 +3672,6 @@ class GeocodeManagerWindow(QMainWindow):
 
         btn_col = QVBoxLayout()
         self.qdgc_suggest_btn = QPushButton("Suggest QDGC")
-        self.qdgc_suggest_btn.setProperty("role", "primary")
         self.qdgc_suggest_btn.clicked.connect(self._suggest_qdgc)
         btn_col.addWidget(self.qdgc_suggest_btn)
         self.qdgc_generate_btn = QPushButton("Generate QDGC")

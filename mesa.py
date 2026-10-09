@@ -5152,7 +5152,7 @@ class MesaMainWindow(QMainWindow):
         reload_btn.clicked.connect(self._load_config_editor)
         btn_row.addWidget(reload_btn)
         save_btn = QPushButton("Save all")
-        save_btn.setProperty("role", "success")
+        save_btn.setProperty("role", "primary")
         save_btn.setToolTip("Apply all edited values.")
         save_btn.clicked.connect(self._save_config_editor)
         btn_row.addWidget(save_btn)

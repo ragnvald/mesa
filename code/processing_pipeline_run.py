@@ -2506,6 +2506,8 @@ class ProcessRunnerWindow(QMainWindow):
         self._process_btn = QPushButton("Process")
         self._pause_btn = QPushButton("Pause")
         self._cancel_btn = QPushButton("Cancel")
+        self._process_btn.setProperty("role", "primary")
+        self._cancel_btn.setProperty("role", "danger")
         self._map_btn = QPushButton("Progress map")
 
         # Pause and Cancel are disabled until a run is in progress.

@@ -451,7 +451,6 @@ class AtlasManagerWindow(QMainWindow):
         btn_row.addWidget(create_btn)
 
         import_btn = QPushButton("Import")
-        import_btn.setProperty("role", "primary")
         import_btn.clicked.connect(self._on_import_clicked)
         btn_row.addWidget(import_btn)
 
@@ -553,7 +552,7 @@ class AtlasManagerWindow(QMainWindow):
         controls_row.addWidget(self.reload_btn)
 
         save_btn = QPushButton("Save")
-        save_btn.setProperty("role", "success")
+        save_btn.setProperty("role", "primary")
         save_btn.clicked.connect(self._save_current)
         controls_row.addWidget(save_btn)
 

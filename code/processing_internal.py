@@ -5414,6 +5414,7 @@ class ProcessingInternalWindow(QMainWindow):
         # Buttons
         btn_layout = QHBoxLayout()
         self._btn_process = QPushButton("Process")
+        self._btn_process.setProperty("role", "primary")
         self._btn_process.clicked.connect(self._run)
         btn_layout.addWidget(self._btn_process)
         btn_layout.addStretch()

@@ -1720,6 +1720,7 @@ class ComparisonWindow(QMainWindow):
         # Footer
         footer_layout = QHBoxLayout()
         btn_report = QPushButton("Export report")
+        btn_report.setProperty("role", "primary")
         btn_report.clicked.connect(self._export_comprehensive_report)
         footer_layout.addWidget(btn_report)
         footer_layout.addStretch()
