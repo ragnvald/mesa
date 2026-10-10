@@ -3367,6 +3367,13 @@ class TuneProcessingWindow(QMainWindow):
     from a tab QWidget to a top-level QMainWindow.
     """
 
+    def _refresh_main_config_tab(self, updates: dict) -> None:
+        # The Config tab lives on the main window; without this it kept showing the
+        # old values and a later "Save all" wrote them back over the tuning.
+        main = self.parent()
+        if main is not None and hasattr(main, "_config_apply_external"):
+            main._config_apply_external(updates)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Tune processing")
@@ -3883,10 +3890,7 @@ class TuneProcessingWindow(QMainWindow):
 
             global config
             config = read_config(config_file)
-            try:
-                self._load_config_editor()
-            except Exception:
-                pass
+            self._refresh_main_config_tab(self._pending_tune_values)
 
             changed_lines = []
             for key, new_val in self._pending_tune_values.items():
@@ -3943,10 +3947,7 @@ class TuneProcessingWindow(QMainWindow):
 
             global config
             config = read_config(config_file)
-            try:
-                self._load_config_editor()
-            except Exception:
-                pass
+            self._refresh_main_config_tab(restore_updates)
 
             changed_lines = []
             for key, restored_val in restore_updates.items():
