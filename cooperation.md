@@ -1,6 +1,21 @@
 # Cooperation log
 
-A version-controlled dialog between Claude sessions running on different developer hosts (Windows / Apple Silicon). Each entry is dated and signed with the host so it stays clear who saw what when. Append; do not rewrite. Mark a previous entry as superseded inline if a newer one overrides it.
+A version-controlled dialog with whoever we have to stay aligned with. That started as the Claude
+sessions on the two developer hosts (Windows / Apple Silicon), and now also covers the sibling
+projects — `mesa-server` above all. Each entry is dated and signed with the counterpart so it stays
+clear who saw what when. Append; do not rewrite. Mark a previous entry as superseded inline if a
+newer one overrides it.
+
+The scope was widened on 2026-08-09. `history.md` had described this file as where "the coordination
+with sibling projects lives" while the preamble here said host-to-host, and the mesa-server
+correspondence had ended up as loose files in the repository root because neither description
+clearly claimed it. It belongs here.
+
+Two exceptions to append-only:
+- The **Agreed formats** section below is maintained in place. It states what the projects have
+  agreed to *write*, and a contract is only useful in its current form.
+- Full letters live in [`docs/exchange/`](docs/exchange/), dated and verbatim. This file carries the
+  decisions; that folder carries the audit trail.
 
 Format for entries:
 
@@ -21,6 +36,107 @@ Things that belong elsewhere:
 - One-shot fix narratives → `learning.md` (with date, rule, why, how to apply, non-regression).
 - Coding rules and what-goes-where → `CLAUDE.md`.
 - User-facing tuning notes → inline near the `config.ini` key.
+
+---
+
+# Agreed formats
+
+**Maintained in place, not appended to.** What desktop and mesa-server have agreed to write. The
+letters that settled each point are in [`docs/exchange/`](docs/exchange/); this section is the
+current state, so that nobody has to reconstruct a contract by reading correspondence in order.
+
+## `tbl_stacked` columns (agreed 2026-08-08)
+
+Grain is one row per (cell × asset object). Nothing cell-grained or asset-group-grained belongs
+here.
+
+```
+code, ref_geocodegroup, name_gis_geocodegroup,
+ref_asset_group, name_gis_assetgroup, asset_group_name, total_asset_objects,
+importance, susceptibility, sensitivity, sensitivity_code, sensitivity_description
+```
+
+Deliberately absent: `geometry` and `area_m2` (cell-grained — join from `tbl_geocode_object` /
+`tbl_flat`), `id_x` / `id_y` (merge artefacts), `attributes` (asset-object-grained), `grid_cell`
+(internal chunking). Written as plain Parquet, not GeoParquet, so no reader can reach for
+`gpd.read_parquet` by accident.
+
+Open: `overlap_m2`. mesa-server has it, desktop does not. Desktop computes exactly that value per
+row in the 1 m² boundary rule and discards it; it is the one genuinely per-row value in the table
+and cannot be looked up afterwards.
+
+## GeoParquet metadata (agreed 2026-08-08)
+
+Any writer that assembles its own Arrow schema must write the schema-level `geo` header itself.
+`GeoDataFrame.to_arrow()` supplies only per-field geoarrow metadata, and a file with just that is
+complete but rejected by `gpd.read_parquet`. Readers on both sides recover through Arrow rather
+than failing. Rollout order when a format changes: **readers first, writers second.**
+
+## MBTiles metadata (agreed 2026-08-09)
+
+`mesa_aggregation`, alongside the existing `mesa_scale`, `mesa_value_min`, `mesa_value_max`,
+`mesa_legend`. Written on **every** layer so a viewer never has to treat a missing field as a
+state of its own.
+
+| value | meaning |
+|---|---|
+| `max` | highest value under the pixel wins |
+| `none` | no rule; whichever candidate was drawn last |
+
+Reserved for the value-raster work: `mode`, `mean`, `count`.
+
+Draw order is by the numeric column, never by the A–E letter — see the open question below.
+
+## Generated geocode group names (agreed 2026-09-16, desktop + mesa-server + mesa_demodata)
+
+Generated grids carry a two-digit level in `name_gis_geocodegroup`: `H3_R{res:02d}` (0–15) and
+`QDGC_L{level:02d}` (0–12) — `H3_R07`, `QDGC_L06`, `H3_R10`. Built in `mesa_shared.h3_group_name()` /
+`qdgc_group_name()` from 5.7.0 (`e0e2412`); mesa-server's `worker/generate_geocodes.py` has
+functions of the same name and output. Only the label is MESA's; the H3 cell index and QDGC cell
+code in `code` are unchanged. `basic_mosaic` and imported groups keep their names.
+
+- **Writers** produce only the padded form. A package never mixes the two forms: every generated
+  grid in a run comes from one writer.
+- **Renaming** is desktop's job, at startup, after restore and before generation. mesa-server
+  deliberately does not rename old names in packages it reads — it copies `tbl_geocode_group` /
+  `tbl_geocode_object` through as they are, so renaming only its own tables would make a package
+  inconsistent with itself.
+- **Readers** must not rely on text order to find the coarsest grid. Desktop gets it from padded
+  names; mesa-server's `primary_geocode()` reads the level as a number, so old-name packages give
+  the same answer.
+- Desktop reads packages only through restore. If a viewer ever opens a package zip directly, tell
+  mesa-server: their answer on old names depends on it.
+- The demo packages (5.7.0) carry no group names beyond the `config.ini` example, which comes from
+  the template (`e0e75a0`).
+
+## Open across the two projects
+
+- **5.7.0 packages with output are refused by mesa-server.** Their contract accepts pre-built
+  output only from 5.5.0 and 5.6.0 (`contracts/package-contract-5.5.0.json:79`) until they have
+  checked that the 5.7 output schema is unchanged apart from the names. Input-only 5.7 packages
+  import as before. **Awaiting mesa-server adding 5.7.0**; relevant from the 5.7.0 release on.
+- **mesa-server's padded-name writer is not deployed.** Changed and tested locally 2026-09-16;
+  the deploy waits on a changed SSH host key being verified. Until then the server still writes
+  `H3_R7`-style names, which desktop renames on restore.
+
+- **A–E direction.** Desktop: `[A] range = 21-25`, "Very high", `#bd0026`. mesa-server reports the
+  opposite, E most sensitive. `build_code_from_numeric_if_missing` hard-codes nothing — the meaning
+  comes entirely from `config.ini` — so if the report holds, the same letters carry opposite
+  meanings across a shared package, reaching legends, QGIS styling and any report naming a class.
+  `read_sensitivity_palette_from_config`, vendored from desktop, additionally hard-codes
+  `A = #bd0026 … E = #ffffb2`. **Awaiting mesa-server's check of `[A] range` and
+  `[A] category_colour`.**
+- **Per-group geometry join.** Desktop joins `tbl_geocode_object` over the whole table at the end
+  of flatten — measured 1.47 GB per 3 million cells, ~9.5 GB extrapolated to 19.4 million. Fine on
+  128 GB; flagged as a hazard on mesa-server's 32 GB. **2026-08-09: mesa-server reports testing at
+  32 GB and that it went fine.** Downgraded from an obligation to desktop hygiene — but not closed,
+  because "it completed" and "it had headroom" are different claims and no peak figure was quoted.
+  A peak RSS number, and the cell count it was measured on, would close it. See the 2026-07-28
+  Albertine entry in `history.md` for why this project asks: a run the pre-flight gate estimated at
+  6.9 GB peaked at 85.65 GB, and completed.
+- **Value raster / tile pyramid.** Render the finest zoom once and aggregate upward; measured worth
+  ~6.9x on its own and ~49x combined with sharing one geometry pass across layers. Changes how
+  coarse tiles look, so it is not to be started unilaterally.
 
 ---
 
