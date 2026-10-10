@@ -2451,7 +2451,7 @@ class ProcessRunnerWindow(QMainWindow):
 
         # Four-column layout (compact — no per-stage hint column, so the dialog
         # stays short on small laptop screens):
-        #   col 0: all stages 1-10 (Prep → Analysis) in one column
+        #   col 0: all stages 1-9 (Prep → Analysis) in one column
         #   col 1: visual gap
         #   col 2: Options A (explode/sliver, segment geocodes)
         #   col 3: Options B (segment mode + zones k)
@@ -2468,7 +2468,7 @@ class ProcessRunnerWindow(QMainWindow):
         # Status cells stay empty when a stage is ready (the enabled checkbox
         # is signal enough); when something blocks the stage we show the
         # reason instead, so the column only fills up with words worth reading.
-        self._cb_data_master = QCheckBox("Process (1. Prep → 8. QGIS project)")
+        self._cb_data_master = QCheckBox("Process (1. Prep → 7. QGIS project)")
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
@@ -2568,7 +2568,7 @@ class ProcessRunnerWindow(QMainWindow):
             c.setSpacing(2)
             return c
 
-        # col 0: all stages 1-10 stacked in a single column.
+        # col 0: all stages 1-9 stacked in a single column.
         stage_col = _stage_col()
         self._cb_prep      = _mk_sub(stage_col, "1. Prep (workspace, status)", avail_data.available)
         self._cb_intersect = _mk_sub(stage_col, "2. Intersect (build tbl_stacked)", avail_data.available)

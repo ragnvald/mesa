@@ -4268,7 +4268,7 @@ class MesaMainWindow(QMainWindow):
                 ("Parameters", edit_processing_setup,
                  "Adjust weights, thresholds and other processing rules."),
                 ("Classification", open_segmentation_setup,
-                 "Set up the \"what kind\" sensitivity-pattern typology; it runs automatically during Process."),
+                 "Set up the \"what kind\" sensitivity-pattern typology and choose whether it runs during Process."),
                 ("Special focus", open_special_focus,
                  "Lines and Analysis setup, grouped in one popup."),
             ]),
@@ -5722,8 +5722,8 @@ class MesaMainWindow(QMainWindow):
             "browsed, styled, and combined with other layers in a shared "
             "spatial data infrastructure. The popup lets you point at a "
             "GeoNode instance, save credentials, choose which layers to "
-            "publish (sensitivity geocode layers and supporting tables), "
-            "and optionally bundle them into a single GeoNode Map.\n\n"
+            "publish (geocode groups, segmentation levels, assets and "
+            "supporting tables), and get a map and a dashboard per group.\n\n"
             "Existing layers with the same name are detected before upload "
             "so you can either replace or skip them per layer; partial runs "
             "and cancellation are supported. Use this when you want to "
