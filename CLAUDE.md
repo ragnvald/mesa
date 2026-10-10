@@ -76,7 +76,6 @@ the same file, so an incident that crosses the boundary should be logged on both
 
 ## Documentation in `docs/`
 
-- `docs/MESA_User_Guide.docx` is an end-user Word manual compiled from the `mesa.wiki` repository (Home, What's new, Quickstart, User-interface, Data, Method, Indexes, QGIS, Definitions, Advanced, Troubleshooting). It targets analysts/operators, not developers. When the wiki content changes substantially, regenerate the guide so the two stay in sync.
-- The guide was generated using docx-js. The build script lives in the Cowork session output folder (`build_user_guide.js`) — not yet checked in. If a future session needs to rebuild it, recreate the script from the wiki content rather than searching for the old session artefact.
-- Source-of-truth ordering: `mesa.wiki` is canonical; `docs/MESA_User_Guide.docx` is a derived artefact. Do not edit the .docx by hand and expect the wiki to follow.
-- `docs/technical_docs.docx` is a separate, older developer-focused doc and should not be confused with the user guide.
+- `docs/MESA_User_Guide_en.docx` and `docs/MESA_User_Guide_pt.docx` are the end-user Word manuals (Home, What's new, Quickstart, User-interface, Data, Method, Indexes, QGIS, Definitions, Advanced, Troubleshooting). They target analysts/operators, not developers.
+- Both are built by [devtools/build_user_guide.py](devtools/build_user_guide.py) from a hand-maintained EN/PT content tree inside that script, with the release stamped in its `VERSION` constant. Update the tree and re-run the script; do not hand-edit a .docx.
+- Source-of-truth ordering: `mesa.wiki` is canonical prose; the .docx files are derived artefacts. When the wiki content changes substantially, mirror it into `build_user_guide.py` and regenerate so the two stay in sync.
