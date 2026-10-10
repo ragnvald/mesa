@@ -156,3 +156,50 @@ def test_asset_group_colour_follows_the_map_rule() -> None:
     assert asset_styling.group_fill_color('{"fill_color": "#123456"}', "B", cfg) == "#123456"
     assert asset_styling.group_fill_color(None, "b", cfg) == "#f03b20"
     assert asset_styling.group_fill_color("", "", cfg) == asset_styling.FALLBACK_GROUP_COLOR
+
+
+def test_owa_class_labels_sort_as_text_and_cover_the_range() -> None:
+    labels = [ge.owa_class_label(v) for v in (1, 9.99, 10, 55, 99, 100)]
+    assert labels == ["01-10", "01-10", "10-20", "50-60", "90-100", "90-100"]
+    assert sorted(set(labels)) == ["01-10", "10-20", "50-60", "90-100"]
+    assert ge.owa_class_label(None) is None and ge.owa_class_label(float("nan")) is None
+
+
+def test_prepare_overview_adds_area_and_owa_class() -> None:
+    gdf = _group_gdf()
+    gdf["area_m2"] = 2_000_000.0
+    out = ge._prepare_overview(gdf)
+    assert out["area_km2"].sum() == 2.0 * len(gdf)
+    assert out["index_owa_class"].notna().all()
+
+
+def _seg_ctx(gdf):
+    return {"layer": {"label": "L", "id": "segmentation:L"}, "layer_name": "mesa_seg_l",
+            "gdf": gdf, "geoparquet_dir": ".", "config_path": None,
+            "colors": {}, "descs": {}, "log": lambda m: None}
+
+
+def test_segmentation_styles_signatures_default_and_clusters_when_present() -> None:
+    gdf = _group_gdf().head(4)
+    gdf["signature"] = ["A+B", "A+B", "(no overlap)", "C"]
+    gdf["area_km2"] = [1.0, 1.0, 5.0, 0.5]
+    styles = ge._styles_segmentation(_seg_ctx(gdf))
+    assert [s["title"] for s in styles] == ["Signatures"]
+    doc = xml.dom.minidom.parseString(styles[0]["sld"].encode("utf-8"))
+    lits = [n.firstChild.data for n in doc.getElementsByTagName("ogc:Literal")]
+    assert lits == ["(no overlap)", "A+B", "C"]   # most area first
+    gdf["cluster"] = ["cluster 0", "cluster 1", "cluster 1", None]
+    styles = ge._styles_segmentation(_seg_ctx(gdf))
+    assert [s["name"] for s in styles] == ["mesa_seg_l", "mesa_seg_l_clusters"]
+
+
+def test_dashboards_only_use_columns_that_exist() -> None:
+    gdf = _group_gdf().head(4)
+    gdf["signature"] = ["A", "A", "B", "C"]
+    gdf["area_km2"] = 1.0
+    gdf["code"] = ["1", "2", "3", "4"]
+    for w in ge._dashboard_segmentation(_seg_ctx(gdf)):
+        for key in ("field", "group_by"):
+            if key in w:
+                assert w[key] in gdf.columns, w
+    assert "cluster" not in {w.get("group_by") for w in ge._dashboard_segmentation(_seg_ctx(gdf))}

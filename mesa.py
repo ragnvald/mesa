@@ -2621,8 +2621,9 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_cancel_event = __import__("threading").Event()
         self._geonode_layer_checkboxes: dict = {}   # id → QCheckBox
         self._geonode_dataset_title_edits: dict = {}   # id → QLineEdit
-        self._geonode_map_title_edits: dict = {}       # id → QLineEdit (geocode groups)
-        saved_ds_titles, saved_map_titles = self._geonode_load_titles()
+        self._geonode_map_title_edits: dict = {}       # id → QLineEdit (layers with a map)
+        self._geonode_dash_title_edits: dict = {}      # id → QLineEdit (layers with a dashboard)
+        saved_ds_titles, saved_map_titles, saved_dash_titles = self._geonode_load_titles()
         self._geonode_confirm_event = __import__("threading").Event()
         self._geonode_confirm_result: str = "skip"  # "replace" or "skip"
 
@@ -2677,15 +2678,16 @@ class GeoNodePublishWindow(QMainWindow):
             gpq_dir = _detect_geoparquet_dir()
             info = _layer_info(gpq_dir)
             sens_layers = info["sensitivity"]
+            seg_layers = info.get("segmentation", [])
             supp_layers = info["supporting"]
         except Exception:
             import geonode_export as _ge  # type: ignore[import]
-            sens_layers = []
+            sens_layers, seg_layers = [], []
             supp_layers = [{**l, "available": False, "row_count": None}
                            for l in _ge.SUPPORTING_LAYERS]
 
         # Store all layer defs for use in export
-        self._geonode_all_layers = sens_layers + supp_layers
+        self._geonode_all_layers = sens_layers + seg_layers + supp_layers
 
         def _add_section_header(text: str):
             lbl = QLabel(text)
@@ -2720,12 +2722,10 @@ class GeoNodePublishWindow(QMainWindow):
                 detail_parts.append("not yet generated")
             if layer.get("size_note"):
                 detail_parts.append(layer["size_note"])
-            if str(layer.get("id", "")).startswith("sensitivity:"):
-                detail_parts.append("dataset + map, 5 layers")
-            elif layer.get("sld_field"):
-                detail_parts.append("A-E styled")
-            elif layer.get("asset_style_field"):
-                detail_parts.append("MESA map colours")
+            if layer.get("detail"):
+                detail_parts.append(layer["detail"])
+            if layer.get("dashboard"):
+                detail_parts.append("dashboard")
             if detail_parts:
                 detail = QLabel("    " + "  ·  ".join(detail_parts))
                 detail.setStyleSheet(
@@ -2759,12 +2759,18 @@ class GeoNodePublishWindow(QMainWindow):
                     saved_ds_titles.get(lid, layer["layer_name"]),
                     f"Title shown on GeoNode. The technical name stays "
                     f"'{layer['layer_name']}'.")
-                if lid.startswith("sensitivity:"):
+                if layer.get("map"):
                     self._geonode_map_title_edits[lid] = _title_row(
                         1, "Map title",
                         saved_map_titles.get(lid, _ge.default_map_title(layer)),
-                        "Title of the GeoNode map for this geocode group. Re-publishing "
+                        "Title of the GeoNode map for this layer. Re-publishing "
                         "replaces an earlier MESA map with the same title.")
+                if layer.get("dashboard"):
+                    self._geonode_dash_title_edits[lid] = _title_row(
+                        2, "Dashboard title",
+                        saved_dash_titles.get(lid, _ge.default_dashboard_title(layer)),
+                        "Title of the GeoNode dashboard for this layer. Re-publishing "
+                        "replaces an earlier MESA dashboard with the same title.")
                 row_layout.addLayout(title_grid)
 
             inner_vbox.addWidget(row_widget)
@@ -2780,13 +2786,22 @@ class GeoNodePublishWindow(QMainWindow):
             placeholder.setStyleSheet("color: #aaa; font-size: 9px;")
             inner_vbox.addWidget(placeholder)
 
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #d4c8a8; margin: 6px 0px 2px 0px;")
-        inner_vbox.addWidget(sep)
+        def _add_separator():
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setStyleSheet("color: #d4c8a8; margin: 6px 0px 2px 0px;")
+            inner_vbox.addWidget(sep)
 
-        # Section 2: supporting layers
+        # Section 2: segmentation (one per segmented geocode level)
+        if seg_layers:
+            _add_separator()
+            _add_section_header("Segmentation (one map each)")
+            for layer in seg_layers:
+                _add_layer_row(layer)
+
+        _add_separator()
+
+        # Section 3: supporting layers
         _add_section_header("Supporting data")
         for layer in supp_layers:
             _add_layer_row(layer)
@@ -2872,10 +2887,15 @@ class GeoNodePublishWindow(QMainWindow):
 
         # Map option
         self._geonode_create_map_cb = QCheckBox(
-            "Create a GeoNode map per geocode group (Sensitivity, OWA index, "
-            "Importance, # asset groups, # asset objects)")
+            "Create a GeoNode map per geocode group and segmentation level "
+            "(one layer per MESA style)")
         self._geonode_create_map_cb.setChecked(True)
         right.addWidget(self._geonode_create_map_cb)
+        self._geonode_create_dash_cb = QCheckBox(
+            "Create a GeoNode dashboard per geocode group and segmentation level "
+            "(area charts, counters and a map)")
+        self._geonode_create_dash_cb.setChecked(True)
+        right.addWidget(self._geonode_create_dash_cb)
 
         # Log
         log_group = QGroupBox("Log")
@@ -2921,7 +2941,7 @@ class GeoNodePublishWindow(QMainWindow):
         top.addWidget(self._geonode_refresh_btn)
         top.addWidget(QLabel("Show"))
         self._geonode_kind_combo = QComboBox()
-        self._geonode_kind_combo.addItems(["Datasets and maps", "Datasets", "Maps"])
+        self._geonode_kind_combo.addItems(["All", "Datasets", "Maps", "Dashboards"])
         self._geonode_kind_combo.currentIndexChanged.connect(self._geonode_manage_apply_filter)
         top.addWidget(self._geonode_kind_combo)
         self._geonode_filter_edit = QLineEdit()
@@ -2933,7 +2953,7 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_res_table = QTableWidget(0, len(self._MANAGE_COLS))
         self._geonode_res_table.setHorizontalHeaderLabels(self._MANAGE_COLS)
         self._geonode_res_table.horizontalHeaderItem(6).setToolTip(
-            "Published by MESA: dataset name starts with mesa_, or map created by MESA.")
+            "Published by MESA: dataset name starts with mesa_, or map/dashboard created by MESA.")
         hdr = self._geonode_res_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -2997,7 +3017,7 @@ class GeoNodePublishWindow(QMainWindow):
         def _run():
             from geonode_export import list_resources as _list  # type: ignore[import]
             try:
-                res = _list(*creds, "datasets") + _list(*creds, "maps")
+                res = [r for k in ("datasets", "maps", "dashboards") for r in _list(*creds, k)]
                 self._geonode_manage_queue.put(("list", res, None))
             except Exception as exc:
                 self._geonode_manage_queue.put(("list", None, str(exc)))
@@ -3028,7 +3048,7 @@ class GeoNodePublishWindow(QMainWindow):
         self._geonode_manage_apply_filter()
 
     def _geonode_manage_apply_filter(self, *_):
-        kind = {1: "dataset", 2: "map"}.get(self._geonode_kind_combo.currentIndex())
+        kind = {1: "dataset", 2: "map", 3: "dashboard"}.get(self._geonode_kind_combo.currentIndex())
         needle = self._geonode_filter_edit.text().strip().lower()
         t = self._geonode_res_table
         for r in range(t.rowCount()):
@@ -3069,14 +3089,16 @@ class GeoNodePublishWindow(QMainWindow):
         if not creds or not chosen:
             return
         n_ds = sum(1 for c in chosen if c["kind"] == "dataset")
-        n_map = len(chosen) - n_ds
+        n_map = sum(1 for c in chosen if c["kind"] == "map")
+        n_dash = len(chosen) - n_ds - n_map
         preview = "\n".join(f"  {c['kind']}: {c['title']}" for c in chosen[:12])
         if len(chosen) > 12:
             preview += f"\n  … and {len(chosen) - 12} more"
-        warn = ("\n\nMaps that use a deleted dataset will lose that layer." if n_ds else "")
+        warn = ("\n\nMaps and dashboards that use a deleted dataset will lose it." if n_ds else "")
         ans = QMessageBox.warning(
             self, "Delete from GeoNode",
-            f"Permanently delete {n_ds} dataset(s) and {n_map} map(s) from "
+            f"Permanently delete {n_ds} dataset(s), {n_map} map(s) and {n_dash} "
+            f"dashboard(s) from "
             f"{creds[0]}?\n\n{preview}{warn}\n\nThis cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
@@ -3084,8 +3106,8 @@ class GeoNodePublishWindow(QMainWindow):
         if ans != QMessageBox.StandardButton.Yes:
             return
         self._geonode_manage_set_busy(True)
-        # Maps first, so no map is left pointing at a dataset that is already gone.
-        ordered = sorted(chosen, key=lambda c: c["kind"] != "map")
+        # Maps and dashboards first, so none is left pointing at a dataset already gone.
+        ordered = sorted(chosen, key=lambda c: c["kind"] == "dataset")
 
         def _run():
             from geonode_export import delete_resource as _delete  # type: ignore[import]
@@ -3116,9 +3138,11 @@ class GeoNodePublishWindow(QMainWindow):
                         self._geonode_manage_log.appendPlainText(f"Could not read the list: {err}")
                     else:
                         self._geonode_manage_loaded = True
-                        n_ds = sum(1 for r in res if r["kind"] == "dataset")
+                        counts = {k: sum(1 for r in res if r["kind"] == k)
+                                  for k in ("dataset", "map", "dashboard")}
                         self._geonode_manage_log.appendPlainText(
-                            f"{n_ds} dataset(s) and {len(res) - n_ds} map(s) on the server.")
+                            f"{counts['dataset']} dataset(s), {counts['map']} map(s) and "
+                            f"{counts['dashboard']} dashboard(s) on the server.")
                         self._geonode_manage_fill(res)
                 elif msg[0] == "deleted":
                     self._geonode_manage_set_busy(False)
@@ -3143,18 +3167,21 @@ class GeoNodePublishWindow(QMainWindow):
             pass
         return cfg
 
-    def _geonode_load_titles(self) -> tuple[dict, dict]:
+    _TITLE_SECTIONS = ("dataset_titles", "map_titles", "dashboard_titles")
+
+    def _geonode_load_titles(self) -> tuple[dict, dict, dict]:
         try:
             cfg = self._geonode_settings_cfg()
-            return (dict(cfg["dataset_titles"]) if cfg.has_section("dataset_titles") else {},
-                    dict(cfg["map_titles"]) if cfg.has_section("map_titles") else {})
+            return tuple(dict(cfg[s]) if cfg.has_section(s) else {} for s in self._TITLE_SECTIONS)
         except Exception:
-            return {}, {}
+            return {}, {}, {}
 
-    def _geonode_titles(self) -> tuple[dict, dict]:
-        """Current dataset and map titles from the dialog, keyed by layer id."""
-        return ({lid: e.text().strip() for lid, e in self._geonode_dataset_title_edits.items()},
-                {lid: e.text().strip() for lid, e in self._geonode_map_title_edits.items()})
+    def _geonode_titles(self) -> tuple[dict, dict, dict]:
+        """Current dataset, map and dashboard titles from the dialog, keyed by layer id."""
+        return tuple({lid: e.text().strip() for lid, e in edits.items()}
+                     for edits in (self._geonode_dataset_title_edits,
+                                   self._geonode_map_title_edits,
+                                   self._geonode_dash_title_edits))
 
     def _geonode_load_settings(self):
         try:
@@ -3176,8 +3203,7 @@ class GeoNodePublishWindow(QMainWindow):
                 "username": self._geonode_username.text().strip(),
             }
             # Keep titles of layers not shown this time (e.g. a group not yet processed).
-            ds_titles, map_titles = self._geonode_titles()
-            for section, titles in (("dataset_titles", ds_titles), ("map_titles", map_titles)):
+            for section, titles in zip(self._TITLE_SECTIONS, self._geonode_titles()):
                 merged = dict(cfg[section]) if cfg.has_section(section) else {}
                 for k, v in titles.items():
                     if v:
@@ -3230,22 +3256,29 @@ class GeoNodePublishWindow(QMainWindow):
             return
 
         import geonode_export as _ge  # type: ignore[import]
-        ds_titles, map_titles = self._geonode_titles()
+        ds_titles, map_titles, dash_titles = self._geonode_titles()
         create_map = self._geonode_create_map_cb.isChecked()
-        if create_map:
-            # Publishing a map replaces earlier MESA maps with the same title, so
-            # two groups sharing a title would leave only the last one.
-            layers_by_id = {l["id"]: l for l in getattr(self, "_geonode_all_layers", [])}
+        create_dash = self._geonode_create_dash_cb.isChecked()
+        # Publishing a map or dashboard replaces earlier MESA ones with the same
+        # title, so two layers sharing a title would leave only the last one.
+        layers_by_id = {l["id"]: l for l in getattr(self, "_geonode_all_layers", [])}
+        for enabled, kind, titles, edits, default in (
+                (create_map, "map", map_titles, self._geonode_map_title_edits,
+                 _ge.default_map_title),
+                (create_dash, "dashboard", dash_titles, self._geonode_dash_title_edits,
+                 _ge.default_dashboard_title)):
+            if not enabled:
+                continue
             seen: dict = {}
             for lid in selected:
-                if lid not in self._geonode_map_title_edits:
+                if lid not in edits:
                     continue
-                t = map_titles.get(lid) or _ge.default_map_title(layers_by_id[lid])
+                t = titles.get(lid) or default(layers_by_id[lid])
                 if t in seen:
                     QMessageBox.warning(
-                        self, "Duplicate map title",
-                        f"'{seen[t]}' and '{layers_by_id[lid]['label']}' both have the map "
-                        f"title '{t}'. Give each geocode group its own map title.")
+                        self, f"Duplicate {kind} title",
+                        f"'{seen[t]}' and '{layers_by_id[lid]['label']}' both have the {kind} "
+                        f"title '{t}'. Give each its own {kind} title.")
                     return
                 seen[t] = layers_by_id[lid]["label"]
 
@@ -3286,6 +3319,8 @@ class GeoNodePublishWindow(QMainWindow):
                     create_map=create_map,
                     dataset_titles=ds_titles,
                     map_titles=map_titles,
+                    create_dashboard=create_dash,
+                    dashboard_titles=dash_titles,
                 )
                 success_count = sum(1 for r in results if r["success"])
                 fail_count = len(results) - success_count
@@ -3346,6 +3381,9 @@ class GeoNodePublishWindow(QMainWindow):
                 elif msg.startswith("__MAP__:"):
                     map_url = msg[len("__MAP__:"):]
                     self._geonode_log.appendPlainText(f"  Map URL: {map_url}")
+                elif msg.startswith("__DASHBOARD__:"):
+                    self._geonode_log.appendPlainText(
+                        f"  Dashboard URL: {msg[len('__DASHBOARD__:'):]}")
                 else:
                     self._geonode_log.appendPlainText(msg)
         except _queue.Empty:

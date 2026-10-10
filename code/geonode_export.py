@@ -16,8 +16,9 @@ API used:
   PATCH /api/v2/styles/<pk>/            update SLD content
   POST /api/v2/maps/                    create empty map
   PATCH /api/v2/maps/<pk>/              add maplayers to map
-  GET  /api/v2/{datasets,maps}/?page=   list for the Manage server tab
-  DELETE /api/v2/resources/<pk>/        delete a dataset or map
+  GET  /api/v2/{datasets,maps,geoapps}/?page=   list for the Manage server tab
+  DELETE /api/v2/resources/<pk>/        delete a dataset, map or dashboard
+  Dashboards: see geonode_dashboard.py
   Auth: HTTP Basic (username / password)
   Server upload limit: 100 MB per dataset
 
@@ -134,6 +135,7 @@ SUPPORTING_LAYERS: list[dict] = [
         "parquet": "tbl_asset_group.parquet",
         "layer_name": "mesa_asset_groups",
         "asset_style_field": "id",
+        "detail": "MESA map colours",
         "default_checked": False,
         "size_note": None,
     },
@@ -144,6 +146,7 @@ SUPPORTING_LAYERS: list[dict] = [
         "parquet": "tbl_asset_object.parquet",
         "layer_name": "mesa_assets",
         "asset_style_field": "ref_asset_group",
+        "detail": "MESA map colours",
         "default_checked": False,
         "size_note": "~50 MB - may take several minutes",
     },
@@ -171,7 +174,7 @@ def sensitivity_layers(geoparquet_dir: str) -> list[dict]:
       id             "sensitivity:<name_gis_geocodegroup>"
       filter_field   "name_gis_geocodegroup"
       filter_value   <name_gis_geocodegroup string>
-      sld_field      "sensitivity_code_max"
+      prepare/styles/map/dashboard   the Overview recipe (see "Publishing recipes")
       row_count      number of rows in this group
       available      True
     """
@@ -213,23 +216,71 @@ def sensitivity_layers(geoparquet_dir: str) -> list[dict]:
             "layer_name": f"mesa_{_safe_name(gname)}",
             "default_checked": True,
             "size_note": None,
-            "sld_field": "sensitivity_code_max",
+            "detail": "dataset + map, 5 layers",
+            "prepare": _prepare_overview,
+            "styles": _styles_overview,
+            "map": True,
+            "dashboard": _dashboard_overview,
             "available": True,
             "row_count": nrows,
         })
     return result
 
 
+def segmentation_layers(geoparquet_dir: str) -> list[dict]:
+    """One publishable product per segmented geocode level (tbl_segmentation/<level>.parquet),
+    as on the MESA map's Segmentation tab: cells with their overlap signature and, when
+    clustering ran, their cluster."""
+    import pyarrow.parquet as pq
+
+    seg_dir = os.path.join(geoparquet_dir, "tbl_segmentation")
+    if not os.path.isdir(seg_dir):
+        return []
+    out = []
+    for fn in sorted(os.listdir(seg_dir)):
+        if not fn.endswith(".parquet"):
+            continue
+        path = os.path.join(seg_dir, fn)
+        try:
+            pf = pq.ParquetFile(path)
+            nrows = pf.metadata.num_rows
+            level = str(pq.read_table(path, columns=["name_gis_geocodegroup"])
+                        .column(0)[0]) if nrows else fn[:-8]
+        except Exception:
+            continue
+        out.append({
+            "id": f"segmentation:{level}",
+            "label": level,
+            "hint": (f"Segmentation of '{level}' ({nrows:,} cells): overlap signatures and "
+                     "clusters, published as one dataset with a map and a dashboard."),
+            "parquet": os.path.join("tbl_segmentation", fn),
+            "layer_name": f"mesa_seg_{_safe_name(level)}",
+            "default_checked": False,
+            "size_note": None,
+            "detail": "dataset + map, signatures/clusters",
+            "load": lambda gpq, _lvl=level, _fn=fn: _load_segmentation(gpq, _lvl, _fn),
+            "prepare": _prepare_area,
+            "styles": _styles_segmentation,
+            "map": True,
+            "dashboard": _dashboard_segmentation,
+            "available": True,
+            "row_count": nrows,
+        })
+    return out
+
+
 def layer_info(geoparquet_dir: str) -> dict:
     """
-    Return a dict with two keys:
+    Return a dict with three keys:
       "sensitivity"  - list of dicts from sensitivity_layers()
+      "segmentation" - list of dicts from segmentation_layers()
       "supporting"   - list of SUPPORTING_LAYERS dicts enriched with
                        available + row_count
     """
     import pyarrow.parquet as pq
 
     sens = sensitivity_layers(geoparquet_dir)
+    segm = segmentation_layers(geoparquet_dir)
 
     supp = []
     for layer in SUPPORTING_LAYERS:
@@ -243,7 +294,7 @@ def layer_info(geoparquet_dir: str) -> dict:
                 pass
         supp.append({**layer, "available": available, "row_count": row_count})
 
-    return {"sensitivity": sens, "supporting": supp}
+    return {"sensitivity": sens, "segmentation": segm, "supporting": supp}
 
 
 # ---------------------------------------------------------------------------
@@ -285,16 +336,25 @@ _LIST_PAGE_SIZE = 100
 _LIST_MAX_PAGES = 200   # guard against a server that never reports the end
 
 
+# kind -> (endpoint, list key in the response, extra filter, singular label)
+_RESOURCE_KINDS = {
+    "datasets": ("datasets", "datasets", {}, "dataset"),
+    "maps": ("maps", "maps", {}, "map"),
+    "dashboards": ("geoapps", "geoapps", {"filter{resource_type}": "dashboard"}, "dashboard"),
+}
+
+
 def list_resources(base_url: str, username: str, password: str, kind: str) -> list[dict]:
-    """All datasets (kind="datasets") or maps (kind="maps") visible to the user,
-    as {pk, kind, title, name, owner, updated, mesa}. Raises RuntimeError on
+    """All datasets, maps or dashboards (kind as in _RESOURCE_KINDS) visible to the
+    user, as {pk, kind, title, name, owner, updated, mesa}. Raises RuntimeError on
     an HTTP or connection error so the caller can report it."""
     base = base_url.rstrip("/")
+    endpoint, key, extra, singular = _RESOURCE_KINDS[kind]
     out: list[dict] = []
     for page in range(1, _LIST_MAX_PAGES + 1):
         try:
-            r = requests.get(f"{base}/api/v2/{kind}/",
-                             params={"page": page, "page_size": _LIST_PAGE_SIZE},
+            r = requests.get(f"{base}/api/v2/{endpoint}/",
+                             params={"page": page, "page_size": _LIST_PAGE_SIZE, **extra},
                              auth=(username, password), timeout=30)
         except Exception as exc:
             raise RuntimeError(f"listing {kind} failed: {exc}") from exc
@@ -303,18 +363,19 @@ def list_resources(base_url: str, username: str, password: str, kind: str) -> li
         if r.status_code != 200:
             raise RuntimeError(f"listing {kind} failed: HTTP {r.status_code}")
         body = r.json()
-        items = body.get(kind, [])
+        items = body.get(key, [])
         for it in items:
             abstract = it.get("raw_abstract") or it.get("abstract") or ""
             name = it.get("name") or ""
             out.append({
                 "pk": it.get("pk"),
-                "kind": "dataset" if kind == "datasets" else "map",
+                "kind": singular,
                 "title": it.get("title") or name,
                 "name": name,
                 "owner": (it.get("owner") or {}).get("username", ""),
                 "updated": (it.get("last_updated") or it.get("created") or "")[:16].replace("T", " "),
-                "mesa": _MAP_MARKER in abstract if kind == "maps" else name.startswith("mesa_"),
+                "mesa": (name.startswith("mesa_") if kind == "datasets"
+                         else _MAP_MARKER in abstract),
             })
         total = body.get("total")
         has_next = bool((body.get("links") or {}).get("next"))
@@ -324,7 +385,7 @@ def list_resources(base_url: str, username: str, password: str, kind: str) -> li
 
 
 def delete_resource(base_url: str, username: str, password: str, pk: int) -> tuple[bool, str]:
-    """Delete a dataset or map by pk. (/api/v2/datasets/{pk}/ refuses DELETE.)"""
+    """Delete a dataset, map or dashboard by pk. (/api/v2/datasets/{pk}/ refuses DELETE.)"""
     try:
         r = requests.delete(f"{base_url.rstrip('/')}/api/v2/resources/{pk}/",
                             auth=(username, password), timeout=60)
@@ -567,11 +628,26 @@ def asset_group_classes(geoparquet_dir: str, config_path: Optional[str]) -> list
     return out
 
 
-def build_asset_sld(style_name: str, field: str, classes: list[tuple]) -> str:
-    """SLD 1.0.0 with one rule per asset group (field == group id)."""
+def build_value_sld(
+    style_name: str,
+    style_title: str,
+    field: str,
+    classes: list[tuple],
+    fill_opacity: float = _OVERLAY_OPACITY,
+    stroke: Optional[str] = None,
+    stroke_width: float = 0.0,
+) -> str:
+    """SLD 1.0.0 with one polygon rule per (value, colour, label): field == value.
+    Features matching no value are not drawn."""
     rules = []
-    for gid, color, label in classes:
-        lit = int(gid) if isinstance(gid, float) and gid.is_integer() else gid
+    for value, color, label in classes:
+        lit = int(value) if isinstance(value, float) and value.is_integer() else value
+        stroke_xml = (
+            "        <Stroke>\n"
+            f"          <CssParameter name=\"stroke\">{stroke}</CssParameter>\n"
+            f"          <CssParameter name=\"stroke-width\">{stroke_width}</CssParameter>\n"
+            "        </Stroke>\n"
+        ) if stroke else ""
         rules.append(
             "    <Rule>\n"
             f"      <Name>{_xml_escape(label)}</Name>\n"
@@ -582,12 +658,9 @@ def build_asset_sld(style_name: str, field: str, classes: list[tuple]) -> str:
             "      <PolygonSymbolizer>\n"
             "        <Fill>\n"
             f"          <CssParameter name=\"fill\">{color}</CssParameter>\n"
-            f"          <CssParameter name=\"fill-opacity\">{_ASSET_FILL_OPACITY:.3f}</CssParameter>\n"
+            f"          <CssParameter name=\"fill-opacity\">{fill_opacity:.3f}</CssParameter>\n"
             "        </Fill>\n"
-            "        <Stroke>\n"
-            f"          <CssParameter name=\"stroke\">{_ASSET_STROKE}</CssParameter>\n"
-            f"          <CssParameter name=\"stroke-width\">{_ASSET_STROKE_WIDTH}</CssParameter>\n"
-            "        </Stroke>\n"
+            + stroke_xml +
             "      </PolygonSymbolizer>\n"
             "    </Rule>"
         )
@@ -602,7 +675,7 @@ def build_asset_sld(style_name: str, field: str, classes: list[tuple]) -> str:
         '  <NamedLayer>\n'
         f'    <Name>{style_name}</Name>\n'
         '    <UserStyle>\n'
-        '      <Title>MESA asset groups</Title>\n'
+        f'      <Title>{_xml_escape(style_title)}</Title>\n'
         '      <FeatureTypeStyle>\n'
         + "\n".join(rules) + "\n"
         '      </FeatureTypeStyle>\n'
@@ -610,6 +683,13 @@ def build_asset_sld(style_name: str, field: str, classes: list[tuple]) -> str:
         '  </NamedLayer>\n'
         '</StyledLayerDescriptor>\n'
     )
+
+
+def build_asset_sld(style_name: str, field: str, classes: list[tuple]) -> str:
+    """SLD with one rule per asset group (field == group id), as the MESA map draws assets."""
+    return build_value_sld(style_name, "MESA asset groups", field, classes,
+                           fill_opacity=_ASSET_FILL_OPACITY,
+                           stroke=_ASSET_STROKE, stroke_width=_ASSET_STROKE_WIDTH)
 
 
 def _hex(rgba) -> str:
@@ -1467,7 +1547,13 @@ def build_group_map_config(
 
 def default_map_title(layer: dict) -> str:
     """Map title used when the operator gives none."""
-    return f"MESA - {layer['label']}"
+    prefix = "MESA segmentation" if str(layer.get("id", "")).startswith("segmentation:") else "MESA"
+    return f"{prefix} - {layer['label']}"
+
+
+def default_dashboard_title(layer: dict) -> str:
+    """Dashboard title used when the operator gives none."""
+    return f"{default_map_title(layer)} dashboard"
 
 
 def _delete_generated_maps(base: str, auth, title: str, log: Callable[[str], None]) -> None:
@@ -1543,6 +1629,220 @@ def create_group_map(
 
 
 # ---------------------------------------------------------------------------
+# Publishing recipes
+#
+# A layer dict may carry, besides where its data lives:
+#   load(geoparquet_dir) -> gdf      own reader (default: parquet + filter)
+#   prepare(gdf) -> gdf              derived columns the styles/dashboard need
+#   styles(ctx) -> [{name, title, sld}]   first is the dataset's default style
+#   map: True                        publish a map with one layer per style
+#   dashboard(ctx) -> [widget spec]  publish a dashboard (see geonode_dashboard)
+# ctx = {layer, layer_name, gdf, geoparquet_dir, config_path, colors, descs, log}.
+# A new product is published by describing it this way; export_layers is generic.
+# ---------------------------------------------------------------------------
+
+OWA_CLASS_EDGES = [1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+
+
+def owa_class_label(v) -> Optional[str]:
+    """Zero-padded OWA range label ("01-10" ... "90-100") that sorts as text."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v != v:
+        return None
+    edges = OWA_CLASS_EDGES
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        if v < hi or hi == edges[-1]:
+            return f"{lo:02d}-{hi}"
+    return None
+
+
+def _prepare_area(gdf):
+    """Add area_km2 (from area_m2, else equal-area EPSG:6933) for dashboard sums."""
+    import numpy as np
+    import pandas as pd
+    if "area_km2" in gdf.columns:
+        return gdf
+    gdf = gdf.copy()
+    if "area_m2" in gdf.columns and pd.to_numeric(gdf["area_m2"], errors="coerce").notna().any():
+        gdf["area_km2"] = pd.to_numeric(gdf["area_m2"], errors="coerce") / 1_000_000.0
+    else:
+        try:
+            gdf["area_km2"] = np.asarray(gdf.geometry.to_crs(6933).area) / 1_000_000.0
+        except Exception:
+            gdf["area_km2"] = np.nan
+    return gdf
+
+
+def _prepare_overview(gdf):
+    gdf = _prepare_area(gdf)
+    if "index_owa" in gdf.columns:
+        gdf = gdf.copy()
+        gdf["index_owa_class"] = gdf["index_owa"].map(owa_class_label)
+    return gdf
+
+
+def _styles_overview(ctx) -> list[dict]:
+    """Sensitivity (default) plus the other Overview layers of the MESA map."""
+    name, gdf, log = ctx["layer_name"], ctx["gdf"], ctx["log"]
+    out = [{"name": name, "title": RESULT_STYLES[0]["title"],
+            "sld": build_sensitivity_sld(name, "sensitivity_code_max", ctx["colors"], ctx["descs"])}]
+    try:
+        classes = result_style_classes(gdf, ctx["config_path"])
+    except Exception as exc:
+        log(f"  Result styles failed ({exc}); publishing Sensitivity only.")
+        return out
+    for st in RESULT_STYLES[1:]:
+        if st["key"] not in classes:
+            log(f"  {st['title']}: column {st['field']} missing, style skipped.")
+            continue
+        sname = f"{name}_{st['key']}"
+        out.append({"name": sname, "title": st["title"],
+                    "sld": build_class_sld(sname, st["title"], st["field"], classes[st["key"]])})
+    return out
+
+
+def _styles_assets(ctx) -> list[dict]:
+    field = ctx["layer"].get("asset_style_field")
+    classes = asset_group_classes(ctx["geoparquet_dir"], ctx["config_path"])
+    if not field or not classes or field not in ctx["gdf"].columns:
+        ctx["log"]("  Asset-group colours unavailable; GeoNode's default style is used.")
+        return []
+    ctx["log"](f"  Asset-group colours from the MESA map ({len(classes)} group(s)).")
+    return [{"name": ctx["layer_name"], "title": "Asset groups",
+             "sld": build_asset_sld(ctx["layer_name"], field, classes)}]
+
+
+def _load_segmentation(geoparquet_dir: str, level: str, filename: str):
+    """Cells of one segmented level with geometry, as the Segmentation tab shows them."""
+    import geopandas as gpd
+    import pandas as pd
+    import mesa_shared
+
+    seg = pd.read_parquet(os.path.join(geoparquet_dir, "tbl_segmentation", filename))
+    seg["code"] = seg["code"].astype(str)
+    seg["signature"] = seg["signature"].fillna("").map(lambda s: s if s else "(no overlap)")
+    if "cluster_id" in seg.columns and seg["cluster_id"].notna().any():
+        seg["cluster"] = seg["cluster_id"].map(
+            lambda c: f"cluster {int(c)}" if pd.notna(c) else None)
+    poly = mesa_shared.read_geoparquet(
+        os.path.join(geoparquet_dir, "tbl_geocode_object.parquet"),
+        columns=["code", "geometry", "name_gis_geocodegroup"],
+        filters=[("name_gis_geocodegroup", "=", level)],
+    )
+    poly["code"] = poly["code"].astype(str)
+    keep = [c for c in ("code", "signature", "cluster", "n_assets", "sens_mean") if c in seg.columns]
+    g = poly[["code", "geometry"]].merge(seg[keep], on="code", how="inner")
+    g = gpd.GeoDataFrame(g, geometry="geometry", crs=poly.crs)
+    g.insert(1, "name_gis_geocodegroup", level)
+    return g
+
+
+def _value_classes(gdf, field: str, colour_fn) -> list[tuple]:
+    """(value, colour, label) for each distinct value of field, most area first."""
+    import pandas as pd
+    s = gdf[field].dropna().astype(str)
+    if s.empty:
+        return []
+    if "area_km2" in gdf.columns:
+        order = (pd.to_numeric(gdf.loc[s.index, "area_km2"], errors="coerce")
+                 .groupby(s).sum().sort_values(ascending=False).index)
+    else:
+        order = s.value_counts().index
+    return [(v, colour_fn(v), v) for v in order]
+
+
+def _styles_segmentation(ctx) -> list[dict]:
+    """Signatures (default) and, when clustering ran, Clusters: colours as the MESA map."""
+    import segmentation as seg
+    name, gdf = ctx["layer_name"], ctx["gdf"]
+    out = []
+    sig = _value_classes(gdf, "signature", lambda v: seg._overview_colour(v, "signatures"))
+    if sig:
+        out.append({"name": name, "title": "Signatures",
+                    "sld": build_value_sld(name, "Signatures", "signature", sig)})
+    if "cluster" in gdf.columns:
+        cl = _value_classes(gdf, "cluster", lambda v: seg._overview_colour(v, "clusters"))
+        if cl:
+            sname = f"{name}_clusters"
+            out.append({"name": sname, "title": "Clusters",
+                        "sld": build_value_sld(sname, "Clusters", "cluster", cl)})
+    return out
+
+
+def _dashboard_overview(ctx) -> list[dict]:
+    """Overview statistics of one geocode group: the MESA A-E area chart and more."""
+    import tiles_create_raster as tcr
+    gdf, colors, descs = ctx["gdf"], ctx["colors"], ctx["descs"]
+    label = ctx["layer"]["label"]
+    sens_cols = {c: colors.get(c) for c in ("A", "B", "C", "D", "E")}
+    widgets = [
+        {"type": "text", "title": "About",
+         "text": (f"<h3>MESA results - {_xml_escape(label)}</h3>"
+                  "<p>Sensitivity per cell of this geocode group. Charts follow the map "
+                  "extent. Sensitivity classes: "
+                  + ", ".join(f"<b>{c}</b> {_xml_escape(descs.get(c, c))}" for c in "ABCDE")
+                  + ".</p>")},
+        {"type": "counter", "title": "Total area (km²)", "field": "area_km2", "op": "sum"},
+        {"type": "counter", "title": "Cells", "field": "code", "op": "count"},
+        {"type": "map"},
+        {"type": "chart", "chart": "bar", "title": "Area by sensitivity (km²)",
+         "group_by": "sensitivity_code_max", "field": "area_km2", "op": "sum",
+         "colors": sens_cols},
+    ]
+    if "importance_max" in gdf.columns:
+        widgets.append({"type": "chart", "chart": "bar", "title": "Area by importance (max) (km²)",
+                        "group_by": "importance_max", "field": "area_km2", "op": "sum",
+                        # MapStore matches classes type-strictly; importance_max is numeric.
+                        "colors": {int(k): v for k, v in tcr.IMPORTANCE_MAX_HEX.items()}})
+    if "index_owa_class" in gdf.columns:
+        widgets.append({"type": "chart", "chart": "bar", "title": "Area by OWA index (km²)",
+                        "group_by": "index_owa_class", "field": "area_km2", "op": "sum"})
+    widgets.append({"type": "chart", "chart": "pie", "title": "Cells by sensitivity",
+                    "group_by": "sensitivity_code_max", "field": "code", "op": "count",
+                    "colors": sens_cols})
+    cols = [c for c in ("code", "sensitivity_code_max", "importance_max", "index_owa",
+                        "asset_groups_total", "asset_group_names", "area_km2") if c in gdf.columns]
+    widgets.append({"type": "table", "title": "Cells", "columns": cols})
+    return widgets
+
+
+def _dashboard_segmentation(ctx) -> list[dict]:
+    """Segmentation statistics of one level, as the Segmentation tab's zone table."""
+    import segmentation as seg
+    gdf = ctx["gdf"]
+    label = ctx["layer"]["label"]
+    widgets = [
+        {"type": "text", "title": "About",
+         "text": (f"<h3>MESA segmentation - {_xml_escape(label)}</h3>"
+                  "<p>A signature is the set of sensitivity classes (A-E) that overlap in a "
+                  "cell; clusters group cells with similar profiles. Charts follow the map "
+                  "extent.</p>")},
+        {"type": "counter", "title": "Total area (km²)", "field": "area_km2", "op": "sum"},
+        {"type": "counter", "title": "Cells", "field": "code", "op": "count"},
+        {"type": "map"},
+        {"type": "chart", "chart": "bar", "title": "Area by signature (km²)",
+         "group_by": "signature", "field": "area_km2", "op": "sum",
+         "colors": {v: c for v, c, _ in
+                    _value_classes(gdf, "signature", lambda v: seg._overview_colour(v, "signatures"))}},
+    ]
+    if "sens_mean" in gdf.columns:
+        widgets.append({"type": "chart", "chart": "bar", "title": "Mean sensitivity by signature",
+                        "group_by": "signature", "field": "sens_mean", "op": "avg"})
+    if "cluster" in gdf.columns:
+        widgets.append({"type": "chart", "chart": "pie", "title": "Area by cluster (km²)",
+                        "group_by": "cluster", "field": "area_km2", "op": "sum",
+                        "colors": {v: c for v, c, _ in
+                                   _value_classes(gdf, "cluster", lambda v: seg._overview_colour(v, "clusters"))}})
+    if "n_assets" in gdf.columns:
+        widgets.append({"type": "chart", "chart": "bar", "title": "Mean number of assets by signature",
+                        "group_by": "signature", "field": "n_assets", "op": "avg"})
+    return widgets
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1561,6 +1861,8 @@ def export_layers(
     create_map: bool = True,
     dataset_titles: Optional[dict[str, str]] = None,
     map_titles: Optional[dict[str, str]] = None,
+    create_dashboard: bool = True,
+    dashboard_titles: Optional[dict[str, str]] = None,
 ) -> list[dict]:
     """
     Export selected layers to GeoNode.
@@ -1581,31 +1883,29 @@ def export_layers(
     dataset_titles / map_titles map a layer id to the title shown on GeoNode.
     The technical dataset name (layer_name) is never changed. A missing or
     blank dataset title keeps GeoNode's default; a missing map title gives
-    default_map_title(layer).
+    default_map_title(layer). dashboard_titles works the same way for dashboards.
 
-    For each selected layer:
+    For each selected layer (see "Publishing recipes" for the optional keys):
       1. Check if dataset already exists on GeoNode; ask user if so
-      2. Read GeoParquet (optionally filtered by filter_field/filter_value)
+      2. Load the data (layer["load"], else GeoParquet + filter), then layer["prepare"]
       3. Sanitize -> write temp GeoPackage
-      4. If sld_field set: generate the sensitivity SLD and, for geocode groups,
-         the other RESULT_STYLES; save them to styles_output_dir
-      5. Upload GeoPackage -> poll
+      4. Build layer["styles"]; save the SLDs to styles_output_dir
+      5. Upload GeoPackage (+ default SLD) -> poll
       6. Push the default and alternative styles to GeoServer
       7. Set the dataset title, if one was given
-      8. For geocode groups (create_map): one map (default "MESA - <group>") with a layer per style
+      8. layer["map"] and create_map: one map with a layer per style
+      9. layer["dashboard"] and create_dashboard: one dashboard of its widgets
 
     Returns list of result dicts {id, success, message, url}.
     """
-    import geopandas as gpd
-
     colors, descs = read_palette(config_path)
 
     # Build the full ordered layer list the caller knows about
     if all_layers is None:
-        all_layers = sensitivity_layers(geoparquet_dir) + SUPPORTING_LAYERS
+        all_layers = (sensitivity_layers(geoparquet_dir) + segmentation_layers(geoparquet_dir)
+                      + SUPPORTING_LAYERS)
 
     results: list[dict] = []
-    style_titles = {s["key"]: s["title"] for s in RESULT_STYLES}
 
     with tempfile.TemporaryDirectory(prefix="mesa_geonode_") as tmp_dir:
         for layer in all_layers:
@@ -1619,10 +1919,8 @@ def export_layers(
             label = layer["label"]
             parquet_file = os.path.join(geoparquet_dir, layer["parquet"])
             layer_name = layer["layer_name"]
-            sld_field = layer.get("sld_field")
             filter_field = layer.get("filter_field")
             filter_value = layer.get("filter_value")
-            is_sensitivity = lid.startswith("sensitivity:")
 
             log(f"\n--- {label} ---")
 
@@ -1654,12 +1952,17 @@ def export_layers(
                     results.append({"id": lid, "success": False, "message": msg, "url": None})
                     continue
 
-            # ── Read + filter ────────────────────────────────────────────
+            # ── Load + prepare ───────────────────────────────────────────
             try:
                 log(f"  Reading {layer['parquet']} ...")
-                gdf = _read_geoparquet(parquet_file)
-                if filter_field and filter_value is not None:
-                    gdf = gdf[gdf[filter_field] == filter_value].copy()
+                if layer.get("load"):
+                    gdf = layer["load"](geoparquet_dir)
+                else:
+                    gdf = _read_geoparquet(parquet_file)
+                    if filter_field and filter_value is not None:
+                        gdf = gdf[gdf[filter_field] == filter_value].copy()
+                if layer.get("prepare"):
+                    gdf = layer["prepare"](gdf)
                 log(f"  {len(gdf):,} features. Writing GeoPackage ...")
                 gpkg_path = _write_gpkg(gdf, layer_name, tmp_dir)
             except Exception as exc:
@@ -1668,53 +1971,33 @@ def export_layers(
                 results.append({"id": lid, "success": False, "message": msg, "url": None})
                 continue
 
-            # ── Generate SLD ─────────────────────────────────────────────
-            sld_xml: Optional[str] = None
+            ctx = {"layer": layer, "layer_name": layer_name, "gdf": gdf,
+                   "geoparquet_dir": geoparquet_dir, "config_path": config_path,
+                   "colors": colors, "descs": descs, "log": log}
+
+            # ── Styles ───────────────────────────────────────────────────
+            styles_fn = layer.get("styles") or (_styles_assets if layer.get("asset_style_field") else None)
+            styles: list[dict] = []
+            if styles_fn:
+                try:
+                    styles = styles_fn(ctx) or []
+                except Exception as exc:
+                    log(f"  Style generation failed ({exc}), uploading without style.")
+                    styles = []
+            sld_xml = styles[0]["sld"] if styles else None
             sld_path: Optional[str] = None
-            extra_slds: dict[str, str] = {}   # style name -> SLD, in RESULT_STYLES order
-            extra_keys: dict[str, str] = {}   # style name -> RESULT_STYLES key
-            if sld_field:
-                try:
-                    sld_xml = build_sensitivity_sld(layer_name, sld_field, colors, descs)
-                    sld_path = os.path.join(tmp_dir, f"{layer_name}.sld")
-                    with open(sld_path, "w", encoding="utf-8") as f:
-                        f.write(sld_xml)
-                except Exception as exc:
-                    log(f"  SLD generation failed ({exc}), uploading without style.")
-                    sld_xml = None
-                    sld_path = None
-            asset_field = layer.get("asset_style_field")
-            if asset_field and not sld_xml:
-                classes = asset_group_classes(geoparquet_dir, config_path)
-                if classes and asset_field in gdf.columns:
-                    sld_xml = build_asset_sld(layer_name, asset_field, classes)
-                    sld_path = os.path.join(tmp_dir, f"{layer_name}.sld")
-                    with open(sld_path, "w", encoding="utf-8") as f:
-                        f.write(sld_xml)
-                    log(f"  Asset-group colours from the MESA map ({len(classes)} group(s)).")
-                else:
-                    log("  Asset-group colours unavailable; GeoNode's default style is used.")
-            if sld_xml and is_sensitivity:
-                try:
-                    classes = result_style_classes(gdf, config_path)
-                    for st in RESULT_STYLES[1:]:
-                        if st["key"] not in classes:
-                            log(f"  {st['title']}: column {st['field']} missing, style skipped.")
-                            continue
-                        name = f"{layer_name}_{st['key']}"
-                        extra_slds[name] = build_class_sld(
-                            name, st["title"], st["field"], classes[st["key"]])
-                        extra_keys[name] = st["key"]
-                except Exception as exc:
-                    log(f"  Result styles failed ({exc}); publishing Sensitivity only.")
-                    extra_slds, extra_keys = {}, {}
-            if sld_xml and styles_output_dir:
+            if sld_xml:
+                sld_path = os.path.join(tmp_dir, f"{layer_name}.sld")
+                with open(sld_path, "w", encoding="utf-8") as f:
+                    f.write(sld_xml)
+            extra_slds = {s["name"]: s["sld"] for s in styles[1:]}
+            if styles and styles_output_dir:
                 try:
                     os.makedirs(styles_output_dir, exist_ok=True)
-                    for name, xml in [(layer_name, sld_xml), *extra_slds.items()]:
-                        with open(os.path.join(styles_output_dir, f"{name}.sld"), "w", encoding="utf-8") as f:
-                            f.write(xml)
-                    log(f"  {1 + len(extra_slds)} SLD(s) saved to {styles_output_dir}")
+                    for s in styles:
+                        with open(os.path.join(styles_output_dir, f"{s['name']}.sld"), "w", encoding="utf-8") as f:
+                            f.write(s["sld"])
+                    log(f"  {len(styles)} SLD(s) saved to {styles_output_dir}")
                 except Exception as exc:
                     log(f"  Could not save SLDs locally ({exc}).")
 
@@ -1753,24 +2036,50 @@ def export_layers(
 
             results.append({"id": lid, "success": ok, "message": msg, "url": url})
 
-            # ── One map per geocode group ────────────────────────────────
-            if ok and is_sensitivity and create_map and not cancel_event.is_set():
-                default_style = info.get("default_style") or gs_layer
-                styles = [(default_style, style_titles["sensitivity_max"])]
-                styles += [(n, style_titles[extra_keys[n]]) for n in extra_slds if n in added]
-                try:
-                    g4326 = gdf if gdf.crs is None or gdf.crs.to_epsg() == 4326 else gdf.to_crs(4326)
-                    bbox = [float(v) for v in g4326.total_bounds]
-                except Exception:
-                    bbox = None
+            if not ok or not dataset_pk or cancel_event.is_set():
+                continue
+
+            # Styles actually on the layer, default first, for the map and dashboard.
+            map_styles: list[tuple[str, str]] = []
+            if styles:
+                map_styles.append((info.get("default_style") or gs_layer, styles[0]["title"]))
+                map_styles += [(s["name"], s["title"]) for s in styles[1:] if s["name"] in added]
+            try:
+                g4326 = gdf if gdf.crs is None or gdf.crs.to_epsg() == 4326 else gdf.to_crs(4326)
+                bbox = [float(v) for v in g4326.total_bounds]
+            except Exception:
+                bbox = None
+
+            # ── Map ──────────────────────────────────────────────────────
+            if layer.get("map") and create_map and map_styles:
                 map_title = ((map_titles or {}).get(lid) or "").strip() or default_map_title(layer)
                 map_url = create_group_map(
                     base_url, username, password, map_title,
-                    alternate, dataset_pk, styles, bbox, log,
+                    alternate, dataset_pk, map_styles, bbox, log,
                 )
                 if map_url:
                     log(f"__MAP__:{map_url}")
                 else:
                     log("  Map creation failed. Create it manually on the GeoNode server.")
+
+            # ── Dashboard ────────────────────────────────────────────────
+            if layer.get("dashboard") and create_dashboard and not cancel_event.is_set():
+                import geonode_dashboard
+                try:
+                    widgets = layer["dashboard"](ctx)
+                except Exception as exc:
+                    log(f"  Dashboard: could not describe widgets ({exc}).")
+                    widgets = []
+                if widgets:
+                    dash_title = (((dashboard_titles or {}).get(lid) or "").strip()
+                                  or default_dashboard_title(layer))
+                    dash_url = geonode_dashboard.create_dashboard(
+                        base_url, username, password, dash_title,
+                        alternate, dataset_pk, map_styles, bbox, widgets, log,
+                    )
+                    if dash_url:
+                        log(f"__DASHBOARD__:{dash_url}")
+                    else:
+                        log("  Dashboard creation failed.")
 
     return results
