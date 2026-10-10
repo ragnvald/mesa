@@ -40,6 +40,7 @@ TARGET_SCRIPT_NAMES = {
     "analysis_setup.py",
     "analysis_present.py",
     "line_manage.py",
+    "segmentation_setup.py",
 }
 
 
@@ -592,6 +593,8 @@ def main() -> None:
         HelperCapture("analysis_present", ["code/analysis_present.py", "--original_working_directory", str(repo)], "comparison", 40.0),
         HelperCapture("geocode_group_edit", ["code/geocode_manage.py", "--start-tab", "edit", "--original_working_directory", str(repo)], "geocode manage", 35.0),
         HelperCapture("line_manage", ["code/line_manage.py", "--original_working_directory", str(repo)], "edit line", 40.0),
+        # Configure -> Classification (the opt-in tick and its settings).
+        HelperCapture("segmentation_setup", ["code/segmentation_setup.py", "--original_working_directory", str(repo)], "classification (setup)", 35.0),
     ]
 
     helper_filter = _parse_helper_keys(args.helpers)
