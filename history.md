@@ -313,11 +313,13 @@ workbooks. Processing was then run in the belief that the mosaic was in place. I
 face, while `tbl_geocode_group` still listed `basic_mosaic` at id 1. The project therefore looked
 registered and processed without it.
 
-The cause is `_load_existing_geocodes` in `geocode_manage.py`, unchanged since 2026-05-06: it
+The cause is `_load_existing_geocodes` in `geocode_manage.py`: it
 caught every exception from `gpd.read_parquet(tbl_geocode_object)` and returned an empty frame,
 which `_merge_and_write_geocodes` then concatenated the new grid objects onto and wrote back. A
-failed read and an empty table were indistinguishable, and nothing was logged. What was new was
-not the code but the data — decoding that table costs 1,269 bytes a row, measured, so 23 GB for
+failed read and an empty table were indistinguishable, and nothing was logged. The swallow is
+older than `geocode_manage.py` itself — it came across from `geocodes_create.py` and predates the
+5.0 tag, so every MESA 5 release carries it, which is what the 5.7 changelog states. What was new
+was not the code but the data — decoding that table costs 1,269 bytes a row, measured, so 23 GB for
 19.4 million rows before `pd.concat` copies it, against 64 GB free while a mosaic build was
 running. Earlier projects had mosaics small enough to read.
 
@@ -340,6 +342,415 @@ layers on top of a large `basic_mosaic` may have lost the mosaic without being t
 results computed afterwards exclude it.
 
 `pytest tests/ -q` green at 19 passed.
+
+## 2026-08-08 — tbl_stacked loses its geometry column
+
+mesa-server sent a proposal (`forslag-tbl-stacked-geometri.md`, not archived — see docs/exchange/README.md) to drop the geometry column from
+`tbl_stacked`: on a real package the table was 30.41 GB of 27, and 83% of it was the same cell
+geometry repeated once per asset that touched the cell. Their reading of our flatten step was
+correct to the line — it read 94 million geometries to keep 18 million via
+`drop_duplicates(subset=["code"])`.
+
+Verified on our side before answering. On the run sitting in `output/geoparquet/__stacked_parts`
+here (142 partitions, 15,517,653 rows, 395 MB, already ZSTD-3) geometry is 71.6% of the bytes and
+everything else is 7.2 B/row — which scaled to their 94 million rows gives ~660 MB, matching their
+595 MB estimate. 71.6% is the low-water mark: those are grid layers with cheap WKB, and
+basic_mosaic is what takes it to their 83%.
+
+We found a third consumer they had missed, and it was the expensive one: the Backfill stage read
+every partition with `gpd.read_parquet`, merged one Int64 column, and wrote the whole partition
+back with geometry and all — tens of GB of I/O to add 8 bytes a row. The column it wrote,
+`area_m2`, is a property of the cell, not of the (cell, asset) pair. And the polygon analysis
+loaded the entire stacked dataset into the orchestrator process with one `gpd.read_parquet` before
+filtering to basic_mosaic, which on a 30 GB table cannot run at all — the feature was already
+broken at that scale, so removing the column cost us nothing and forced the fix.
+
+The classification path (`segmentation.py` / `segmentation_run.py`) already did exactly what the
+proposal asks for: pyarrow column projection and predicate pushdown on the layer, geometry joined
+from `tbl_geocode_object` at render time, no geometry in its output tables. That stage was the
+existing proof, and the rest now follows it.
+
+Shipped in this session: a `STACKED_COLUMNS` contract that also drops the merge artefacts `id_x`
+and `id_y`, the unread `attributes` blob and `grid_cell` (~10% on top of the geometry); a
+column-projected `_read_stacked_partition` used by flatten; the cell geometry joined into
+`tbl_flat` once, keyed on (`name_gis_geocodegroup`, `code`); the analysis rewritten to read stacked
+rows scoped to the cells a polygon actually touches; and the flatten pre-flight amplification split
+into geometry (10x) and geometry-free (3x) so the gate stops refusing jobs that now fit easily.
+
+The Backfill stage was removed outright rather than left as a no-op — the operator's call, taken
+after the first cut had parked it for 6.0. Gone with it: `backfill_max_workers` from config.ini and
+`mesa.py`, `_derive_backfill_max_workers` in `auto_tune.py`, the "4. Backfill" checkbox in the
+Advanced panel, and the `--no-backfill` CLI flag. A script still passing that flag now fails on an
+unknown argument, deliberately: silently accepting a flag that does nothing is worse.
+
+Also noted while working: the repo's `config.ini` had been overwritten at some point by a generated
+demo config (`tools/make_demo_config.py` banner, `mem_target_frac` 0.85, `chunk_size` 22000,
+`segmv_ai_enabled` 1 and others changed from canonical). It was reset to HEAD, and only the two new
+pre-flight keys were added on top.
+
+Non-regression measured, not assumed: HEAD and the new code were run over the same synthetic
+project and `tbl_flat` came out identical in all 27 columns including geometry; the analysis
+outputs matched on everything except the per-run uuids and timestamp; the retained `tbl_stacked`
+columns are row-for-row identical. `pytest tests/ -q` green at 24 passed (5 new).
+
+Answered mesa-server in [`docs/exchange/2026-08-08-tbl-stacked-geometri-svar.md`](docs/exchange/2026-08-08-tbl-stacked-geometri-svar.md): yes to the change, no to a version marker
+(the parquet schema is the authority — `mesa_version` describes the writer, not the file), lesson
+about `gpd.read_parquet` raising outright on a geometry-free parquet so readers must ship before
+their writers do, and two asks back — an agreed column contract rather than just "minus geometry",
+and their `overlap_m2`, which we compute per row in `_drop_boundary_only_joins` for the 1 m² rule
+and then throw away. It is the one genuinely per-row value in the table and cannot be looked up.
+
+## 2026-08-08 — first run after the tbl_stacked change fails on a missing GeoParquet header
+
+The first real run after the geometry change died in Stage 2 with "The CRS attribute of a
+GeoDataFrame without an active geometry column is not defined". Not the tbl_stacked work: the
+project's `tbl_geocode_object.parquet` had been written without the schema-level GeoParquet `geo`
+header, so `read_parquet_or_empty` fell into its "Missing geo metadata" branch, returned a frame
+with `geometry=None`, and the next line's `.crs` raised.
+
+Root cause in `_rewrite_geocode_objects` (geocode_manage.py), the streamed merge added on
+2026-08-06. It builds its output schema from `new_table.schema` when there is no existing file, and
+`GeoDataFrame.to_arrow()` records the CRS in per-field geoarrow metadata rather than the
+schema-level `geo` key. Any project that generated geocodes from scratch since that change has the
+same file. The data was never damaged — measured on the affected project, all 29,682 cells and the
+EPSG:4326 CRS were present in the field metadata throughout.
+
+One of the new readers had the same fragility, and it was ours: `_attach_geocode_geometry` called
+`gpd.read_parquet` bare — exactly the failure mode the reply to mesa-server warns them about.
+
+Two fixes. `mesa_shared.read_geoparquet` tries geopandas first and recovers through Arrow on that
+specific error, used now by `read_parquet_or_empty`, `_attach_geocode_geometry`,
+`segmentation_run.read_layer_geometry` and `segmentation.py`. `_geoparquet_header` in
+geocode_manage.py writes the header when the table is built from scratch, taken from geopandas
+itself via an empty frame so the JSON cannot drift from the spec; a following merge keeps it and
+widens the bbox.
+
+Verified by running intersect + flatten against a copy of the affected project with the headerless
+file untouched: 9 partitions, 53,949 rows, 0.35 MB (~6.5 B/row, matching the 7.2 B/row measured
+earlier); flatten 5.7 s to 28,674 rows with geometry and a positive area on every row across all
+four geocode groups, no missing-geometry warnings. So existing projects need no regeneration.
+
+Two process notes. The verification harness itself burned twenty minutes first: the script had no
+`if __name__ == "__main__"` guard, so on Windows spawn every worker re-ran it, deleted the project
+directory and started another pool — visible as cycling worker PIDs, no output and almost no CPU.
+And resetting `config.ini` to HEAD earlier in the session reverted this host's tuning
+(`geocode_soft_limit` 420 -> 250, `asset_soft_limit` 100000 -> 50000, `chunk_size` 22000 -> 8000,
+`mem_target_frac` 0.85 -> 0.60); the run's log is full of "geocode subset size > 250; splitting",
+so intersect at 553.9 s is paying for that, not for the format change.
+
+## 2026-08-08 — tile renderer, Landing A and B
+
+mesa-server proposed replacing the tile renderer's per-cell drawing with pixel-centre sampling
+against a PostGIS spatial join, to escape a 26.7 GB memory ceiling and speckled coarse tiles. The
+assessment found the premise did not hold for desktop: our renderer has none of the hybrid /
+centroid-scatter / adaptive-cap machinery theirs has grown, so the speckling cannot occur here, and
+the efficiency argument rests on a database desktop does not have. Point sampling was measured
+against MESA's own data and rejected — MESA buffers line and point assets to 30 m, which is under
+one pixel at every zoom it renders (z6 = 2446 m/px, z12 = 38.2 m/px), and pixel-centre sampling
+turns a continuous 0.05 px band into 38.7 of 248 columns where PIL's polygon fill keeps 216.
+
+The operator then asked the better question: render the finest zoom once and aggregate upward.
+Measured, every zoom level costs about one full pass over the features (1.00-1.02x of N, because
+tile count quadruples as candidates per tile quarter), so the pyramid is worth ~6.9x on
+basic_mosaic — and combined with sharing one geometry pass across the seven layers, ~49x. That is
+Landing C and is not built yet; it changes coarse-zoom appearance and should be agreed with
+mesa-server first.
+
+Landings A and B shipped in this session, on the parts that do not change what a pixel means:
+
+- The WKB payload is spilled to a file and mmapped rather than pickled into every worker. The
+  module's own docstring recorded 3.2 GB for 17.6M features, which at eight workers is the 26 GB
+  that made a large mosaic unrenderable; it is now one physical copy.
+- Tile planning is vectorised bbox arithmetic instead of one `sindex.intersection` per tile in the
+  parent, which also removes the ~1.8 GB STRtree.
+- Projection is batched over all of a tile's rings in one call.
+- Candidates are drawn in ascending value order, so the highest value wins a contested pixel.
+- `tbl_geocode_object` is read through `mesa_shared.read_geoparquet`, which had been silently
+  costing this project its Classification rasters ("classification tiles skipped: Missing geo
+  metadata").
+
+Measured end to end on a real 28,674-cell project, z6-z11, four geocode groups, 20 mbtiles,
+195 tiles: **63.3 s -> 37.3 s**, output 360 KB -> 347 KB. The render core alone, timed on one z6
+tile with all 26,975 basic_mosaic cells as candidates: 1488 ms -> 485 ms, 3.1x, or 55.2 -> 18.0 us
+per cell.
+
+Correctness was established piece by piece rather than by looking at the total. The vectorised
+planner returns identical candidate sets on all 41 tiles, nothing lost or gained, in a different
+order. The batched projection returns paths identical to the previous implementation over 26,984
+rings at three zooms on two groups, 0 mismatches, including which rings are skipped. The 1.32% of
+pixels that changed are therefore entirely draw order — which is the point of the ordering change,
+and `--no-max-aggregate` restores the old behaviour.
+
+Two things were built and then deleted on the evidence. Palettised PNG looked like a 5x win on a
+synthetic dense tile and measured *slower and larger* on real ones. The first attempt at vectorised
+projection worked ring by ring and delivered 1.1x, because the average cell is 38 vertices and
+numpy call overhead ate it; only batching across the tile made it 3.1x. Both are recorded in
+learning.md, because in both cases the benchmark, not the code, was what had been wrong.
+
+Written up for mesa-server in [`docs/exchange/2026-08-08-veiledning-mesa-server.md`](docs/exchange/2026-08-08-veiledning-mesa-server.md): the column contract, the GeoParquet
+metadata trap, the tile-renderer changes with their measurements, and a memory section written
+against their 32 GB machine specifically. Their 26.7 GB ceiling turns out to be exactly the
+per-worker WKB copy — 3.2 GB × 8 workers = 25.6 GB, which their own inherited docstring already
+recorded — so the mmap fix is the first item on the checklist. The one place they are told *not*
+to copy us is the parent-side geometry join in flatten: measured 1.47 GB per 3 million cells over
+three columns, ~9.5 GB extrapolated to 19.4 million, which is fine on a 127 GB desktop and is not
+fine on 32 GB. Doing it per geocode group is owed to them, and to us.
+
+Removing Backfill had left the operator-facing numbering with a hole — the Advanced panel read
+1, 2, 3, 5, 6, 7… and the log emitted "[Stage 3a]" and "[Stage 3c]" with no 3b. Both were closed
+up: the panel is 1-9 contiguous and the data sub-stages log as 1/4 through 4/4. Found by building
+`ProcessRunnerWindow` headlessly, which is also the only check that the three removed
+`_cb_backfill` references left nothing behind; no test covered window construction before.
+
+Note on process: a verification harness written during this session lacked an
+`if __name__ == "__main__"` guard and, separately, resolved `base_dir()` to the mesa repo because
+its sandbox project had no `input/` folder — so one baseline run wrote tiles into the real
+`output/mbtiles`. Same source data, rendered by the HEAD renderer, so nothing was lost, but the
+harness now refuses to report a run that escaped its project directory.
+
+## 2026-08-09 — mesa-server on draw order; an A-E divergence surfaces
+
+mesa-server implemented four of the six checklist items and independently verified the ordering
+finding, more strictly than we had: feeding the new renderer the old planner's candidate order gave
+0 differences across 18,874,368 pixels. Both sides found the same non-determinism, from opposite
+directions, and neither had seen it before something moved the order.
+
+They then asked six questions before adopting max-aggregation, all of which needed answering from
+the code rather than from memory. Answered in [`docs/exchange/2026-08-09-tegnerekkefolge-svar.md`](docs/exchange/2026-08-09-tegnerekkefolge-svar.md).
+
+The important one was not the one they thought. They report that on their side E is the most
+sensitive class, ascending values mapping to ascending letters. Here A is: `config.ini` gives
+`[A] range = 21-25, description = Very high, category_colour = #bd0026`. The function they cite,
+`build_code_from_numeric_if_missing`, hard-codes nothing — the whole meaning of A..E comes from
+config, so if their report is accurate the two projects assign opposite value ranges to the same
+letters. That would make `sensitivity_code_max` mean the opposite thing in a package crossing
+between us, and it reaches legends, QGIS styling and any report naming a class. Worse,
+`read_sensitivity_palette_from_config` — vendored from us — carries
+`defaults = {"A": "#bd0026", ..., "E": "#ffffb2"}`, dark red through pale yellow, so an unswapped
+config would paint their most sensitive class pale. They have been asked to check `[A] range` and
+`[A] category_colour` and report back rather than us assuming.
+
+The renderer-level answer sidesteps it: we sort on the numeric `sensitivity_max`, not on the
+letter, so letter direction cannot flip a map.
+
+Two of our own claims were corrected by measurement before sending. We had assumed sorting would
+beat `np.maximum.at` for the scatter path; measured, `fmax.at` is ~10x faster (5M points: 21 ms
+against 750 ms) because argsort dominates — their instinct was right and ours was wrong. And the
+right primitive is `np.fmax.at`, not `np.maximum.at`: `maximum` propagates NaN, so a single
+unassessed cell blanks the whole pixel, which would read as missing data rather than as an
+aggregation artefact.
+
+Their question 6 was answered in code rather than prose: `mesa_aggregation` is now written to the
+mbtiles metadata of every layer, `max` where a draw-order key exists and `none` where none does,
+with `mode` / `mean` / `count` reserved for the value-raster work. Verified on a real run across
+all ten layers of a group. One gap admitted on our side: `segmv_cert` is ordinal but rides the
+classification pool without an order key, so it is labelled `none`.
+
+## 2026-08-09 — the mesa-server correspondence gets a home
+
+Four letters to mesa-server had accumulated in the repository root — the Classification
+specification from 2026-07-26 plus the three written this week — and **three of the four had never
+been committed**, so deleting them would have been irreversible rather than a tidy-up. That was
+the finding that decided the order of work: commit first, rearrange second, and never delete an
+untracked file to reduce clutter.
+
+They were not purely historical either. Four live things lived only in those letters: the
+`tbl_stacked` column contract, the `mesa_aggregation` vocabulary, the unresolved A-E direction
+question, and the open per-group geometry join. A contract that exists only in correspondence has
+to be reconstructed by reading letters in date order, which is not a way to keep an agreement.
+
+`cooperation.md` turned out to be the intended home and to have drifted: its own preamble called it
+a dialog between Claude sessions on two developer hosts, while `history.md`'s header said "the
+coordination with sibling projects lives in cooperation.md". Neither description clearly claimed the
+mesa-server letters, which is most likely why they ended up in the root. The preamble now covers
+both counterparts and says so, dated, rather than quietly widening.
+
+What landed:
+
+- A maintained-in-place **Agreed formats** section at the top of `cooperation.md`: the `tbl_stacked`
+  columns, the GeoParquet header rule and its readers-before-writers rollout order, the
+  `mesa_aggregation` values, and the three open cross-project questions. Marked as an explicit
+  exception to the file's append-only rule, since a contract is only useful in its current form.
+- `docs/exchange/` holding the four letters verbatim under dated names, with `klassifisering.md`
+  moved via `git mv` so its history survives. Root markdown files: 14 -> 10.
+- A `README.md` in that folder saying it is the audit trail and not the reference, and recording
+  that the archive is **one-sided** — all four documents are outbound, because mesa-server's two
+  proposals and their question letter arrived as pasted text in a working session and were never
+  saved. They should be retrieved and filed, or the folder reads as a monologue.
+- A line in `CLAUDE.md` under "Where to put what", so the next session files a letter instead of
+  dropping it in the root and the cleanup does not undo itself.
+
+## 2026-08-09 — what the tbl_stacked change actually bought, measured
+
+A true A/B of the data stages, HEAD against the working tree, same input, same host, both variants
+run in sequence:
+
+```
+Intersect           498.4s      490.2s       1.02x
+Flatten               5.3s        5.3s       0.99x
+Backfill              1.4s        0.0s     removed
+TOTAL               505.0s      495.5s       1.02x
+tbl_stacked on disk  5.64 MB -> 0.41 MB      92.8% smaller
+rows identical: stacked 65,541 | flat 31,826
+```
+
+**The format change bought disk and memory, not wall clock.** That contradicts what the component
+measurements had suggested and what had been implied to the operator: the flatten read is 13.5x
+faster per row and the intersect write 17.4x, but on this project flatten is 5.3 s in total,
+dominated by process spawn and pool setup, and intersect is dominated by the sjoin and the
+boundary-bleed filter, neither of which was touched. Two percent is noise.
+
+Both component figures remain true and both scale with data — backfill on a 94-million-row table
+was tens of GB of read-and-rewrite, and the flatten read saves ~0.8 us a row, which is 0.05 s here
+and over a minute there. But on the project actually in front of the operator, the honest answer is
+that processing takes the same time and the table is 93% smaller.
+
+The changelog was corrected to say so outright rather than let a reader infer a speed-up from a
+size reduction. The 92.8% is also a better number than the 72-83% quoted from the geometry share
+alone, because it is a measured before/after of the whole table including the other repeated
+columns.
+
+This is the third time this session that a component benchmark predicted an end-to-end result it
+did not deliver — after the per-ring projection (19x predicted, 1.1x delivered) and the palette PNG
+(5x predicted, slower delivered). The pattern is consistent enough to be worth stating as a rule:
+a component speed-up is a claim about a component, and becomes a claim about the program only
+after the program has been timed.
+
+## 2026-08-09 — Link zoom & pan restored; the stale comment was the clue
+
+The operator reported two things in quick succession: switching layer in the Overview tab reset the
+view, and "Link zoom & pan" had stopped working — it used to hold the view across tabs.
+
+The first was a plain bug in `showResLayer`, which called `fitBounds` on every call. Three of its
+four call paths do not move the data at all: the layer-type radios, the group dropdown reselecting
+the same group, and the master geocode-layer checkbox, which reset the view every time it was
+toggled. Fixed by tracking the group the map was last fitted to.
+
+The second was a regression with a name. While fixing the first I noticed that `showClassTiles`
+carried a comment — "When linked, keep the synced view from the previous tab; only auto-fit when
+unlinked" — above a `fitBounds` that ran unconditionally, and set it aside as a curiosity worth
+mentioning. It was not a curiosity. `git log` on the file named `d88d280` (2026-07-23, "always zoom
+to layer data, and size the map before the first fit"), which rewrote six sites from
+`if(linking){ syncFrom(x) } else { fitBounds() }` to `fitBounds(); if(linking){ syncFrom(x) }`. That
+is exactly the reported loss, and it shipped four days after a commit whose subject line was "stop
+layer toggles panning when linked".
+
+The commit was not wrong about its own problem: a `fitBounds` against a map the webview has not
+sized yet picks the wrong zoom, which is why it added `invalidateSize()` everywhere. Those calls are
+kept. What is restored is the condition, now in a single `frameMap(key, bounds, keepView)` that all
+seven call sites go through — six copies of a rule is how half of them end up on an old version of
+it.
+
+One improvement over the pre-regression behaviour: the first framing always happens, even when
+linked. The old code would push Leaflet's default world view to every map if a loader ran before
+anything had been framed.
+
+Verified by extracting the real JS from `combined_map.py` and running it in QtWebEngine — the engine
+the Maps window actually uses, since there is no node on this host — against a Leaflet stub. Six
+cases, all passing: unlinked first show fits, unlinked layer switch holds, unlinked other tab fits,
+linked other tab holds and pushes its view onward, and linked-with-nothing-framed still fits.
+
+## 2026-08-09 — Classification becomes an opt-in
+
+Classification joined every Process run as long as a geocode layer was configured, and it is the
+most expensive thing MESA does: a Gaussian Mixture fit for every k in the range, over every cell of
+the chosen layer, repeated on each run. Nothing told the operator that, and nothing asked.
+
+It is now opt-in behind `segmv_enabled`, default 0. The tick sits at the top of Configure ->
+Classification, above the settings it governs, with a plain-language note on what the cost is —
+that a 2-15 range means fourteen fits over the whole layer, that on a large `basic_mosaic` that is
+a long wait, and that everything else in the pipeline completes without it. The settings below grey
+out while it is off rather than disappearing, so a configuration made earlier is visibly still
+there.
+
+The gate is in `detect_classification_processing`, not on the runner's checkbox. That matters:
+Normal mode builds its plan from availability and never reads checkbox state, so gating at the
+checkbox would have left "off" meaning off in Advanced mode only. One place covers both — in
+Advanced the stage greys out with the reason as its tooltip, and in Normal it is simply not run.
+
+Deliberately not gated: invoking `segmentation_run` directly. The flag decides whether the stage
+joins Process automatically, not whether a deliberate run is allowed.
+
+Verified headlessly against the real windows rather than by reading the code: the setup window
+defaults to off and greys its six dependent controls, `_collect()` writes `segmv_enabled` both ways,
+`detect_classification_processing` blocks with a reason pointing at the setup window, the Advanced
+checkbox is disabled and unchecked with that reason as its tooltip, Normal mode's plan comes out
+False, and `params_from_config` round-trips the flag.
+
+## 2026-08-09 — the classification popup names its asset groups
+
+Clicking a cell on the Classifications map gave the type, certainty, overlap count and the top
+importance x susceptibility bins — everything about how sensitive the type is, nothing about what it
+is made of. `top_asset_groups` already existed, computed per run and shown as a column in the
+Classifications table, but never reached the popup.
+
+It is a per-TYPE attribute in `tbl_seg_mv_profile`, not per cell, so both popup paths had to join it
+on `cluster_id`. The vector path builds a `cluster_id -> top_asset_groups` map in JS from the profile
+rows the same response already carries; the raster path joins it onto the cached cell frame in
+`_fi_load_class`, where `_fi_class_info` can list it as another field. `cluster_id` was added to the
+profile rows so the join is on an id rather than on `cluster_label`, which is a display string.
+
+While in that code, both reads of `tbl_geocode_object` in `combined_map.py` were switched to
+`mesa_shared.read_geoparquet`. They were the last two `gpd.read_parquet` calls on that table outside
+the pipeline, and on a project whose geocode table lacks the GeoParquet header — which is every
+project that generated geocodes during 5.7 development — the fallback was `gdf = None`, meaning the
+Classifications map would have failed to identify anything at all, silently.
+
+Verified against the real project, run 2026-08-09_130819: all 7 profile rows carry both fields, and
+a raster cell resolves to "Top asset groups: Minor road corridor (30 m buffer), Shrubland,
+Grassland" across 19,150 cells.
+
+## 2026-09-16 — Generated grid names get a two-digit level; demo packages follow
+
+The report's map selection listed `H3_R10` before `H3_R7`, and the maps did the same: group names
+sorted as text. The operator asked for `H3_R07` / `QDGC_L06`, on the condition that it did not
+compromise the libraries' own naming. It does not — H3 names only resolutions and cell indexes,
+QDGC only cell codes; the `H3_R` / `QDGC_L` label is MESA's. The same sort had quietly inverted
+`choose_primary_geocode`, which returned the finest H3 grid as the fallback instead of the coarsest.
+
+Shipped in `e0e2412`: names from `mesa_shared.h3_group_name()` / `qdgc_group_name()`, and
+`migrate_geocode_group_names()` at startup, after restore and before generation. On a copy of the
+live workspace it renamed 4 tables and 40 MBTiles in 0.50 s, with all 24 tables equal before and
+after apart from the names. `e0e75a0` committed the two template lines mesa_demodata builds from
+(`mesa_version = 5.7.0`, example `H3_R09`); `config.ini` is otherwise not committed.
+
+mesa_demodata was sent a prompt (`docs/exchange/2026-09-16-geokodenavn-ledende-null-prompt.md`).
+It first stopped at the template step — correctly, the template was not committed — and also
+reported that no commit held padded names, which was wrong: its clone predated the push, and it
+searched for the prompt's illustrative spelling `H3_R{r:02d}`. After a fetch it rebuilt all eight
+packages as 5.7.0 (reply: `docs/exchange/2026-09-16-geokodenavn-ledende-null-svar.md`). Only
+`config.ini` differs from 5.6.0 in each, +51 bytes zipped; zero unpadded names found. The template
+also moved `segmv_ai_enabled` from 1 to 0 in the packages — 5.6.0 had shipped a value that differed
+from the committed default. Zenodo versions are prepared, not published.
+
+Two observations from the reply, not acted on: QDGC L8 took 18.6 s for 1,817 cells against 0.8 s
+for 2,312 H3 R9 cells; and the working `config.ini` here still carries the "GENERATED FILE" banner
+from a restored demo package, which `e0e75a0` did not pick up because it was built from HEAD.
+mesa-server has not been told about the naming change.
+
+## 2026-09-16 — mesa-server agrees to the two-digit grid names
+
+mesa-server answered the same day (`docs/exchange/2026-09-16-geokodenavn-ledende-null-server-svar.md`)
+and accepted the format, so it now stands in `cooperation.md` as agreed by all three projects.
+
+The server writes grid names in one place, `worker/generate_geocodes.py`, and now calls functions
+named and behaving like desktop's. It had the same fallback inversion: classification picked "the
+first layer" from a PostgreSQL `string_agg(DISTINCT …)`, which is text order. Its fix reads the
+level as a number rather than relying on padding, because the server deliberately does not rename
+old names in packages it reads — it copies the geocode tables through, and renaming only its own
+tables would leave a package disagreeing with itself. Desktop's restore migration covers what comes
+back. The change is not deployed: a changed SSH host key on the server is being verified first.
+
+Desktop was asked whether it ever reads a server package without restoring it. Checked: it does
+not — outside restore, package zips are opened only to read `config.ini` and list member names.
+
+One consequence for the 5.7.0 release: the server's package contract accepts pre-built output only
+from 5.5.0 and 5.6.0, so a 5.7.0 package *with output* is refused until they have confirmed the
+schema. Input-only packages are unaffected. Logged as open in `cooperation.md`.
+
+The line numbers the server quoted for `mesa_shared.py` (466–473, 704–725) come from this machine's
+working tree, which carries uncommitted changes; in `e0e75a0` the functions sit at 425, 430 and 663.
+The code they compared against is the same.
 
 ## 2026-10-08 – 2026-10-09 — Button review: Exit placement, roles, safe dialogs, unsaved edits
 
