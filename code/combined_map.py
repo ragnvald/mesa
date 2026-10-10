@@ -41,6 +41,7 @@ except Exception:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import segmentation as seg  # noqa: E402
+import mesa_shared  # noqa: E402  (stdlib-only at import time; geopandas is lazy inside)
 
 # 1x1 transparent PNG, returned for tile misses so image loads never break.
 BLANK_PNG = (b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
@@ -318,6 +319,9 @@ def _fi_class_info(row, level):
         ("Certainty (p_max)", "p_max", lambda v: f"{round(float(v) * 100)}%", None),
         ("Coverage (overlaps)", "coverage_index", None, None),
         ("Top (imp×sus) bins", "top_bins", None, None),
+        # Per-type, joined onto the cell in _fi_load_class: the bins say how
+        # sensitive the type is, this says what it is made of.
+        ("Top asset groups", "top_asset_groups", None, None),
     ]
     return {
         "title": title,
@@ -822,6 +826,9 @@ class _Api:
             fill = seg._overview_colour(str(cid), "clusters")
             label = str(r.get("cluster_label") or f"type {cid + 1}")
             rows.append({
+                # cluster_id travels with the row so consumers can join on it
+                # rather than on cluster_label, which is a display string.
+                "cluster_id": cid,
                 "cluster_label": label, "fill": fill,
                 "n_polygons": int(r["n_polygons"]) if pd.notna(r.get("n_polygons")) else 0,
                 "total_area_km2": float(r["total_area_km2"]) if pd.notna(r.get("total_area_km2")) else None,
@@ -881,11 +888,14 @@ class _Api:
                 return out
             return {"too_large": True, "features": int(len(m)),
                     "max_features": self.SEGMV_MAX_FEATURES, "layer": layer}
+        # Tolerant read: tbl_geocode_object written by the streamed merge lacks the
+        # schema-level GeoParquet header, and gpd.read_parquet refuses it outright.
+        # See learning.md "GeoParquet metadata lives in two places".
         try:
-            geo = gpd.read_parquet(go, columns=["code", "geometry"],
-                                   filters=[("name_gis_geocodegroup", "=", layer)])
+            geo = mesa_shared.read_geoparquet(go, columns=["code", "geometry"],
+                                              filters=[("name_gis_geocodegroup", "=", layer)])
         except Exception:
-            geo = gpd.read_parquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
+            geo = mesa_shared.read_geoparquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
             geo = geo[geo["name_gis_geocodegroup"].astype(str) == layer][["code", "geometry"]]
         geo["code"] = geo["code"].astype(str)
         m = m.copy(); m["code"] = m["code"].astype(str)
@@ -1012,14 +1022,27 @@ class _Api:
                 if not mv.empty:
                     mv = mv.copy(); mv["code"] = mv["code"].astype(str)
                     try:
-                        geo = gpd.read_parquet(go, columns=["code", "geometry"],
-                                               filters=[("name_gis_geocodegroup", "=", str(layer))])
+                        geo = mesa_shared.read_geoparquet(go, columns=["code", "geometry"],
+                                                          filters=[("name_gis_geocodegroup", "=", str(layer))])
                     except Exception:
-                        geo = gpd.read_parquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
+                        geo = mesa_shared.read_geoparquet(go, columns=["code", "name_gis_geocodegroup", "geometry"])
                         geo = geo[geo["name_gis_geocodegroup"].astype(str) == str(layer)][["code", "geometry"]]
                     geo["code"] = geo["code"].astype(str)
                     gdf = gpd.GeoDataFrame(mv.merge(geo, on="code", how="inner"),
                                            geometry="geometry", crs=getattr(geo, "crs", None))
+                    # top_asset_groups is a per-TYPE attribute in the profile table,
+                    # not per cell. Carry it onto the cells so a clicked cell can
+                    # name what its type is made of, which is the question the
+                    # bins alone do not answer.
+                    try:
+                        prof_rows, _ = self._segmv_profile(str(run_id), str(layer))
+                        tags = {r.get("cluster_id"): r.get("top_asset_groups") for r in prof_rows}
+                        if tags:
+                            gdf["top_asset_groups"] = [
+                                tags.get(int(c)) if pd.notna(c) else None for c in gdf["cluster_id"]
+                            ]
+                    except Exception:
+                        pass
                     try:
                         if gdf.crs is not None and "4326" not in str(gdf.crs):
                             gdf = gdf.to_crs(4326)
@@ -2081,6 +2104,7 @@ HTML = r"""<!doctype html>
   var classProfileData=[], classSort={key:null, dir:1};
   var classColourMode='types', classLegendData=[], classRaster=null;
   var classLayer=null, classRunId=null, classHoverTimer=null, classHoverHL=null;   // raster hover-identify state
+  var classTopAssets={};            // cluster_id -> "Top asset groups", from the profile rows
   function classHideHover(){ var h=document.getElementById('classHover'); if(h) h.style.display='none';
     if(classHoverHL){ try{ maps.class.removeLayer(classHoverHL); }catch(e){} classHoverHL=null; } }
   // Hover-identify on the Classifications raster: point-in-polygon on the server, shown
@@ -2218,6 +2242,12 @@ HTML = r"""<!doctype html>
       classSetLoading(false);
       if(!res || res.error){ classMsg((res&&res.error)||'Could not load results.'); renderClassPanel([],[]); return; }
       classLayer=res.layer||null;
+      // cluster_id -> "Top asset groups", so a cell popup can name what its type
+      // is made of. The value is per type, and only the profile rows carry it.
+      classTopAssets={};
+      (res.profile||[]).forEach(function(pr){
+        if(pr && pr.cluster_id!=null && pr.top_asset_groups) classTopAssets[pr.cluster_id]=pr.top_asset_groups;
+      });
       if(res.raster){ showClassTiles(res.raster, res.raster_cert, res.layer); renderClassPanel(res.legend||[], res.profile||[]); return; }
       if(res.too_large){ classMsg('This result has '+Number(res.features).toLocaleString()+
         ' cells — too many to draw as vectors (cap '+Number(res.max_features).toLocaleString()+'). '+
@@ -2230,10 +2260,15 @@ HTML = r"""<!doctype html>
           lyr.bindTooltip((p.cluster_label||'type')+' · '+pm, {sticky:true, direction:'top', opacity:0.92});
           lyr.on('mouseover', function(){ try{ this.setStyle({weight:2.5,color:'#1d4ed8'}); if(this.bringToFront) this.bringToFront(); }catch(e){} });
           lyr.on('mouseout', function(){ try{ this.setStyle(classStyle(f)); }catch(e){} });
+          // top_asset_groups is a per-TYPE attribute, looked up from the profile
+          // rows in this same response. The bins say how sensitive the type is;
+          // this says what it is made of.
+          var tag=classTopAssets[p.cluster_id];
           lyr.bindPopup('<b>'+(p.cluster_label||'type')+'</b><br>Cell: '+(p.code||'')+
                         '<br>Certainty (p_max): '+pm+
                         '<br>Coverage (overlaps): '+(p.coverage_index==null?'–':p.coverage_index)+
-                        '<br>Top (imp×sus) bins: '+(p.top_bins||'–')); }
+                        '<br>Top (imp×sus) bins: '+(p.top_bins||'–')+
+                        (tag?('<br>Top asset groups: '+tag):'')); }
       });
       classVecGj=gj; classVec.addLayer(gj);
       frameMap('class', gj.getBounds());
