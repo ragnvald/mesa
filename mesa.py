@@ -4113,8 +4113,15 @@ class MesaMainWindow(QMainWindow):
             pd.DataFrame([row]).to_parquet(path, index=False)
             self._project_info_status.setText(f"Last saved: {now_utc}")
             self._project_continue_btn.setVisible(True)
+            self._welcome_saved = self._welcome_values()
+            return True
         except Exception as e:
             QMessageBox.warning(self, "Save failed", f"Could not save project info:\n{e}")
+            return False
+
+    def _welcome_values(self) -> tuple:
+        return (self._project_name_edit.text().strip(),
+                self._project_about_edit.toPlainText().strip())
 
     def _build_welcome_tab(self):
         tab = QWidget()
@@ -4182,6 +4189,7 @@ class MesaMainWindow(QMainWindow):
         info = self._read_project_info()
         self._project_name_edit.setText(info["project_name"])
         self._project_about_edit.setPlainText(info["about"])
+        self._welcome_saved = self._welcome_values()
         if info["updated_utc"]:
             self._project_info_status.setText(f"Last saved: {info['updated_utc']}")
             self._project_continue_btn.setVisible(True)
@@ -5149,7 +5157,7 @@ class MesaMainWindow(QMainWindow):
         btn_row.addStretch()
         reload_btn = QPushButton("Reload")
         reload_btn.setToolTip("Discard unsaved edits and re-read the saved values.")
-        reload_btn.clicked.connect(self._load_config_editor)
+        reload_btn.clicked.connect(self._on_config_reload_clicked)
         btn_row.addWidget(reload_btn)
         save_btn = QPushButton("Save all")
         save_btn.setProperty("role", "primary")
@@ -5381,19 +5389,26 @@ class MesaMainWindow(QMainWindow):
         self._ai_ollama_url.setText(s.get("ollama_url", "") or "")
         self._ai_ollama_model.setText(s.get("ollama_model", "") or "")
         self._ai_provider_changed()
+        self._ai_saved = self._ai_values()
 
-    def _save_ai_connection(self):
-        settings = {
+    def _ai_values(self) -> dict:
+        return {
             "provider": self._ai_provider.currentData() or "openai",
             "openai_token": self._ai_token.text().strip(),
             "ollama_url": self._ai_ollama_url.text().strip(),
             "ollama_model": self._ai_ollama_model.text().strip(),
         }
+
+    def _save_ai_connection(self) -> bool:
+        settings = self._ai_values()
         try:
             write_ai_connection(original_working_directory, settings)
             self._ai_status.setText("AI connection saved to secrets/.")
+            self._ai_saved = settings
+            return True
         except Exception as e:
             self._ai_status.setText(f"Could not save AI connection: {e}")
+            return False
 
     def _delete_ai_token(self):
         if QMessageBox.question(
@@ -5407,6 +5422,7 @@ class MesaMainWindow(QMainWindow):
         try:
             write_ai_connection(original_working_directory, s)
             self._ai_token.clear()
+            self._ai_saved = {**getattr(self, "_ai_saved", {}), "openai_token": ""}
             self._ai_status.setText("Token deleted from secrets/.")
         except Exception as e:
             self._ai_status.setText(f"Could not delete token: {e}")
@@ -5473,20 +5489,64 @@ class MesaMainWindow(QMainWindow):
                 if cfg.has_option("DEFAULT", key):
                     self._config_widget_set(widget, kind, cfg.get("DEFAULT", key))
             self._config_status_label.clear()
+            self._config_saved = self._config_values()
         except Exception as e:
             self._config_status_label.setText(f"Could not load settings: {e}")
 
-    def _save_config_editor(self):
+    def _config_values(self) -> dict:
+        return {key: self._config_widget_value(widget, kind)
+                for key, (widget, kind, _opts) in self._config_widgets.items()}
+
+    def _config_apply_external(self, updates: dict) -> None:
+        """Show keys another window (Tune) just wrote to config.ini, keeping other unsaved edits."""
+        for key, value in updates.items():
+            entry = self._config_widgets.get(key)
+            if entry is None:
+                continue
+            widget, kind, _opts = entry
+            self._config_widget_set(widget, kind, str(value))
+            if hasattr(self, "_config_saved"):
+                self._config_saved[key] = self._config_widget_value(widget, kind)
+
+    def _on_config_reload_clicked(self):
+        from ui_style import confirm_unsaved
+        if (self._config_values() == getattr(self, "_config_saved", None)
+                or confirm_unsaved(self, "the Config tab", self._save_config_editor)):
+            self._load_config_editor()
+
+    def _save_config_editor(self) -> bool:
         try:
-            updates = {}
-            for key, (widget, kind, _opts) in self._config_widgets.items():
-                updates[key] = self._config_widget_value(widget, kind)
+            updates = self._config_values()
             self._update_default_keys_preserve_comments(config_file, updates)
             self._config_status_label.setText("All changes saved.")
             log_to_logfile(f"Config tab saved {len(updates)} settings")
+            self._config_saved = updates
+            return True
         except Exception as e:
             self._config_status_label.setText(f"Could not save changes: {e}")
             log_to_logfile(f"Config save error: {e}")
+            return False
+
+    def _unsaved_sections(self) -> list[tuple]:
+        """(name, save_fn) for each main-window section whose fields differ from the last load/save."""
+        dirty = []
+        if hasattr(self, "_welcome_saved") and self._welcome_values() != self._welcome_saved:
+            dirty.append(("Welcome", self._save_project_info))
+        if hasattr(self, "_config_saved") and self._config_values() != self._config_saved:
+            dirty.append(("Config", self._save_config_editor))
+        if hasattr(self, "_ai_saved") and self._ai_values() != self._ai_saved:
+            dirty.append(("AI connection", self._save_ai_connection))
+        return dirty
+
+    def closeEvent(self, event):
+        from ui_style import confirm_unsaved
+        dirty = self._unsaved_sections()
+        if dirty:
+            names = ", ".join(name for name, _save in dirty)
+            if not confirm_unsaved(self, names, lambda: all(save() for _name, save in dirty)):
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def _open_config_file_externally(self):
         try:
