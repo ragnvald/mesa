@@ -55,6 +55,8 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 # fiona/geopandas/shapely stack. See learning.md.
 from ui_style import (
     apply_shared_stylesheet,
+    DirtyTracker,
+    confirm_unsaved,
 )
 
 
@@ -449,6 +451,7 @@ class AssetManagerWindow(QMainWindow):
 
         self.df = pd.DataFrame()
         self.idx = 0
+        self._dirty = DirtyTracker(self._edit_snapshot)
 
         # Thread-safe signals
         self._signals = _ImportSignals()
@@ -548,11 +551,19 @@ class AssetManagerWindow(QMainWindow):
         main_layout.addWidget(self.summary_label)
 
     def _request_close(self):
+        self.close()
+
+    def closeEvent(self, event):
+        # Both checks live here so the window's X gets them too, not just Exit.
         if self._import_running:
             QMessageBox.warning(self, "Import running",
                                 "Import is still running. Please wait for completion before exiting.")
+            event.ignore()
             return
-        self.close()
+        if not self._edits_resolved():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _log_import_diagnostics(self):
         cfg_display = _CFG_PATH if _CFG_PATH is not None else (self.base_dir / "config.ini")
@@ -624,7 +635,7 @@ class AssetManagerWindow(QMainWindow):
         btn_row.addWidget(import_btn)
 
         refresh_btn = QPushButton("Refresh editor")
-        refresh_btn.clicked.connect(self._refresh_edit_data)
+        refresh_btn.clicked.connect(self._on_reload_clicked)
         btn_row.addWidget(refresh_btn)
 
         btn_row.addStretch()
@@ -799,7 +810,7 @@ class AssetManagerWindow(QMainWindow):
         controls.addStretch()
 
         reload_btn = QPushButton("Reload")
-        reload_btn.clicked.connect(self._refresh_edit_data)
+        reload_btn.clicked.connect(self._on_reload_clicked)
         controls.addWidget(reload_btn)
 
         save_next_btn = QPushButton("Save && Next")
@@ -1343,6 +1354,10 @@ class AssetManagerWindow(QMainWindow):
         if self._import_running:
             self._log("Import already running.", "WARN")
             return
+        # The import rewrites tbl_asset_group; a later Save of the old in-memory
+        # table would undo it, so settle pending edits first.
+        if not self._edits_resolved():
+            return
 
         def _job():
             self._import_running = True
@@ -1357,7 +1372,13 @@ class AssetManagerWindow(QMainWindow):
 
     def _on_import_finished(self):
         """Slot: called on UI thread when import completes."""
+        edited_meanwhile = self._dirty.is_dirty()
         self._refresh_edit_data()
+        if edited_meanwhile:
+            QMessageBox.information(
+                self, "Editor reloaded",
+                "The import finished and the editor now shows the imported data.\n\n"
+                "Edits made while the import was running were not kept.")
         self._refresh_import_source_label()
 
     def _refresh_import_source_label(self) -> None:
@@ -1408,6 +1429,30 @@ class AssetManagerWindow(QMainWindow):
         self._update_counter()
         self.edit_state_label.setText(f"Record {self.idx + 1} of {len(self.df)}")
 
+    def _edit_snapshot(self) -> tuple:
+        """Editable columns of every row, with the open form folded in first."""
+        if len(self.df) == 0:
+            return ()
+        self._write_back_to_df()
+        cols = [c for c in ("name_original", "title_fromuser", PURPOSE_COLUMN, STYLING_COLUMN)
+                if c in self.df.columns]
+        return tuple(tuple("" if pd.isna(v) else str(v) for v in row)
+                     for row in self.df[cols].itertuples(index=False))
+
+    def _edits_resolved(self) -> bool:
+        """True when nothing is unsaved, or the user saved or discarded it."""
+        if not self._dirty.is_dirty():
+            return True
+        if not confirm_unsaved(self, "the asset editor", self._save_current):
+            return False
+        if self._dirty.is_dirty():  # discarded: drop them from the form and memory too
+            self._refresh_edit_data()
+        return True
+
+    def _on_reload_clicked(self):
+        if self._edits_resolved():
+            self._refresh_edit_data()
+
     def _write_back_to_df(self):
         if len(self.df) == 0:
             return
@@ -1423,6 +1468,7 @@ class AssetManagerWindow(QMainWindow):
         self._write_back_to_df()
         ok = save_asset_group_df(self.asset_group_file, self.df)
         if ok:
+            self._dirty.mark_clean()
             self.edit_state_label.setText("Saved.")
             self._log("Asset group record saved from asset_manage.")
             return True
@@ -1444,6 +1490,10 @@ class AssetManagerWindow(QMainWindow):
             return
         if len(self.df) == 0:
             QMessageBox.information(self, "Nothing to delete", "There are no asset groups.")
+            return
+        # Delete rewrites the whole table from self.df, so pending edits on other
+        # rows would be saved silently; settle them first.
+        if not self._edits_resolved():
             return
 
         row = self.df.iloc[self.idx]
@@ -1531,6 +1581,7 @@ class AssetManagerWindow(QMainWindow):
             self._load_record()
         parquet_path = _parquet_path(self.asset_group_file)
         self.summary_label.setText(f"Asset group file: {parquet_path}  |  rows: {len(self.df)}")
+        self._dirty.mark_clean()
 
 
 # =====================================================================

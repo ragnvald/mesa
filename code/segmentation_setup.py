@@ -59,11 +59,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 try:
-    from ui_style import apply_shared_stylesheet, InfoCircleLabel
+    from ui_style import apply_shared_stylesheet, InfoCircleLabel, DirtyTracker, confirm_unsaved
 except Exception:  # keep standalone-launchable even if the shared sheet is unavailable
     def apply_shared_stylesheet(_app):  # type: ignore
         return None
     InfoCircleLabel = None  # type: ignore
+    DirtyTracker = None  # type: ignore
+    confirm_unsaved = None  # type: ignore
 
 import segmentation as _seg
 import segmentation_run as _run
@@ -290,6 +292,19 @@ class SegmentationSetupWindow(QMainWindow):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # Snapshot the form as loaded (not config.ini: the layer combo falls back
+        # to the first layer when the saved one is gone).
+        self._dirty = DirtyTracker(self._collect) if DirtyTracker is not None else None
+        if self._dirty is not None:
+            self._dirty.mark_clean()
+
+    def closeEvent(self, event):
+        if (self._dirty is not None and self._dirty.is_dirty()
+                and not confirm_unsaved(self, "the Classification settings", self._on_save)):
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     # -- helpers ---------------------------------------------------------
     def _collect(self) -> dict:
         k_raw = self._txt_k.text().strip() or "2-15"
@@ -329,6 +344,8 @@ class SegmentationSetupWindow(QMainWindow):
             _update_config(self._config_file, **self._collect())
             self._status.setText(
                 "Settings saved. Classification runs as part of Process (step 3).")
+            if self._dirty is not None:
+                self._dirty.mark_clean()
             return True
         except Exception as exc:
             self._status.setText(f"Could not save settings: {exc}")

@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
-from ui_style import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet, DirtyTracker, confirm_unsaved
 
 
 BASE_DIR: Path = Path(".").resolve()
@@ -197,6 +197,7 @@ class AtlasManagerWindow(QMainWindow):
     def __init__(self, base_dir: Path):
         super().__init__()
         self.base_dir = base_dir
+        self._dirty = DirtyTracker(self._form_values)
 
         self.cfg = _ensure_cfg()
         d = self.cfg["DEFAULT"]
@@ -548,7 +549,7 @@ class AtlasManagerWindow(QMainWindow):
         controls_row.addStretch()
 
         self.reload_btn = QPushButton("Reload")
-        self.reload_btn.clicked.connect(self._refresh_edit_data)
+        self.reload_btn.clicked.connect(self._on_reload_clicked)
         controls_row.addWidget(self.reload_btn)
 
         save_btn = QPushButton("Save")
@@ -999,15 +1000,37 @@ class AtlasManagerWindow(QMainWindow):
         self.image2_entry.setText("" if pd.isna(row.get("image_name_2")) else str(row.get("image_name_2")))
         self.image2_desc_entry.setText("" if pd.isna(row.get("image_desc_2")) else str(row.get("image_desc_2")))
         self.edit_state_label.setText(f"Record {self.current_index + 1} of {len(self.df)}")
+        self._dirty.mark_clean()
         self._refresh_map()
 
-    def _save_current(self):
-        if self.df.empty:
+    def _form_values(self) -> tuple:
+        return (self.title_entry.text(), self.description_entry.text(),
+                self.image1_entry.text(), self.image1_desc_entry.text(),
+                self.image2_entry.text(), self.image2_desc_entry.text())
+
+    def _edits_resolved(self) -> bool:
+        """True when there are no unsaved page edits, or the user saved/discarded them."""
+        if self.df.empty or not self._dirty.is_dirty():
+            return True
+        return confirm_unsaved(self, "this atlas page", self._save_current)
+
+    def _on_reload_clicked(self):
+        if self._edits_resolved():
+            self._refresh_edit_data()
+
+    def closeEvent(self, event):
+        if not self._edits_resolved():
+            event.ignore()
             return
+        super().closeEvent(event)
+
+    def _save_current(self) -> bool:
+        if self.df.empty:
+            return False
         key = self.lbl_name_gis.text().strip()
         if not key:
             QMessageBox.critical(self, "Error", "Missing name_gis")
-            return
+            return False
 
         self.df.at[self.current_index, "title_user"] = self.title_entry.text()
         self.df.at[self.current_index, "description"] = self.description_entry.text()
@@ -1019,18 +1042,18 @@ class AtlasManagerWindow(QMainWindow):
         path = self._atlas_path(for_write=False)
         if not path.exists():
             QMessageBox.critical(self, "Error", f"File not found:\n{path}")
-            return
+            return False
 
         try:
             gdf_local = gpd.read_parquet(path)
             if "name_gis" not in gdf_local.columns:
                 QMessageBox.critical(self, "Error", "GeoParquet does not contain name_gis.")
-                return
+                return False
 
             idx = gdf_local.index[gdf_local["name_gis"].astype(str) == key]
             if len(idx) == 0:
                 QMessageBox.critical(self, "Error", f"No record found for name_gis='{key}'.")
-                return
+                return False
 
             for col in ["title_user", "description", "image_name_1", "image_desc_1", "image_name_2", "image_desc_2"]:
                 if col in gdf_local.columns:
@@ -1052,8 +1075,11 @@ class AtlasManagerWindow(QMainWindow):
 
             self.edit_state_label.setText("Saved.")
             self.summary_label.setText(f"Atlas file: {write_path} | pages: {len(self.df)}")
+            self._dirty.mark_clean()
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Save failed:\n{exc}")
+            return False
 
     def _navigate(self, direction: int):
         if self.df.empty:
@@ -1061,6 +1087,9 @@ class AtlasManagerWindow(QMainWindow):
         nxt = self.current_index + int(direction)
         nxt = max(0, min(len(self.df) - 1, nxt))
         if nxt == self.current_index:
+            return
+        # Page edits live only in the form, so moving on would drop them.
+        if not self._edits_resolved():
             return
         self.current_index = nxt
         self._load_record()

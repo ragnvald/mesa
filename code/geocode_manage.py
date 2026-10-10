@@ -3274,7 +3274,7 @@ def format_qdgc_level(z: int) -> str:
 # =====================================================================
 # Shared stylesheet (same warm palette as mesa.py / asset_manage.py)
 # =====================================================================
-from ui_style import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet, DirtyTracker, confirm_unsaved
 
 
 # =====================================================================
@@ -3311,6 +3311,7 @@ class GeocodeManagerWindow(QMainWindow):
 
         self.geocode_df = None
         self.edit_idx = 0
+        self._dirty = DirtyTracker(self._edit_snapshot)
         self.write_path = gpq_dir(base) / TABLE_GEOCODE_GROUP
         self._h3_levels: list[int] = []
         self._qdgc_levels: list[int] = []
@@ -3852,7 +3853,7 @@ class GeocodeManagerWindow(QMainWindow):
         controls.addWidget(next_btn)
         controls.addStretch()
         reload_btn = QPushButton("Reload")
-        reload_btn.clicked.connect(self._refresh_edit_data)
+        reload_btn.clicked.connect(self._on_reload_clicked)
         controls.addWidget(reload_btn)
         del_btn = QPushButton("Delete")
         del_btn.setProperty("role", "danger")
@@ -3910,8 +3911,48 @@ class GeocodeManagerWindow(QMainWindow):
     def _on_task_finished(self):
         self._set_job_running(False)
         self._active_log_widget = None
+        edited_meanwhile = self._dirty.is_dirty()
         self._refresh_group_list()
         self._refresh_edit_data()
+        if edited_meanwhile:
+            QMessageBox.information(
+                self, "Editor reloaded",
+                "The job finished and the Edit tab now shows the updated geocode groups.\n\n"
+                "Edits made while the job was running were not kept.")
+
+    def _edit_snapshot(self) -> tuple:
+        """Editable columns of every row, with the open form folded in first."""
+        if self.geocode_df is None or len(self.geocode_df) == 0:
+            return ()
+        self._write_back_to_df()
+        cols = [c for c in ("name", "title_user", "description") if c in self.geocode_df.columns]
+        return tuple(tuple("" if pd.isna(v) else str(v) for v in row)
+                     for row in self.geocode_df[cols].itertuples(index=False))
+
+    def _edits_resolved(self) -> bool:
+        """True when nothing is unsaved, or the user saved or discarded it."""
+        if not self._dirty.is_dirty():
+            return True
+        if not confirm_unsaved(self, "the Edit tab", self._save_current):
+            return False
+        if self._dirty.is_dirty():  # discarded: drop them from the form and memory too
+            self._refresh_edit_data()
+        return True
+
+    def _on_reload_clicked(self):
+        if self._edits_resolved():
+            self._refresh_edit_data()
+
+    def closeEvent(self, event):
+        if getattr(self, "_job_prev_enabled", None):
+            QMessageBox.warning(self, "Job running",
+                                "A geocode job is still running. Please wait for it to finish before exiting.")
+            event.ignore()
+            return
+        if not self._edits_resolved():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _on_mosaic_line(self, text: str):
         self.mosaic_log.appendPlainText(text)
@@ -3940,6 +3981,9 @@ class GeocodeManagerWindow(QMainWindow):
         self.mosaic_status_label.setStyleSheet(f"font-weight: 600; color: {color}; min-width: 100px;")
 
     def _run_mosaic(self):
+        # These rewrite the geocode tables the Edit tab saves wholesale; settle edits first.
+        if not self._edits_resolved():
+            return
         self._active_log_widget = self.mosaic_log
         self.mosaic_log.clear()
         self.mosaic_log.appendPlainText("--- Mosaic run started ---")
@@ -4065,6 +4109,9 @@ class GeocodeManagerWindow(QMainWindow):
         )
 
     def _generate_h3(self):
+        # These rewrite the geocode tables the Edit tab saves wholesale; settle edits first.
+        if not self._edits_resolved():
+            return
         levels = self._picked_levels(self.h3_level_checks, self._h3_levels)
         if not levels:
             log_to_gui("No levels ticked to generate.", "WARN")
@@ -4101,6 +4148,9 @@ class GeocodeManagerWindow(QMainWindow):
             bool(self._picked_levels(self.qdgc_level_checks, self._qdgc_levels)))
 
     def _generate_qdgc(self):
+        # These rewrite the geocode tables the Edit tab saves wholesale; settle edits first.
+        if not self._edits_resolved():
+            return
         levels = self._picked_levels(self.qdgc_level_checks, self._qdgc_levels)
         if not levels:
             log_to_gui("No levels ticked to generate.", "WARN")
@@ -4115,6 +4165,9 @@ class GeocodeManagerWindow(QMainWindow):
     # Import
     # ------------------------------------------------------------------
     def _run_import(self):
+        # These rewrite the geocode tables the Edit tab saves wholesale; settle edits first.
+        if not self._edits_resolved():
+            return
         self._active_log_widget = self.import_log
         log_to_gui("[Import] Import requested.", "INFO")
         self._set_job_running(True)
@@ -4159,6 +4212,9 @@ class GeocodeManagerWindow(QMainWindow):
         self.manage_status_label.setText(f"Groups: {len(existing_g)}  |  Total objects: {total_objects}")
 
     def _delete_selected_groups(self):
+        # These rewrite the geocode tables the Edit tab saves wholesale; settle edits first.
+        if not self._edits_resolved():
+            return
         self._active_log_widget = self.manage_log
         log_to_gui("[Manage] Delete selected requested.", "INFO")
         selected = self.group_tree.selectedItems()
@@ -4259,6 +4315,7 @@ class GeocodeManagerWindow(QMainWindow):
         try:
             self.geocode_df.to_parquet(tmp_path, index=False)
             os.replace(tmp_path, self.write_path)
+            self._dirty.mark_clean()
             self.edit_state_label.setText("Saved.")
             return True
         except Exception as exc:
@@ -4288,8 +4345,12 @@ class GeocodeManagerWindow(QMainWindow):
         total = len(self.geocode_df) if self.geocode_df is not None else 0
         actual_path = _existing_parquet_path(self.base, "tbl_geocode_group") or self.write_path
         self.edit_info_label.setText(f"Geocode group file: {actual_path}  |  rows: {total}")
+        self._dirty.mark_clean()
 
     def _delete_current_group(self):
+        # These rewrite the geocode tables the Edit tab saves wholesale; settle edits first.
+        if not self._edits_resolved():
+            return
         if self.geocode_df is None or len(self.geocode_df) == 0:
             QMessageBox.information(self, "Delete geocode", "There is no geocode group to delete.")
             return
