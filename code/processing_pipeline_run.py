@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""processing_pipeline_run.py — Unified processing runner (Data / Lines / Analysis).
+"""processing_pipeline_run.py — Unified processing and deliverables runner.
 
 Goal
 - Provide a single UI for batch-processing:
@@ -12,7 +12,8 @@ Notes
 - It tries to be safe for both dev (.py) runs and future frozen builds.
 
 UI behavior
-- Shows three checkboxes (Data / Lines / Analysis).
+- Normal mode runs every available stage and deliverable.
+- Advanced mode exposes one checkbox per stage, including MBTiles and QGIS.
 - A checkbox is disabled (greyed out) when required input data is missing.
 - Default: all available processes are checked.
 
@@ -102,6 +103,7 @@ class ProcessPlan:
     explode_flat_multipolygons: bool
     cleanup_slivers: bool
     run_tiles: bool
+    run_qgis: bool
     run_lines: bool
     run_analysis: bool
     # Classification (segmv) runs segmentation_run between data and tiles, so a
@@ -255,6 +257,22 @@ def detect_tiles_processing(base_dir: Path, cfg: configparser.ConfigParser) -> P
     if not flat_exists:
         return ProcessAvailability(True, ["tbl_flat.parquet missing (run data first)"])
 
+    return ProcessAvailability(True, [])
+
+
+def detect_qgis_processing(base_dir: Path, cfg: configparser.ConfigParser) -> ProcessAvailability:
+    """The generated QGIS project needs the shipped seed and tbl_flat.
+
+    A missing tbl_flat is a soft reason because Flatten may be selected in the
+    same run and produce it before this stage starts.
+    """
+    seed = base_dir / "qgis" / "mesa.qgz"
+    if not seed.is_file():
+        return ProcessAvailability(False, ["Missing: qgis/mesa.qgz project template"])
+
+    gpq = parquet_dir(base_dir, cfg)
+    if not (gpq / "tbl_flat.parquet").is_file():
+        return ProcessAvailability(True, ["tbl_flat.parquet missing (run Flatten/data first)"])
     return ProcessAvailability(True, [])
 
 
@@ -661,6 +679,31 @@ def run_tiles_process(
     progress_fn(97.0)
     progress_fn(100.0)
     _log_line(base_dir, log_fn, "TILES PROCESS COMPLETED")
+
+
+def run_qgis_process(
+    base_dir: Path,
+    cfg: configparser.ConfigParser,
+    log_fn: Callable[[str], None],
+    progress_fn: Callable[[float], None],
+) -> None:
+    """Build qgis/mesa_results.qgz independently of raster tile production."""
+    del cfg  # Signature matches the other pipeline stages.
+    progress_fn(0.0)
+    _log_line(base_dir, log_fn, "QGIS PROJECT PROCESS START")
+    progress_fn(10.0)
+
+    from qgis_results_project import build_results_project
+
+    result = build_results_project(
+        base_dir,
+        log=lambda message: _log_line(base_dir, log_fn, message),
+    )
+    if result is None:
+        raise RuntimeError("QGIS results project could not be generated; see the preceding QGIS log message")
+
+    progress_fn(100.0)
+    _log_line(base_dir, log_fn, f"QGIS PROJECT PROCESS COMPLETED: {result}")
 
 
 def run_classification_process(
@@ -1873,7 +1916,7 @@ def run_analysis_process(
 # ---------------------------------------------------------------------------
 
 
-_STAGE_NAMES: tuple[str, ...] = ("data", "classification", "tiles", "lines", "analysis")
+_STAGE_NAMES: tuple[str, ...] = ("data", "classification", "tiles", "qgis", "lines", "analysis")
 
 # First-run fallback. Units are arbitrary but proportional to typical wall
 # clock seconds, tuned from observed MESA runs (tiles is the dominant stage,
@@ -1883,6 +1926,7 @@ _DEFAULT_STAGE_WEIGHTS: dict[str, float] = {
     "data": 600.0,
     "classification": 240.0,
     "tiles": 1200.0,
+    "qgis": 12.0,
     "lines": 180.0,
     "analysis": 300.0,
 }
@@ -1974,6 +2018,7 @@ def run_selected(
         ("data", plan.run_data),
         ("classification", plan.run_classification),
         ("tiles", plan.run_tiles),
+        ("qgis", plan.run_qgis),
         ("lines", plan.run_lines),
         ("analysis", plan.run_analysis),
     ]
@@ -2070,7 +2115,7 @@ def run_selected(
 
     ranges: dict[str, tuple[float, float]] = {}
     cursor = 0.0
-    for name in ["data", "classification", "tiles", "lines", "analysis"]:
+    for name in ["data", "classification", "tiles", "qgis", "lines", "analysis"]:
         if name not in active:
             continue
         w = max(0.0, float(weights.get(name, 1.0)))
@@ -2181,6 +2226,29 @@ def run_selected(
                     had_errors = True
             finally:
                 _record_stage("tiles", _started_iso, _t0, _err)
+
+        _bail_if_cancelled()
+        if plan.run_qgis:
+            _t0 = time.monotonic()
+            _started_iso = _now_iso()
+            _err = False
+            try:
+                s, e = ranges.get("qgis", (0.0, 100.0))
+                _log_line(base_dir, log_fn, f"[Process] Progress range QGIS: {s:.1f}% -> {e:.1f}%")
+                gpq = parquet_dir(base_dir, cfg)
+                if not (gpq / "tbl_flat.parquet").is_file():
+                    _log_line(base_dir, log_fn,
+                              "QGIS project: skipped - tbl_flat.parquet is missing. "
+                              "Run Flatten (or Data processing end-to-end) first.")
+                else:
+                    run_qgis_process(base_dir, cfg, log_fn, make_slice_progress(s, e))
+            except Exception as exc:
+                if not _is_cancelled():
+                    _err = True
+                    _log_line(base_dir, log_fn, f"ERROR: QGIS project generation failed: {exc}")
+                    had_errors = True
+            finally:
+                _record_stage("qgis", _started_iso, _t0, _err)
 
         _bail_if_cancelled()
         if plan.run_lines:
@@ -2333,12 +2401,14 @@ class ProcessRunnerWindow(QMainWindow):
         avail_data = detect_data_processing(base_dir, cfg)
         avail_classification = detect_classification_processing(base_dir, cfg)
         avail_tiles = detect_tiles_processing(base_dir, cfg)
+        avail_qgis = detect_qgis_processing(base_dir, cfg)
         avail_lines = detect_lines_processing(base_dir, cfg)
         avail_analysis = detect_analysis_processing(base_dir, cfg)
 
         gpq = parquet_dir(base_dir, cfg)
         tiles_flat_exists = _exists_any([gpq / "tbl_flat.parquet"])
         tiles_default = bool(avail_tiles.available and (tiles_flat_exists or avail_data.available))
+        qgis_default = bool(avail_qgis.available and (tiles_flat_exists or avail_data.available))
         stacked_exists = _exists_any([gpq / "tbl_stacked", gpq / "tbl_stacked.parquet"])
         classification_default = bool(avail_classification.available and (stacked_exists or avail_data.available))
 
@@ -2347,6 +2417,7 @@ class ProcessRunnerWindow(QMainWindow):
         self._avail_data = avail_data
         self._avail_classification = avail_classification
         self._avail_tiles = avail_tiles
+        self._avail_qgis = avail_qgis
         self._avail_lines = avail_lines
         self._avail_analysis = avail_analysis
         self._tiles_flat_exists = tiles_flat_exists
@@ -2380,14 +2451,14 @@ class ProcessRunnerWindow(QMainWindow):
 
         # Four-column layout (compact — no per-stage hint column, so the dialog
         # stays short on small laptop screens):
-        #   col 0: all stages 1-9 (Prep → Analysis) in one column
+        #   col 0: all stages 1-10 (Prep → Analysis) in one column
         #   col 1: visual gap
         #   col 2: Options A (explode/sliver, segment geocodes)
         #   col 3: Options B (segment mode + zones k)
         # A blocked stage shows its reason as a checkbox tooltip; the one message
         # worth shouting — "existing tiles will be DELETED" — lives in a
         # full-width label below the grid (self._lbl_tiles). Stage labels keep
-        # their "1.".."8." prefixes so the run order stays legible.
+        # their numeric prefixes so the run order stays legible.
         grid.setColumnMinimumWidth(1, 24)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(2, 1)
@@ -2397,7 +2468,7 @@ class ProcessRunnerWindow(QMainWindow):
         # Status cells stay empty when a stage is ready (the enabled checkbox
         # is signal enough); when something blocks the stage we show the
         # reason instead, so the column only fills up with words worth reading.
-        self._cb_data_master = QCheckBox("Process (1. Prep → 7. Tiles)")
+        self._cb_data_master = QCheckBox("Process (1. Prep → 8. QGIS project)")
         self._cb_data_master.setTristate(True)
         self._cb_data_master.setEnabled(avail_data.available)
         self._cb_data_master.setChecked(avail_data.available)
@@ -2497,7 +2568,7 @@ class ProcessRunnerWindow(QMainWindow):
             c.setSpacing(2)
             return c
 
-        # col 0: all stages 1-9 stacked in a single column.
+        # col 0: all stages 1-10 stacked in a single column.
         stage_col = _stage_col()
         self._cb_prep      = _mk_sub(stage_col, "1. Prep (workspace, status)", avail_data.available)
         self._cb_intersect = _mk_sub(stage_col, "2. Intersect (build tbl_stacked)", avail_data.available)
@@ -2510,6 +2581,10 @@ class ProcessRunnerWindow(QMainWindow):
         self._cb_tiles     = _mk_sub(stage_col, "6. Tiles processing (MBTiles)", tiles_default, avail=avail_tiles)
         if not tiles_flat_exists:
             self._cb_tiles.setToolTip("Run Flatten (or full data) first")
+        self._cb_qgis      = _mk_sub(stage_col, "7. QGIS project (mesa_results.qgz)",
+                                     qgis_default, avail=avail_qgis)
+        if not tiles_flat_exists:
+            self._cb_qgis.setToolTip("Run Flatten (or full data) first")
         self._cb_lines     = _mk_sub(stage_col, "8. Lines processing (segments)",
                                      avail_lines.available, avail=avail_lines)
         self._cb_analysis  = _mk_sub(stage_col, "9. Analysis processing (study areas)",
@@ -2540,7 +2615,7 @@ class ProcessRunnerWindow(QMainWindow):
         # programmatic updates don't recurse - no guard flag needed.
         sub_cbs = [self._cb_prep, self._cb_intersect, self._cb_flatten,
                    self._cb_segment, self._cb_classification,
-                   self._cb_tiles]
+                   self._cb_tiles, self._cb_qgis]
 
         def _on_master_clicked():
             state = self._cb_data_master.checkState()
@@ -2555,6 +2630,7 @@ class ProcessRunnerWindow(QMainWindow):
                     cb.setChecked(new_checked)
             _sync_data_option()
             _sync_tiles()
+            _sync_qgis()
 
         def _refresh_master_state():
             enabled_subs = [cb for cb in sub_cbs if cb.isEnabled()]
@@ -2584,6 +2660,13 @@ class ProcessRunnerWindow(QMainWindow):
             self._cb_tiles.setEnabled(enabled)
             if not enabled:
                 self._cb_tiles.setChecked(False)
+
+        def _sync_qgis():
+            flatten_ok = self._cb_flatten.isChecked() and avail_data.available
+            enabled = avail_qgis.available and (flatten_ok or tiles_flat_exists)
+            self._cb_qgis.setEnabled(enabled)
+            if not enabled:
+                self._cb_qgis.setChecked(False)
 
         def _sync_tiles_warning():
             # Red warning next to Tiles when leaving it unchecked would delete
@@ -2617,11 +2700,13 @@ class ProcessRunnerWindow(QMainWindow):
         # an on-disk tbl_flat) controls Tiles availability.
         self._cb_flatten.clicked.connect(_sync_data_option)
         self._cb_flatten.clicked.connect(_sync_tiles)
+        self._cb_flatten.clicked.connect(_sync_qgis)
         # Tiles toggle drives the stale-tiles warning text.
         self._cb_tiles.clicked.connect(_sync_tiles_warning)
 
         _sync_data_option()
         _sync_tiles()
+        _sync_qgis()
         _sync_tiles_warning()
         _refresh_master_state()
 
@@ -2997,6 +3082,7 @@ class ProcessRunnerWindow(QMainWindow):
                     cleanup_slivers=self._cb_cleanup_slivers.isChecked(),
                     run_classification=self._cb_classification.isChecked(),
                     run_tiles=self._cb_tiles.isChecked(),
+                    run_qgis=self._cb_qgis.isChecked(),
                     run_lines=self._cb_lines.isChecked(),
                     run_analysis=self._cb_analysis.isChecked(),
                 )
@@ -3015,6 +3101,7 @@ class ProcessRunnerWindow(QMainWindow):
                     cleanup_slivers=True,
                     run_classification=self._avail_classification.available and (data_on or self._stacked_exists),
                     run_tiles=self._avail_tiles.available and (data_on or self._tiles_flat_exists),
+                    run_qgis=self._avail_qgis.available and (data_on or self._tiles_flat_exists),
                     run_lines=self._avail_lines.available,
                     run_analysis=self._avail_analysis.available,
                 )
@@ -3128,6 +3215,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--no-classification", action="store_true", help="Skip Classification (segmv -> tbl_seg_mv). Runs by default when configured.")
     p.add_argument("--no-tiles", action="store_true", help="Do not run raster tiles (MBTiles) after data processing")
+    p.add_argument("--no-qgis", action="store_true", help="Do not generate qgis/mesa_results.qgz")
     p.add_argument("--no-lines", action="store_true", help="Do not run lines processing")
     p.add_argument("--no-analysis", action="store_true", help="Do not run analysis processing")
 
@@ -3261,10 +3349,12 @@ def main() -> None:
 
     avail_data = detect_data_processing(base_dir, cfg)
     avail_classification = detect_classification_processing(base_dir, cfg)
+    avail_qgis = detect_qgis_processing(base_dir, cfg)
     avail_lines = detect_lines_processing(base_dir, cfg)
     avail_analysis = detect_analysis_processing(base_dir, cfg)
 
     data_on = avail_data.available and not bool(args.no_data)
+    flat_exists = (parquet_dir(base_dir, cfg) / "tbl_flat.parquet").is_file()
     default_plan = ProcessPlan(
         run_prep=data_on and not bool(args.no_prep),
         run_intersect=data_on and not bool(args.no_intersect),
@@ -3274,6 +3364,7 @@ def main() -> None:
         cleanup_slivers=not bool(args.no_cleanup_slivers),
         run_classification=avail_classification.available and not bool(args.no_classification),
         run_tiles=data_on and not bool(args.no_tiles),
+        run_qgis=avail_qgis.available and (data_on or flat_exists) and not bool(args.no_qgis),
         run_lines=avail_lines.available and not bool(args.no_lines),
         run_analysis=avail_analysis.available and not bool(args.no_analysis),
     )
@@ -3282,6 +3373,7 @@ def main() -> None:
         print("Base dir:", base_dir)
         print("Data:", "OK" if avail_data.available else "NO", "; ".join(avail_data.reasons))
         print("Classification:", "OK" if avail_classification.available else "NO", "; ".join(avail_classification.reasons))
+        print("QGIS project:", "OK" if avail_qgis.available else "NO", "; ".join(avail_qgis.reasons))
         print("Lines:", "OK" if avail_lines.available else "NO", "; ".join(avail_lines.reasons))
         print("Analysis:", "OK" if avail_analysis.available else "NO", "; ".join(avail_analysis.reasons))
         return
@@ -3300,6 +3392,8 @@ def main() -> None:
             selected.append("classification")
         if default_plan.run_tiles:
             selected.append("tiles")
+        if default_plan.run_qgis:
+            selected.append("qgis")
         if default_plan.run_lines:
             selected.append("lines")
         if default_plan.run_analysis:
