@@ -146,6 +146,10 @@ class Params:
 
     def __init__(self, **kw):
         self.run_id: str = kw.get("run_id") or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        # Operator opt-in (Configure -> Classification). Read by the pipeline to
+        # decide whether Process offers the stage at all; a direct invocation of
+        # this helper still runs, so the flag never blocks a deliberate run.
+        self.enabled: bool = bool(kw.get("enabled") or False)
         self.layer: str = kw.get("layer") or ""          # resolved later if blank
         self.k_min: int = int(kw.get("k_min") or 2)
         self.k_max: int = int(kw.get("k_max") or 15)
@@ -213,6 +217,7 @@ def params_from_config(cfg, **overrides) -> Params:
 
     return Params(
         run_id=overrides.get("run_id"),
+        enabled=overrides.get("enabled") if overrides.get("enabled") is not None else _truthy(g("segmv_enabled", "0")),
         layer=overrides.get("layer") if overrides.get("layer") is not None else g("segmv_geocode_layer", ""),
         k_min=k_min, k_max=k_max,
         transform=overrides.get("transform") or g("segmv_transform", "hellinger"),

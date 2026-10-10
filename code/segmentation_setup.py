@@ -174,6 +174,42 @@ class SegmentationSetupWindow(QMainWindow):
         _intro_row.addWidget(exit_btn, 0, Qt.AlignTop)
         layout.addLayout(_intro_row)
 
+        # Opt-in. Classification fits a Gaussian Mixture for every k in the range
+        # and is the most expensive thing Process can do, so it is off until the
+        # operator asks for it — rather than quietly lengthening every run.
+        self._cb_enabled = QCheckBox("Run Classification as part of Process")
+        self._cb_enabled.setChecked(bool(self._params.enabled))
+        self._cb_enabled.setToolTip(
+            "Off by default. Leave it off and Process skips Classification entirely; "
+            "the settings below are kept and take effect the next time you enable it.")
+        _f = self._cb_enabled.font(); _f.setBold(True); self._cb_enabled.setFont(_f)
+        layout.addWidget(self._cb_enabled)
+
+        self._cost = QLabel(
+            "Classification is the slowest stage in MESA. It fits a Gaussian Mixture for "
+            "every k in the range below and picks the best by BIC, so a range of 2–15 means "
+            "fourteen fits over every cell in the chosen geocode layer — on a large "
+            "<code>basic_mosaic</code> that is a long wait, and it repeats on every Process run. "
+            "Everything else in the pipeline finishes without it.")
+        self._cost.setWordWrap(True)
+        self._cost.setStyleSheet("color: #7a5c1e; font-size: 10px; margin: 0 0 4px 18px;")
+        layout.addWidget(self._cost)
+
+        # The settings below are only meaningful when the stage will run. Greying
+        # them out says so without hiding what was configured earlier.
+        self._gated: list = []
+
+        def _sync_enabled():
+            on = self._cb_enabled.isChecked()
+            for w in self._gated:
+                try:
+                    w.setEnabled(on)
+                except Exception:
+                    pass
+
+        self._cb_enabled.toggled.connect(lambda _=None: _sync_enabled())
+        self._sync_enabled = _sync_enabled
+
         form = QGridLayout()
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(8)
@@ -275,6 +311,10 @@ class SegmentationSetupWindow(QMainWindow):
             "class. Requires Ollama running at localhost:11434, or OPENAI_API_KEY.")
         layout.addWidget(self._cb_ai)
 
+        self._gated.extend([self._cmb_layer, self._txt_k, self._cmb_transform,
+                            self._txt_cov, self._cmb_pressure, self._spn_area, self._cb_ai])
+        self._sync_enabled()
+
         self._status = QLabel("")
         self._status.setWordWrap(True)
         self._status.setProperty("role", "muted")
@@ -310,6 +350,7 @@ class SegmentationSetupWindow(QMainWindow):
         k_raw = self._txt_k.text().strip() or "2-15"
         cov = (self._txt_cov.text().strip() or "1.0")
         return {
+            "segmv_enabled": "1" if self._cb_enabled.isChecked() else "0",
             "segmv_geocode_layer": self._cmb_layer.currentText(),
             "segmv_k_range": k_raw,
             "segmv_transform": self._cmb_transform.currentData() or "hellinger",

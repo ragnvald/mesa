@@ -259,12 +259,27 @@ def detect_tiles_processing(base_dir: Path, cfg: configparser.ConfigParser) -> P
 
 
 def detect_classification_processing(base_dir: Path, cfg: configparser.ConfigParser) -> ProcessAvailability:
-    """Classification (segmv) is available when the helper is present AND a
-    geocode layer is configured (Configure → Classification writes
-    segmv_geocode_layer). tbl_stacked is produced by Intersect, so a missing
-    one is only a soft reason — a full Process pass builds it before this stage."""
+    """Classification (segmv) is available when the operator has opted in, the
+    helper is present, AND a geocode layer is configured (Configure →
+    Classification writes both). tbl_stacked is produced by Intersect, so a
+    missing one is only a soft reason — a full Process pass builds it before
+    this stage.
+
+    The opt-in is checked here rather than at the checkbox because Normal mode
+    builds its plan from availability and never reads checkbox state; gating in
+    one place is what makes "off" mean off in both modes. Classification fits a
+    Gaussian Mixture per k in the range and is the most expensive stage MESA has,
+    so it must not join a run by default.
+    """
     if not _helper_argv(base_dir, "segmentation_run"):
         return ProcessAvailability(False, ["Missing: segmentation_run helper"])
+
+    enabled = str(cfg["DEFAULT"].get("segmv_enabled", "0")).split("#", 1)[0].strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return ProcessAvailability(False, [
+            "Classification is off — tick 'Run Classification as part of Process' "
+            "in Configure → Classification. It is the slowest stage, so it is opt-in."
+        ])
 
     layer = str(cfg["DEFAULT"].get("segmv_geocode_layer", "")).strip()
     if not layer:
