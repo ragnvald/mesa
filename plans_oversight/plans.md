@@ -6,8 +6,9 @@ roadmap surface so a future session (or the other dev host) can pick something u
 without re-deriving it from the code. Keep entries short; link to `learning.md`
 or `file:line` for detail. Move an item to "Done" (or delete it) when it lands.
 
-Lives at the repo root next to `learning.md` — both are developer notes and neither
-ships. Full design documents for individual items live in `devtools/docs/`, which
+Lives in `plans_oversight/` alongside the other roadmap and overview documents —
+moved off the repo root on 2026-08-12. Neither this file nor `learning.md` ships.
+Full design documents for individual items live in `devtools/docs/`, which
 `build_all.py` strips from the distribution wholesale.
 
 ---

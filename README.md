@@ -147,6 +147,7 @@ The helpers are loosely coupled through files, not through direct Python imports
 - [system_resources/](system_resources): packaged assets
 - [instructions.md](instructions.md): repo-specific engineering rules
 - [learning.md](learning.md): accumulated local lessons from past fixes
+- [plans_oversight/](plans_oversight): roadmap and overview documents (`plans.md`, `MESA_system_overview.md`, `presentasjon.md`)
 
 ## Development Setup
 
@@ -198,7 +199,7 @@ A good reading order is:
 1. [README.md](README.md)
 2. [instructions.md](instructions.md)
 3. [mesa.py](mesa.py)
-4. [MESA_system_overview.md](MESA_system_overview.md)
+4. [plans_oversight/MESA_system_overview.md](plans_oversight/MESA_system_overview.md)
 5. the relevant helper under [code/](code)
 6. [devtools/build_all.py](devtools/build_all.py) if the change touches packaging
 
@@ -219,7 +220,7 @@ Typical verification is manual and task-specific:
 
 - [instructions.md](instructions.md): coding and workflow rules
 - [learning.md](learning.md): prior fixes and local knowledge
-- [MESA_system_overview.md](MESA_system_overview.md): user-oriented workflow explanation
+- [plans_oversight/MESA_system_overview.md](plans_oversight/MESA_system_overview.md): user-oriented workflow explanation
 - [code/README.md](code/README.md): compiled-distribution overview
 
 ## Bottom Line

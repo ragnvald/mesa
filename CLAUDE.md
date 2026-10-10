@@ -14,6 +14,19 @@ Do not run `git commit` or `git push` on your own. Finish the work, leave the ch
 
 This holds even when the change is small, obviously correct, or already verified, and even when an earlier task in the same session ended in a commit. Attribute commits to the user only (`ragnvald@mindland.com`), no AI co-author trailer, and keep them granular: one purpose per commit, with a message that explains why.
 
+## Document map — where every document lives
+
+The root holds only what has to be there. Everything else is filed. A new document does **not** go in the root: roadmap or overview → `plans_oversight/`; design detail → `devtools/docs/`; letter to a sibling project → `docs/exchange/`.
+
+- **Repo root** — entry points and the permanent developer notes only: `README.md` (developer entry point), `LICENSE`, `privacy-policy.md`, `CLAUDE.md`, `instructions.md`, [learning.md](learning.md), [history.md](history.md), [cooperation.md](cooperation.md). `instructions.md` must stay at the root — [.github/copilot-instructions.md](.github/copilot-instructions.md) reads it by that path.
+- **[plans_oversight/](plans_oversight/)** — roadmap and overview material, moved off the root 2026-08-12: `plans.md` (index of decided-but-not-done work and ideas), `MESA_system_overview.md` (user-oriented walkthrough of the workflow buttons), `presentasjon.md` (methodology framing for planning processes, Norwegian).
+- **[devtools/docs/](devtools/docs/)** — full design documents, capacity records, yEd `.graphml` diagram sources, the segmentation PoC. `build_all.py` removes `devtools/` from the distribution wholesale, so anything here is safe by construction.
+- **[devtools/](devtools/)** (top level) — dated release and build notes: `PUBLISERE_*.md`, `RELEASE_NOTES_*.md`, `ZENODO_*.md`, `MAC_BUILD.md`, `COUNTING_LOC.md`. They record the state at that release; do not rewrite them to match a later one.
+- **[docs/](docs/)** — **ships to end users.** The two manuals, `docs/templates/` (read at runtime by `report_generate`) and `docs/exchange/` correspondence. Never add developer material here; see learning.md "Developer docs must live outside docs/".
+- **`mesa.wiki/`** — separate repo, canonical source for end-user prose.
+
+Neither `plans_oversight/` nor `devtools/` is in the `build_all.py` copy allowlist, so neither can reach a build. That allowlist — not the filename-matched `DEVELOPER_ONLY_FILES` list — is the real guarantee.
+
 ## Where to put what
 
 - **Code comments**: explain the "what" and the technical "why" (hidden constraints, non-obvious invariants, references to a learning.md section). Keep them tight - a sentence or two max. Never write multi-paragraph comment blocks.
