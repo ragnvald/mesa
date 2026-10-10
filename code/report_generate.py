@@ -124,6 +124,7 @@ _signals: _ReportSignals | None = None
 # refuses to open. See learning.md "One report run at a time".
 _report_run_lock = threading.Lock()
 _report_running = False
+_report_started_at = ""
 
 # When running long jobs in a background thread, set_progress() messages were
 # only written to the GUI widget (not to log.txt). Keep a best-effort base_dir
@@ -5901,14 +5902,27 @@ def generate_report(base_dir: str,
                 pass
 
 # ---------------- GUI runner ----------------
+def report_run_started_at() -> str:
+    """Clock time the in-flight run started, or "" when nothing is running.
+
+    Lets a window that was opened mid-render say *when* the run it is waiting
+    for began, instead of refusing with no explanation.
+    """
+    with _report_run_lock:
+        return _report_started_at if _report_running else ""
+
+
 def _claim_report_run(base_dir) -> bool:
     """Take the single report slot. Returns False if a run is already going."""
-    global _report_running
+    global _report_running, _report_started_at
     with _report_run_lock:
         if _report_running:
-            write_to_log("A report is already being generated - ignoring this request.", base_dir)
+            write_to_log(
+                f"A report is already being generated (started {_report_started_at}) "
+                "- ignoring this request.", base_dir)
             return False
         _report_running = True
+        _report_started_at = datetime.datetime.now().strftime("%H:%M:%S")
     try:
         if _signals is not None:
             _signals.busy_changed.emit(True)
@@ -5935,21 +5949,22 @@ def _run_report_guarded(**kwargs) -> None:
         _release_report_run()
 
 
-def _spawn_report(base_dir, kwargs: dict) -> None:
-    """Start one report run, or do nothing if one is already in flight."""
+def _spawn_report(base_dir, kwargs: dict) -> bool:
+    """Start one report run. Returns False when one is already in flight."""
     if not _claim_report_run(base_dir):
-        return
+        return False
     try:
         threading.Thread(target=_run_report_guarded, kwargs=kwargs, daemon=True).start()
     except Exception:
         # Never leave the slot taken - that would disable the button for good.
         _release_report_run()
         raise
+    return True
 
 
 def _start_report_thread(base_dir, config_file, palette, desc, report_mode):
     # Backwards-compatible helper for old call sites.
-    _spawn_report(base_dir, {
+    return _spawn_report(base_dir, {
         'base_dir': base_dir,
         'config_file': config_file,
         'palette_A2E': palette,
@@ -5971,7 +5986,7 @@ def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  analysis_mode: str = "single",
                                  analysis_area_left: str | None = None,
                                  analysis_area_right: str | None = None):
-    _spawn_report(base_dir, {
+    return _spawn_report(base_dir, {
         'base_dir': base_dir,
         'config_file': config_file,
         'palette_A2E': palette,
@@ -6245,6 +6260,9 @@ class ReportGeneratorWindow(QMainWindow):
         _signals.progress_update.connect(self._on_progress_update)
         _signals.link_update.connect(self._on_link_update)
         _signals.busy_changed.connect(self._on_busy_changed)
+        # A run may already be in flight when this window appears; the busy
+        # signal fired before it existed, so take the state directly.
+        self._sync_busy_button()
 
         # --- Control wiring ---
         self._chk_analysis.stateChanged.connect(self._sync_analysis_controls)
@@ -6330,7 +6348,7 @@ class ReportGeneratorWindow(QMainWindow):
         else:
             mode = "all"
 
-        _start_report_thread_selected(
+        started = _start_report_thread_selected(
             base_dir,
             config_file,
             palette,
@@ -6348,6 +6366,27 @@ class ReportGeneratorWindow(QMainWindow):
             report_geocode_groups=[c for c, cb in self._chk_report_geocats.items() if cb.isChecked()],
             include_atlas_maps=self._chk_atlas.isChecked(),
         )
+        if not started:
+            # Refusing in the log only is how this looked like "it won't make a
+            # report because one exists". Say it where the operator is looking.
+            since = report_run_started_at()
+            QMessageBox.information(
+                self, "Report already running",
+                f"A report has been rendering since {since}.\n\n"
+                "Only one report can render at a time: two runs share the scratch "
+                "files in output/tmp/ and would overwrite each other's .docx.\n\n"
+                "Wait for it to finish — it is saved with its own date and time "
+                "stamp — then press Create report again.",
+            )
+        self._sync_busy_button()
+
+    def _sync_busy_button(self):
+        """Match the button to the live run state.
+
+        The busy signal fires once, when a run starts. A window opened after
+        that point never saw it, so it has to ask.
+        """
+        self._on_busy_changed(bool(report_run_started_at()))
 
     def _open_report_folder(self, event=None):
         if not last_report_path:
@@ -6368,6 +6407,22 @@ class ReportGeneratorWindow(QMainWindow):
             write_to_log("Report folder not found.", self._base_dir)
 
 
+def _live_gui_window():
+    """The existing report window, or None if there is none / it was closed.
+
+    Touching a deleted Qt object raises RuntimeError from the C++ side, which
+    is the only reliable way to tell a closed window from a live one here.
+    """
+    win = _gui_window
+    if win is None:
+        return None
+    try:
+        win.isVisible()
+    except RuntimeError:
+        return None
+    return win
+
+
 def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme: str = "", master=None):
     """Create and show the ReportGeneratorWindow. Returns the window instance."""
     app = QApplication.instance()
@@ -6375,6 +6430,21 @@ def launch_gui(base_dir: str, config_file: str, palette: dict, desc: dict, theme
     if own_app:
         app = QApplication([])
         apply_shared_stylesheet(app)
+
+    # One window per process. ReportGeneratorWindow.__init__ rebinds the module
+    # globals a running render writes through (_signals, log_widget,
+    # progress_var), so building a second one silently redirects the first
+    # run's progress into the new window and leaves the old one dead. Raise the
+    # existing window instead. See learning.md "One report window per process".
+    existing = _live_gui_window()
+    if existing is not None:
+        existing.show()
+        existing.raise_()
+        existing.activateWindow()
+        existing._sync_busy_button()
+        if own_app:
+            app.exec()
+        return existing
 
     window = ReportGeneratorWindow(base_dir, config_file, palette, desc)
     window.show()
