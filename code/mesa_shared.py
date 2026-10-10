@@ -387,6 +387,47 @@ def parquet_dir(base_dir: Path, cfg: Optional[configparser.ConfigParser] = None)
     return out
 
 
+def read_geoparquet(path, columns=None, filters=None):
+    """Read GeoParquet, tolerating a file that lacks the schema-level 'geo' header.
+
+    GeoParquet records the geometry column twice over: a schema-level ``geo``
+    key, which ``gpd.read_parquet`` requires, and per-field geoarrow extension
+    metadata. A writer that assembles its schema through pyarrow gets the second
+    for free and loses the first, producing a file that is complete — geometry
+    and CRS both survive — but that geopandas refuses outright with "Missing geo
+    metadata". Recover through Arrow rather than failing the run.
+
+    Imports geopandas lazily so this module stays safe to import early.
+    See learning.md "GeoParquet metadata lives in two places".
+    """
+    import geopandas as gpd
+
+    kwargs = {}
+    if columns is not None:
+        kwargs["columns"] = list(columns)
+    if filters is not None:
+        kwargs["filters"] = filters
+    try:
+        return gpd.read_parquet(path, **kwargs)
+    except Exception as exc:
+        message = str(exc)
+        if "Missing geo metadata" not in message and "Use pandas.read_parquet" not in message:
+            raise
+
+    import pyarrow.parquet as pq
+
+    if columns is not None:
+        present = set(pq.read_schema(path).names) if Path(str(path)).is_file() else None
+        if present is not None:
+            kwargs["columns"] = [c for c in columns if c in present]
+    table = pq.read_table(path, **kwargs)
+    try:
+        return gpd.GeoDataFrame.from_arrow(table)
+    except Exception:
+        # No geoarrow metadata either — a genuinely non-spatial table.
+        return gpd.GeoDataFrame(table.to_pandas(), geometry=None, crs=None)
+
+
 # ---------------------------------------------------------------------------
 # Leaflet vendor inlining
 #

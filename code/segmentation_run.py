@@ -390,7 +390,7 @@ def read_layer_geometry(gpq: Path, layer: str, codes):
     """GeoDataFrame (code, geometry) for the given codes, in the file's native CRS."""
     import geopandas as gpd
     p = Path(gpq) / "tbl_geocode_object.parquet"
-    g = gpd.read_parquet(p, columns=[COL_CODE, COL_LAYER, "geometry"])
+    g = mesa_shared.read_geoparquet(p, columns=[COL_CODE, COL_LAYER, "geometry"])
     g = g[g[COL_LAYER].astype(str) == str(layer)].copy()
     g[COL_CODE] = g[COL_CODE].astype(str)
     g = g[g[COL_CODE].isin(set(map(str, codes)))]

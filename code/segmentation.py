@@ -532,7 +532,9 @@ def build_overview_geojson(gpq_dir, layer: str, mode: str = "signatures",
     else:
         seg["_cat"] = seg["signature"].fillna("").map(lambda s: s if s else "(no overlap)")
 
-    poly = gpd.read_parquet(
+    import mesa_shared
+
+    poly = mesa_shared.read_geoparquet(
         gpq_dir / "tbl_geocode_object.parquet",
         columns=["code", "geometry", "name_gis_geocodegroup"],
         filters=[("name_gis_geocodegroup", "=", layer)],

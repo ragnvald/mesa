@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
+from mesa_shared import read_geoparquet
 _ensure_geo_data()  # repair a machine-wide PROJ/GDAL env before the GIS stack loads
 import geopandas as gpd
 import shapely
@@ -1211,24 +1212,16 @@ def read_parquet_or_empty(name: str) -> gpd.GeoDataFrame:
     alt_dir   = in_root / name
 
     def _read_any(path_like):
-        """Read GeoParquet when possible; fall back to plain Parquet.
+        """Read GeoParquet when possible; recover the geometry when the file
+        lacks the schema-level 'geo' header, and fall back to plain Parquet for
+        tables that are genuinely non-spatial (e.g. tbl_asset_group).
 
-        Some tables (e.g. tbl_asset_group) are non-spatial and are written as
-        plain Parquet without GeoParquet metadata. GeoPandas will raise:
-        "Missing geo metadata in Parquet/Feather file. Use pandas.read_parquet() instead."
+        The recovery matters: a frame whose geometry column went missing still
+        looks like a GeoDataFrame, and the first `.crs` access then raises
+        "CRS attribute of a GeoDataFrame without an active geometry column",
+        far from the read that caused it.
         """
-        try:
-            return gpd.read_parquet(path_like)
-        except Exception as e:
-            msg = str(e)
-            if "Missing geo metadata" in msg or "Use pandas.read_parquet" in msg:
-                try:
-                    df = pd.read_parquet(path_like)
-                    # Wrap as GeoDataFrame for downstream code that expects a GeoDataFrame.
-                    return gpd.GeoDataFrame(df, geometry=None, crs=None)
-                except Exception:
-                    raise
-            raise
+        return read_geoparquet(path_like)
 
     try:
         if file_path.exists():

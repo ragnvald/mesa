@@ -2227,11 +2227,47 @@ def _rewrite_geocode_objects(base_dir: Path,
     return rows
 
 
+def _geoparquet_header(bounds: list[float] | None) -> dict:
+    """A GeoParquet 'geo' header for this table, produced by geopandas itself.
+
+    GeoDataFrame.to_arrow() records the CRS in per-field geoarrow metadata, not
+    in the schema-level 'geo' key that gpd.read_parquet requires. A table built
+    from scratch through pyarrow therefore came out as plain Parquet, and every
+    reader that went through geopandas failed on it with "Missing geo metadata"
+    — which surfaced far away, as a CRS error inside the pipeline.
+
+    Round-tripping an empty frame is cheaper than hand-writing the JSON and
+    cannot drift from whatever spec version this geopandas emits. The table is
+    always WGS84 here (see ensure_wgs84 on the way in).
+    """
+    import io
+    import pyarrow.parquet as pq
+
+    try:
+        buffer = io.BytesIO()
+        gpd.GeoDataFrame(geometry=[], crs="EPSG:4326").to_parquet(buffer, index=False)
+        buffer.seek(0)
+        raw = (pq.ParquetFile(buffer).schema_arrow.metadata or {}).get(b"geo")
+        if not raw:
+            return {}
+        if bounds:
+            geo = json.loads(raw)
+            geo["columns"][geo["primary_column"]]["bbox"] = [float(b) for b in bounds[:4]]
+            raw = json.dumps(geo).encode("utf-8")
+        return {b"geo": raw}
+    except Exception:
+        return {}
+
+
 def _geo_metadata_extended(base_schema, extra_bounds: list[float] | None) -> dict:
     """The source schema's metadata, with the GeoParquet bbox grown to fit."""
     metadata = dict(base_schema.metadata or {})
     raw = metadata.get(b"geo")
-    if not raw or not extra_bounds:
+    if not raw:
+        # No header to widen: supply one, or the written file is not GeoParquet.
+        metadata.update(_geoparquet_header(extra_bounds))
+        return metadata
+    if not extra_bounds:
         return metadata
     try:
         geo = json.loads(raw)
