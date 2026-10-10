@@ -77,7 +77,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QIcon, QPainter, QPen, QBrush, QColor
 from PySide6.QtCore import Qt, Signal, QObject
 
-from ui_style import apply_shared_stylesheet
+from ui_style import apply_shared_stylesheet, confirm_unsaved
 
 
 # -------------------------------
@@ -653,18 +653,59 @@ def load_asset_group(base_dir: str):
         log_to_file(f"Failed to persist sanitized tbl_asset_group defaults: {e}")
     return gdf
 
-def save_asset_group_to_parquet(gdf, base_dir: str):
+_VULN_COLS = ['importance', 'susceptibility', 'sensitivity',
+              'sensitivity_code', 'sensitivity_description']
+
+
+def _merge_vuln_into_disk_copy(gdf, out: str):
+    """Return the on-disk tbl_asset_group with only the vulnerability columns taken from gdf.
+
+    Writing gdf wholesale would overwrite edits other windows (Assets) saved to the
+    same table since this window loaded it. Rows are matched on id - a row key that
+    is stable within one table - falling back to name_original if id is unusable.
+    """
+    if not os.path.exists(out):
+        return gdf
+    try:
+        disk = gpd.read_parquet(out)
+    except ValueError:
+        disk = _load_asset_group_without_geo_metadata(Path(out))
+    key = 'id'
+    if not ('id' in gdf.columns and 'id' in disk.columns
+            and gdf['id'].notna().all() and gdf['id'].is_unique and disk['id'].is_unique):
+        key = 'name_original'
+    src = gdf.drop_duplicates(subset=[key]).set_index(key)
+    for col in _VULN_COLS:
+        if col not in src.columns:
+            continue
+        mapped = disk[key].map(src[col])
+        if col in disk.columns:
+            disk[col] = mapped.where(mapped.notna(), disk[col])
+        else:
+            disk[col] = mapped
+    return disk
+
+
+def save_asset_group_to_parquet(gdf, base_dir: str) -> tuple[bool, str]:
+    """Persist the vulnerability values; returns (ok, message) so callers can tell the user."""
     try:
         if gdf is None:
-            return
-        gdf2 = sanitize_vulnerability(gdf, valid_input_values, FALLBACK_VULN)
-        enforce_vuln_dtypes_inplace(gdf2)
+            return False, "No asset-group data loaded."
         out = _parquet_asset_group_path(base_dir)
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        gdf2.to_parquet(out, index=False)
+        merged = _merge_vuln_into_disk_copy(gdf, out)
+        gdf2 = sanitize_vulnerability(merged, valid_input_values, FALLBACK_VULN)
+        enforce_vuln_dtypes_inplace(gdf2)
+        # Write to a temp file and swap it in, so an interrupted save cannot leave a
+        # truncated table behind.
+        tmp = out + ".tmp"
+        gdf2.to_parquet(tmp, index=False)
+        os.replace(tmp, out)
         log_to_file(f"Saved tbl_asset_group to GeoParquet: {out}")
+        return True, out
     except Exception as e:
         log_to_file(f"Save asset group parquet failed: {e}")
+        return False, str(e)
 
 # -------------------------------
 # Excel round-trip
@@ -826,10 +867,12 @@ def load_all_from_excel(excel_path: str):
         # after an Excel load reads stale susceptibility/importance from
         # disk, which on a 35-row workbook produced an all-E result for one
         # user because the load only updated in-memory state.
-        try:
-            save_asset_group_to_parquet(gdf_asset_group, original_working_directory)
-        except Exception as exc:
-            log_to_file(f"Excel load: failed to persist asset group parquet: {exc}")
+        ok, msg = save_asset_group_to_parquet(gdf_asset_group, original_working_directory)
+        if not ok:
+            QMessageBox.critical(None, "Save failed",
+                                 f"The Excel values were loaded but could not be saved:\n{msg}")
+        elif root is not None:
+            root._mark_vuln_clean()
         _set_status_message(f"Loaded Excel workbook: {excel_path}")
     except Exception as e:
         log_to_file(f"Excel load failed: {e}")
@@ -1122,6 +1165,7 @@ class SetupWindow(QMainWindow):
         # Guard to stop the itemChanged handler re-entering when it writes back
         # the derived sensitivity/code/description cells.
         self._vuln_suppress_itemchanged = False
+        self._vuln_dirty = False
 
         entries_vuln = []
         # Disable sorting while populating so row positions stay stable; we
@@ -1224,6 +1268,7 @@ class SetupWindow(QMainWindow):
         if idx is None:
             return
 
+        self._vuln_dirty = True
         self._vuln_suppress_itemchanged = True
         try:
             # Coerce user input and normalise display + numeric sort key.
@@ -1290,32 +1335,31 @@ class SetupWindow(QMainWindow):
             return
         load_all_from_excel(excel_path)
 
-    def _do_save_database(self):
+    def _mark_vuln_clean(self):
+        self._vuln_dirty = False
+
+    def _do_save_database(self) -> bool:
         update_all_vuln_rows(entries_vuln, gdf_asset_group)
         enforce_vuln_dtypes_inplace(gdf_asset_group)
         gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-        save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        ok, msg = save_asset_group_to_parquet(gdf_ready, original_working_directory)
+        if not ok:
+            QMessageBox.critical(self, "Save failed", f"Could not save the sensitivity values:\n{msg}")
+            return False
+        self._mark_vuln_clean()
         _set_status_message("Saved asset-group layer to GeoParquet.")
+        return True
 
     # ------------------------------------------------------------------
     def _close_application(self):
-        try:
-            update_all_vuln_rows(entries_vuln, gdf_asset_group)
-            enforce_vuln_dtypes_inplace(gdf_asset_group)
-            gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-            save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        finally:
-            self.close()
+        self.close()
 
     def closeEvent(self, event):
-        """Handle window close via X button."""
-        try:
-            update_all_vuln_rows(entries_vuln, gdf_asset_group)
-            enforce_vuln_dtypes_inplace(gdf_asset_group)
-            gdf_ready = sanitize_vulnerability(gdf_asset_group, valid_input_values, FALLBACK_VULN)
-            save_asset_group_to_parquet(gdf_ready, original_working_directory)
-        except Exception:
-            pass
+        # Ask instead of auto-saving: the old silent save wrote even unchanged data
+        # and hid failures. See learning.md "Helper windows ask before discarding edits".
+        if self._vuln_dirty and not confirm_unsaved(self, "the sensitivity table", self._do_save_database):
+            event.ignore()
+            return
         event.accept()
 
 
