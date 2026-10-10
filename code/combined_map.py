@@ -1542,7 +1542,7 @@ HTML = r"""<!doctype html>
         onEachFeature:function(f,l){ var p=f.properties;
           l.bindPopup('<b>'+(p.name||'line')+'</b> · seg '+p.seg+'<br>Sensitivity: '+(p.code||'–')+' ('+p.sens+')'); }
       }).addTo(maps.results);
-      try{ maps.results.fitBounds(segOverlay.getBounds(),{padding:[20,20]}); if(linking){ syncFrom('results'); } }catch(e){}
+      frameMap('results', segOverlay.getBounds());
     });
   });
   // ---- geocode-layer master toggle (Overview tab): off = line segments only ----
@@ -1569,6 +1569,31 @@ HTML = r"""<!doctype html>
   }
   Object.keys(maps).forEach(function(k){ maps[k].on('moveend zoomend', function(){ if(k===current) syncFrom(k); }); });
   document.getElementById('linkChk').addEventListener('change', function(){ linking=this.checked; if(linking) syncFrom(current); });
+
+  // ---- framing a map when a layer loads ----
+  // Every tab used to decide this for itself, in six near-identical lines, and
+  // d88d280 ("always zoom to layer data") rewrote all six to fit unconditionally.
+  // That fixed a real problem — a fitBounds against a not-yet-sized map picks the
+  // wrong zoom, hence invalidateSize() first — but it also silently disabled
+  // "Link zoom & pan", whose whole purpose is that the view carried over from the
+  // tab you just left survives. One function now, so the rule cannot be undone in
+  // five places and kept in the sixth.
+  //
+  //   keepView  caller already knows the view must not move (e.g. the operator
+  //             only switched which layer is drawn over the same area).
+  var anyFramed=false;              // has any map been framed to real data yet?
+  function frameMap(key, bounds, keepView){
+    var m=maps[key];
+    try{ m.invalidateSize(); }catch(e){}
+    // The very first framing always happens: with nothing framed yet the "view"
+    // is Leaflet's default world view, and preserving that would strand the
+    // operator in the Atlantic.
+    var keep = keepView || (linking && anyFramed);
+    if(!keep && bounds){
+      try{ m.fitBounds(bounds,{padding:[20,20]}); anyFramed=true; }catch(e){}
+    }
+    if(linking){ try{ syncFrom(key); }catch(e){} }
+  }
 
   // ---- GetFeatureInfo: left-click a raster cell to identify it ----
   // The map layers are raster MBTiles, so the cell attributes are fetched from
@@ -1759,7 +1784,7 @@ HTML = r"""<!doctype html>
       }).addTo(maps.asset);
       assetLayers[gid]=lyr;
       // Frame the asset's own extent; when linked, propagate that view to the other maps.
-      try{ maps.asset.invalidateSize(); maps.asset.fitBounds(lyr.getBounds(),{padding:[20,20]}); if(linking){ syncFrom('asset'); } }catch(e){}
+      frameMap('asset', lyr.getBounds());
     });
   }
 
@@ -1773,6 +1798,7 @@ HTML = r"""<!doctype html>
     groupstotal:'Count of distinct asset groups per cell (diversity).',
     assetstotal:'Count of asset objects per cell (density).'
   };
+  var resFitGroup=null;                // which geocode group the map was last fitted to
   function showResLayer(group, suf){
     resKind=suf;                       // remember selection (click-to-query + re-show on toggle)
     fiClear();                         // a new layer invalidates the previous popup/highlight
@@ -1786,7 +1812,20 @@ HTML = r"""<!doctype html>
     resTile=L.tileLayer('/tiles/'+info.name+'/{z}/{x}/{y}.png',
       {opacity:opacity, maxNativeZoom:(info.maxzoom||14), minNativeZoom:(info.minzoom||0), maxZoom:19, tms:false}).addTo(maps.results);
     if(info.bounds && info.bounds.length===4){
-      try{ maps.results.invalidateSize(); maps.results.fitBounds([[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]],{padding:[20,20]}); if(linking){ syncFrom('results'); } }catch(e){}
+      var b=[[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]];
+      // Hold the view when the operator is only switching layer type. Comparing
+      // Sensitivity against Importance over one area is the point of this tab,
+      // and refitting on every switch threw away the place they had navigated to.
+      // A different geocode group may cover somewhere else, so that still fits —
+      // unless the current centre is inside it, in which case they stay put.
+      var keep=false;
+      if(resFitGroup===group){
+        keep=true;
+      }else if(resFitGroup!==null){
+        try{ keep=L.latLngBounds(b).contains(maps.results.getCenter()); }catch(e){ keep=false; }
+      }
+      frameMap('results', b, keep);
+      resFitGroup=group;
     }
     var d=KIND_DESC[suf]||'';
     document.getElementById('resMsg').innerHTML='<b>'+info.label+'</b> — '+group+(d?('<br>'+d):'')+
@@ -1964,7 +2003,7 @@ HTML = r"""<!doctype html>
       // invalidateSize first: the seg map is hidden until its tab is shown, so the
       // container can still report a stale size when this async chain resolves —
       // fitBounds against a 0-sized map yields the wrong zoom.
-      try{ maps.seg.invalidateSize(); maps.seg.fitBounds(b,{padding:[20,20]}); if(linking){ syncFrom('seg'); } }catch(e){}
+      frameMap('seg', b);
     }
     setMsg('Raster tiles ('+info.name+'). <span class="muted">Click a cell to identify it.</span>');
     api().seg_panel(level, mode).then(function(p){ renderPanel(p.zones||[]); });
@@ -1982,7 +2021,7 @@ HTML = r"""<!doctype html>
                       '<br>Mean sensitivity: '+fmt(p.sens_mean,2)+'<br>Mean # assets: '+fmt(p.mean_n_assets,1)); }
     });
     segVecGj=gj; segVec.addLayer(gj);
-    try{ maps.seg.invalidateSize(); maps.seg.fitBounds(gj.getBounds(),{padding:[20,20]}); if(linking){ syncFrom('seg'); } }catch(e){}
+    frameMap('seg', gj.getBounds());
     setMsg('Vector view (no MBTiles for this level yet).');
     renderPanel((res.legend||[]));
   }
@@ -2087,7 +2126,7 @@ HTML = r"""<!doctype html>
     if(info.bounds && info.bounds.length===4){
       var b=[[info.bounds[1],info.bounds[0]],[info.bounds[3],info.bounds[2]]];
       // When linked, keep the synced view from the previous tab; only auto-fit when unlinked.
-      try{ maps.class.invalidateSize(); maps.class.fitBounds(b,{padding:[20,20]}); if(linking){ syncFrom('class'); } }catch(e){}
+      frameMap('class', b);
     }
     var note=certainty ? '' : ' (Certainty needs a Tiles re-run)';
     classMsg('<b>'+(layer||'')+'</b> · raster view'+note+'; hover a cell to identify it.');
@@ -2197,7 +2236,7 @@ HTML = r"""<!doctype html>
                         '<br>Top (imp×sus) bins: '+(p.top_bins||'–')); }
       });
       classVecGj=gj; classVec.addLayer(gj);
-      try{ maps.class.invalidateSize(); maps.class.fitBounds(gj.getBounds(),{padding:[20,20]}); if(linking){ syncFrom('class'); } }catch(e){}
+      frameMap('class', gj.getBounds());
       classMsg(res.layer ? ('<b>'+res.layer+'</b> · click a polygon to identify it.') : 'Click a polygon to identify it.');
       renderClassPanel(res.legend||[], res.profile||[]);
     });
