@@ -1139,3 +1139,27 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - Rule: in a GeoNode 5 map PATCH, `maplayers[].dataset` is the dataset **pk** (an int), never a dict; and against GeoServer 2.27, a PUT to a style that does not exist answers **400**, not 404, so check existence (`GET …/styles/<name>.json`) before deciding to POST.
 - Why: every map MESA created was empty. The PATCH carrying the MapStore config and maplayers sent `{"dataset": {"alternate": …}}`; dynamic_rest resolves the relation with `objects.get(pk=data)` and raised `TypeError: Field 'id' expected a number` → HTTP 500, and because the view is `@transaction.atomic` the `data` blob was dropped too. The old single "MESA Sensitivity Map" had the same bug. Separately, the four alternative result styles were never created: the create branch only ran on 404, GeoServer returned 400, so each layer referenced `geonode:<name>_index_owa` etc. and WMS answered `StyleNotDefined`. The export still logged "Done", so the operator found out by opening a blank map.
 - How to apply: when calling GeoNode's API, read the serializer on the server (`geonode/maps/api/serializers.py`) rather than guessing field shapes; relation fields take pks. After any GeoServer style push, verify with a WMS GetMap using that style — a 200 with `application/vnd.ogc.se_xml` is a failure. A map whose layer PATCH fails is deleted rather than left empty in the catalogue.
+
+## Helper windows ask before discarding edits (2026-10-09)
+
+- Rule: every window with editable fields checks for unsaved edits in `closeEvent` (not in the Exit handler) and before anything that reloads or rewrites what it edits — Previous/Next where edits live only in the form, Reload, jobs that rewrite the table, deletes. Use `ui_style.DirtyTracker` (snapshot of the values after load/save) and `ui_style.confirm_unsaved` (Save / Discard / Cancel, Cancel default). Save functions return `True`/`False` and report their own errors.
+- Why: a review on 2026-10-09 found no window tracked unsaved edits. Atlas dropped a page's edits on Previous/Next; Assets, Geocodes, Classification, and the main window's Config/Welcome/AI sections lost edits on close without a word; a finished import or geocode job silently reloaded the editor over pending edits. Processing setup did the opposite — saved on every close, changed or not, and swallowed save errors.
+- How to apply: when adding a field to an editor, add it to that window's snapshot function (`_edit_snapshot`, `_form_values`, `_collect`, `_config_values`, …) or it will not count as an edit. When adding a background job that rewrites a table an editor holds in memory, call `_edits_resolved()` before starting it. After a Discard, reload the data — the discarded values are still in the form and the in-memory frame.
+
+## Never write a whole table back from a copy loaded when the window opened (2026-10-09)
+
+- Rule: a window that edits a few columns of a shared table writes back only those columns, merged into a fresh read of the file, and swaps the file in atomically (temp file + `os.replace`).
+- Why: Processing setup loaded `tbl_asset_group` on open and wrote the entire frame back on close. Titles, purposes or styling saved from Assets in the meantime were overwritten with the stale copy, silently. The save is now `_merge_vuln_into_disk_copy` + atomic write: only importance/susceptibility/sensitivity columns are taken from memory, matched on `id` (stable within one table), with `name_original` as fallback. Probe: a title written to disk after load survives the save, the importance edit lands, row count unchanged.
+- How to apply: before any `to_parquet` of a table that another window or helper also edits (`tbl_asset_group`, `tbl_geocode_group`, `tbl_atlas`), ask whether the frame in hand could be older than the file. If so, merge your columns into a fresh read. `id` is fine as a row key inside one table; it is not a cross-project join key (see the Excel round-trip, which joins on `name_original`).
+
+## Button roles need their own :disabled rule (2026-10-09)
+
+- Rule: every `QPushButton[role="..."]` style needs a matching `:disabled` rule placed after it, in both `ui_style.ASSET_STYLESHEET` and `mesa.MESA_STYLESHEET`.
+- Why: Qt gives an attribute selector and a pseudo-state the same specificity, so the role rule — which comes after `QPushButton:disabled` — wins, and a disabled primary/success/danger button kept its enabled colours. "Commit changes" in Tune processing looked clickable before Evaluate had run; the new busy-locking of job buttons would have been invisible.
+- How to apply: when adding a new role, add it to the shared `:disabled` block too. Check by rendering the role enabled and disabled with the shared sheet.
+
+## Destructive prompts need an explicit No default (2026-10-09)
+
+- Rule: `QMessageBox.question(...)` for anything that deletes, replaces or discards data passes `QMessageBox.No` (or `Cancel`) as the default button.
+- Why: without an explicit default Qt picks the accept button, so Enter confirmed Clear output, Restore package, Move workspace and the geocode deletes — the same keystroke that dismisses an info box.
+- How to apply: grep new `QMessageBox.question` calls for a third argument after the button set. Non-destructive prompts ("Import now?") may keep Yes.

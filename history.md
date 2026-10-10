@@ -340,3 +340,53 @@ layers on top of a large `basic_mosaic` may have lost the mosaic without being t
 results computed afterwards exclude it.
 
 `pytest tests/ -q` green at 19 passed.
+
+## 2026-10-08 – 2026-10-09 — Button review: Exit placement, roles, safe dialogs, unsaved edits
+
+Started from an operator remark: Exit should sit top-right in every window, and it did not in
+Classification setup, Process all and a few others. A survey found six windows with Exit at the
+bottom (Classification setup, Process all, Report generator, Publish to GeoNode, Tune processing,
+the GeoParquet processing window), and the tan Exit style pasted inline about twelve times in two
+drifting variants — which is how Classification setup ended up with neither the position nor the
+colour. Fixed in `a0c92f7`: Exit top-right everywhere (tab-bar corner where there are tabs, a header
+row otherwise) and one `role="exit"` style. The tan colour was kept on purpose: a shade darker than
+ordinary buttons so it is easy to find, but not red, since leaving a window is not destructive.
+
+A wider read-only review of buttons across all windows followed. Of its ranked findings the operator
+chose four to fix first, committed one purpose each:
+
+- `896f98b` — disabled buttons with a role looked enabled (stylesheet ordering; see learning.md
+  "Button roles need their own :disabled rule"). Found while preparing the next fix; it was
+  already wrong in Tune processing.
+- `396af6a` — Enter confirmed seven destructive prompts (Clear output, both Restore paths, Restore
+  previous tuning, Move workspace, both geocode deletes). No/Cancel is now the default.
+- `824c874` — `danger` role on Restore data, Delete token, Delete current atlas and GeoNode's
+  Delete selected (which had its own bright-red inline style); new confirmations for Delete token,
+  Cancel in Process all (it discards the run) and Load from Excel (it persists at once).
+- `891d0d5` — long jobs could be started twice: every Process click in the GeoParquet window
+  spawned another worker; Geocodes and Atlas job buttons stayed live. Now locked while running and
+  restored afterwards, also when a job fails (Atlas needed a new `job_done` signal because
+  `task_finished` fires only on success). Checked by driving both windows with dummy jobs.
+- `10f8cde` — one marked primary action per window; the duplicate primaries (Suggest/Generate,
+  Create/Import) reduced to one.
+
+Then the largest finding: no editor tracked unsaved edits (learning.md "Helper windows ask before
+discarding edits"). Mapping it turned up two things worse than lost edits. Processing setup wrote the
+whole `tbl_asset_group` back on every close from the copy loaded at open, so Assets edits made in
+between were overwritten without a trace (learning.md "Never write a whole table back from a copy
+loaded when the window opened"). And Tune processing's commit and restore called
+`self._load_config_editor()`, a method that exists only on the main window, inside a bare
+`try/except: pass` — the Config tab never refreshed, so a later "Save all" wrote the pre-tuning
+values back over the tuning. The operator accepted the recommendation that Processing setup prompt
+like the other windows rather than keep a (fixed) auto-save, so all editors behave the same.
+
+The fix added `DirtyTracker` and `confirm_unsaved` to `ui_style.py` and wired them into Atlas,
+Assets, Geocodes, Classification setup, Processing setup and the main window (Config, Welcome, AI
+connection as one prompt on close). Tune now pushes only the keys it wrote into the Config tab,
+keeping other unsaved edits there. Verified with scripted probes per window (Cancel keeps the edit
+and blocks close or navigation, Discard reloads clean, the guards block a geocode import), a merge
+probe on a copy of `tbl_asset_group`, and the test suite (68 passed).
+
+Remaining from the review, not started: Delete placed next to Save/Next in the record editors,
+inconsistent save wording, no keyboard shortcuts, fixed button widths. Nothing here touched the
+sibling projects; nothing reported to mesa-server or mesa_demodata.
