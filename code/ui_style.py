@@ -13,7 +13,7 @@ import webbrowser
 
 from PySide6.QtCore import Qt, qInstallMessageHandler
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QMessageBox
 
 # =====================================================================
 # Shared stylesheet (same warm palette as mesa.py)
@@ -446,3 +446,36 @@ class InfoCircleLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self._url:
             webbrowser.open(self._url)
+
+
+class DirtyTracker:
+    """Detects unsaved edits by comparing collect() against a snapshot taken at load/save."""
+
+    def __init__(self, collect):
+        self._collect = collect
+        self._snapshot = None
+
+    def mark_clean(self) -> None:
+        self._snapshot = self._collect()
+
+    def is_dirty(self) -> bool:
+        return self._snapshot is not None and self._collect() != self._snapshot
+
+
+def confirm_unsaved(parent, what: str, save_fn) -> bool:
+    """Ask Save / Discard / Cancel about unsaved edits; True means it is safe to proceed.
+
+    save_fn must return True on success (and report its own errors); a failed save
+    keeps the caller where it is.
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle("Unsaved changes")
+    box.setText(f"You have unsaved changes in {what}.")
+    box.setInformativeText("Save them before continuing?")
+    box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+    box.setDefaultButton(QMessageBox.Cancel)
+    choice = box.exec()
+    if choice == QMessageBox.Save:
+        return bool(save_fn())
+    return choice == QMessageBox.Discard
