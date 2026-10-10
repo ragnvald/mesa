@@ -23,7 +23,7 @@ Usage examples:
 
 INDEX_GRADIENT_STEPS = 100  # number of discrete colors for 1..100 index layers
 
-import argparse, gc, json, math, os, sqlite3, re, multiprocessing as mp, sys, io
+import argparse, gc, json, math, mmap, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Iterable
 
@@ -52,6 +52,7 @@ _tame_stdio()
 
 import numpy as np
 import pandas as pd
+import mesa_shared
 from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
 _ensure_geo_data()  # repair a machine-wide PROJ/GDAL env before the GIS stack loads
 import geopandas as gpd
@@ -65,31 +66,41 @@ from PIL import Image, ImageDraw  # Pillow
 WKB_DECODE_BATCH = 20000
 
 
-def pack_wkb(geoms, chunk: int = 500_000) -> Tuple[bytes, np.ndarray]:
-    """Pack a geometry array into one WKB blob plus int64 offsets.
+def _rm_quiet(path) -> None:
+    """Delete a scratch file without ever failing the render for it."""
+    try:
+        Path(path).unlink()
+    except Exception:
+        pass
 
-    The pool runs under 'spawn', so everything in initargs is pickled once per
-    worker and each worker keeps a private copy. Shipping live shapely objects
-    cost ~15.4 GB per worker on basic_mosaic (17.6M features); the blob form is
-    ~3.2 GB. Callers should drop the source GeoDataFrame once packed.
+
+def spill_wkb(geoms, out_path: Path, chunk: int = 500_000) -> np.ndarray:
+    """Write a geometry array to one WKB file on disk and return int64 offsets.
+
+    The pool runs under 'spawn', so anything passed through initargs is pickled
+    once per worker and each worker keeps a private copy. On basic_mosaic
+    (17.6M features) the blob is ~3.2 GB, so eight workers cost ~26 GB of
+    identical bytes — which is what made a 17M-cell mosaic unrenderable.
+    Written to a file and mapped read-only in each worker, the operating system
+    keeps one physical copy in the page cache no matter how many workers there
+    are. See learning.md "Tiles worker payload".
 
     Encoding runs in chunks so the intermediate per-geometry bytes objects are
-    never all live at once. The blob must end up as `bytes`: shapely.from_wkb
-    rejects bytearray and memoryview slices (it reads them as sequences of int).
+    never all live at once, and nothing accumulates in memory at all.
     """
     arr = np.asarray(geoms, dtype=object)
     n = len(arr)
     offsets = np.zeros(n + 1, dtype=np.int64)
-    blob = bytearray()
-    for start in range(0, n, chunk):
-        parts = shapely.to_wkb(arr[start:start + chunk])
-        stop = start + len(parts)
-        lengths = np.fromiter((len(p) for p in parts), dtype=np.int64, count=len(parts))
-        np.cumsum(lengths, out=offsets[start + 1:stop + 1])
-        offsets[start + 1:stop + 1] += offsets[start]
-        blob += b"".join(parts)
-        del parts, lengths
-    return bytes(blob), offsets
+    with open(out_path, "wb") as fh:
+        for start in range(0, n, chunk):
+            parts = shapely.to_wkb(arr[start:start + chunk])
+            stop = start + len(parts)
+            lengths = np.fromiter((len(p) for p in parts), dtype=np.int64, count=len(parts))
+            np.cumsum(lengths, out=offsets[start + 1:stop + 1])
+            offsets[start + 1:stop + 1] += offsets[start]
+            fh.write(b"".join(parts))
+            del parts, lengths
+    return offsets
 
 
 def _swap_xy_geom(geom):
@@ -507,27 +518,79 @@ def is_polygon_like_gdf(gdf: gpd.GeoDataFrame) -> pd.Series:
     except Exception:
         return pd.Series([True] * len(gdf), index=gdf.index)
 
-def polygon_rings_lonlat(geom) -> Iterable[Iterable[Tuple[float,float]]]:
-    """Yield exterior rings as lists of (lon,lat). Interiors ignored for speed."""
+def polygon_rings_lonlat(geom) -> List[np.ndarray]:
+    """Exterior rings as (N,2) lon/lat arrays.
+
+    Interiors are still dropped, so a polygon with a hole renders solid. That is
+    wrong for imported admin layers with enclaves, but punching the hole here
+    would mean erasing pixels a *neighbouring* cell may legitimately have filled
+    — ImageDraw has no per-feature mask. The fix belongs with the index-raster
+    rewrite, where "which cell covers this pixel" answers it by construction.
+    """
     if geom is None or geom.is_empty:
         return []
     if isinstance(geom, Polygon):
-        return [list(geom.exterior.coords)]
-    elif isinstance(geom, MultiPolygon):
-        return [list(p.exterior.coords) for p in geom.geoms]
+        return [shapely.get_coordinates(geom.exterior)]
+    if isinstance(geom, MultiPolygon):
+        return [shapely.get_coordinates(p.exterior) for p in geom.geoms]
     return []
 
-def ring_lonlat_to_pixels(ring: Iterable[Tuple[float,float]], z: int, x: int, y: int, tol: float=0.3) -> List[Tuple[float,float]]:
-    out: List[Tuple[float,float]] = []
-    last = None
-    for lon, lat in ring:
-        px, py = lonlat_to_tile_px(lon, lat, z, x, y)
-        if last is None or (abs(px - last[0]) > tol or abs(py - last[1]) > tol):
-            out.append((px, py))
-            last = (px, py)
+def project_lonlat(coords: np.ndarray, z: int, x: int, y: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Project an (N,2) lon/lat array to tile pixel space in one pass.
+
+    Call this over ALL of a tile's candidate vertices at once, never per ring.
+    numpy's per-call overhead is what matters at this size: a 38-vertex ring —
+    the average basic_mosaic cell — costs about as much to project one at a time
+    as the Python loop it replaces, and the first attempt at this measured 1.1x
+    for exactly that reason. Batched over a whole tile it is worth ~19x.
+    See learning.md "Tile projection is the hot loop".
+    """
+    n = 2.0 ** z
+    lat_rad = np.radians(np.clip(coords[:, 1], -WEBMERCATOR_LAT_MAX, WEBMERCATOR_LAT_MAX))
+    px = ((coords[:, 0] + 180.0) / 360.0 * n - x) * TILE_SIZE
+    py = ((1.0 - np.log(np.tan(lat_rad) + 1.0 / np.cos(lat_rad)) / np.pi) / 2.0 * n - y) * TILE_SIZE
+    return px, py
+
+
+def decimate_ring(px: np.ndarray, py: np.ndarray, tol: float) -> List[Tuple[float,float]]:
+    """Drop vertices that do not move more than `tol` from the last kept one.
+
+    Greedy against the last *kept* vertex, so it cannot be written as a diff
+    over neighbours: a long run of sub-tol steps must collapse to one point, not
+    survive as many. The caller has already screened the two common cases
+    (everything moves, nothing moves), so the loop here is the rare path.
+    """
+    keep = np.ones(len(px), dtype=bool)
+    lx, ly = px[0], py[0]
+    for i in range(1, len(px)):
+        if abs(px[i] - lx) > tol or abs(py[i] - ly) > tol:
+            lx, ly = px[i], py[i]
+        else:
+            keep[i] = False
+    return _close_ring(px[keep], py[keep], tol)
+
+
+def _close_ring(px: np.ndarray, py: np.ndarray, tol: float) -> List[Tuple[float,float]]:
+    out = list(zip(px.tolist(), py.tolist()))
     if len(out) >= 2 and (abs(out[0][0]-out[-1][0]) <= tol and abs(out[0][1]-out[-1][1]) <= tol):
         out[-1] = out[0]
     return out
+
+
+def ring_lonlat_to_pixels(ring, z: int, x: int, y: int, tol: float=0.3) -> List[Tuple[float,float]]:
+    """Single-ring convenience wrapper. The renderer batches instead."""
+    pts = np.asarray(ring, dtype="float64")
+    if pts.ndim != 2 or len(pts) == 0:
+        return []
+    px, py = project_lonlat(pts, z, x, y)
+    if len(px) > 1:
+        dx = np.abs(np.diff(px)); dy = np.abs(np.diff(py))
+        if np.all((dx > tol) | (dy > tol)):
+            return _close_ring(px, py, tol)
+        if (px.max() - px.min() <= tol) and (py.max() - py.min() <= tol):
+            return _close_ring(px[:1], py[:1], tol)
+        return decimate_ring(px, py, tol)
+    return _close_ring(px, py, tol)
 
 # ----------------------- MBTiles writer (single process) -----------------------
 def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int,
@@ -612,9 +675,11 @@ def writer_process(dbpath: str, in_q: mp.Queue, done_q: mp.Queue):
 
 # ----------------------- Worker globals & worker -----------------------
 # Everything here is pickled once per worker under 'spawn', so all per-feature
-# state is held as compact buffers (WKB blob, numpy arrays) rather than Python
-# objects. See pack_wkb() and learning.md "Tiles worker payload".
-_G_WKB: bytes = b""
+# state is held as compact buffers (numpy arrays) rather than Python objects —
+# and the geometry, which dwarfs the rest, is not passed at all: workers map the
+# WKB file written by spill_wkb(). See learning.md "Tiles worker payload".
+_G_WKB_FH = None                                          # keeps the mapping alive
+_G_WKB: "mmap.mmap | bytes" = b""
 _G_WKB_OFF: np.ndarray = np.zeros(1, dtype=np.int64)
 _G_SENS_CODES: np.ndarray = np.zeros(0, dtype=np.int16)   # -1 = missing
 _G_SENS_CATS: List[Optional[str]] = []                     # code -> label
@@ -625,9 +690,14 @@ _G_STROKE_W: float = 0.0
 # Per-feature precomputed RGBA for categorical layers (seg_signatures, seg_clusters):
 # mode -> uint8 (N,4) array aligned to feature index.
 _G_COLORS_BY_MODE: Dict[str, np.ndarray] = {}
+# Per-mode draw-order key: higher wins a contested pixel. Kept separate from
+# _G_VALS_BY_MODE because they differ where it matters — the sensitivity layer
+# colours from a category code whose alphabetical order (A..E) runs opposite to
+# severity, so ordering by it would hand the pixel to the *least* sensitive cell.
+_G_ORDER_BY_MODE: Dict[str, np.ndarray] = {}
 
 def _worker_init(
-    wkb_blob,
+    wkb_path,
     wkb_offsets,
     sens_codes,
     sens_cats,
@@ -636,10 +706,14 @@ def _worker_init(
     stroke_rgba,
     stroke_w,
     colors_by_mode=None,
+    order_by_mode=None,
 ):
-    global _G_WKB, _G_WKB_OFF, _G_SENS_CODES, _G_SENS_CATS, _G_VALS_BY_MODE
-    global _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W, _G_COLORS_BY_MODE
-    _G_WKB = wkb_blob
+    global _G_WKB, _G_WKB_OFF, _G_WKB_FH, _G_SENS_CODES, _G_SENS_CATS, _G_VALS_BY_MODE
+    global _G_PALETTES_BY_MODE, _G_STROKE_RGBA, _G_STROKE_W, _G_COLORS_BY_MODE, _G_ORDER_BY_MODE
+    # Read-only mapping: every worker sees the same physical pages, so the
+    # geometry costs one copy for the whole pool rather than one per process.
+    _G_WKB_FH = open(wkb_path, "rb")
+    _G_WKB = mmap.mmap(_G_WKB_FH.fileno(), 0, access=mmap.ACCESS_READ)
     _G_WKB_OFF = wkb_offsets
     _G_SENS_CODES = sens_codes
     _G_SENS_CATS = list(sens_cats or [])
@@ -648,6 +722,25 @@ def _worker_init(
     _G_STROKE_RGBA = stroke_rgba
     _G_STROKE_W = float(stroke_w)
     _G_COLORS_BY_MODE = colors_by_mode or {}
+    _G_ORDER_BY_MODE = order_by_mode or {}
+
+def encode_tile_png(img: "Image.Image") -> bytes:
+    """PNG-encode a tile.
+
+    `optimize=True` was costing 1.92 ms a tile against 0.66 ms here, to save
+    6.5% of the bytes — measured over the 195 tiles of a real project, not a
+    synthetic one.
+
+    Palettising was tried and dropped. It looked like a large win on a dense
+    synthetic tile, but real tiles are mostly transparent, and RGBA with PNG's
+    filters compresses long transparent runs better than an index plane plus a
+    palette: measured 4.40 ms and 357 KB against 0.66 ms and 384 KB. The
+    synthetic benchmark had simply been unrepresentative.
+    """
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", compress_level=6)
+    return buf.getvalue()
+
 
 def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
     """
@@ -664,14 +757,27 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
         numvals = _G_VALS_BY_MODE.get(mode)
         colors = _G_COLORS_BY_MODE.get(mode)
 
+        # Paint low values first so that where several cells land on the same
+        # pixel — the normal case at coarse zoom, where one pixel can cover
+        # hundreds of cells — the highest value survives. That makes the tile a
+        # max-aggregation of what is under it instead of "whichever cell came
+        # last out of the index", which is arbitrary and order-dependent.
+        order = _G_ORDER_BY_MODE.get(mode)
+        if order is not None and len(cand_idx) > 1:
+            v = order[cand_idx]
+            cand_idx = cand_idx[np.argsort(np.where(np.isnan(v), -np.inf, v), kind="stable")]
+
         # Decode candidates from the WKB blob in batches: one vectorised
         # shapely call per batch, and never more than WKB_DECODE_BATCH live
         # geometries at a time even when a coarse tile covers the whole AOI.
         off = _G_WKB_OFF
         blob = _G_WKB
+        tol = 0.35 if z >= 9 else 0.6
         for start in range(0, len(cand_idx), WKB_DECODE_BATCH):
             batch = cand_idx[start:start + WKB_DECODE_BATCH]
             geoms = shapely.from_wkb([blob[off[i]:off[i + 1]] for i in batch])
+            rings: List[np.ndarray] = []
+            ring_fill: List[Tuple[int,int,int,int]] = []
 
             for geom, i in zip(geoms, batch):
                 if geom is None or geom.is_empty:
@@ -703,43 +809,64 @@ def _render_one_tile(task) -> Optional[Tuple[int,int,int, bytes]]:
                     continue
 
                 for ring in polygon_rings_lonlat(geom):
-                    path = ring_lonlat_to_pixels(ring, z, x, y, tol=0.35 if z>=9 else 0.6)
-                    if len(path) < 3:
-                        continue
+                    if len(ring) >= 3:
+                        rings.append(ring)
+                        ring_fill.append(fill_rgba)
 
-                    # Fast reject: if the pixel bbox is fully outside the tile, skip.
-                    # This prevents writing many fully-transparent tiles when bbox-based
-                    # candidate selection includes geometries that don't actually affect
-                    # the current tile after projection/rounding.
+            if not rings:
+                continue
+
+            # Project every vertex of every ring in this batch in one call.
+            # Projecting ring by ring costs more in numpy call overhead than it
+            # saves — measured 1.1x that way against ~19x batched, because the
+            # average cell is only 38 vertices. See project_lonlat.
+            lens = np.fromiter((len(r) for r in rings), dtype=np.int64, count=len(rings))
+            starts = np.concatenate(([0], np.cumsum(lens)))
+            px_all, py_all = project_lonlat(np.concatenate(rings), z, x, y)
+
+            # Per-ring extents and "does every step clear tol", both vectorised,
+            # so the decimation loop only runs for the rings that need it.
+            heads = starts[:-1]
+            xmin = np.minimum.reduceat(px_all, heads); xmax = np.maximum.reduceat(px_all, heads)
+            ymin = np.minimum.reduceat(py_all, heads); ymax = np.maximum.reduceat(py_all, heads)
+            outside = (xmax < 0.0) | (xmin > float(TILE_SIZE)) | (ymax < 0.0) | (ymin > float(TILE_SIZE))
+            collapses = (xmax - xmin <= tol) & (ymax - ymin <= tol)
+            step = np.ones(len(px_all), dtype=bool)
+            step[1:] = (np.abs(np.diff(px_all)) > tol) | (np.abs(np.diff(py_all)) > tol)
+            step[heads] = True
+            keeps_all = np.minimum.reduceat(step.astype(np.int8), heads).astype(bool)
+
+            for r_i in range(len(rings)):
+                # Fast reject: ring's pixel bbox entirely off this tile. Kept
+                # because bbox-based candidate selection over-selects.
+                if outside[r_i] or collapses[r_i]:
+                    continue
+                a, b = starts[r_i], starts[r_i + 1]
+                if keeps_all[r_i]:
+                    path = _close_ring(px_all[a:b], py_all[a:b], tol)
+                else:
+                    path = decimate_ring(px_all[a:b], py_all[a:b], tol)
+                if len(path) < 3:
+                    continue
+
+                fill_rgba = ring_fill[r_i]
+                if fill_rgba[3] > 0:
                     try:
-                        xs = [p[0] for p in path]
-                        ys = [p[1] for p in path]
-                        if (max(xs) < 0.0) or (min(xs) > float(TILE_SIZE)) or (max(ys) < 0.0) or (min(ys) > float(TILE_SIZE)):
-                            continue
+                        draw.polygon(path, fill=fill_rgba)
+                        painted = True
                     except Exception:
                         pass
-
-                    if fill_rgba[3] > 0:
-                        try:
-                            draw.polygon(path, fill=fill_rgba)
-                            painted = True
-                        except Exception:
-                            pass
-                    if _G_STROKE_RGBA[3] > 0 and _G_STROKE_W > 0:
-                        try:
-                            draw.line(path + [path[0]], fill=_G_STROKE_RGBA, width=int(max(1, round(_G_STROKE_W))))
-                            painted = True
-                        except Exception:
-                            pass
+                if _G_STROKE_RGBA[3] > 0 and _G_STROKE_W > 0:
+                    try:
+                        draw.line(path + [path[0]], fill=_G_STROKE_RGBA, width=int(max(1, round(_G_STROKE_W))))
+                        painted = True
+                    except Exception:
+                        pass
 
         if not painted:
             return None
 
-        # Encode PNG
-        from io import BytesIO
-        buf = BytesIO()
-        img.save(buf, format="PNG", optimize=True)
-        return (z, x, y, buf.getvalue())
+        return (z, x, y, encode_tile_png(img))
     except Exception:
         return None
 
@@ -749,8 +876,23 @@ def slugify(value: str | int) -> str:
     s = re.sub(r"[^\w\-]+", "", s)
     return s[:120] if len(s) > 120 else s
 
+def _feature_tile_ranges(bboxes: np.ndarray, z: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Tile index range each feature bbox spans at zoom z, computed arithmetically."""
+    n = 2.0 ** z
+    minx, miny, maxx, maxy = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+    tx0 = np.floor((minx + 180.0) / 360.0 * n)
+    tx1 = np.floor((maxx + 180.0) / 360.0 * n)
+    lat_hi = np.radians(np.clip(maxy, -WEBMERCATOR_LAT_MAX, WEBMERCATOR_LAT_MAX))
+    lat_lo = np.radians(np.clip(miny, -WEBMERCATOR_LAT_MAX, WEBMERCATOR_LAT_MAX))
+    ty0 = np.floor((1.0 - np.log(np.tan(lat_hi) + 1.0 / np.cos(lat_hi)) / np.pi) / 2.0 * n)
+    ty1 = np.floor((1.0 - np.log(np.tan(lat_lo) + 1.0 / np.cos(lat_lo)) / np.pi) / 2.0 * n)
+    hi = int(n) - 1
+    return (np.clip(tx0, 0, hi).astype(np.int64), np.clip(ty0, 0, hi).astype(np.int64),
+            np.clip(tx1, 0, hi).astype(np.int64), np.clip(ty1, 0, hi).astype(np.int64))
+
+
 def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int,
-                    sindex, n_features: int) -> List[Tuple[int,int,int, np.ndarray]]:
+                    bboxes: Optional[np.ndarray], n_features: int) -> List[Tuple[int,int,int, np.ndarray]]:
     """
     Build full task list and print schedule summary for z in [minz..maxz].
     Each task: (z, x, y, candidate_indexes as an int32 array)
@@ -758,6 +900,16 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
     Candidates are kept as int32 arrays, not Python lists: a coarse tile over a
     large group can hold millions of them, and a list costs ~64 B per entry
     against 4 B here (and pickles ~5x larger per task).
+
+    Assignment is by arithmetic on the feature bounding boxes rather than one
+    spatial-index query per tile. Web Mercator tile indices are a closed-form
+    function of lon/lat, so every feature's tile range is a vectorised
+    calculation, and features are bucketed with a single argsort — O(N log N)
+    over features instead of O(tiles) index queries in the parent process,
+    which was single-threaded and grew with the tile count.
+
+    The result is the same candidate set: both forms select features whose bbox
+    intersects the tile's bbox.
     """
     minx, miny, maxx, maxy = bounds
     tasks: List[Tuple[int,int,int, np.ndarray]] = []
@@ -766,17 +918,41 @@ def plan_tile_tasks(bounds: Tuple[float,float,float,float], minz: int, maxz: int
         tx0, ty0, tx1, ty1 = tiles_covering_bounds((minx, miny, maxx, maxy), z)
         count = (tx1 - tx0 + 1) * (ty1 - ty0 + 1)
         log(f"  z{z}: scheduling tiles ({tx0},{ty0})–({tx1},{ty1}) → {count:,}")
-        for x in range(tx0, tx1+1):
-            for y in range(ty0, ty1+1):
-                tminlon, tminlat, tmaxlon, tmaxlat = tile_bounds_lonlat(z, x, y)
-                if sindex is not None:
-                    idx = np.asarray(sindex.intersection((tminlon, tminlat, tmaxlon, tmaxlat)), dtype=np.int32)
-                else:
-                    idx = np.arange(n_features, dtype=np.int32)
-                if idx.size == 0:
-                    continue
-                tasks.append((z, x, y, idx))
-                total += 1
+
+        if bboxes is None or len(bboxes) == 0:
+            for x in range(tx0, tx1+1):
+                for y in range(ty0, ty1+1):
+                    tasks.append((z, x, y, np.arange(n_features, dtype=np.int32)))
+                    total += 1
+            continue
+
+        fx0, fy0, fx1, fy1 = _feature_tile_ranges(bboxes, z)
+        # Expand each feature into the (x,y) tiles its bbox touches. Features
+        # spanning many tiles are rare and the spans are small, so building the
+        # pairs directly is cheaper than any index.
+        spans_x = (fx1 - fx0 + 1)
+        spans_y = (fy1 - fy0 + 1)
+        counts = spans_x * spans_y
+        feat = np.repeat(np.arange(len(bboxes), dtype=np.int64), counts)
+        within = np.arange(counts.sum(), dtype=np.int64) - np.repeat(
+            np.concatenate(([0], np.cumsum(counts)[:-1])), counts)
+        sx = np.repeat(spans_x, counts)
+        gx = np.repeat(fx0, counts) + (within % sx)
+        gy = np.repeat(fy0, counts) + (within // sx)
+
+        keep = (gx >= tx0) & (gx <= tx1) & (gy >= ty0) & (gy <= ty1)
+        gx, gy, feat = gx[keep], gy[keep], feat[keep]
+        if feat.size == 0:
+            continue
+
+        tile_key = gx * (1 << 32) + gy
+        order = np.argsort(tile_key, kind="stable")
+        tile_key, feat = tile_key[order], feat[order]
+        edges = np.flatnonzero(np.diff(tile_key)) + 1
+        for lo, hi in zip(np.concatenate(([0], edges)), np.concatenate((edges, [len(tile_key)]))):
+            k = int(tile_key[lo])
+            tasks.append((z, k >> 32, k & 0xFFFFFFFF, feat[lo:hi].astype(np.int32)))
+            total += 1
     log(f"  total scheduled tiles with candidates: {total:,}")
     return tasks
 
@@ -798,6 +974,9 @@ def main():
         return max(1, cpu // 2)
 
     ap.add_argument("--procs", type=int, default=_default_procs(), help="Worker processes (default ~= half cores; frozen builds cap lower)")
+    ap.add_argument("--no-max-aggregate", action="store_true",
+                    help="Draw candidates in index order instead of value order. Restores the "
+                         "pre-5.7 behaviour where an arbitrary cell wins a contested pixel.")
     ap.add_argument("--stroke", default="#000000", help="Stroke color hex")
     ap.add_argument("--stroke-alpha", type=float, default=0.0, help="Stroke alpha 0..1")
     # Optional fill alpha overrides (0..1). If not provided, values are read from config.ini or default to 1.0
@@ -919,6 +1098,7 @@ def main():
     importance_max_palette = {"importance_max_colors": build_importance_max_palette(importance_max_alpha)}
     ranges_map = read_ranges_map(cfg_path)
     stroke_rgba = hex_to_rgba(args.stroke, args.stroke_alpha)
+    max_aggregate = not bool(args.no_max_aggregate)
     groups_total_available = "asset_groups_total" in ordered_cols
     assets_total_available = "assets_overlap_total" in ordered_cols
     index_owa_available = "index_owa" in ordered_cols
@@ -970,14 +1150,17 @@ def main():
         miny_c = clamp_lat(miny); maxy_c = clamp_lat(maxy)
         bounds_c = (float(minx), float(miny_c), float(maxx), float(maxy_c))
         
+        # Feature bounding boxes, not a spatial index: tile assignment is
+        # closed-form arithmetic, so the ~1.8 GB STRtree basic_mosaic used to
+        # build here is not needed at all.
         try:
-            sindex = gdf.sindex
+            bboxes = shapely.bounds(gdf.geometry.values)
         except Exception:
-            sindex = None
+            bboxes = None
 
-        tasks = plan_tile_tasks(bounds_c, args.minzoom, args.maxzoom, sindex, len(gdf))
+        tasks = plan_tile_tasks(bounds_c, args.minzoom, args.maxzoom, bboxes, len(gdf))
         log(f"  → planned {len(tasks):,} tiles (shared across layers)")
-        del sindex   # ~1.8 GB on basic_mosaic; only plan_tile_tasks needs it
+        del bboxes
 
         # Precompute per-feature values for all supported layers once per group.
         sens_codes = gdf.get("sensitivity_code_max", pd.Series(index=gdf.index, dtype="string")).astype("string").str.strip().str.upper()
@@ -1048,6 +1231,19 @@ def main():
             "index_owa": sensitivity_index_palette,
         }
 
+        # Draw-order keys (higher wins a contested pixel). The numeric layers
+        # order by the value they are coloured from; sensitivity needs its own
+        # key because it is coloured from a category code, not a number.
+        order_by_mode: Dict[str, np.ndarray] = {}
+        if max_aggregate:
+            for _m in ("groupstotal", "assetstotal", "importance_max", "index_owa"):
+                if _m in vals_by_mode:
+                    order_by_mode[_m] = vals_by_mode[_m]
+            if "sensitivity_max" in gdf.columns:
+                order_by_mode["sensitivity"] = pd.to_numeric(
+                    gdf["sensitivity_max"], errors="coerce"
+                ).to_numpy(dtype=np.float64, na_value=np.nan)
+
         # Segmentation categorical layers — auto when tbl_segmentation/<slug>.parquet
         # exists. Per-feature RGBA is precomputed here (signature ramp / cluster
         # palette) and shipped to workers via colors_by_mode; cells with no
@@ -1097,16 +1293,20 @@ def main():
                 log(f"  → segmentation tiles skipped for '{gv}': {exc}")
                 colors_by_mode = {}
 
-        # Shared worker pool for this group (reused across all layers). Pack the
-        # geometry into a WKB blob and drop the GeoDataFrame *before* spawning, so
-        # the parent is not holding ~18 GB while N workers each unpickle a copy.
-        wkb_blob, wkb_off = pack_wkb(gdf.geometry.values)
+        # Shared worker pool for this group (reused across all layers). Spill the
+        # geometry to a WKB file and drop the GeoDataFrame *before* spawning: the
+        # parent then holds neither the GeoDataFrame nor the blob, and the workers
+        # map the file instead of each unpickling a copy of it.
+        wkb_path = out_dir / f"__wkb_{slug}.bin"
+        wkb_off = spill_wkb(gdf.geometry.values, wkb_path)
         del gdf
         gc.collect()
-        log(f"  → payload {len(wkb_blob)/1024**3:.2f} GB WKB shared with each worker")
+        log(f"  → payload {wkb_path.stat().st_size/1024**3:.2f} GB WKB mapped by every worker "
+            f"(one physical copy)")
 
-        init_args = (wkb_blob, wkb_off, sens_code_arr, sens_cats, vals_by_mode,
-                     palettes_by_mode, stroke_rgba, args.stroke_width, colors_by_mode)
+        init_args = (str(wkb_path), wkb_off, sens_code_arr, sens_cats, vals_by_mode,
+                     palettes_by_mode, stroke_rgba, args.stroke_width, colors_by_mode,
+                     order_by_mode)
 
         procs = max(1, int(args.procs))
         with ctx.Pool(processes=procs, initializer=_worker_init, initargs=init_args) as pool:
@@ -1116,10 +1316,19 @@ def main():
                 done_q = mp.Queue()
                 wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
                 wp.start()
-                metadata = None
+                # A coarse tile is an aggregation, and until now nothing said
+                # which one. `mesa_aggregation` names the rule that decided a
+                # contested pixel, so a viewer can tell the analyst rather than
+                # leave them to assume the tile shows a typical value.
+                #   max  — highest value under the pixel wins
+                #   none — no rule; whichever candidate was drawn last
+                # Reserved for the value-raster work: mode, mean, count.
+                metadata = {
+                    "mesa_aggregation": "max" if mode in order_by_mode else "none",
+                }
                 if mode in ("groupstotal", "assetstotal"):
                     scale = "log1p" if mode == "assetstotal" else "linear"
-                    metadata = {
+                    metadata.update({
                         "mesa_scale": scale,
                         "mesa_value_min": num_min,
                         "mesa_value_max": num_max,
@@ -1127,7 +1336,7 @@ def main():
                             blue_ramp_legend(num_min, num_max, scale=scale),
                             separators=(",", ":"),
                         ),
-                    }
+                    })
                 in_q.put(("__INIT__", mbt_name, int(args.minzoom), int(args.maxzoom), bounds_c, metadata))
 
                 layer_tasks = [(z, x, y, idx, mode, num_min, num_max) for (z, x, y, idx) in tasks]
@@ -1185,6 +1394,9 @@ def main():
                 log(f"  → building {slug}_seg_clusters.mbtiles …")
                 _run_layer(f"{slug}_seg_clusters", "seg_clusters", 0.0, 0.0)
 
+        # The pool is closed, so no worker is still mapping the spill file.
+        _rm_quiet(wkb_path)
+
         # --- Classification (segmv) rasters: rendered from the FULL geocode grid ---
         # tbl_seg_mv covers every geocode cell, but tbl_flat (the gdf above) omits cells
         # with no asset overlap (~7% of basic_mosaic). To paint those no-data cells grey on
@@ -1209,8 +1421,14 @@ def main():
                     mv = mv[mv["run_id"].astype(str) == run_id]
                     clu_by_code = dict(zip(mv["code"].astype(str), mv["cluster_id"]))
                     pmax_by_code = dict(zip(mv["code"].astype(str), mv["p_max"])) if has_pmax else {}
-                    sgeo = gpd.read_parquet(go_part, columns=["code", "geometry"],
-                                            filters=[("name_gis_geocodegroup", "=", gv)])
+                    # Tolerant read: tbl_geocode_object written by the streamed
+                    # merge lacks the schema-level GeoParquet header, and
+                    # gpd.read_parquet refuses it outright — which silently cost
+                    # this project its Classification rasters. See learning.md
+                    # "GeoParquet metadata lives in two places".
+                    sgeo = mesa_shared.read_geoparquet(
+                        go_part, columns=["code", "geometry"],
+                        filters=[("name_gis_geocodegroup", "=", gv)])
                     if sgeo.crs is not None and str(sgeo.crs).upper() not in ("EPSG:4326", "WGS84", "EPSG: 4326"):
                         sgeo = sgeo.to_crs("EPSG:4326")
                     sgeo = maybe_swap_xy(sgeo)
@@ -1243,15 +1461,16 @@ def main():
                     s_minx, s_miny, s_maxx, s_maxy = sgeo.total_bounds
                     s_bounds = (float(s_minx), float(clamp_lat(s_miny)), float(s_maxx), float(clamp_lat(s_maxy)))
                     try:
-                        s_sindex = sgeo.sindex
+                        s_bboxes = shapely.bounds(sgeo.geometry.values)
                     except Exception:
-                        s_sindex = None
-                    s_tasks = plan_tile_tasks(s_bounds, args.minzoom, args.maxzoom, s_sindex, len(sgeo))
-                    del s_sindex
-                    s_wkb, s_off = pack_wkb(sgeo.geometry.values)
+                        s_bboxes = None
+                    s_tasks = plan_tile_tasks(s_bounds, args.minzoom, args.maxzoom, s_bboxes, len(sgeo))
+                    del s_bboxes
+                    s_wkb_path = out_dir / f"__wkb_{slug}_segmv.bin"
+                    s_off = spill_wkb(sgeo.geometry.values, s_wkb_path)
                     del sgeo
                     gc.collect()
-                    s_init = (s_wkb, s_off, np.zeros(0, dtype=np.int16), [], {}, {},
+                    s_init = (str(s_wkb_path), s_off, np.zeros(0, dtype=np.int16), [], {}, {},
                               stroke_rgba, args.stroke_width, s_colors)
                     with ctx.Pool(processes=procs, initializer=_worker_init, initargs=s_init) as spool:
                         for nm, mode, _cols in s_modes:
@@ -1259,7 +1478,10 @@ def main():
                             in_q = mp.Queue(maxsize=1000); done_q = mp.Queue()
                             wp = mp.Process(target=writer_process, args=(str(out_path), in_q, done_q), daemon=True)
                             wp.start()
-                            in_q.put(("__INIT__", nm, int(args.minzoom), int(args.maxzoom), s_bounds))
+                            # Classification rasters are categorical: "highest
+                            # cluster id" is not a statement anyone wants.
+                            in_q.put(("__INIT__", nm, int(args.minzoom), int(args.maxzoom), s_bounds,
+                                      {"mesa_aggregation": "none"}))
                             ltasks = [(z, x, y, idx, mode, 0.0, 0.0) for (z, x, y, idx) in s_tasks]
                             written = 0
                             log(f"  → building {nm}.mbtiles …")
@@ -1285,8 +1507,13 @@ def main():
                                 log(f"    {nm}: stable alias → {alias.name}")
                             except Exception as exc:
                                 log(f"    {nm}: alias copy skipped: {exc}")
+                    _rm_quiet(s_wkb_path)
             except Exception as exc:
                 log(f"  → classification tiles skipped for '{gv}': {exc}")
+                try:
+                    _rm_quiet(s_wkb_path)
+                except NameError:
+                    pass
 
     log("All done.")
 
