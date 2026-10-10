@@ -290,22 +290,6 @@ def _derive_flatten_small_max_workers(hw: dict, cfg: configparser.ConfigParser) 
     return n, reason
 
 
-def _derive_backfill_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, str]:
-    """Backfill is I/O-bound and pandas-merge-light. Each worker holds one
-    partition and reads area_map from a scratch parquet (not pickled).
-    Per-worker RSS stays small (1-2 GB observed), so we can run with broad
-    parallelism limited only by CPU count."""
-    avail_gb = hw["ram_avail_gb"]
-    backfill_per_worker_gb = 1.5
-    mem_target = _mem_target(cfg, hw)
-    by_ram = max(1, int((avail_gb * mem_target) / backfill_per_worker_gb))
-    n = max(1, min(by_ram, hw["cpu_count"]))
-    reason = (f"avail {avail_gb:.1f} GB × {mem_target:.0%} / "
-              f"{backfill_per_worker_gb:.1f} GB per-backfill-worker = {by_ram}, "
-              f"capped to CPU={hw['cpu_count']}")
-    return n, reason
-
-
 def _derive_tiles_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, str]:
     """Tiles: each worker holds a pickled per-group geometry list. Memory
     cost scales with the basic_mosaic / tbl_flat geometry payload, which
@@ -388,7 +372,6 @@ def auto_tune_in_place(
     _apply_int("flatten_max_workers",         lambda: _derive_flatten_max_workers(hw, cfg))
     _apply_int("flatten_small_max_workers",   lambda: _derive_flatten_small_max_workers(hw, cfg))
     _apply_int("tiles_max_workers",           lambda: _derive_tiles_max_workers(hw, cfg))
-    _apply_int("backfill_max_workers",        lambda: _derive_backfill_max_workers(hw, cfg))
     _apply_int("segment_max_workers",         lambda: _derive_segment_max_workers(hw, cfg))
 
     # Single coherent log block so the operator can audit at a glance.

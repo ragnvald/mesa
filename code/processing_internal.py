@@ -530,7 +530,7 @@ def _start_panic_watchdog(label: str, panic_pct: int, grace_s: int,
       - When pressure >= soft_pct for soft_grace_s, sets
         state["soft_throttle"] = True. The caller is expected to read this
         in its imap_unordered loop and drain+restart the pool with fewer
-        workers (see backfill / flatten for the pattern). The watchdog
+        workers (see flatten for the pattern). The watchdog
         does NOT terminate the pool at this level — drain is cooperative.
       - When pressure >= panic_pct for grace_s, sets state["triggered"] =
         True AND terminates the pool immediately. Last-line defence.
@@ -1917,6 +1917,75 @@ _GEOCODE_SOFT_LIMIT = 160
 
 _BOUNDARY_ONLY_OVERLAP_MIN_M2 = 1.0
 
+# tbl_stacked column contract. The table's grain is (cell x asset object), so a
+# column whose grain is "cell" (geometry, area_m2) or "asset group" (the merge-
+# artefact ids, the source attributes blob) is a constant repeated across millions
+# of rows. Geometry alone was 72-83% of the file. Consumers join those from
+# tbl_geocode_object / tbl_asset_group instead.
+# See learning.md "tbl_stacked carries no geometry".
+STACKED_COLUMNS = (
+    "code",
+    "ref_geocodegroup",
+    "name_gis_geocodegroup",
+    "ref_asset_group",
+    "name_gis_assetgroup",
+    "asset_group_name",
+    "total_asset_objects",
+    "importance",
+    "susceptibility",
+    "sensitivity",
+    "sensitivity_code",
+    "sensitivity_description",
+)
+
+# What flatten reads out of a partition. A superset of what it aggregates, minus
+# anything cell-grained: geometry is joined once in the parent, not 94M times here.
+STACKED_FLATTEN_COLUMNS = (
+    "code",
+    "ref_geocodegroup",
+    "name_gis_geocodegroup",
+    "ref_asset_group",
+    "name_gis_assetgroup",
+    "importance",
+    "susceptibility",
+    "sensitivity",
+    "sensitivity_code",
+    "importance_code",
+    "susceptibility_code",
+)
+
+
+def _to_stacked_contract(df):
+    """Project a join result down to the tbl_stacked column contract.
+
+    Returns a plain DataFrame — the output is deliberately not GeoParquet, so
+    every reader must go through pyarrow/pandas rather than gpd.read_parquet.
+    """
+    keep = [c for c in STACKED_COLUMNS if c in df.columns]
+    out = pd.DataFrame(df[keep]) if keep else pd.DataFrame(index=df.index)
+    return out.reset_index(drop=True)
+
+
+def _read_stacked_partition(path, columns=None):
+    """Read one tbl_stacked partition as a plain DataFrame, projected to the
+    columns that actually exist in it.
+
+    Never returns geometry: the caller joins it from tbl_geocode_object. Older
+    packages still carry the column, and reading it here is exactly the waste
+    this whole change exists to remove.
+    """
+    import pyarrow.dataset as ds
+
+    dataset = ds.dataset(str(path), format="parquet")
+    present = set(dataset.schema.names)
+    if columns is None:
+        wanted = [c for c in present if c != "geometry"]
+    else:
+        wanted = [c for c in columns if c in present and c != "geometry"]
+    if not wanted:
+        return pd.DataFrame()
+    return dataset.to_table(columns=wanted).to_pandas()
+
 
 def _intersect_rowwise(cell_geoms, asset_geoms):
     """Per-pair intersection that isolates the pairs GEOS cannot handle.
@@ -2040,6 +2109,10 @@ def _intersection_worker(args):
                     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
                 except Exception:
                     pass
+                # Drop the cell geometry here, after the empty-geometry filter and
+                # after the boundary-bleed rule has used it. It is identical for
+                # every row sharing a code; tbl_geocode_object holds it once.
+                gdf = _to_stacked_contract(gdf)
             fname = f"part_{os.getpid()}_{uuid.uuid4().hex}.parquet"
             path = _PARTS_DIR / fname
             gdf.to_parquet(path, index=False, compression="zstd", compression_level=3)
@@ -2859,10 +2932,13 @@ def _flatten_worker(args):
     # correct bands are used either way. See derive_value_class_ranges.
     value_ranges_map = (args[3] if len(args) > 3 else None) or derive_value_class_ranges(ranges_map)
     try:
-        df = gpd.read_parquet(parquet_path)
+        # Column-projected, geometry-free read. The partition's geometry (when an
+        # older package still has one) is the cell's, identical across a code's
+        # rows; the parent joins it once from tbl_geocode_object instead.
+        df = _read_stacked_partition(parquet_path, STACKED_FLATTEN_COLUMNS)
     except Exception:
         return None
-    
+
     if df.empty:
         return None
 
@@ -2942,7 +3018,7 @@ def _flatten_worker(args):
     # Meta: "first row per code" is much cheaper via drop_duplicates than a full
     # groupby.first(), and the cheaper list/count aggregations below trim a visible
     # amount of flatten-stage pandas overhead without changing output semantics.
-    meta_cols = [c for c in ["code", "ref_geocodegroup", "name_gis_geocodegroup", "geometry"] if c in df.columns]
+    meta_cols = [c for c in ["code", "ref_geocodegroup", "name_gis_geocodegroup"] if c in df.columns]
     meta = df.loc[df["code"].notna(), meta_cols].drop_duplicates(subset=["code"], keep="first")
 
     # Counts
@@ -2995,48 +3071,61 @@ def _flatten_worker(args):
         
     return result_df
 
-def _backfill_worker_named(args):
-    """Wrapper so the orchestrator can track which file each result
-    corresponds to (needed for the drain+restart soft-throttle path —
-    we need to know which partitions are confirmed done so the
-    remainder can be re-submitted to a smaller pool without re-doing
-    completed work)."""
-    path, _ = args
-    count = _backfill_worker(args)
-    return (str(path), count)
 
+def _attach_geocode_geometry(df: "pd.DataFrame", working_epsg: str) -> "gpd.GeoDataFrame":
+    """Join the cell geometry onto a per-code frame from tbl_geocode_object.
 
-def _backfill_worker(args):
+    The join key is (name_gis_geocodegroup, code), not code alone.
+    _ensure_unique_geocode_codes (geocode_manage.py) only enforces uniqueness
+    within one import batch, while H3, QDGC and the basic mosaic are generated on
+    separate paths — so a bare `code` is not a safe key across groups. Falls back
+    to code alone only when one side lacks the group column.
+
+    This is a parent-side read of a known-large table, which the pipeline
+    otherwise avoids (see learning.md "Parent-side memory in the pipeline"). It is
+    bounded deliberately: three columns, no attributes, and it replaces the 18M
+    geometries the flatten partials used to carry through the same frame.
     """
-    Backfill area_m2 to a single tbl_stacked parquet file.
-    args: (parquet_path, area_map_source)
-      area_map_source may be a pandas DataFrame (legacy path) or a path-like
-      pointing at a parquet file. Reading from a path avoids pickling a large
-      DataFrame across every spawn boundary, which dominated driver-process
-      memory on large runs.
-    """
-    path, area_map_source = args
-    try:
-        # Accept str, pathlib.Path, or DataFrame.
-        if isinstance(area_map_source, (str, os.PathLike)):
-            area_map = pd.read_parquet(area_map_source)
-        else:
-            area_map = area_map_source
-        part = gpd.read_parquet(path)
-        if 'code' not in part.columns:
-            return 0
-        part['code'] = part['code'].astype(str)
-        # area_map has ['code', 'area_m2']
-        merged = part.merge(area_map, on='code', how='left', suffixes=('','_flat'))
-        if 'area_m2_flat' in merged.columns:
-            merged['area_m2'] = merged['area_m2_flat']
-            merged.drop(columns=['area_m2_flat'], inplace=True)
-        gpd.GeoDataFrame(merged, geometry=part.geometry.name, crs=part.crs).to_parquet(
-            path, index=False, compression="zstd", compression_level=3,
+    import pyarrow.dataset as ds
+
+    gpq = gpq_dir()
+    src = gpq / "tbl_geocode_object.parquet"
+    if not src.exists():
+        alt = gpq / "tbl_geocode_object"
+        src = alt if alt.exists() else src
+    if not src.exists():
+        raise RuntimeError(
+            "tbl_flat needs the cell geometry from tbl_geocode_object.parquet, which is "
+            "missing. Re-import geocodes and re-run Intersect."
         )
-        return len(part)
+
+    present = set(ds.dataset(str(src), format="parquet").schema.names)
+    cols = [c for c in ("code", "name_gis_geocodegroup", "geometry") if c in present]
+    geo = read_geoparquet(src, columns=cols)
+    if geo.crs is None:
+        geo.set_crs(f"EPSG:{working_epsg}", inplace=True, allow_override=True)
+    else:
+        try:
+            geo = geo.to_crs(f"EPSG:{working_epsg}")
+        except Exception:
+            pass
+
+    keys = ["code"]
+    if "name_gis_geocodegroup" in geo.columns and "name_gis_geocodegroup" in df.columns:
+        keys.append("name_gis_geocodegroup")
+    for k in keys:
+        geo[k] = geo[k].astype(str)
+        df[k] = df[k].astype(str)
+    geo = geo.drop_duplicates(subset=keys, keep="first")
+
+    out = df.merge(geo[keys + ["geometry"]], on=keys, how="left")
+    del geo
+    try:
+        gc.collect()
     except Exception:
-        return 0
+        pass
+    return out
+
 
 def _estimate_flatten_peak_gb(files: list[Path],
                               cfg: configparser.ConfigParser) -> tuple[float, str]:
@@ -3050,12 +3139,14 @@ def _estimate_flatten_peak_gb(files: list[Path],
                             * per_worker_peak_mb / 1024
 
     The two flatten phases (huge / small) run sequentially, so the relevant
-    worker count for peak is the larger of the two pools. ``k_amp`` captures
-    the parquet -> in-memory geopandas amplification (~5-15x for
-    geometry-heavy data); we default to 10 to stay conservative without
-    blowing past reality. Floors and overhead are configurable via
-    ``flatten_preflight_*`` keys; defaults are tuned to match the auto-tune
-    estimates.
+    worker count for peak is the larger of the two pools. ``k_amp`` captures the
+    parquet -> in-memory amplification. The 10x default was measured on
+    geometry-carrying partitions, where decoding WKB into shapely objects
+    dominates. Since tbl_stacked stopped carrying geometry the partitions are
+    scalars and short strings, which amplify far less, so a geometry-free dataset
+    uses ``flatten_preflight_amplification_flat`` (default 3) instead. Getting
+    this wrong is not harmless in either direction: too high and the pre-flight
+    gate refuses to start a job that would have fit easily.
 
     Returns ``(estimated_peak_gb, debug_string)``.
     """
@@ -3077,11 +3168,18 @@ def _estimate_flatten_peak_gb(files: list[Path],
         small_workers = 1
     workers_concurrent = max(flatten_workers, small_workers)
 
+    has_geometry = True
     try:
-        k_amp = max(1.0, cfg_get_float(
-            cfg, "flatten_preflight_amplification", 10.0))
+        if files:
+            import pyarrow.parquet as pq
+            has_geometry = "geometry" in pq.ParquetFile(str(files[0])).schema_arrow.names
     except Exception:
-        k_amp = 10.0
+        has_geometry = True
+    try:
+        key = "flatten_preflight_amplification" if has_geometry else "flatten_preflight_amplification_flat"
+        k_amp = max(1.0, cfg_get_float(cfg, key, 10.0 if has_geometry else 3.0))
+    except Exception:
+        k_amp = 10.0 if has_geometry else 3.0
     try:
         per_worker_floor_mb = max(64.0, cfg_get_float(
             cfg, "flatten_preflight_per_worker_floor_mb", 500.0))
@@ -3099,7 +3197,8 @@ def _estimate_flatten_peak_gb(files: list[Path],
     peak_gb = parent_overhead_gb + workers_peak_gb
     debug = (
         f"parts={n_parts}, total={total_mb:.1f} MB, largest={largest_mb:.1f} MB, "
-        f"workers_peak={workers_concurrent}, k_amp={k_amp:.1f}, "
+        f"workers_peak={workers_concurrent}, k_amp={k_amp:.1f} "
+        f"({'with' if has_geometry else 'no'} geometry), "
         f"per_worker={per_worker_peak_mb:.0f} MB, parent={parent_overhead_gb:.1f} GB"
     )
     return peak_gb, debug
@@ -3108,19 +3207,17 @@ def _estimate_flatten_peak_gb(files: list[Path],
 def flatten_tbl_stacked(config_file: Path, working_epsg: str,
                         *, cleanup_slivers: bool = True,
                         cfg: configparser.ConfigParser | None = None):
-    """Flatten tbl_stacked into tbl_flat, then backfill area_m2 to stacked.
+    """Flatten tbl_stacked into tbl_flat.
 
     cfg: pass the *already-auto-tuned* cfg object from
     run_processing_pipeline so that auto_tune_in_place's in-memory
     mutations (max_workers, flatten_max_workers, flatten_huge_partition_mb,
-    flatten_small_max_workers, tiles_max_workers, backfill_max_workers)
-    are honoured. If omitted, the function falls back to re-reading
-    config.ini from disk - which misses the auto-tune values, since
-    auto_tune writes only into memory. The disk-fallback path is the
-    pre-fix behaviour and the source of the April-29 single-worker
-    backfill (auto-tune said 16, the disk-read cfg had backfill_max_workers
-    = 0, the resolver fell into RAM-budget math against tight late-pipeline
-    memory and produced 1).
+    flatten_small_max_workers, tiles_max_workers) are honoured. If omitted,
+    the function falls back to re-reading config.ini from disk - which misses
+    the auto-tune values, since auto_tune writes only into memory. That
+    disk-fallback path is the pre-fix behaviour behind the April-29 incident,
+    where a stage read 0 from disk, fell into RAM-budget math against tight
+    late-pipeline memory and produced a single worker.
     """
     log_to_gui(log_widget, "Building presentation table (tbl_flat)…")
 
@@ -3436,10 +3533,11 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             return
         log_to_gui(log_widget, f"[{label}] {len(paths)} partitions using {n_workers} workers…")
         if _mp_allowed() and n_workers > 1:
-            # Drain+restart on soft RAM pressure. See backfill_tbl_stacked
-            # for the rationale; flatten is idempotent at the partition
-            # level (orphan partial files in __stacked_parts get cleaned
-            # up by cleanup_outputs at the end of the run).
+            # Drain+restart on soft RAM pressure: tear the pool down, reopen it
+            # with half the workers, and re-submit whatever did not return.
+            # Flatten is idempotent at the partition level (orphan partial files
+            # in __stacked_parts get cleaned up by cleanup_outputs at the end of
+            # the run).
             todo = [str(p) for p in paths]
             current_workers = n_workers
             while todo:
@@ -3525,7 +3623,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
     _run_flatten_pool(small_files, workers_small, "flatten-small")
 
     # Expose the large-phase value as max_workers for downstream sections
-    # (e.g. backfill) that still read it as a fallback.
+    # that still read it as a fallback.
     max_workers = workers_large
 
     if not partials:
@@ -3560,20 +3658,22 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
     except Exception:
         pass
     # If codes are split across files, aggregate again at code level.
+    # No "geometry" rule: the partials are geometry-free and the cell geometry is
+    # joined once, after this aggregation, from tbl_geocode_object.
     agg_rules = {
-        "geometry": "first",
         "ref_geocodegroup": "first",
         "name_gis_geocodegroup": "first",
         "assets_overlap_total": "sum",
         "ref_asset_group": "sum",
         "name_gis_assetgroup": "sum",
     }
-    
+
     bases = ["importance","sensitivity","susceptibility"]
     for b in bases:
         agg_rules[f"{b}_min"] = "min"
         agg_rules[f"{b}_max"] = "max"
-    
+    agg_rules = {k: v for k, v in agg_rules.items() if k in full.columns}
+
     if "code" in full.columns and full["code"].duplicated().any():
         log_to_gui(log_widget, "Resolving split geocodes…")
 
@@ -3644,6 +3744,26 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
             tbl_flat[f"{b}_description_min"] = tbl_flat[f"{b}_code_min"].map(lambda k: desc_map.get(k, None))
         if f"{b}_code_max" in tbl_flat.columns:
             tbl_flat[f"{b}_description_max"] = tbl_flat[f"{b}_code_max"].map(lambda k: desc_map.get(k, None))
+
+    # 4b. Attach the cell geometry, once, from the table that holds it once.
+    # tbl_stacked no longer carries it (see the STACKED_COLUMNS contract), so this
+    # is where tbl_flat becomes spatial again.
+    before_join = len(tbl_flat)
+    _log_memory_snapshot("tbl_flat:geometry-join:start", {"codes": f"{before_join:,}"}, force=True)
+    tbl_flat = _attach_geocode_geometry(tbl_flat, working_epsg)
+    _log_memory_snapshot("tbl_flat:geometry-join:done", {"rows": f"{len(tbl_flat):,}"}, force=True)
+    missing_geom = int(tbl_flat["geometry"].isna().sum()) if "geometry" in tbl_flat.columns else len(tbl_flat)
+    if missing_geom:
+        # A code that flatten produced but tbl_geocode_object cannot place is a
+        # broken join key, not an empty cell — never let it pass as a blank row.
+        log_to_gui(
+            log_widget,
+            f"[tbl_flat] WARNING: {missing_geom:,} of {before_join:,} codes got no geometry from "
+            f"tbl_geocode_object. Those rows carry no area and are dropped. This means the "
+            f"(name_gis_geocodegroup, code) keys in tbl_stacked and tbl_geocode_object disagree — "
+            f"re-run Intersect after re-importing geocodes."
+        )
+        tbl_flat = tbl_flat[tbl_flat["geometry"].notna()].reset_index(drop=True)
 
     tbl_flat = gpd.GeoDataFrame(tbl_flat, geometry="geometry", crs=f"EPSG:{working_epsg}")
 
@@ -3767,10 +3887,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
     except Exception as e:
         log_to_gui(log_widget, f"Area stats computation failed: {e}")
 
-    # Backfill is now its own pipeline stage (backfill_tbl_stacked).
-    # Run it after flatten finishes, gated by the run_backfill flag in
-    # run_processing_pipeline.
-
     update_progress(90)
     try:
         prev = {}
@@ -3797,203 +3913,6 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
         })
     except Exception:
         pass
-
-
-def backfill_tbl_stacked(config_file: Path,
-                          *, cfg: configparser.ConfigParser | None = None) -> None:
-    """Backfill area_m2 from tbl_flat into every tbl_stacked partition.
-
-    Standalone stage (was previously inlined inside flatten_tbl_stacked).
-    Reads tbl_flat from disk to derive area_map, persists it to a scratch
-    parquet, then runs a worker pool across the tbl_stacked partitions.
-
-    Soft validation: if tbl_flat or tbl_stacked is missing, logs a clear
-    skip message and returns without raising.
-
-    cfg: pass the auto-tuned cfg from run_processing_pipeline so
-    backfill_max_workers is honoured (otherwise see learning.md
-    "auto_tune mutations must reach flatten / backfill").
-    """
-    log_to_gui(log_widget, "Backfilling area_m2 to tbl_stacked partitions…")
-
-    if cfg is not None:
-        cfg_local = cfg
-    else:
-        try:
-            cfg_local = read_config(config_file)
-        except Exception:
-            cfg_local = configparser.ConfigParser()
-
-    # Locate inputs.
-    flat_path = gpq_dir() / "tbl_flat.parquet"
-    if not flat_path.exists():
-        log_to_gui(log_widget,
-                   "[backfill] Skipped: tbl_flat.parquet missing. Run Flatten first.")
-        return
-    ds_dir = _dataset_dir("tbl_stacked")
-    if ds_dir.exists():
-        files = sorted(p for p in ds_dir.glob("*.parquet"))
-    else:
-        single = gpq_dir() / "tbl_stacked.parquet"
-        files = [single] if single.exists() else []
-    if not files:
-        log_to_gui(log_widget,
-                   "[backfill] Skipped: no tbl_stacked partitions on disk. "
-                   "Run Intersect first.")
-        return
-
-    # Build area_map from tbl_flat. If flatten emitted multiple polygon
-    # parts per code (MultiPolygon-split mode), sum their areas back to a
-    # single area_m2 per code.
-    try:
-        flat_df = pd.read_parquet(flat_path, columns=["code", "area_m2"])
-    except Exception as e:
-        log_to_gui(log_widget, f"[backfill] Failed to read tbl_flat: {e}")
-        return
-    area_map = flat_df.dropna(subset=["code"]).copy()
-    try:
-        area_map["code"] = area_map["code"].astype(str)
-    except Exception:
-        pass
-    try:
-        area_map["area_m2"] = pd.to_numeric(area_map["area_m2"], errors="coerce")
-    except Exception:
-        pass
-    area_map = area_map.groupby("code", as_index=False)["area_m2"].sum()
-    try:
-        area_map["area_m2"] = area_map["area_m2"].round().astype("Int64")
-    except Exception:
-        pass
-    area_map["code"] = area_map["code"].astype(str)
-
-    # Resolve worker count. With cfg auto-tuned, backfill_max_workers
-    # comes from auto_tune.py's _derive_backfill_max_workers (~16 on a
-    # roomy host). Without cfg, falls back to a small default so we
-    # don't accidentally over-allocate when called directly.
-    try:
-        backfill_workers = cfg_get_int(cfg_local, "backfill_max_workers", 0)
-    except Exception:
-        backfill_workers = 0
-    try:
-        cpu_cap = max(1, multiprocessing.cpu_count())
-    except Exception:
-        cpu_cap = 1
-    if backfill_workers <= 0:
-        try:
-            max_workers_cfg = cfg_get_int(cfg_local, "max_workers", 0)
-        except Exception:
-            max_workers_cfg = 0
-        backfill_workers = max(1, min(cpu_cap, len(files),
-                                      max_workers_cfg or 2))
-    backfill_workers = max(1, min(backfill_workers, cpu_cap, len(files)))
-
-    # Persist area_map to a small parquet so workers don't pickle the
-    # whole DataFrame across every spawn boundary.
-    area_map_path = gpq_dir() / "__area_map.parquet"
-    try:
-        area_map.to_parquet(area_map_path, index=False, compression="zstd", compression_level=3)
-        worker_area_arg = area_map_path
-    except Exception as e:
-        log_to_gui(log_widget,
-                   f"[backfill] Could not persist area_map to disk; "
-                   f"falling back to in-memory pickle: {e}")
-        worker_area_arg = area_map
-        area_map_path = None
-
-    log_to_gui(log_widget,
-               f"Backfill: {len(files)} partitions using {backfill_workers} workers…")
-
-    touched = 0
-    try:
-        if _mp_allowed() and backfill_workers > 1:
-            bf_pct, bf_grace, soft_pct, soft_grace = _panic_cfg(cfg_local)
-            # Drain+restart loop: under soft RAM pressure the active pool
-            # is torn down and a new pool with HALF the workers is opened
-            # for the remaining partitions. Files already returned by
-            # imap_unordered are confirmed done; everything else (queued,
-            # in-flight, killed-mid-write) goes back into the todo list
-            # for the smaller pool to retry. Backfill is idempotent: a
-            # partial rewrite that got terminated is just overwritten on
-            # the retry.
-            todo = [str(p) for p in files]
-            current_workers = backfill_workers
-            while todo:
-                pstate, pstop, pthread = _start_panic_watchdog(
-                    "backfill", bf_pct, bf_grace, soft_pct, soft_grace
-                )
-                done_this_round: set[str] = set()
-                try:
-                    with multiprocessing.get_context("spawn").Pool(current_workers) as pool:
-                        pstate["pool"] = pool
-                        args = [(Path(p), worker_area_arg) for p in todo]
-                        try:
-                            for fname, count in pool.imap_unordered(_backfill_worker_named, args):
-                                if pstate["triggered"]:
-                                    raise RuntimeError(
-                                        f"backfill aborted by memory panic watchdog "
-                                        f"(>{bf_pct}% RAM for >={bf_grace}s)"
-                                    )
-                                _check_pause_or_cancel()
-                                done_this_round.add(fname)
-                                touched += count
-                                if pstate["soft_throttle"]:
-                                    # Stop submitting; tear down to free
-                                    # memory from in-flight workers, then
-                                    # restart smaller. In-flight files
-                                    # that didn't return by now will be
-                                    # retried on the next iteration.
-                                    try: pool.terminate()
-                                    except Exception: pass
-                                    break
-                        finally:
-                            pstate["pool"] = None
-                finally:
-                    pstop.set()
-                    try: pthread.join(timeout=1.5)
-                    except Exception: pass
-
-                # Filter the todo list down to what didn't complete this round.
-                todo = [p for p in todo if p not in done_this_round]
-
-                if not pstate["soft_throttle"]:
-                    break  # Pool finished normally.
-
-                # Halve the worker count for the next round; if already at
-                # the minimum, escalate to an explicit abort rather than
-                # spin forever.
-                next_workers = max(1, current_workers // 2)
-                if next_workers == current_workers:
-                    raise RuntimeError(
-                        f"backfill: RAM pressure persists at "
-                        f"{current_workers} worker(s); cannot reduce further"
-                    )
-                log_to_gui(
-                    log_widget,
-                    f"[backfill] Soft-throttle: reducing workers "
-                    f"{current_workers} → {next_workers}, "
-                    f"{len(todo)} partitions remaining."
-                )
-                current_workers = next_workers
-                # Give the OS a beat to reclaim memory from the
-                # terminated workers before opening the next pool.
-                time.sleep(1.0)
-                try: gc.collect()
-                except Exception: pass
-        else:
-            for f in files:
-                touched += _backfill_worker((f, worker_area_arg))
-    except Exception as e:
-        log_to_gui(log_widget, f"[backfill] Failed: {e}")
-        return
-    finally:
-        if area_map_path is not None:
-            try:
-                area_map_path.unlink()
-            except Exception:
-                pass
-
-    log_to_gui(log_widget,
-               f"Backfilled area_m2 to {len(files)} parts ({touched:,} rows).")
 
 
 def segment_tbl_stacked(config_file: Path,
@@ -4156,7 +4075,6 @@ def run_processing_pipeline(config_file: Path,
                             run_prep: bool = True,
                             run_intersect: bool = True,
                             run_flatten: bool = True,
-                            run_backfill: bool = True,
                             run_segment: bool = False,
                             segment_layers: list[str] | None = None,
                             segment_mode: str = "",
@@ -4269,39 +4187,32 @@ def run_processing_pipeline(config_file: Path,
             n_parts = len(list(ds_dir.glob("*.parquet"))) if ds_dir.exists() else 0
             if n_parts == 0:
                 log_to_gui(log_widget,
-                           "[Stage 3a] Flatten skipped: tbl_stacked has 0 parts on disk. "
+                           "[Stage 3/4] Flatten skipped: tbl_stacked has 0 parts on disk. "
                            "Run Intersect first (or rerun with Intersect checked).")
             else:
-                log_to_gui(log_widget, "[Stage 3a] Flattening outputs, computing stats, and refreshing status…")
+                log_to_gui(log_widget, "[Stage 3/4] Flattening outputs, computing stats, and refreshing status…")
                 flatten_tbl_stacked(config_file, working_epsg,
                                     cleanup_slivers=cleanup_slivers,
                                     cfg=cfg); update_progress(92)
         else:
-            log_to_gui(log_widget, "[Stage 3a] Flatten skipped (unchecked).")
-
-        if run_backfill:
-            log_to_gui(log_widget, "[Stage 3b] Backfilling area_m2 to tbl_stacked partitions…")
-            backfill_tbl_stacked(config_file, cfg=cfg)
-            update_progress(95)
-        else:
-            log_to_gui(log_widget, "[Stage 3b] Backfill skipped (unchecked).")
+            log_to_gui(log_widget, "[Stage 3/4] Flatten skipped (unchecked).")
 
         # Segment runs when requested via the UI/CLI flag OR forced on in
         # config (segment_enabled = 1). Optional and OFF by default.
         seg_enabled_cfg = cfg_get_int(cfg, "segment_enabled", 0) == 1
         if run_segment or seg_enabled_cfg:
-            log_to_gui(log_widget, "[Stage 3c] Segmenting geocode layers (tbl_segmentation)…")
+            log_to_gui(log_widget, "[Stage 4/4] Segmenting geocode layers (tbl_segmentation)…")
             segment_tbl_stacked(config_file, cfg=cfg, layers_override=segment_layers,
                                 mode_override=segment_mode or None,
                                 n_clusters_override=segment_n_clusters or None)
             update_progress(97)
         else:
-            log_to_gui(log_widget, "[Stage 3c] Segment skipped (optional; not enabled).")
+            log_to_gui(log_widget, "[Stage 4/4] Segment skipped (optional; not enabled).")
 
         # __mosaic_faces_tmp is produced by geocode_manage.py's polygonize
         # step; the mosaic path does not clean it itself. Only sweep when we
         # actually ran a stage that may have produced these scratches.
-        if run_prep or run_intersect or run_flatten or run_backfill or run_segment:
+        if run_prep or run_intersect or run_flatten or run_segment:
             for temp_dir in ["__stacked_parts", "__grid_assign_in", "__grid_assign_out", "__mosaic_faces_tmp"]:
                 _rm_rf(_dataset_dir(temp_dir))
 
@@ -4927,7 +4838,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
     # pool cleanly when host RAM pressure crosses mem_panic_percent. Soft
     # throttle on this stage is only a visibility log (the chunked progress
     # + RSS-tracking loop here is too complex to drain+restart safely;
-    # backfill and flatten are where soft-throttle actually acts).
+    # flatten is where soft-throttle actually acts).
     panic_pct, panic_grace_s, soft_pct, soft_grace = _panic_cfg()
     panic_state, panic_stop, wd_thread = _start_panic_watchdog(
         "intersect", panic_pct, panic_grace_s, soft_pct, soft_grace
@@ -5159,7 +5070,6 @@ def run_headless(original_working_directory_arg: str | None = None,
                  run_prep: bool = True,
                  run_intersect: bool = True,
                  run_flatten: bool = True,
-                 run_backfill: bool = True,
                  run_segment: bool = False,
                  segment_layers: list[str] | None = None,
                  segment_mode: str = "",
@@ -5224,7 +5134,6 @@ def run_headless(original_working_directory_arg: str | None = None,
                                 run_prep=run_prep,
                                 run_intersect=run_intersect,
                                 run_flatten=run_flatten,
-                                run_backfill=run_backfill,
                                 run_segment=run_segment,
                                 segment_layers=segment_layers,
                                 segment_mode=segment_mode,

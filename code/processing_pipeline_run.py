@@ -98,7 +98,6 @@ class ProcessPlan:
     run_prep: bool
     run_intersect: bool
     run_flatten: bool
-    run_backfill: bool
     run_segment: bool
     explode_flat_multipolygons: bool
     cleanup_slivers: bool
@@ -121,7 +120,7 @@ class ProcessPlan:
     def run_data(self) -> bool:
         """True if any data sub-stage (incl. the optional Segment stage) is selected."""
         return bool(self.run_prep or self.run_intersect
-                    or self.run_flatten or self.run_backfill or self.run_segment)
+                    or self.run_flatten or self.run_segment)
 
 
 def _exists_any(paths: Iterable[Path]) -> bool:
@@ -711,7 +710,6 @@ def run_data_process(
     run_prep: bool = True,
     run_intersect: bool = True,
     run_flatten: bool = True,
-    run_backfill: bool = True,
     run_segment: bool = False,
     segment_layers: list | None = None,
     segment_mode: str = "",
@@ -720,7 +718,7 @@ def run_data_process(
 ) -> None:
     """Run the data-processing pipeline.
 
-    Sub-stages (prep / intersect / flatten / backfill / segment) can be skipped
+    Sub-stages (prep / intersect / flatten / segment) can be skipped
     independently via the run_* flags; the internal pipeline does soft
     validation and logs a clear skip line when an upstream artifact is
     missing. Segment is optional and OFF by default.
@@ -754,7 +752,6 @@ def run_data_process(
             run_prep=bool(run_prep),
             run_intersect=bool(run_intersect),
             run_flatten=bool(run_flatten),
-            run_backfill=bool(run_backfill),
             run_segment=bool(run_segment),
             segment_layers=list(segment_layers) if segment_layers else None,
             segment_mode=str(segment_mode or ""),
@@ -1422,7 +1419,7 @@ def run_analysis_process(
             self.analysis_stacked_path = analysis_stacked_path(base_dir, cfg_local)
 
             self._flat_dataset: gpd.GeoDataFrame | None = None
-            self._stacked_dataset: gpd.GeoDataFrame | None = None
+            self._stacked_src: str | None = None
 
         def _load_flat_dataset(self) -> gpd.GeoDataFrame:
             if self._flat_dataset is not None:
@@ -1436,17 +1433,43 @@ def run_analysis_process(
             self._flat_dataset = gdf
             return gdf
 
-        def _load_stacked_dataset(self) -> gpd.GeoDataFrame:
-            if self._stacked_dataset is not None:
-                return self._stacked_dataset
+        def _stacked_source(self) -> str:
+            """Path to the stacked dataset, as a pyarrow source. Never read whole."""
+            if self._stacked_src is not None:
+                return self._stacked_src
             path = self._find_dataset_dir(self.base_dir, self.cfg, "tbl_stacked")
             if not path:
                 raise FileNotFoundError("Stacked table missing (tbl_stacked).")
-            gdf = gpd.read_parquet(path)
-            if gdf.crs is None:
-                gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
-            self._stacked_dataset = gdf
-            return gdf
+            self._stacked_src = str(path)
+            return self._stacked_src
+
+        def _stacked_rows_for_codes(self, codes, geocode: str) -> "pd.DataFrame":
+            """Stacked attribute rows for a bounded set of cell codes.
+
+            Reads column-projected and filtered on (layer, code) rather than
+            materialising the table. The previous implementation loaded every
+            partition into the parent with one gpd.read_parquet and filtered
+            afterwards; on a large project that is tens of GB in the orchestrator
+            process. See learning.md "Parent-side memory in the pipeline".
+            """
+            import pyarrow.dataset as ds
+            import pyarrow.compute as pc
+
+            codes = [str(c) for c in codes]
+            if not codes:
+                return pd.DataFrame()
+
+            dataset = ds.dataset(self._stacked_source(), format="parquet")
+            present = set(dataset.schema.names)
+            wanted = [c for c in present if c != "geometry"]
+
+            flt = pc.field("code").isin(codes)
+            if "name_gis_geocodegroup" in present and geocode:
+                flt = flt & (pc.field("name_gis_geocodegroup") == geocode)
+            df = dataset.to_table(columns=wanted, filter=flt).to_pandas()
+            if not df.empty:
+                df["code"] = df["code"].astype(str)
+            return df
 
         @staticmethod
         def _subset_by_polygon(gdf: gpd.GeoDataFrame, polygon) -> gpd.GeoDataFrame:
@@ -1522,6 +1545,97 @@ def run_analysis_process(
             subset["analysis_timestamp"] = run_ts
             return subset.reset_index(drop=True)
 
+        def _stacked_for_clip(
+            self,
+            clipped_flat: gpd.GeoDataFrame,
+            geocode: str,
+            group,
+            record,
+            run_id: str,
+            run_ts: str,
+        ) -> gpd.GeoDataFrame:
+            """Expand a clipped tbl_flat subset back to one row per (cell, asset).
+
+            The clip itself is a per-CELL operation: tbl_stacked's geometry was
+            always the cell's, so clipping it row by row re-did the same
+            intersection once per asset. Clipping tbl_flat (one row per cell) and
+            then attaching the stacked attribute rows gives identical geometry and
+            identical analysis_area_m2, without a geometry column in tbl_stacked.
+
+            One deliberate consequence: cells that flatten's sliver cleanup
+            removed from tbl_flat (area below flatten_sliver_min_area_m2, 1 m² by
+            default) no longer reach the stacked result either. The two analysis
+            tables now agree on which cells exist.
+            """
+            if clipped_flat is None or clipped_flat.empty:
+                return self._empty_stacked_result()
+
+            keep = [c for c in ("code", "geometry", "analysis_area_m2", "area_m2")
+                    if c in clipped_flat.columns]
+            per_cell = gpd.GeoDataFrame(clipped_flat[keep].copy(), geometry="geometry",
+                                        crs=clipped_flat.crs)
+            per_cell["code"] = per_cell["code"].astype(str)
+            if per_cell["code"].duplicated().any():
+                # Only reachable when flatten exploded MultiPolygons into parts:
+                # re-unite the parts so the join stays one row per (cell, asset).
+                agg = per_cell.groupby("code", sort=False).agg(
+                    analysis_area_m2=("analysis_area_m2", "sum"),
+                    area_m2=("area_m2", "first"),
+                )
+                geoms = per_cell.groupby("code", sort=False)["geometry"].apply(
+                    lambda s: s.union_all() if hasattr(s, "union_all") else s.unary_union
+                )
+                per_cell = gpd.GeoDataFrame(
+                    agg.join(geoms).reset_index(), geometry="geometry", crs=clipped_flat.crs
+                )
+
+            attrs = self._stacked_rows_for_codes(per_cell["code"].tolist(), geocode)
+            if attrs.empty:
+                return self._empty_stacked_result()
+
+            # tbl_flat is the authority on per-cell area (tbl_stacked no longer
+            # carries it), so drop any stale copy before the join.
+            attrs = attrs.drop(columns=[c for c in ("area_m2",) if c in attrs.columns])
+            merged = attrs.merge(per_cell, on="code", how="inner")
+            if merged.empty:
+                return self._empty_stacked_result()
+
+            subset = gpd.GeoDataFrame(merged, geometry="geometry", crs=clipped_flat.crs)
+            base_area = pd.to_numeric(subset.get("area_m2"), errors="coerce")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                subset["analysis_area_fraction"] = np.where(
+                    base_area > 0,
+                    subset["analysis_area_m2"].astype("float64") / base_area.astype("float64"),
+                    np.nan,
+                )
+            subset["analysis_group_id"] = getattr(group, "identifier", "")
+            subset["analysis_group_name"] = getattr(group, "name", "")
+            subset["analysis_polygon_id"] = getattr(record, "identifier", "")
+            subset["analysis_polygon_title"] = getattr(record, "title", "")
+            subset["analysis_polygon_notes"] = getattr(record, "notes", "")
+            subset["analysis_geocode"] = geocode
+            subset["analysis_run_id"] = run_id
+            subset["analysis_timestamp"] = run_ts
+            return subset.reset_index(drop=True)
+
+        def _empty_stacked_result(self) -> gpd.GeoDataFrame:
+            """An empty frame with the stacked-analysis schema, taken from the
+            dataset's own parquet schema so readers see the same columns whether
+            or not any polygon matched."""
+            import pyarrow.dataset as ds
+
+            try:
+                names = [n for n in ds.dataset(self._stacked_source(), format="parquet").schema.names
+                         if n != "geometry"]
+            except Exception:
+                names = ["code"]
+            cols = names + ["area_m2", "geometry", "analysis_area_m2", "analysis_area_fraction",
+                            "analysis_group_id", "analysis_group_name", "analysis_polygon_id",
+                            "analysis_polygon_title", "analysis_polygon_notes", "analysis_geocode",
+                            "analysis_run_id", "analysis_timestamp"]
+            cols = list(dict.fromkeys(cols))
+            return gpd.GeoDataFrame(columns=cols, geometry="geometry", crs=f"EPSG:{self.storage_epsg}")
+
         def _write_analysis_output(self, path: Path, group_id: str, new_gdf: gpd.GeoDataFrame) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists():
@@ -1564,12 +1678,12 @@ def run_analysis_process(
 
             category = self._DEFAULT_GEOCODE
             flat_base = self._load_flat_dataset()
-            stacked_base = self._load_stacked_dataset()
+            # tbl_stacked is not loaded here — it is read per polygon, scoped to the
+            # cells that polygon actually touches (_stacked_rows_for_codes).
+            self._stacked_source()
 
             if "name_gis_geocodegroup" in flat_base.columns:
                 flat_base = flat_base[flat_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
-            if "name_gis_geocodegroup" in stacked_base.columns:
-                stacked_base = stacked_base[stacked_base["name_gis_geocodegroup"].astype(str).str.strip() == category].copy()
 
             run_id = uuid.uuid4().hex
             run_ts = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
@@ -1596,7 +1710,7 @@ def run_analysis_process(
                 if not clipped_flat.empty:
                     flat_results.append(clipped_flat)
 
-                clipped_stacked = self._clip_to_polygon(stacked_base, polygon, group, record, category, run_id, run_ts)
+                clipped_stacked = self._stacked_for_clip(clipped_flat, category, group, record, run_id, run_ts)
                 if not clipped_stacked.empty:
                     stacked_results.append(clipped_stacked)
 
@@ -1639,11 +1753,7 @@ def run_analysis_process(
                     crs=stacked_results[0].crs,
                 )
             else:
-                stacked_gdf = gpd.GeoDataFrame(
-                    columns=list(stacked_base.columns) + extra_cols,
-                    geometry="geometry",
-                    crs=stacked_base.crs,
-                )
+                stacked_gdf = self._empty_stacked_result()
 
             flat_gdf = flat_gdf.reset_index(drop=True)
             stacked_gdf = stacked_gdf.reset_index(drop=True)
@@ -1979,7 +2089,6 @@ def run_selected(
                     name for name, on in [("prep", plan.run_prep),
                                            ("intersect", plan.run_intersect),
                                            ("flatten", plan.run_flatten),
-                                           ("backfill", plan.run_backfill),
                                            ("segment", plan.run_segment)]
                     if on
                 ]) or "(none)"
@@ -1993,7 +2102,6 @@ def run_selected(
                     run_prep=bool(plan.run_prep),
                     run_intersect=bool(plan.run_intersect),
                     run_flatten=bool(plan.run_flatten),
-                    run_backfill=bool(plan.run_backfill),
                     run_segment=bool(plan.run_segment),
                     segment_layers=list(plan.segment_layers) if plan.segment_layers else None,
                     segment_mode=str(plan.segment_mode or ""),
@@ -2379,11 +2487,12 @@ class ProcessRunnerWindow(QMainWindow):
         self._cb_prep      = _mk_sub(stage_col, "1. Prep (workspace, status)", avail_data.available)
         self._cb_intersect = _mk_sub(stage_col, "2. Intersect (build tbl_stacked)", avail_data.available)
         self._cb_flatten   = _mk_sub(stage_col, "3. Flatten (build tbl_flat)", avail_data.available)
-        self._cb_backfill  = _mk_sub(stage_col, "4. Backfill (area_m2 → tbl_stacked)", avail_data.available)
-        self._cb_segment   = _mk_sub(stage_col, "5. Segment (build tbl_segmentation)", avail_data.available)
-        self._cb_classification = _mk_sub(stage_col, "6. Classification (segmv → tbl_seg_mv)",
+        # Numbering is contiguous: the old "4. Backfill" stage is gone, so
+        # everything after it moved up rather than leaving a hole in the list.
+        self._cb_segment   = _mk_sub(stage_col, "4. Segment (build tbl_segmentation)", avail_data.available)
+        self._cb_classification = _mk_sub(stage_col, "5. Classification (segmv → tbl_seg_mv)",
                                           classification_default, avail=avail_classification)
-        self._cb_tiles     = _mk_sub(stage_col, "7. Tiles processing (MBTiles)", tiles_default, avail=avail_tiles)
+        self._cb_tiles     = _mk_sub(stage_col, "6. Tiles processing (MBTiles)", tiles_default, avail=avail_tiles)
         if not tiles_flat_exists:
             self._cb_tiles.setToolTip("Run Flatten (or full data) first")
         self._cb_lines     = _mk_sub(stage_col, "8. Lines processing (segments)",
@@ -2415,7 +2524,7 @@ class ProcessRunnerWindow(QMainWindow):
         # Use `clicked` (fires only on user interaction, not setCheckState) so
         # programmatic updates don't recurse - no guard flag needed.
         sub_cbs = [self._cb_prep, self._cb_intersect, self._cb_flatten,
-                   self._cb_backfill, self._cb_segment, self._cb_classification,
+                   self._cb_segment, self._cb_classification,
                    self._cb_tiles]
 
         def _on_master_clicked():
@@ -2473,7 +2582,7 @@ class ProcessRunnerWindow(QMainWindow):
                 has_existing = False
             feeds_tiles = any(cb.isChecked() for cb in (
                 self._cb_prep, self._cb_intersect, self._cb_flatten,
-                self._cb_backfill, self._cb_segment, self._cb_classification))
+                self._cb_segment, self._cb_classification))
             if feeds_tiles and (not self._cb_tiles.isChecked()) and has_existing:
                 self._lbl_tiles.setText(
                     "Existing tiles in output/mbtiles will be DELETED at run start "
@@ -2865,7 +2974,6 @@ class ProcessRunnerWindow(QMainWindow):
                     run_prep=self._cb_prep.isChecked(),
                     run_intersect=self._cb_intersect.isChecked(),
                     run_flatten=self._cb_flatten.isChecked(),
-                    run_backfill=self._cb_backfill.isChecked(),
                     run_segment=self._cb_segment.isChecked(),
                     segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
                     segment_mode="signatures",   # Segment is signatures-only (clusters retired)
@@ -2884,7 +2992,6 @@ class ProcessRunnerWindow(QMainWindow):
                     run_prep=data_on,
                     run_intersect=data_on,
                     run_flatten=data_on,
-                    run_backfill=data_on,
                     run_segment=data_on,
                     segment_layers=tuple(c for c, cb in self._chk_seg_geocats.items() if cb.isChecked()),
                     segment_mode="signatures",   # Segment is signatures-only (clusters retired)
@@ -2992,7 +3099,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-prep", action="store_true", help="Skip Prep sub-stage of data processing")
     p.add_argument("--no-intersect", action="store_true", help="Skip Intersect sub-stage of data processing")
     p.add_argument("--no-flatten", action="store_true", help="Skip Flatten sub-stage of data processing")
-    p.add_argument("--no-backfill", action="store_true", help="Skip Backfill sub-stage (area_m2 enrichment of tbl_stacked)")
     p.add_argument("--segment", action="store_true", help="(Deprecated/no-op) Segment now runs by default; kept for back-compat.")
     p.add_argument("--no-segment", action="store_true", help="Skip the Segment sub-stage (build tbl_segmentation). Segment runs by default.")
     p.add_argument(
@@ -3148,7 +3254,6 @@ def main() -> None:
         run_prep=data_on and not bool(args.no_prep),
         run_intersect=data_on and not bool(args.no_intersect),
         run_flatten=data_on and not bool(args.no_flatten),
-        run_backfill=data_on and not bool(args.no_backfill),
         run_segment=data_on and not bool(args.no_segment),
         explode_flat_multipolygons=bool(args.explode_flat_multipolygons),
         cleanup_slivers=not bool(args.no_cleanup_slivers),
@@ -3174,8 +3279,6 @@ def main() -> None:
             selected.append("data:intersect")
         if default_plan.run_flatten:
             selected.append("data:flatten")
-        if default_plan.run_backfill:
-            selected.append("data:backfill")
         if default_plan.run_segment:
             selected.append("data:segment")
         if default_plan.run_classification:

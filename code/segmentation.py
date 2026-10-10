@@ -73,7 +73,7 @@ def list_geocode_layers(gpq_dir: Path) -> list[str]:
 def _read_layer_stacked(gpq_dir: Path, layer: str, log_fn=None):
     """Read tbl_stacked rows for one layer with a pyarrow filter. Returns a
     pandas DataFrame with code, sensitivity (float), sensitivity_code (A..E) and,
-    when present, area_m2 (per-cell area, backfilled — constant across a code's rows).
+    in packages written before 5.7, area_m2 (per-cell area — see _per_code_area).
 
     Robust to a corrupt/unreadable partition: if the fast whole-dataset read
     fails (e.g. one truncated parquet), it re-reads file-by-file and skips the
@@ -130,10 +130,11 @@ def _read_layer_stacked(gpq_dir: Path, layer: str, log_fn=None):
 def _per_code_area(gpq_dir: Path, layer: str, stacked):
     """Return a Series (index = code, value = per-cell area in m²) for the layer.
 
-    Primary source: the area_m2 already carried in tbl_stacked (backfilled, so it
-    is constant across a code's rows → take the max). Fallback: tbl_flat filtered
-    to the layer. Returns an empty Series if area is unavailable everywhere — the
-    caller then shows '–' and sorts by polygon count.
+    tbl_flat is the source: area is a per-cell value and tbl_stacked has one row
+    per (cell, asset). Packages written before 5.7 carry a backfilled area_m2 in
+    the stack, so that is still preferred when present (constant across a code's
+    rows → take the max). Returns an empty Series if area is unavailable
+    everywhere — the caller then shows '–' and sorts by polygon count.
     """
     import pandas as pd
 

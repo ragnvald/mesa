@@ -3681,7 +3681,6 @@ class TuneProcessingWindow(QMainWindow):
             "flatten_small_max_workers": "0",
             "flatten_approx_gb_per_worker": f"{flatten_gb:.1f}",
             "flatten_large_partition_mb": "50",
-            "backfill_max_workers": "0",
             "tiles_max_workers": "0",
             "tiles_approx_gb_per_worker": "3.0",
             # Mosaic (basic_mosaic boundary extraction)

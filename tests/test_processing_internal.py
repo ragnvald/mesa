@@ -168,6 +168,123 @@ def test_flatten_worker_preserves_unique_asset_lists_and_scores(tmp_path: Path, 
     assert int(row_b["assets_overlap_total"]) == 1
     assert set(row_b["ref_asset_group"]) == {30}
 
+    # Flatten no longer carries the cell geometry out of the partition; the
+    # parent joins it from tbl_geocode_object. See learning.md
+    # "tbl_stacked carries no geometry".
+    assert "geometry" not in result.columns
+
+
+def _stacked_rows() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "code": ["A", "A", "B"],
+            "ref_geocodegroup": [1, 1, 1],
+            "name_gis_geocodegroup": ["basic_mosaic"] * 3,
+            "ref_asset_group": [10, 20, 10],
+            "name_gis_assetgroup": ["roads", "water", "roads"],
+            "importance": [5, 3, 5],
+            "sensitivity": [25, 6, 25],
+            "susceptibility": [5, 2, 5],
+        }
+    )
+
+
+def test_flatten_worker_reads_a_partition_that_has_no_geometry(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(pi, "_ASSET_GROUP_LOOKUP", pd.DataFrame(), raising=False)
+
+    part_path = tmp_path / "part.parquet"
+    _stacked_rows().to_parquet(part_path, index=False)
+
+    result = pi._flatten_worker((part_path, _class_ranges(), {}))
+    assert result is not None
+    assert set(result["code"]) == {"A", "B"}
+    assert int(result.loc[result["code"] == "A", "assets_overlap_total"].iloc[0]) == 2
+    assert "geometry" not in result.columns
+
+
+def test_stacked_contract_drops_cell_and_asset_group_grained_columns() -> None:
+    gdf = gpd.GeoDataFrame(
+        {
+            "code": ["A"],
+            "name_gis_geocodegroup": ["basic_mosaic"],
+            "ref_asset_group": [10],
+            "sensitivity": [25],
+            # cell-grained / merge artefacts that must not be repeated per row
+            "geometry": [box(0, 0, 1, 1)],
+            "id_x": [1],
+            "id_y": [10],
+            "attributes": ["{'a': 1}"],
+            "grid_cell": [0],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+    out = pi._to_stacked_contract(gdf)
+
+    assert list(out.columns) == ["code", "name_gis_geocodegroup", "ref_asset_group", "sensitivity"]
+    assert not isinstance(out, gpd.GeoDataFrame)
+
+
+def test_read_stacked_partition_never_returns_geometry(tmp_path: Path) -> None:
+    # An older package still carries the column; reading it back is exactly the
+    # waste the format change removes, so the reader must skip it either way.
+    gdf = gpd.GeoDataFrame(
+        _stacked_rows().assign(geometry=[box(0, 0, 1, 1), box(0, 0, 1, 1), box(1, 1, 2, 2)]),
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+    legacy = tmp_path / "legacy.parquet"
+    gdf.to_parquet(legacy, index=False)
+
+    out = pi._read_stacked_partition(legacy)
+    assert "geometry" not in out.columns
+    assert len(out) == 3
+
+    projected = pi._read_stacked_partition(legacy, ["code", "sensitivity", "geometry", "nope"])
+    assert list(projected.columns) == ["code", "sensitivity"]
+
+
+def test_attach_geocode_geometry_keys_on_group_and_code(tmp_path: Path, monkeypatch) -> None:
+    # The same `code` in two geocode groups must not cross-join: codes are only
+    # unique per import batch, and H3/QDGC/mosaic are generated on separate paths.
+    geocodes = gpd.GeoDataFrame(
+        {
+            "code": ["c1", "c1", "c2"],
+            "name_gis_geocodegroup": ["basic_mosaic", "H3_R8", "basic_mosaic"],
+            "geometry": [box(0, 0, 1, 1), box(5, 5, 6, 6), box(1, 1, 2, 2)],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+    geocodes.to_parquet(tmp_path / "tbl_geocode_object.parquet", index=False)
+    monkeypatch.setattr(pi, "gpq_dir", lambda: tmp_path)
+
+    flat = pd.DataFrame({"code": ["c1", "c2"], "name_gis_geocodegroup": ["basic_mosaic", "basic_mosaic"]})
+    out = pi._attach_geocode_geometry(flat, "4326")
+
+    assert len(out) == 2, "a bare `code` key would have duplicated c1 across groups"
+    assert out.loc[out["code"] == "c1", "geometry"].iloc[0].equals(box(0, 0, 1, 1))
+    assert out.loc[out["code"] == "c2", "geometry"].iloc[0].equals(box(1, 1, 2, 2))
+
+
+def test_flatten_preflight_relaxes_amplification_when_there_is_no_geometry(tmp_path: Path) -> None:
+    cfg = configparser.ConfigParser()
+    cfg["DEFAULT"] = {"flatten_max_workers": "4", "flatten_small_max_workers": "4"}
+
+    flat_part = tmp_path / "flat.parquet"
+    _stacked_rows().to_parquet(flat_part, index=False)
+    geo_part = tmp_path / "geo.parquet"
+    gpd.GeoDataFrame(
+        _stacked_rows().assign(geometry=[box(0, 0, 1, 1)] * 3), geometry="geometry", crs="EPSG:4326"
+    ).to_parquet(geo_part, index=False)
+
+    _, flat_debug = pi._estimate_flatten_peak_gb([flat_part], cfg)
+    _, geo_debug = pi._estimate_flatten_peak_gb([geo_part], cfg)
+
+    assert "k_amp=3.0 (no geometry)" in flat_debug
+    assert "k_amp=10.0 (with geometry)" in geo_debug
+
 
 def test_running_chunk_ids_skips_chunks_that_returned_out_of_order() -> None:
     # imap_unordered: chunk 3 came back before 1 and 2.
