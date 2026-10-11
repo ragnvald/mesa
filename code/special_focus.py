@@ -190,13 +190,15 @@ HOST_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <style>
   html,body{height:100%;margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:13px;color:#3f3528}
   #app{display:flex;flex-direction:column;height:100vh}
-  #bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f3ecdf;border-bottom:2px solid #cbb791}
-  .tab{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;padding:6px 14px;cursor:pointer;border-radius:6px;font-size:13px}
-  .tab:hover{background:#eadbbd}
-  .tab:active{transform:translateY(1px)}
-  .tab.active{background:#d9bd7d;color:#3f3018;border-color:#9b7c3d;font-weight:600}
+  /* Tabs drawn like the QTabBar in ui_style.py, so this window matches the Qt dialogs. */
+  #bar{display:flex;align-items:flex-end;gap:2px;padding:8px 12px 0 12px;background:#f3ecdf;border-bottom:1px solid #c6b089}
+  .tab{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;border-bottom:none;padding:8px 18px;margin:2px 0 0 0;
+       cursor:pointer;border-radius:5px 5px 0 0;font:inherit;font-weight:500}
+  .tab:hover{background:#efe3cc}
+  .tab.active{background:#f8f3e9;color:#3f3528;font-weight:600;margin-top:0;margin-bottom:-1px;padding-bottom:9px}
   #spacer{flex:1}
-  #exit{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;padding:6px 12px;border-radius:6px;cursor:pointer}
+  #exit{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;padding:6px 12px;border-radius:6px;cursor:pointer;
+        font:inherit;align-self:center;margin-bottom:6px}
   #exit:hover{background:#eadbbd}
   #views{position:relative;flex:1}
   .view{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#fff}
