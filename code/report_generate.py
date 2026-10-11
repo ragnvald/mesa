@@ -3976,30 +3976,67 @@ def export_to_excel(df, fp):
     df.to_excel(fp, index=False)
 
 
+def _format_area_compact(area_m2) -> str:
+    """An area for a table cell: m² below 1 ha, ha below 1 km², km² above, with sensible digits."""
+    try:
+        m2 = float(area_m2)
+    except Exception:
+        return "–"
+    if not math.isfinite(m2) or m2 < 0:
+        return "–"
+    if m2 < 10_000:
+        return f"{m2:,.0f} m²"
+    if m2 < 1_000_000:
+        return f"{m2 / 10_000:,.1f} ha"
+    km2 = m2 / 1_000_000
+    return f"{km2:,.2f} km²" if km2 < 100 else f"{km2:,.0f} km²"
+
+
 def build_geocode_overview_table(parquet_dir: str) -> list | None:
     """Return a list-of-rows (header + body) summarising every geocode group.
 
-    One row per geocode group (basic_mosaic, H3_R06, ..., custom grids) with
-    object count drawn from tbl_geocode_object.parquet. Friendly title and
-    description come from tbl_geocode_group.parquet when available. Returns
-    None when neither source file is available, so callers can skip the
-    section cleanly.
+    One row per geocode group (basic_mosaic, H3_R06, ..., custom grids) with the
+    number of cells, their average area and the area they cover together, from
+    tbl_geocode_object.parquet. Friendly title and description come from
+    tbl_geocode_group.parquet when available. Returns None when neither source
+    file is available, so callers can skip the section cleanly.
     """
     group_pq  = os.path.join(parquet_dir, "tbl_geocode_group.parquet")
     object_pq = os.path.join(parquet_dir, "tbl_geocode_object.parquet")
 
-    counts = {}
+    counts: dict[str, int] = {}
+    areas: dict[str, tuple[float, float]] = {}   # group -> (mean m², total m²)
     try:
         if os.path.exists(object_pq):
             try:
-                gdf = gpd.read_parquet(object_pq)
+                from mesa_shared import read_geoparquet
+                gdf = read_geoparquet(object_pq, columns=["name_gis_geocodegroup", "geometry"])
             except Exception:
-                gdf = pd.read_parquet(object_pq)
+                gdf = pd.read_parquet(object_pq, columns=["name_gis_geocodegroup"])
             if gdf is not None and not gdf.empty and 'name_gis_geocodegroup' in gdf.columns:
                 series = gdf.groupby('name_gis_geocodegroup').size()
                 counts = {str(k): int(v) for k, v in series.items()}
+                # Areas on an equal-area projection; degrees or Web Mercator would mislead.
+                try:
+                    if isinstance(gdf, gpd.GeoDataFrame) and gdf.geometry.notna().any():
+                        geo = gdf if gdf.crs is not None else gdf.set_crs(4326)
+                        cell_m2 = geo.to_crs(6933).geometry.area
+                        stats = cell_m2.groupby(gdf['name_gis_geocodegroup']).agg(['mean', 'sum'])
+                        areas = {str(k): (float(r['mean']), float(r['sum'])) for k, r in stats.iterrows()}
+                except Exception:
+                    areas = {}
     except Exception:
         counts = {}
+
+    def _txt(value) -> str:
+        # A missing title arrives as NaN and would print as the word "nan".
+        try:
+            if value is None or pd.isna(value):
+                return ''
+        except Exception:
+            pass
+        text = str(value).strip()
+        return '' if text.lower() in ('nan', 'none') else text
 
     meta_rows = []
     try:
@@ -4011,11 +4048,11 @@ def build_geocode_overview_table(parquet_dir: str) -> list | None:
             if meta is not None and not meta.empty:
                 cols = set(meta.columns)
                 for _, r in meta.iterrows():
-                    name = str(r.get('name_gis_geocodegroup', '')).strip()
+                    name = _txt(r.get('name_gis_geocodegroup', ''))
                     if not name:
                         continue
-                    title = str(r.get('title_user', '')).strip() if 'title_user' in cols else ''
-                    description = str(r.get('description', '')).strip() if 'description' in cols else ''
+                    title = _txt(r.get('title_user', '')) if 'title_user' in cols else ''
+                    description = _txt(r.get('description', '')) if 'description' in cols else ''
                     meta_rows.append((name, title, description))
     except Exception:
         meta_rows = []
@@ -4029,9 +4066,11 @@ def build_geocode_overview_table(parquet_dir: str) -> list | None:
         return None
 
     meta_rows.sort(key=lambda t: (0 if t[0].lower() == 'basic_mosaic' else 1, t[0]))
-    rows = [["Geocode group", "Title", "Description", "# objects"]]
+    rows = [["Geocode group", "Title", "Description", "# objects", "Average area", "Total area"]]
     for name, title, description in meta_rows:
-        rows.append([name, title, description, counts.get(name, 0)])
+        mean_m2, total_m2 = areas.get(name, (float('nan'), float('nan')))
+        rows.append([name, title, description, f"{counts.get(name, 0):,}",
+                     _format_area_compact(mean_m2), _format_area_compact(total_m2)])
     return rows
 
 def fetch_lines_and_segments(parquet_dir: str):
@@ -5275,9 +5314,9 @@ def generate_report(base_dir: str,
                         "sections of this report."),
                     ('text',
                         "<b>H3 hexagon grids (H3_R06 … H3_R09).</b> These are standardised hierarchical "
-                        "hex tessellations from Uber's open H3 spec. R6 is the coarsest (cells "
-                        "≈36 km², about the size of a small district); each level halves the cell "
-                        "size, so R9 cells are ≈0.1 km². H3 grids are useful when you need consistent "
+                        "hex tessellations from Uber's open H3 spec. Of the levels named here R6 is the "
+                        "coarsest (cells ≈36 km², about the size of a small district); each finer "
+                        "level has cells about one seventh the area, so R9 cells are ≈0.1 km². H3 grids are useful when you need consistent "
                         "cell sizes across runs or when comparing study areas — a value at H3_R08 in "
                         "one project is directly comparable to H3_R08 in another, regardless of the "
                         "asset footprint. The fields used for ranking and weighting are identical to "
@@ -5291,9 +5330,11 @@ def generate_report(base_dir: str,
                         "the report works without modification."),
                     ('text',
                         "The table below lists every group MESA knows about for this run, together "
-                        "with the number of geocode objects (cells) it contains. <code># objects</code> "
-                        "is the row count in <code>tbl_geocode_object.parquet</code> for that group "
-                        "— a higher value means more cells and therefore a finer spatial resolution."),
+                        "with the number of geocode objects (cells) it contains, the average area of a "
+                        "cell and the area the cells cover together. A higher object count with a "
+                        "smaller average area means a finer spatial resolution. For "
+                        "<code>basic_mosaic</code> the average hides a wide spread: its cells follow "
+                        "the asset boundaries and range from very small to very large."),
                     ('table_data', ("Geocode groups and object counts", geocode_overview_rows)),
                     ('new_page', None),
                 ])
