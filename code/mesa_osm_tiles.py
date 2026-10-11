@@ -15,6 +15,7 @@ send a suitable ``Referer`` and can therefore be blocked by OSM's tile policy.
 
 from __future__ import annotations
 
+import http.client
 import json
 import tempfile
 import threading
@@ -132,6 +133,36 @@ def start_osm_tile_proxy(
                 pass
         return now + (7 * 24 * 60 * 60)
 
+    # One kept-alive connection to OSM per proxy thread (the browser holds about six
+    # connections open, each served by its own thread). Opening a new TLS connection
+    # for every tile cost over a second a tile. See learning.md "Tile proxy latency".
+    local = threading.local()
+
+    def _fetch_upstream(z: str, x: str, y: str):
+        """Return (status, headers, body) for one tile, reconnecting once if the kept connection has gone stale."""
+        last_exc: Optional[Exception] = None
+        for _attempt in range(2):
+            conn = getattr(local, "conn", None)
+            if conn is None:
+                conn = http.client.HTTPSConnection("tile.openstreetmap.org", timeout=20)
+                local.conn = conn
+            try:
+                conn.request("GET", f"/{z}/{x}/{y}.png", headers={
+                    "User-Agent": user_agent,
+                    "Accept": "image/png,image/*;q=0.9,*/*;q=0.8",
+                })
+                response = conn.getresponse()
+                body = response.read()
+                return response.status, response.headers, body
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                local.conn = None
+        raise last_exc if last_exc is not None else RuntimeError("tile fetch failed")
+
     def _build_handler():
         class _OsmTileProxyHandler(BaseHTTPRequestHandler):
             server_version = "MesaOsmProxy/1.0"
@@ -173,26 +204,19 @@ def start_osm_tile_proxy(
                     self._send_png(cached_data, expires_at - now)
                     return
 
-                upstream = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-                request = urlrequest.Request(
-                    upstream,
-                    headers={
-                        "User-Agent": user_agent,
-                        "Accept": "image/png,image/*;q=0.9,*/*;q=0.8",
-                    },
-                )
                 try:
-                    with urlrequest.urlopen(request, timeout=20) as response:
-                        payload = response.read()
-                        expiry = _cache_expiry_from_headers(response.headers)
+                    status, headers, payload = _fetch_upstream(z, x, y)
+                    if status != 200:
+                        if cached_data is not None:
+                            _log(f"OSM tile proxy using stale cache for {raw_path} after HTTP {status}")
+                            self._send_png(cached_data, 60.0)
+                            return
+                        _log(f"OSM tile proxy got HTTP {status} for {raw_path}")
+                        self.send_error(status if 400 <= status < 600 else 502)
+                        return
+                    expiry = _cache_expiry_from_headers(headers)
                     _save_cached_tile(tile_path, meta_path, payload, expiry)
                     self._send_png(payload, max(60.0, expiry - time.time()))
-                except urlerror.HTTPError as exc:
-                    if cached_data is not None:
-                        _log(f"OSM tile proxy using stale cache for {raw_path} after HTTP {exc.code}")
-                        self._send_png(cached_data, 60.0)
-                        return
-                    self.send_error(exc.code)
                 except Exception as exc:
                     if cached_data is not None:
                         _log(f"OSM tile proxy using stale cache for {raw_path} after error: {exc}")
