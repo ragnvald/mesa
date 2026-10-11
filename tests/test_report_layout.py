@@ -188,3 +188,40 @@ def test_type_fingerprints_are_drawn_one_grid_per_type(tmp_path: Path) -> None:
     width, height = Image.open(out).size
     assert width > 1.6 * height            # two grids side by side
     assert not rg._type_fingerprints_png([], cols, str(tmp_path / "none.png"))
+
+
+def test_basemap_fetches_only_missing_tiles_and_caches_them(tmp_path: Path, monkeypatch) -> None:
+    import io
+    import matplotlib.pyplot as plt
+
+    asked: list = []
+
+    def fake_tile(z, x, y):
+        asked.append((z, x, y))
+        if (x + y) % 7 == 0:
+            return None                      # a tile the server did not deliver
+        buf = io.BytesIO()
+        Image.new("RGB", (256, 256), (10, 120, 200)).save(buf, "PNG")
+        return buf.getvalue()
+
+    monkeypatch.setattr(rg, "_fetch_osm_tile", fake_tile)
+    monkeypatch.setattr(rg, "_tile_cache_root", lambda base_dir: tmp_path)
+    monkeypatch.setattr(rg, "_REPORT_BASEMAP_MODE", "xyz")
+
+    def draw() -> None:
+        fig, ax = plt.subplots(figsize=(6, 4.5), dpi=100)
+        ax.set_xlim(-60000.0, 40000.0)
+        ax.set_ylim(760000.0, 835000.0)
+        rg._plot_basemap(ax, 3857, base_dir=None)
+        assert ax.images, "the basemap was not drawn"
+        plt.close(fig)
+
+    draw()
+    first = len(asked)
+    cached = sum(1 for _ in tmp_path.rglob("*.png"))
+    failed = sum(1 for (_z, x, y) in asked if (x + y) % 7 == 0)
+    assert first > 4 and len(set(asked)) == first          # every missing tile asked for once
+    assert cached == first - failed                         # what arrived is in the cache
+
+    draw()
+    assert len(asked) - first == failed                     # the second map asks only for what is still missing

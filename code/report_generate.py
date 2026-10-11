@@ -48,6 +48,7 @@ from pathlib import Path
 import subprocess
 import io, math, time, urllib.request
 import functools
+import http.client
 import sqlite3
 try:
     from docx import Document
@@ -2224,6 +2225,69 @@ def _save_tile_to_cache(cache_path: Path, data: bytes) -> None:
     except Exception:
         pass
 
+# Basemap tiles are fetched over connections that stay open for the whole report,
+# two at a time (the limit OSM's tile usage policy sets for one client). A new TLS
+# connection per tile cost about 1.2 s a tile. See learning.md "Tile proxy latency".
+_OSM_TILE_HOST = "tile.openstreetmap.org"
+_OSM_TILE_USER_AGENT = "Mozilla/5.0 (compatible; MESA-Report/1.0)"
+_OSM_TILE_THREADS = 2
+_tile_fetch_local = threading.local()
+_tile_fetch_pool = None
+
+
+def _fetch_osm_tile(z: int, x: int, y: int) -> bytes | None:
+    """One tile as PNG bytes, or None. Reconnects once if the kept connection has gone stale."""
+    for _attempt in range(2):
+        conn = getattr(_tile_fetch_local, "conn", None)
+        if conn is None:
+            conn = http.client.HTTPSConnection(_OSM_TILE_HOST, timeout=10)
+            _tile_fetch_local.conn = conn
+        try:
+            conn.request("GET", f"/{z}/{x}/{y}.png", headers={"User-Agent": _OSM_TILE_USER_AGENT})
+            response = conn.getresponse()
+            data = response.read()
+            if response.status == 200 and data:
+                return data
+            return None            # the server answered; asking again would not help
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _tile_fetch_local.conn = None
+    return None
+
+
+def _fetch_osm_tiles(wanted: list, on_tile=None) -> dict:
+    """Fetch (z, x, y) tiles; returns {(z, x, y): bytes} for those that arrived.
+
+    on_tile(seconds) is called in the calling thread as each tile completes, with
+    the wall time since the previous one, so the times add up to the real wait.
+    """
+    global _tile_fetch_pool
+    if not wanted:
+        return {}
+    if _tile_fetch_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _tile_fetch_pool = ThreadPoolExecutor(max_workers=_OSM_TILE_THREADS, thread_name_prefix="mesa-report-tile")
+    from concurrent.futures import as_completed
+    futures = {_tile_fetch_pool.submit(_fetch_osm_tile, *key): key for key in wanted}
+    got: dict = {}
+    last = time.monotonic()
+    for future in as_completed(futures):
+        try:
+            data = future.result()
+        except Exception:
+            data = None
+        if data:
+            got[futures[future]] = data
+        now = time.monotonic()
+        if on_tile is not None:
+            on_tile(now - last)
+        last = now
+    return got
+
+
 def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
     """Add a basemap under current axes.
     Prefers contextily; if unavailable, fetches OSM Web Mercator tiles and composites them.
@@ -2369,14 +2433,6 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
 
         mosaic = PILImage.new("RGB", (W, H), (240, 240, 240))
 
-        ua = ("Mozilla/5.0 (compatible; MESA-Report/1.0)")
-        opener = urllib.request.build_opener()
-        opener.addheaders = [("User-Agent", ua)]
-        urllib.request.install_opener(opener)
-
-        def tile_url(z, x, y):
-            return f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-
         if base_dir:
             try:
                 write_to_log("Basemap source: XYZ tiles (OpenStreetMap) with local cache", base_dir)
@@ -2387,35 +2443,33 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
         fetched = 0
 
         tracker = _PROGRESS
-        if tracker is not None:
-            missing = sum(1 for x in range(xmin, xmax + 1) for y in range(ymin, ymax + 1)
-                          if not (cache_root / str(z) / str(x) / f"{y}.png").exists())
-            tracker.tiles_needed(tile_span, missing)
-
+        # Cached tiles first; what is missing is then fetched together.
+        missing: list = []
         for xi, x in enumerate(range(xmin, xmax+1)):
             for yi, y in enumerate(range(ymin, ymax+1)):
-                cache_path = cache_root / str(z) / str(x) / f"{y}.png"
-                img = _load_cached_tile(cache_path)
+                img = _load_cached_tile(cache_root / str(z) / str(x) / f"{y}.png")
                 if img is not None:
                     cache_hits += 1
-                    if tracker is not None:
-                        tracker.tile_done(False)
-                else:
-                    t_fetch = time.monotonic()
-                    try:
-                        url = tile_url(z, x, y)
-                        with urllib.request.urlopen(url, timeout=5) as resp:
-                            data = resp.read()
-                        img = PILImage.open(io.BytesIO(data)).convert("RGB")
-                        _save_tile_to_cache(cache_path, data)
-                        fetched += 1
-                    except Exception:
-                        img = None
-                    if tracker is not None:
-                        # a failed download costs time too, so it counts
-                        tracker.tile_done(True, time.monotonic() - t_fetch)
-                if img is not None:
                     mosaic.paste(img, (xi*TILE, yi*TILE))
+                else:
+                    missing.append((z, x, y))
+        if tracker is not None:
+            tracker.tiles_needed(tile_span, len(missing))
+            for _ in range(cache_hits):
+                tracker.tile_done(False)
+
+        def _tile_arrived(seconds: float) -> None:
+            if tracker is not None:
+                tracker.tile_done(True, seconds)   # a failed download costs time too, so it counts
+
+        for (tz, tx, ty), data in _fetch_osm_tiles(missing, _tile_arrived).items():
+            try:
+                img = PILImage.open(io.BytesIO(data)).convert("RGB")
+            except Exception:
+                continue
+            _save_tile_to_cache(cache_root / str(tz) / str(tx) / f"{ty}.png", data)
+            fetched += 1
+            mosaic.paste(img, ((tx - xmin)*TILE, (ty - ymin)*TILE))
 
         if (cache_hits or fetched) and base_dir:
             try:

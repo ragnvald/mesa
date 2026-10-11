@@ -967,3 +967,20 @@ in the script were replaced (a colon after a label, commas where they came in pa
 `.docx` files were regenerated: no em dashes, 38 pictures each. The other chapters were not read
 through against 5.7. The Portuguese text is my translation and has not been reviewed by a
 speaker.
+
+## 2026-10-11 (night): the report's basemap download
+
+The tile proxy entry above noted that the report engine had the same fault and had not been
+changed. The user asked for it. `_plot_basemap` now reads the cached tiles first and fetches the
+missing ones over two connections that stay open for the whole report; two is the limit OSM's
+tile usage policy sets for one client. On single maps with an empty cache: 35 tiles in 7.9 s
+instead of 39.3 s, 25 tiles in 5.6 s instead of 28.4 s, about 0.22 s a tile against 1.1 s.
+
+A full 36-map report with 12 % of the cached tiles removed (583 tiles to download) took 333 s.
+The comparable run earlier in the day, with 622 tiles to download, took 608 s; the same report
+with everything cached takes about 270 to 295 s. So the download part went from roughly 320 s to
+roughly 50 s. The run also served as the first full measurement of the progress model after its
+starting assumption was changed: it opened with "about 6 min left" for a run of 5.5 minutes, the
+time-left figure was off by 6.8 % of the run on average, and the bar by 2.7 points (6.8 at most).
+
+Nothing was reported to the sibling projects.
