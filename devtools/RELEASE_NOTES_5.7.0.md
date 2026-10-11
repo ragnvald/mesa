@@ -7,6 +7,15 @@ A release about scale and safety. Projects take far less disk and memory, map ti
 - Zenodo record — *to be added* (`MESA_570_win11_<date>.zip`, `MESA_570_macos_<date>.dmg`)
 - [MESA project wiki](https://github.com/ragnvald/mesa/wiki), with the full [changelog](https://github.com/ragnvald/mesa/wiki/Mesa-changelog-overview)
 
+### Demonstration data
+
+The download contains no project data: `input/` holds four empty folders and `output/` is empty. Demonstration packages are published as their own records. Download one, load it under **Manage data → Restore data**, and run **Process**; the packages hold input data only.
+
+- [Open data from sites in Uganda, Kenya and Ghana](https://doi.org/10.5281/zenodo.21744272), built from ESA WorldCover, OpenStreetMap and the Allen Coral Atlas
+- [Synthetic test data](https://doi.org/10.5281/zenodo.21744039), with invented and deliberately overlapping asset layers
+
+Both links always lead to the newest version of the data. The 5.7.0 versions of the two records are to be confirmed before publication.
+
 ## Read this first
 
 ### Generating H3 or QDGC could delete your mosaic

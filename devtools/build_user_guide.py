@@ -322,6 +322,17 @@ def build_blocks():
             ["Áreas de análise", "Áreas de estudo / grupos opcionais utilizados para comparação lado a lado e resultados de análise.", "Não"],
         ]))
 
+    add(P(
+        "Demonstration data. MESA is delivered without project data: input/ holds four empty folders and output/ is empty. To try MESA before you have your own data, download a demonstration package from Zenodo and load it under Manage data, Restore data. The packages hold input data only, so run Process after restoring one. Restore replaces the input/, output/ and config.ini of the project you restore into.",
+        "Dados de demonstração. O MESA é distribuído sem dados de projecto: input/ contém quatro pastas vazias e output/ está vazia. Para experimentar o MESA antes de ter os seus próprios dados, descarregue um pacote de demonstração do Zenodo e carregue-o em Manage data, Restore data. Os pacotes contêm apenas dados de entrada, pelo que deve executar Process depois de restaurar um deles. O restauro substitui input/, output/ e config.ini do projecto de destino."))
+    add(UL(
+        ["Open data from sites in Uganda, Kenya and Ghana (ESA WorldCover, OpenStreetMap, Allen Coral Atlas): https://doi.org/10.5281/zenodo.21744272",
+         "Synthetic test data with invented, deliberately overlapping asset layers: https://doi.org/10.5281/zenodo.21744039",
+         "Each record includes a guide, and every package carries docs/readme_demodata.txt with its sources and credits. Both links always lead to the newest version of the data."],
+        ["Dados abertos de locais no Uganda, Quénia e Gana (ESA WorldCover, OpenStreetMap, Allen Coral Atlas): https://doi.org/10.5281/zenodo.21744272",
+         "Dados de teste sintéticos, com camadas inventadas e deliberadamente sobrepostas: https://doi.org/10.5281/zenodo.21744039",
+         "Cada registo inclui um guia, e cada pacote traz docs/readme_demodata.txt com as fontes e os créditos. Ambas as ligações conduzem sempre à versão mais recente dos dados."]))
+
     add(H(2, "3.3 Importing data", "3.3 Importação de dados"))
     add(OL(
         ["Copy asset datasets into input/asset/.",
