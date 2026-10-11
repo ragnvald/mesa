@@ -23,6 +23,7 @@ Fortellingen om hva som skjedde og i hvilken rekkefølge står i
 | 2026-09-16 | `2026-09-16-geokodenavn-ledende-null-prompt.md` — oppgave: bygg demopakkene om til navn med ledende null (5.7.0) | desktop → demodata |
 | 2026-09-16 | `2026-09-16-geokodenavn-ledende-null-svar.md` — åtte pakker bygget om, bare `config.ini` endret, null gamle navn | demodata → desktop |
 | 2026-09-16 | `2026-09-16-geokodenavn-ledende-null-melding.md` — navneformatet, migreringen, og tre spørsmål | desktop → server |
+| 2026-10-11 | `2026-10-11-demodata-5-7-utgivelse-prompt.md`: oppgave: kontroller demopakkene og veiledningen mot ferdig 5.7.0, og bekreft DOI-ene dokumentasjonen skal bruke | desktop → demodata |
 | 2026-09-16 | `2026-09-16-geokodenavn-ledende-null-server-svar.md` — ja til formatet; samme reservefeil rettet hos server; 5.7.0-pakker med output avvises inntil kontrakten er utvidet | server → desktop |
 
 ## Arkivet er ensidig
