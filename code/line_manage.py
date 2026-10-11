@@ -839,6 +839,10 @@ __MESA_LEAFLET_HEAD__
   .bar { grid-area: bar; display:flex; gap:8px; align-items:center; padding:8px 12px; background:#f3ecdf; border-bottom:2px solid #cbb791; }
   .form { grid-area: form; background:#faf6ee; border-right:2px solid #cbb791; padding:10px 12px; overflow:auto; font-size:14px; }
   .map { grid-area: map; position:relative; }
+  /* z-index above Leaflet's panes and controls (up to 1000). */
+  .draw-banner { display:none; position:absolute; top:10px; left:50%; transform:translateX(-50%); z-index:1100;
+    background:#3f3018; color:#fff; padding:7px 14px; border-radius:6px; font-size:13px; white-space:nowrap;
+    box-shadow:0 2px 6px rgba(0,0,0,.25); pointer-events:none; }
   #map { position:absolute; inset:0; }
   .foot { grid-area: foot; font-size:12px; color:#715a36; background:#f3ecdf; padding:4px 10px; border-top:1px solid #cbb791; display:flex; justify-content:space-between; align-items:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .btn { padding:6px 10px; border:1px solid #c6b089; background:#e6dac2; color:#5c4a2f; border-radius:6px; cursor:pointer; }
@@ -899,7 +903,7 @@ __MESA_LEAFLET_BODY_OPEN__
 
     <div id="helpBox" class="help">
       <strong>Map & edit</strong><br>
-      • Draw (pencil) to add a new line (or <span class="kbd">N</span>).<br>
+      • <strong>New line</strong> (or <span class="kbd">N</span>, or the line icon on the map): click to add points, double-click or <span class="kbd">Enter</span> to finish. The new line is not saved until you click <strong>Save all</strong>.<br>
       • Edit: only the selected line is visible until you choose “Show all”. Use <strong>Apply geometry</strong> or <strong>Cancel geometry</strong>.<br>
       • Delete removes the currently selected line (you’ll be asked to confirm).<br>
       • Keys: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel geometry.
@@ -912,12 +916,14 @@ __MESA_LEAFLET_BODY_OPEN__
     <div class="row"><label>Description</label><textarea id="f_desc" placeholder="Short description"></textarea></div>
 
     <div class="form-actions">
-      <button id="formSaveBtn" class="btn primary" title="Commit all staged changes to disk from here">Save changes</button>
+      <button id="formSaveBtn" class="btn primary" style="white-space:nowrap; flex-shrink:0;" title="Same as Save all in the top bar">Save all</button>
       <span id="status" class="status-warn">Initializing…</span>
     </div>
   </div>
 
-  <div class="map"><div id="map"></div></div>
+  <div class="map"><div id="map"></div>
+    <div id="drawBanner" class="draw-banner">Click on the map to add points &nbsp;•&nbsp; double-click or <b>Enter</b> to finish &nbsp;•&nbsp; <b>Esc</b> cancels</div>
+  </div>
 
   <div class="foot"><div id="foot-left">Ready.</div><div id="foot-right"></div></div>
 </div>
@@ -937,6 +943,7 @@ let SELECT_GROUP = null;
 let SINGLE_EDIT_HANDLER = null;
 let DRAW_HANDLER = null;
 let DIRTY = false;
+let DRAWING = false;
 let HIDDEN_LAYERS = {};
 let SHOW_ONLY_CURRENT = false;
 let DEFAULT_SEGMENT_LENGTH = 1000;
@@ -1029,7 +1036,7 @@ function bindAuto(fieldId, fieldName){
           }
         }
         setDirty(true);
-        showStatus('Staged (not saved). Click Save to commit.','status-ok');
+        showStatus('Changed, not saved yet. Click “Save all” to keep it.','status-ok');
       }
     }).catch(function(err){ showStatus('API error: '+err, 'status-err'); });
   });
@@ -1046,7 +1053,8 @@ function initMapOnce(){
   LINES_GROUP = L.featureGroup().addTo(MAP);
 
   DRAW_CONTROL = new L.Control.Draw({
-    edit: { featureGroup: L.featureGroup() }, // dummy to satisfy control
+    // Edit/Delete live in the side panel; the toolbar's own were bound to an empty group and dead.
+    edit: { featureGroup: L.featureGroup(), edit:false, remove:false },
     draw: { polygon:false, circle:false, rectangle:false, marker:false, circlemarker:false, polyline:{ shapeOptions:{ color:'#ff7f50', weight:4 } } }
   });
   MAP.addControl(DRAW_CONTROL);
@@ -1064,7 +1072,12 @@ function initMapOnce(){
     const gj = tmp.toGeoJSON();
     window.pywebview.api.add_line(gj).then(function(res){
       if (!res.ok){ showStatus(res.error || 'Add failed','status-err'); LINES_GROUP.removeLayer(tmp); return; }
-      LINES_GROUP.removeLayer(tmp); addFeature(res.feature, true);
+      LINES_GROUP.removeLayer(tmp);
+      // Put the defaults on the feature before it is selected, so the form shows what is staged.
+      res.feature.properties = res.feature.properties || {};
+      res.feature.properties.segment_length = DEFAULT_SEGMENT_LENGTH;
+      res.feature.properties.segment_width = DEFAULT_SEGMENT_WIDTH;
+      addFeature(res.feature, true);
       const picker = document.getElementById('pickerSel');
       const opt = document.createElement('option');
       opt.value = res.record.name_gis;
@@ -1072,8 +1085,6 @@ function initMapOnce(){
       picker.appendChild(opt);
       picker.value = res.record.name_gis;
 
-    document.getElementById('f_seg_len').value = DEFAULT_SEGMENT_LENGTH;
-    document.getElementById('f_seg_wid').value = DEFAULT_SEGMENT_WIDTH;
     window.pywebview.api.update_attribute(res.record.name_gis, 'segment_length', DEFAULT_SEGMENT_LENGTH);
     window.pywebview.api.update_attribute(res.record.name_gis, 'segment_width', DEFAULT_SEGMENT_WIDTH);
       setDirty(true);
@@ -1081,8 +1092,20 @@ function initMapOnce(){
       enableEditButtons(true);
       setSelected(res.record.name_gis, true);
       updateCountBadge();
-      showStatus('New line staged.','status-ok');
+      showStatus('New line added, not saved yet. Give it a title, then click “Save all”.','status-ok');
+      setFootLeft('Only the new line is shown. Choose “Show all” in the Line list to see the others.');
+      try{ const t = document.getElementById('f_name_user'); t.focus(); }catch(e){}
     }).catch(err => { showStatus('API error: '+err, 'status-err'); LINES_GROUP.removeLayer(tmp); });
+  });
+
+  MAP.on(L.Draw.Event.DRAWSTART, function(){
+    DRAWING = true;
+    document.getElementById('drawBanner').style.display = 'block';
+    setFootLeft('Drawing a new line: click to add points, double-click or Enter to finish, Esc to cancel.');
+  });
+  MAP.on(L.Draw.Event.DRAWSTOP, function(){
+    DRAWING = false;
+    document.getElementById('drawBanner').style.display = 'none';
   });
 
   MAP.on(L.Draw.Event.EDITED, function(e){
@@ -1184,7 +1207,7 @@ function setEditActionButtons(visible){
 function startNewLine(){
   cleanupSingleHandlers();
   const h = DRAW_CONTROL && DRAW_CONTROL._toolbars.draw && DRAW_CONTROL._toolbars.draw._modes.polyline && DRAW_CONTROL._toolbars.draw._modes.polyline.handler;
-  if (h){ h.enable(); setFootLeft('Drawing: click to add points, double-click or Enter to finish.'); }
+  if (h){ h.enable(); }
 }
 
 function toggleSingleEdit(){
@@ -1225,7 +1248,7 @@ async function deleteSelected(){
   const layer = LAYER_BY_ID[SELECTED_ID];
   const title = (layer && layer.feature && layer.feature.properties && layer.feature.properties.name_user) || '';
   const label = title && title.trim().length ? `${title} — ${SELECTED_ID}` : SELECTED_ID;
-  if (!confirm(`Delete the selected line:\n\n${label}\n\nThis action will be staged and applied when you Save.`)) return;
+  if (!confirm(`Delete the selected line:\n\n${label}\n\nIt is removed for good when you click “Save all”; “Discard” brings it back.`)) return;
 
   try{
     const res = await window.pywebview.api.delete_line(SELECTED_ID);
@@ -1236,7 +1259,7 @@ async function deleteSelected(){
     setSelected('');
     setDirty(true);
     updateCountBadge();
-    showStatus('Line deleted (staged). Click Save to commit.','status-ok');
+    showStatus('Line deleted, not saved yet. Click “Save all” to keep the change.','status-ok');
     setFootLeft('Deleted (staged).');
   }catch(err){
     showStatus('API error: '+err,'status-err');
@@ -1306,7 +1329,13 @@ function boot(){
         if (DIRTY && !confirm('You have unsaved changes. Reload anyway and keep staged changes in memory?')) return;
         loadAll();
     });
-  document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
+  // Inside Special focus the host window has the Exit button; a second one here only confuses.
+  if (window.self !== window.top){ document.getElementById('exitBtn').style.display = 'none'; }
+  window.mesaHasUnsaved = function(){ return DIRTY; };
+  document.getElementById('exitBtn').addEventListener('click', ()=> {
+    if (DIRTY && !confirm('You have unsaved changes to the lines.\n\nExit without saving them?')) return;
+    window.pywebview.api.exit_app();
+  });
   document.getElementById('newBtn').addEventListener('click', startNewLine);
   document.getElementById('editBtn').addEventListener('click', toggleSingleEdit);
   document.getElementById('delBtn').addEventListener('click', deleteSelected);
@@ -1350,7 +1379,9 @@ function boot(){
   });
 
   document.getElementById('importBtn').addEventListener('click', async ()=>{
-        if (DIRTY && !confirm('Import replaces current line set. Continue and lose unsaved staged changes?')) return;
+        if (!confirm('Import reads the files in input/lines and REPLACES every line in the project, '
+            + 'including lines drawn here.' + (DIRTY ? '\n\nYour unsaved changes are lost as well.' : '')
+            + '\n\nContinue?')) return;
     showStatus('Importing lines…','status-warn');
     try{
       const res = await window.pywebview.api.import_lines_from_input();
@@ -1385,6 +1416,14 @@ function boot(){
         }
         if (e.altKey) return;
         if (inFormField && e.key !== 'Escape') return;
+
+        if (DRAWING && e.key === 'Enter'){
+            const h = DRAW_CONTROL._toolbars.draw._modes.polyline.handler;
+            e.preventDefault();
+            if (h._markers && h._markers.length >= 2){ h.completeShape(); }
+            else { showStatus('A line needs at least two points.','status-warn'); }
+            return;
+        }
 
         if (e.key === 'N' || e.key === 'n'){ startNewLine(); }
         else if (e.key === 'E' || e.key === 'e'){ if (!document.getElementById('editBtn').disabled) toggleSingleEdit(); }

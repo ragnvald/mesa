@@ -228,6 +228,13 @@ HOST_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   window.addEventListener('load', function(){ show('lines'); });
   document.querySelectorAll('.tab').forEach(function(b){ b.addEventListener('click', function(){ show(b.dataset.tab); }); });
   document.getElementById('exit').addEventListener('click', function(){
+    // Lines keeps edits in memory until "Save all"; Analysis writes as it goes.
+    var unsaved = false;
+    try{ var w = document.getElementById('view-lines').contentWindow; unsaved = !!(w && w.mesaHasUnsaved && w.mesaHasUnsaved()); }catch(e){}
+    if (unsaved){
+      show('lines');
+      if (!confirm('You have unsaved changes on the Lines tab.\n\nExit without saving them?')) return;
+    }
     try{ window.pywebview.api.host_exit(); }catch(e){}
   });
 </script>
