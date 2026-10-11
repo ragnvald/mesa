@@ -125,11 +125,11 @@ never.
 ---
 
 ### A6. Special focus — one editing model for Lines and Analysis
-- **State:** the traps in the add flow were fixed 2026-10-11 (`d20178c`, `a6e5413`). The
-  structural part is under way: both tabs stage edits and write on Save, share one layout, and
-  the tables they write are checked against the report and the statistics built from them.
-- **To do:** the seven steps in the plan, in order; steps 1–3 remove silent data loss, 4 adds
-  the "edited after the last Analysis run" check, 5–6 are the layout, 7 is wiki and screenshots.
+- **State:** done in code 2026-10-11 — both tabs stage edits and write on Save, share one
+  layout, and the report and Compare study areas say when a study area was edited after its
+  analysis ran (`4e0877c`, `bbb14de`, `ba6c813`, `5530c7d`, `39da1a0`).
+- **To do:** click through the real window once (close prompt on X and Exit with unsaved edits
+  on each tab); wiki text and the two screenshots.
 - **Refs:** `devtools/docs/SPECIAL_FOCUS_REDESIGN_PLAN.md`.
 
 ## B. Ideas — candidates, not yet decided

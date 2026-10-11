@@ -1241,3 +1241,28 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - Rule: `QMessageBox.question(...)` for anything that deletes, replaces or discards data passes `QMessageBox.No` (or `Cancel`) as the default button.
 - Why: without an explicit default Qt picks the accept button, so Enter confirmed Clear output, Restore package, Move workspace and the geocode deletes — the same keystroke that dismisses an info box.
 - How to apply: grep new `QMessageBox.question` calls for a third argument after the button set. Non-destructive prompts ("Import now?") may keep Yes.
+
+## An editor that feeds Process stages its edits and writes everything on Save (2026-10-11)
+
+- Rule: an editor whose tables are read by a processing stage or the report keeps edits in memory, writes on an explicit Save, and that Save writes every table the readers need — atomically (temp file + `os.replace`) — and removes derived rows for items that no longer exist. While there are unsaved edits, the page says that Process and the report use saved data only.
+- Why: the Analysis tab wrote on every operation, but not consistently: drawing a polygon wrote `tbl_analysis_polygons` and not `tbl_analysis_group`, so `detect_analysis_processing` (which checks both files) reported the stage unavailable and the report offered no study areas. Deleting a polygon or a group left its rows in `tbl_analysis_flat` / `tbl_analysis_stacked`, because the Analysis stage only rewrites the groups it runs; a deleted polygon's area stayed in report totals and a deleted group went on being exported to GeoNode. Lines had the right model but `Import` bypassed it and overwrote both line tables at once.
+- How to apply: when adding an operation to `AnalysisStorage` or the Lines `Api`, change the in-memory frame and set the dirty flag; never call `to_parquet` from a mutator. When adding a table an editor owns, add it to `save()`. When a stage keeps results per item, give the editor's Save the job of purging results for deleted items (`_purge_orphan_results`).
+- Non-regression guarantee: table names, column sets (`GROUP_COLUMNS`, `POLYGON_COLUMNS`, lines `REQUIRED_COLUMNS`) and id formats are unchanged; `tests/test_analysis_storage.py` and `tests/test_line_manage_api.py` pin the behaviour.
+
+## Results must say when their inputs changed after them (2026-10-11)
+
+- Rule: where an output combines current input with results computed earlier, compare the two and say so when the input is newer — in the editor, in the report and in any viewer. Use `mesa_shared.analysis_groups_edited_since_run()` for study areas.
+- Why: the report takes a study area's map and total area from the current polygons and its sensitivity figures from the last Analysis run. After an edit they describe different shapes, and there was no signal: a polygon added after Process was missing from the figures, a reshaped one kept its old numbers. Both timestamps (`updated_at` on the polygon, `analysis_timestamp` on the result) were already written as naive UTC ISO strings; nothing compared them.
+- How to apply: a new derived table that snapshots editor input should carry a run timestamp, and its consumers should check it against the input's `updated_at`. The check flags any saved polygon edit, a renamed title included, because results carry no fingerprint of the geometry they came from — acceptable while re-running the stage takes seconds; revisit if it ever does not.
+
+## pywebview: ask about unsaved edits in the closing hook, not on the Exit button (2026-10-11)
+
+- Rule: a pywebview window with unsaved state registers `mesa_shared.guard_unsaved_on_close(window, unsaved_fn)`; pages do not prompt on their own Exit button, and the unsaved state is tracked in Python.
+- Why: `window.events.closing` fires for the window's X and for `destroy_window()` alike, synchronously on the GUI thread, and returning `False` cancels the close. A `confirm()` on the Exit button covered neither the X nor, in Special focus, the other tab — and with a hook as well it would ask twice, since Exit ends in `destroy_window()`. Tracking the state in Python also means the host window does not have to reach into an iframe.
+- How to apply: give each backend a `has_unsaved()` / `_is_dirty()` that every staging method sets and Save / Discard clear, and list the parts by name in `unsaved_fn` so the prompt can say which tab it is about.
+
+## A probe that shows no difference may not have reproduced the fault (2026-10-11)
+
+- Rule: before concluding from a before/after check that a fix is unnecessary or ineffective, confirm that the "before" run actually shows the fault.
+- Why: the progress-map legend was reported hidden under the map. The first probe found the legend on top with and without the z-index fix — because its map had loaded no tiles, so nothing covered the legend in either case. Only an element simulating a tile over the whole map separated the two. Separately, a page probe found that the Analysis tab's first load calls `applyState` directly rather than through `callPython`, so a flag handled only in `callPython` was never set at start-up; reading the code had not shown it.
+- How to apply: make the probe fail first. For interface work, drive the real page (QtWebEngine with a stub `window.pywebview.api`) through the first load as well as the later calls.

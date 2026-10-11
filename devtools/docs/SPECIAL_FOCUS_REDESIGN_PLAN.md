@@ -1,6 +1,8 @@
 # Special focus: one editing model for Lines and Analysis
 
-Status: agreed with the operator 2026-10-11; implementation started the same day.
+Status: agreed with the operator 2026-10-11. Steps 1-6 landed the same day (`4e0877c`, `bbb14de`,
+`ba6c813`, `5530c7d`, `39da1a0`); step 7 (wiki and screenshots) follows. Open: the native close
+prompt has not been clicked through in the real window.
 Scope: `code/line_manage.py`, `code/analysis_setup.py`, `code/special_focus.py`, plus the
 readers that turn their tables into statistics and report content.
 

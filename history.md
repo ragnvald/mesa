@@ -801,3 +801,66 @@ probe on a copy of `tbl_asset_group`, and the test suite (68 passed).
 Remaining from the review, not started: Delete placed next to Save/Next in the record editors,
 inconsistent save wording, no keyboard shortcuts, fixed button widths. Nothing here touched the
 sibling projects; nothing reported to mesa-server or mesa_demodata.
+
+## 2026-10-10 – 2026-10-11 — 5.7.0 prepared; Special focus rebuilt around one editing model
+
+**Release preparation (2026-10-10).** The backlog from August and September was committed as fourteen
+thematic commits (`dea9169` … `077a5af`) and pushed. Version information was already 5.7.0 in
+`config.ini` and the user-guide script; what was missing around it went in locally: the config
+template without the dead `backfill_max_workers` and with `segmv_enabled = 0` (`d68582b`), draft
+release notes (`4097db7`), the capture tool covering Classification setup (`1cb9642`). The wiki got
+the rest of the 5.7 changelog, the interface page, four downscaled figures from the method
+manuscript, and all interface screenshots retaken. Taking the screenshots surfaced three interface
+texts that no longer matched the behaviour (`3c5209c`) and the operator's GeoNode server address in
+the publish popup, which was replaced with example values in both GeoNode images before commit.
+
+**Progress-map legend (2026-10-11).** Reported as "legend written under the map". It had no
+z-index and Leaflet's tile pane covered it once tiles loaded (`a541cb8`). The first probe showed
+no difference between old and new, because the probe's map had loaded no tiles and so nothing
+covered the legend; only a simulated tile over the whole map separated the two.
+
+**Special focus.** The operator reported that adding lines and areas was illogical and easy to
+misunderstand. A walk through both editors found the interface saying one thing and doing another:
+"Finish: Enter" with no Enter handler, a polygon drawn from the map icon silently dropped, "area"
+used for both the group and the polygon, a Save button in Analysis that saved nothing new, default
+segment values staged but shown blank. Those were fixed first (`d20178c`, `a6e5413`).
+
+The structural cause was that the two tabs followed different logics — Lines staged edits and
+wrote on Save, Analysis wrote on every operation with no way back. The plan agreed with the
+operator (`devtools/docs/SPECIAL_FOCUS_REDESIGN_PLAN.md`, `0e312ec`) was to move Analysis to the
+Lines model rather than the reverse, since the reverse would take Discard away, and to give both
+tabs the same layout.
+
+The operator asked that the change be checked against report generation and the statistics. That
+trace mattered more than the layout. It found that drawing a polygon wrote
+`tbl_analysis_polygons` but not `tbl_analysis_group`, so the Analysis stage reported itself
+unavailable and the report listed no study areas; that result rows for deleted polygons and groups
+were never removed and stayed in report totals and in the GeoNode export; that the report mixes
+current polygons (map, total area) with figures from the last run and says nothing when they
+differ; that the Lines stage skips a line with an empty segment value and writes three random
+template lines into an empty table; and that the Status tab counted lines from an import snapshot
+that edits never update.
+
+Shipped: Analysis stages edits and Save writes both tables atomically and purges orphan results
+(`4e0877c`); Lines gets a list instead of a dropdown, keeps every line visible, stages Import and
+fills missing segment values on Save (`bbb14de`); the Special focus window asks about unsaved
+edits on either tab for every way out, and the tab is called "Study areas" (`ba6c813`); the report
+and Compare study areas say when a study area was edited after its analysis ran (`5530c7d`); the
+Status tab counts `tbl_lines` (`39da1a0`).
+
+Verified with twelve new unit tests (80 in all), both pages driven in QtWebEngine against stub
+backends, and one end-to-end pass on a copy of the development project: two polygons drawn and
+saved, the Analysis stage run in 5.3 s (167 + 7 result rows), the report helpers finding the study
+area with four sensitivity classes and 1,587 km², a shape edit flagging it as edited since the
+run, a delete removing its 31 result rows on Save, and a re-run clearing the flag. One defect was
+caught by the page probe rather than by reading: the first load calls `applyState` directly, not
+through the common call path, so the edited-since-run note was never set at start-up.
+
+Not done: the real Special focus window was only started and left running for 25 seconds, not
+clicked through, so the native close prompt has not been seen on screen. Left for later and noted
+in the plan: `AnalysisStorage` reads `workingprojection_epsg` while config.ini has
+`working_projection_epsg`, so it always resolves to 4326 — which is what the Analysis stage
+assumes, so correcting only the key would break it.
+
+Nothing here touched the sibling projects, and table and column names are unchanged. Nothing was
+reported to mesa-server or mesa_demodata.
