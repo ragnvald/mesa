@@ -1322,11 +1322,7 @@ class ReportEngine:
             title_raw = tile_row.get('title_user') or tile_row.get('name_gis') or safe_tile
             tile_id = tile_row.get('name_gis') or safe_tile
             heading = f"Atlas tile: {title_raw}" if str(title_raw) == str(tile_id) else f"Atlas tile: {title_raw} ({tile_id})"
-            # Force each atlas tile sub-chapter onto its own page so the
-            # heading, description, and map stay together. Atlas tiles use
-            # the 'image' kind (not 'image_map'), so the automatic
-            # page-break-before-heading logic in compile_docx does not fire
-            # for them — emit the page break explicitly here.
+            # Each atlas tile gets a page of its own.
             pages.append(('new_page', None))
             pages.append(('heading(3)', heading))
             info_parts = []
@@ -1609,8 +1605,9 @@ class ReportEngine:
                 int(r.get('E', 0) or 0),
             ])
 
+        # No page break: the short per-line table shares its page with the
+        # introduction to "Lines and segments" that follows.
         pages.append(('table_data', ("Line overview", table)))
-        pages.append(('new_page', None))
         return pages
 
     def render_segments(self,
@@ -4220,6 +4217,17 @@ def compile_docx(output_docx: str, order_list: list):
     except Exception:
         pass
 
+    # A4 with 2.5 cm side margins gives a 16 cm text column - the width the images
+    # below are sized for. python-docx's default template is US Letter with 3.17 cm
+    # side margins (15.2 cm of text), so full-width images overran the right margin.
+    try:
+        for _section in doc.sections:
+            _section.page_width, _section.page_height = Cm(21.0), Cm(29.7)
+            _section.left_margin = _section.right_margin = Cm(2.5)
+            _section.top_margin = _section.bottom_margin = Cm(2.2)
+    except Exception:
+        pass
+
     MAX_IMAGE_WIDTH_CM = 16.0
     # Atlas tiles previously rendered up to 12 x 18 cm (full A4 page minus
     # margins) and forced their heading + description onto a separate page.
@@ -4278,7 +4286,7 @@ def compile_docx(output_docx: str, order_list: list):
     def add_heading(level: int, text: str):
         clean = _clean_docx_text(text)
         lvl = max(1, min(4, int(level)))
-        h = doc.add_heading(clean, level=lvl)
+        h = _start(doc.add_heading(clean, level=lvl))
         # Keep a heading with the paragraph/image that follows, so it never sits
         # orphaned at the foot of a page ahead of its content.
         try:
@@ -4286,14 +4294,53 @@ def compile_docx(output_docx: str, order_list: list):
         except Exception:
             pass
 
-    def add_text(text: str):
+    _FIGURE_KINDS = ("image", "image_map", "image_ribbon", "table", "table_data", "table_data_small")
+
+    def _next_kind(idx: int):
+        """(kind, payload) of the next item that puts something on the page."""
+        for j in range(idx + 1, len(order_list)):
+            kj, pj = order_list[j]
+            if kj in ("rule",):
+                continue
+            return kj, pj
+        return None, None
+
+    def _keep_with_next(paragraph) -> None:
+        try:
+            paragraph.paragraph_format.keep_with_next = True
+        except Exception:
+            pass
+
+    # A page break is carried by the paragraph that starts the new page ("page break
+    # before"), not by a paragraph of its own. A separate break paragraph needs a
+    # line on the page it ends; when that page was already full it moved to the next
+    # one and left it blank.
+    pending_break = [False]
+
+    def _start(paragraph):
+        """Call on every paragraph that begins an item; applies a pending page break."""
+        if pending_break[0]:
+            try:
+                paragraph.paragraph_format.page_break_before = True
+            except Exception:
+                pass
+            pending_break[0] = False
+        return paragraph
+
+    def _page_break() -> None:
+        pending_break[0] = True
+
+    def add_text(text: str, keep_with_next: bool = False):
         clean = _clean_docx_text(text)
-        para = doc.add_paragraph(clean)
+        para = _start(doc.add_paragraph(clean))
         para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        # The paragraph that introduces a map, chart or table stays on its page.
+        if keep_with_next:
+            _keep_with_next(para)
 
     def add_bold_title(text: str):
         clean = _clean_docx_text(text)
-        p = doc.add_paragraph()
+        p = _start(doc.add_paragraph())
         r = p.add_run(clean)
         r.bold = True
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -4319,6 +4366,9 @@ def compile_docx(output_docx: str, order_list: list):
         cols = len(data[0]) if rows else 0
         if rows <= 0 or cols <= 0:
             return
+        if pending_break[0]:
+            # A table cannot carry the break itself; give it an empty lead paragraph.
+            _keep_with_next(_start(doc.add_paragraph()))
         table = doc.add_table(rows=rows, cols=cols)
         table.style = "Table Grid"
         for r in range(rows):
@@ -4333,6 +4383,22 @@ def compile_docx(output_docx: str, order_list: list):
                 for p in cell.paragraphs:
                     for rr in p.runs:
                         rr.font.bold = True
+        except Exception:
+            pass
+        # Page flow: a row never splits across two pages, the header row repeats when
+        # a long table continues, and a short table is not split at all.
+        try:
+            for r_i, row in enumerate(table.rows):
+                tr_pr = row._tr.get_or_add_trPr()
+                cant_split = OxmlElement('w:cantSplit')
+                tr_pr.append(cant_split)
+                if r_i == 0:
+                    tr_pr.append(OxmlElement('w:tblHeader'))
+            if rows <= 22:
+                for row in list(table.rows)[:-1]:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            _keep_with_next(p)
         except Exception:
             pass
 
@@ -4360,40 +4426,28 @@ def compile_docx(output_docx: str, order_list: list):
     def _needs_osm_attribution(path: str) -> bool:
         return _is_map_image(path) or _is_atlas_image(path)
 
-    def _add_osm_attribution_paragraph():
+    def _add_osm_attribution_paragraph(keep_with_next: bool = False):
         p = doc.add_paragraph()
         r = p.add_run(OSM_ATTRIBUTION_TEXT)
         r.italic = True
         r.font.size = Pt(8)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    def _heading_starts_map_block(idx: int, max_ahead: int = 10) -> bool:
-        try:
-            if idx < 0 or idx >= len(order_list):
-                return False
-            k0, _ = order_list[idx]
-            if not str(k0).startswith("heading"):
-                return False
-            for j in range(idx + 1, min(len(order_list), idx + 1 + max_ahead)):
-                kj, _pj = order_list[j]
-                if kj == "new_page":
-                    return False
-                if kj == "image_map":
-                    return True
-                if str(kj).startswith("heading"):
-                    return False
-            return False
-        except Exception:
-            return False
+        if keep_with_next:
+            _keep_with_next(p)
 
     has_any_content = False
     last_was_page_break = False
+    last_heading_text = None   # a figure title equal to the heading just above it is not printed again
+
+    def _is_repeat_of_heading(title) -> bool:
+        return bool(title) and last_heading_text is not None and \
+            _clean_docx_text(title).strip().lower() == last_heading_text
 
     for idx, (kind, payload) in enumerate(order_list):
         if kind == 'toc':
             # TOC should start on a new page.
             if has_any_content and not last_was_page_break:
-                doc.add_page_break()
+                _page_break()
                 last_was_page_break = True
             add_bold_title("Contents")
             p = doc.add_paragraph()
@@ -4403,20 +4457,17 @@ def compile_docx(output_docx: str, order_list: list):
             last_was_page_break = False
 
         elif isinstance(kind, str) and kind.startswith("heading"):
-            # Keep map sections from starting at end of previous page.
-            if _heading_starts_map_block(idx) and has_any_content and not last_was_page_break:
-                doc.add_page_break()
-                last_was_page_break = True
             try:
                 level = int(kind[kind.find('(') + 1:kind.find(')')])
             except Exception:
                 level = 2
             add_heading(level, payload)
+            last_heading_text = _clean_docx_text(payload).strip().lower()
             has_any_content = True
             last_was_page_break = False
 
         elif kind == "text":
-            add_text(payload)
+            add_text(payload, keep_with_next=(_next_kind(idx)[0] in _FIGURE_KINDS))
             has_any_content = True
             last_was_page_break = False
 
@@ -4452,7 +4503,7 @@ def compile_docx(output_docx: str, order_list: list):
                 title, path = payload
             except Exception:
                 title, path = None, None
-            if title:
+            if title and not _is_repeat_of_heading(title):
                 add_bold_title(title)
             if path and isinstance(path, str) and os.path.exists(path):
                 try:
@@ -4504,11 +4555,23 @@ def compile_docx(output_docx: str, order_list: list):
 
                     try:
                         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        _start(doc.paragraphs[-1])
                     except Exception:
                         pass
 
+                    # A map stays with its attribution line, and with the legend
+                    # strip or ribbon that reads against it.
+                    nk, npay = _next_kind(idx)
+                    next_path = npay[1] if (isinstance(npay, tuple) and len(npay) == 2) else None
+                    ribbon_follows = any(k == "image_ribbon" for k, _p in order_list[idx + 1: idx + 3])
+                    binds_next = bool(
+                        ribbon_follows
+                        or (nk in ("image", "image_map") and isinstance(next_path, str) and _is_legend_image(next_path)))
                     if _needs_osm_attribution(path):
-                        _add_osm_attribution_paragraph()
+                        _keep_with_next(doc.paragraphs[-1])
+                        _add_osm_attribution_paragraph(keep_with_next=binds_next)
+                    elif binds_next:
+                        _keep_with_next(doc.paragraphs[-1])
                 except Exception:
                     add_text(f"(image unavailable: {os.path.basename(path)})")
             else:
@@ -4530,8 +4593,15 @@ def compile_docx(output_docx: str, order_list: list):
             except Exception:
                 n = 1
             n = max(1, min(20, n))
+            prev_kind = order_list[idx - 1][0] if idx > 0 else None
+            if _next_kind(idx)[0] in ("new_page", None):
+                continue   # blank lines at the foot of a page only risk an empty page
             for _ in range(n):
-                doc.add_paragraph("")
+                blank = _start(doc.add_paragraph(""))
+                # Blank lines between a heading and its content would otherwise
+                # release the heading from the content that follows.
+                if isinstance(prev_kind, str) and prev_kind.startswith("heading"):
+                    _keep_with_next(blank)
             has_any_content = True
             last_was_page_break = False
 
@@ -4539,7 +4609,7 @@ def compile_docx(output_docx: str, order_list: list):
             # Avoid consecutive page breaks which can create empty pages.
             if last_was_page_break:
                 continue
-            doc.add_page_break()
+            _page_break()
             has_any_content = True
             last_was_page_break = True
 
@@ -5718,7 +5788,7 @@ def generate_report(base_dir: str,
                 "the line out flat from start to end so peaks are easy to locate against distance markers. "
                 "Read maximum and minimum together: if both are high, sensitivity is uniformly elevated; "
                 "if they diverge, the line passes through both robust and sensitive ground."))
-            order_list.append(('rule', None))
+            # Each line page is a full page (map, distribution, ribbon); start the first one clean.
             order_list.append(('new_page', None))
             order_list.extend(pages_lines)
 
