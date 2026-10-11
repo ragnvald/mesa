@@ -5542,7 +5542,7 @@ def generate_report(base_dir: str,
 
                 def _add_single(group_id: str):
                     group_title = _analysis_group_title(gpq_dir_analysis, group_id)
-                    order_list.append(('heading(2)', f"Analysis – {group_title}"))
+                    order_list.append(('heading(2)', f"Study area analysis – {group_title}"))
                     _edited_note(group_id)
 
                     polys = _analysis_polygons_for_group(gpq_dir_analysis, group_id)
@@ -5562,7 +5562,7 @@ def generate_report(base_dir: str,
                         order_list.append(('image_map', ("Area overview (basemap + sensitivity)", minimap_path)))
                         order_list.append(('text', f"<b>Total area:</b> {_format_area_km2(_analysis_polygon_total_km2(polys))}"))
                     else:
-                        order_list.append(('text', "(Area map unavailable: missing analysis polygons and/or basemap/mbtiles.)"))
+                        order_list.append(('text', "(Area map unavailable: the study area has no polygons, or the basemap or map tiles are missing.)"))
 
                     assets_tbl = _analysis_assets_within_area_table(asset_objects_df, asset_groups_df, polys)
                     if assets_tbl:
@@ -5604,8 +5604,8 @@ def generate_report(base_dir: str,
                 mode = str(analysis_mode or "single").strip().lower()
                 if mode == "all":
                     if not id_list:
-                        order_list.append(('heading(2)', "Analysis"))
-                        order_list.append(('text', "(No analysis groups found. Run analysis_setup.py / processing_pipeline_run.py first.)"))
+                        order_list.append(('heading(2)', "Study area analysis"))
+                        order_list.append(('text', "(No study areas found. Define them under Configure → Special focus → Study areas, save, and run Process.)"))
                         order_list.append(('new_page', None))
                     else:
                         for gid in id_list:
@@ -5614,13 +5614,13 @@ def generate_report(base_dir: str,
                     left = (analysis_area_left or "").strip()
                     right = (analysis_area_right or "").strip()
                     if not left or not right:
-                        order_list.append(('heading(2)', "Analysis"))
+                        order_list.append(('heading(2)', "Study area analysis"))
                         order_list.append(('text', "(Compare mode selected, but one or both areas were not chosen.)"))
                         order_list.append(('new_page', None))
                     else:
                         left_title = _analysis_group_title(gpq_dir_analysis, left)
                         right_title = _analysis_group_title(gpq_dir_analysis, right)
-                        order_list.append(('heading(2)', f"Analysis – Compare: {left_title} vs {right_title}"))
+                        order_list.append(('heading(2)', f"Study area analysis – {left_title} compared with {right_title}"))
                         _edited_note(left, left_title)
                         _edited_note(right, right_title)
 
@@ -5712,14 +5712,14 @@ def generate_report(base_dir: str,
                 else:
                     gid = (analysis_area_left or "").strip() or (id_list[0] if id_list else "")
                     if not gid:
-                        order_list.append(('heading(2)', "Analysis"))
-                        order_list.append(('text', "(No analysis groups found. Run analysis_setup.py / processing_pipeline_run.py first.)"))
+                        order_list.append(('heading(2)', "Study area analysis"))
+                        order_list.append(('text', "(No study areas found. Define them under Configure → Special focus → Study areas, save, and run Process.)"))
                         order_list.append(('new_page', None))
                     else:
                         _add_single(gid)
             except Exception as exc:
                 write_to_log(f"Analysis presentation section failed: {exc}", base_dir)
-                order_list.append(('heading(2)', "Analysis"))
+                order_list.append(('heading(2)', "Study area analysis"))
                 order_list.append(('text', "(Analysis presentation could not be generated; check log for details.)"))
                 order_list.append(('new_page', None))
 
@@ -5762,7 +5762,7 @@ def generate_report(base_dir: str,
 
         if index_pages:
             order_list.extend(index_pages)
-        else:
+        elif include_index_statistics:
             order_list.append(('text', "No index statistics could be generated (missing data/columns)."))
             order_list.append(('new_page', None))
 
