@@ -206,7 +206,7 @@ HOST_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <div id="app">
   <div id="bar">
     <button class="tab active" data-tab="lines">Lines</button>
-    <button class="tab" data-tab="analysis">Analysis</button>
+    <button class="tab" data-tab="analysis">Study areas</button>
     <span id="spacer"></span>
     <button id="exit" title="Close Special focus">Exit</button>
   </div>
@@ -228,13 +228,8 @@ HOST_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   window.addEventListener('load', function(){ show('lines'); });
   document.querySelectorAll('.tab').forEach(function(b){ b.addEventListener('click', function(){ show(b.dataset.tab); }); });
   document.getElementById('exit').addEventListener('click', function(){
-    // Lines keeps edits in memory until "Save all"; Analysis writes as it goes.
-    var unsaved = false;
-    try{ var w = document.getElementById('view-lines').contentWindow; unsaved = !!(w && w.mesaHasUnsaved && w.mesaHasUnsaved()); }catch(e){}
-    if (unsaved){
-      show('lines');
-      if (!confirm('You have unsaved changes on the Lines tab.\n\nExit without saving them?')) return;
-    }
+    // No prompt here: the window's closing hook asks about unsaved changes on
+    // either tab, and it covers the window's X as well.
     try{ window.pywebview.api.host_exit(); }catch(e){}
   });
 </script>
@@ -293,7 +288,7 @@ def run(base: str | None = None) -> None:
 
     url = _start_server()
     window = webview.create_window(
-        title="MESA — Special focus (Lines / Analysis)",
+        title="MESA — Special focus (Lines / Study areas)",
         url=url,
         js_api=_HostApi(),
         width=1180, height=780, resizable=True,
@@ -301,11 +296,14 @@ def run(base: str | None = None) -> None:
     # Register the two apps' bridges under namespaced names.
     window.expose(*_namespaced_wrappers(lines_api, "lines"))
     window.expose(*_namespaced_wrappers(analysis_api, "analysis"))
+    mesa_shared.guard_unsaved_on_close(window, lambda: [
+        name for name, dirty in (("Lines", lines_api.has_unsaved()), ("Study areas", analysis_api._is_dirty())) if dirty
+    ])
     webview.start(gui="edgechromium", debug=False)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="MESA — Special focus (Lines / Analysis tabs)")
+    ap = argparse.ArgumentParser(description="MESA — Special focus (Lines / Study areas tabs)")
     ap.add_argument("--original_working_directory", required=False, default=None)
     args = ap.parse_args(argv if argv is not None else sys.argv[1:])
     run(args.original_working_directory)
