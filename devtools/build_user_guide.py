@@ -36,7 +36,7 @@ PT_MONTHS = [
 
 
 # ---------------------------------------------------------------------------
-# Block helpers — content is language-keyed so a single tree feeds both files.
+# Block helpers: content is language-keyed so a single tree feeds both files.
 # ---------------------------------------------------------------------------
 
 def H(level, en, pt):
@@ -68,7 +68,7 @@ def PB():
 
 
 # ---------------------------------------------------------------------------
-# Content tree — wiki-derived, both languages side-by-side.
+# Content tree: wiki-derived, both languages side-by-side.
 # ---------------------------------------------------------------------------
 
 def build_blocks():
@@ -82,8 +82,8 @@ def build_blocks():
           "1. Introduction",
           "1. Introdução"))
     add(IMG("top_intro.png",
-            "MESA — Mapping Environmentally Sensitive Assets.",
-            "MESA — Mapeamento de Activos Ambientalmente Sensíveis.",
+            "MESA: Mapping Environmentally Sensitive Assets.",
+            "MESA: Mapeamento de Activos Ambientalmente Sensíveis.",
             width_cm=15.0))
     add(P(
         "The MESA method identifies and evaluates key environmental factors such as ecological significance, biodiversity, species abundance, habitat quality, and the presence of sensitive or protected areas. By combining these factors, the method supports a structured assessment of how pollution incidents may affect the environment.",
@@ -121,161 +121,106 @@ def build_blocks():
     add(PB())
 
     # =========================================================================
-    # 2. What's new in MESA 5.2
+    # 2. What's new in MESA 5.7
     # =========================================================================
-    add(H(1, "2. What's new in MESA 5.2", "2. Novidades no MESA 5.2"))
+    add(H(1, "2. What's new in MESA 5.7", "2. Novidades no MESA 5.7"))
     add(P(
-        "MESA 5.2 is a maps-and-segmentation release. The two biggest changes are visible the moment you open the Results tools: a single unified Maps window replaces the two former map viewers, and a new Segment stage in the processing runner builds a per-geocode-layer segmentation of the analysis result. The reliability and usability gains introduced in 5.1 are carried forward and summarised after the 5.2 highlights below.",
-        "O MESA 5.2 é uma versão centrada em mapas e segmentação. As duas maiores mudanças são visíveis assim que abre as ferramentas de Resultados: uma única janela de Mapas unificada substitui os dois antigos visualizadores de mapas, e uma nova fase Segmentar no executor de processamento constrói uma segmentação por camada de geocódigos do resultado da análise. Os ganhos de fiabilidade e usabilidade introduzidos na 5.1 são mantidos e resumidos após os destaques da 5.2 abaixo."))
+        "MESA 5.7 is a release about scale and safety. Projects take far less disk and memory, map tiles render faster, and a data-loss bug that affected every earlier MESA 5 release is fixed. Around that, the interface was gone through window by window: MESA now asks before unsaved edits are lost, destructive actions are harder to trigger by accident, and the report, the QGIS project and GeoNode publishing have gained new features.",
+        "O MESA 5.7 é uma versão centrada na escala e na segurança. Os projectos ocupam muito menos disco e memória, os mosaicos de mapa são gerados mais depressa, e foi corrigido um erro de perda de dados que afectava todas as versões anteriores do MESA 5. Além disso, a interface foi revista janela a janela: o MESA pergunta agora antes de se perderem edições não guardadas, as acções destrutivas são mais difíceis de accionar por engano, e o relatório, o projecto QGIS e a publicação no GeoNode ganharam novas funcionalidades."))
 
-    add(H(2, "2.1 Unified Maps window", "2.1 Janela de Mapas unificada"))
+    add(H(2, "2.1 Read this first: check your mosaic", "2.1 Leia primeiro: verifique o seu mosaico"))
     add(P(
-        "The Results step now has a single Maps button (it was two: Asset map and Results map). It opens one window with three tabs: Overview (the index / sensitivity MBTiles layers over a basemap, with a small area bar chart), Segmentation (the layers produced by the new Segment stage; empty until a project has a segmentation partition), and Assets (imported asset layers, loaded lazily so the window opens quickly, with AI cartography assigning colours when you turn a group on). Shared controls in the header and a floating panel apply to the active tab: Link zoom & pan keeps all three maps framed on the same area, plus an opacity slider, a basemap selector, floating layer controls, and Export PNG.",
-        "A etapa de Resultados tem agora um único botão Mapas (eram dois: Mapa de Activos e Mapa de Resultados). Abre uma janela com três separadores: Visão Geral (as camadas MBTiles de índice / sensibilidade sobre um mapa-base, com um pequeno gráfico de barras de área), Segmentação (as camadas produzidas pela nova fase Segmentar; vazio até o projecto ter uma partição de segmentação) e Activos (camadas de activos importadas, carregadas de forma diferida para a janela abrir rapidamente, com cartografia assistida por IA a atribuir cores quando activa um grupo). Os controlos partilhados no cabeçalho e num painel flutuante aplicam-se ao separador activo: Ligar zoom e deslocamento mantém os três mapas enquadrados na mesma área, mais um cursor de opacidade, um selector de mapa-base, controlos de camadas flutuantes e Exportar PNG."))
-    add(IMG("ui_combined_map.png",
-            "Unified Maps window — Overview, Segmentation, and Assets tabs with linked zoom & pan.",
-            "Janela de Mapas unificada — separadores Visão Geral, Segmentação e Activos com zoom e deslocamento ligados.",
+        "If you added an H3 or QDGC level to a project with a large basic_mosaic in any MESA 5 release up to and including 5.6, the mosaic could be deleted without any message, and processing afterwards silently left it out. Open Geocodes and look at the object count next to basic_mosaic. A group listed with 0 objects was emptied by this bug: rebuild the mosaic and run Process again. In 5.7 a geocode table that cannot be read stops the operation instead of being treated as absent.",
+        "Se acrescentou um nível H3 ou QDGC a um projecto com um basic_mosaic grande em qualquer versão do MESA 5 até à 5.6 inclusive, o mosaico podia ser eliminado sem qualquer mensagem, e o processamento seguinte deixava-o de fora em silêncio. Abra Geocodes e veja o número de objectos junto a basic_mosaic. Um grupo listado com 0 objectos foi esvaziado por este erro: reconstrua o mosaico e execute Process de novo. Na 5.7, uma tabela de geocódigos que não pode ser lida interrompe a operação em vez de ser tratada como inexistente."))
+
+    add(H(2, "2.2 Smaller projects and nine numbered stages", "2.2 Projectos mais pequenos e nove fases numeradas"))
+    add(P(
+        "The analysis table used to store a full copy of a cell's outline on every row of that cell. Outlines are now stored once and looked up when needed. The same project gives identical rows and values in a table about 93% smaller, with unchanged processing time. Existing projects keep working, and running Process again is what shrinks them.",
+        "A tabela de análise guardava uma cópia completa do contorno de cada célula em todas as linhas dessa célula. Os contornos são agora guardados uma só vez e consultados quando necessário. O mesmo projecto produz linhas e valores idênticos numa tabela cerca de 93% mais pequena, com o mesmo tempo de processamento. Os projectos existentes continuam a funcionar, e é a nova execução de Process que os reduz."))
+    add(UL(
+        ["The Backfill stage is removed. The processing runner now has nine numbered stages: Prep, Intersect, Flatten, Segment, Classification, Tiles, QGIS project, Lines and Analysis.",
+         "Classification is the most expensive stage and is now opt-in. Tick Run Classification as part of Process under Configure, Classification if you want it in every run.",
+         "The QGIS project (qgis/mesa_results.qgz) is its own stage and no longer needs Tiles. It carries two interactive 3D views per geocode layer.",
+         "Study areas work on large projects: the analysis reads only the cells a study-area polygon touches.",
+         "Tiles render faster, and where a zoomed-out pixel covers many cells the highest value now wins, so two runs of the same data give the same picture.",
+         "Generated grid levels are named with two digits (H3_R07, QDGC_L06) so that lists sort in level order. Existing projects and restored packages are renamed automatically."],
+        ["A fase Backfill foi removida. O executor de processamento tem agora nove fases numeradas: Prep, Intersect, Flatten, Segment, Classification, Tiles, QGIS project, Lines e Analysis.",
+         "Classification é a fase mais dispendiosa e passou a ser opcional. Assinale Run Classification as part of Process em Configure, Classification se a quiser em todas as execuções.",
+         "O projecto QGIS (qgis/mesa_results.qgz) é uma fase própria e já não depende de Tiles. Inclui duas vistas 3D interactivas por camada de geocódigos.",
+         "As áreas de estudo funcionam em projectos grandes: a análise lê apenas as células tocadas por um polígono de área de estudo.",
+         "Os mosaicos são gerados mais depressa, e quando um píxel afastado cobre muitas células prevalece agora o valor mais alto, pelo que duas execuções dos mesmos dados dão a mesma imagem.",
+         "Os níveis de grelha gerados têm nomes com dois dígitos (H3_R07, QDGC_L06), para que as listas fiquem ordenadas por nível. Os projectos existentes e os pacotes restaurados são renomeados automaticamente."]))
+    add(IMG("ui_processing_pipeline_run_advanced.png",
+            "The processing runner in Advanced mode, with one tick box per stage.",
+            "O executor de processamento em modo Avançado, com uma caixa de selecção por fase.",
             width_cm=15.0))
 
-    add(H(2, "2.2 Segmentation (new Segment stage)", "2.2 Segmentação (nova fase Segmentar)"))
+    add(H(2, "2.3 MESA asks before your edits are lost", "2.3 O MESA pergunta antes de se perderem edições"))
     add(P(
-        "The data pipeline gains a fifth sub-stage, Segment, which builds tbl_segmentation from tbl_stacked. It runs on by default when data is available and produces two complementary views per geocode layer:",
-        "A pipeline de dados ganha uma quinta subfase, Segmentar, que constrói tbl_segmentation a partir de tbl_stacked. Está activa por omissão quando há dados disponíveis e produz duas vistas complementares por camada de geocódigos:"))
+        "Every window with editable fields now asks Save, Discard or Cancel before edits would be lost: on close, on Reload, on Previous and Next in the Atlas editor, and before a job that rewrites what is being edited. Cancel is the default answer.",
+        "Todas as janelas com campos editáveis perguntam agora Save, Discard ou Cancel antes de se perderem edições: ao fechar, em Reload, em Previous e Next no editor de Atlas, e antes de uma tarefa que reescreve o que está a ser editado. Cancel é a resposta por omissão."))
     add(UL(
-        [
-            "Signatures (default) — a deterministic typology: each polygon is labelled by the set of MESA sensitivity codes (A–E) carried by its overlapping assets, e.g. B+C+D+E. No tuning, fully reproducible, and cheap.",
-            "Clusters — algorithmic segmentation (KMeans, or a spatially-contiguous agglomerative-ward variant that keeps zones geographically connected). Optional and heavier; the spatial libraries are only loaded when you ask for it.",
-        ],
-        [
-            "Assinaturas (por omissão) — uma tipologia determinística: cada polígono é rotulado pelo conjunto de códigos de sensibilidade MESA (A–E) dos activos que o sobrepõem, por exemplo B+C+D+E. Sem afinação, totalmente reproduzível e económica.",
-            "Agrupamentos (clusters) — segmentação algorítmica (KMeans, ou uma variante aglomerativa-ward espacialmente contígua que mantém as zonas geograficamente ligadas). Opcional e mais pesada; as bibliotecas espaciais só são carregadas quando solicitada.",
-        ]))
+        ["Exit is in the top right corner of every window, and each window has one highlighted main action.",
+         "Destructive buttons are marked as such, and Enter no longer confirms a deletion. The safe answer is the default for Clear output, Restore, Move workspace and deleting geocode groups.",
+         "A running job cannot be started twice: its buttons are locked until it finishes.",
+         "Parameters no longer overwrites edits made in Assets. It saves only importance and susceptibility, and no longer saves by itself on close."],
+        ["Exit está no canto superior direito de todas as janelas, e cada janela tem uma acção principal destacada.",
+         "Os botões destrutivos estão assinalados como tal, e Enter já não confirma uma eliminação. A resposta segura é a predefinida em Clear output, Restore, Move workspace e na eliminação de grupos de geocódigos.",
+         "Uma tarefa em curso não pode ser iniciada duas vezes: os seus botões ficam bloqueados até terminar.",
+         "Parameters já não substitui edições feitas em Assets. Guarda apenas a importância e a susceptibilidade, e deixou de guardar automaticamente ao fechar."]))
+
+    add(H(2, "2.4 Lines and study areas are edited the same way", "2.4 Linhas e áreas de estudo editam-se da mesma forma"))
     add(P(
-        "A geocode-group multi-select on the runner controls which layers are segmented (default basic_mosaic). Outputs are slim, geometry-free tables (tbl_segmentation/<layer>.parquet plus a tiny tbl_segmentation_profiles.parquet), joined to geocode geometry only at render time. When a segmentation partition exists, the tile generator also renders <group>_seg_signatures.mbtiles and <group>_seg_clusters.mbtiles, which the Maps Segmentation tab shows. The report engine picks the segmentation up as per-method sub-tables with a Total area km² column and report-time multi-selects for geocode groups and segmentation levels.",
-        "Um selector múltiplo de grupos de geocódigos no executor controla quais as camadas a segmentar (por omissão basic_mosaic). Os resultados são tabelas compactas e sem geometria (tbl_segmentation/<camada>.parquet mais uma pequena tbl_segmentation_profiles.parquet), associadas à geometria do geocódigo apenas no momento da renderização. Quando existe uma partição de segmentação, o gerador de azulejos também produz <grupo>_seg_signatures.mbtiles e <grupo>_seg_clusters.mbtiles, mostrados no separador Segmentação dos Mapas. O motor de relatórios integra a segmentação como subtabelas por método com uma coluna Área total km² e selectores múltiplos, no momento do relatório, para grupos de geocódigos e níveis de segmentação."))
+        "The two tabs of the Special focus window used to follow different rules: Lines kept changes until you saved, while the other tab wrote every change at once with no way back. Both now have Save and Discard, the same layout (toolbar, list, form, map) and the same way of adding an item: click the points and finish with Enter or a double-click. The second tab is called Study areas.",
+        "Os dois separadores da janela Special focus seguiam regras diferentes: Lines mantinha as alterações até guardar, enquanto o outro separador escrevia cada alteração de imediato, sem retorno. Ambos têm agora Save e Discard, a mesma disposição (barra de ferramentas, lista, formulário, mapa) e a mesma forma de acrescentar um elemento: clique nos pontos e termine com Enter ou com um duplo clique. O segundo separador chama-se Study areas."))
     add(P(
-        "The Segmentation tab also shows a Zones summary table whose columns (Zone, Area km², Cells, Sens, Assets) are sortable: click a header to sort, click again to reverse, with an arrow marking the active column. Numeric columns sort largest-first by default; only the table reorders — the colour legend keeps its largest-area-first order.",
-        "O separador Segmentação mostra também uma tabela-resumo de Zonas cujas colunas (Zona, Área km², Células, Sens, Activos) são ordenáveis: clique num cabeçalho para ordenar, clique novamente para inverter, com uma seta a marcar a coluna activa. As colunas numéricas ordenam por maior valor primeiro por omissão; apenas a tabela é reordenada — a legenda de cores mantém a ordem de maior área primeiro."))
-    add(IMG("ui_combined_map_segmentation.png",
-            "Segmentation tab — the Zones table sorted by mean sensitivity (click any column header to sort).",
-            "Separador Segmentação — a tabela de Zonas ordenada por sensibilidade média (clique em qualquer cabeçalho de coluna para ordenar).",
+        "Three faults that affected figures were fixed at the same time. A study area with only a drawn polygon could be invisible to Process and the report, results for deleted polygons stayed in the totals, and nothing said when a study area had been edited after its analysis ran. The tab, the report and Compare study areas now say so.",
+        "Foram corrigidas ao mesmo tempo três falhas que afectavam os valores. Uma área de estudo apenas com um polígono desenhado podia ficar invisível para Process e para o relatório, os resultados de polígonos eliminados permaneciam nos totais, e nada indicava que uma área de estudo tinha sido editada depois de a sua análise ter sido executada. O separador, o relatório e Compare study areas passam a indicá-lo."))
+    add(IMG("ui_line_manage.png",
+            "Special focus: lines and study areas are edited in two tabs with the same layout.",
+            "Special focus: as linhas e as áreas de estudo são editadas em dois separadores com a mesma disposição.",
             width_cm=15.0))
-    add(PB())
 
-    add(H(2, "2.3 Headline gains carried over from 5.1",
-          "2.3 Principais ganhos herdados da 5.1"))
-    add(H(3, "Substantially faster processing", "Processamento substancialmente mais rápido"))
-    add(P(
-        "Recent work in the data pipeline cuts avoidable temp-I/O, re-plans chunks more carefully, and tightens the flatten path. On larger projects this materially shortens processing time and reduces the feeling that runs are stuck in I/O-heavy phases. Exact improvement depends on dataset size, geometry complexity, disk speed, and hardware.",
-        "Trabalho recente na pipeline de dados elimina I/O temporário evitável, replaneia blocos com maior cuidado e optimiza o caminho de achatamento. Em projectos maiores isto reduz materialmente o tempo de processamento e diminui a sensação de que as execuções ficam paradas em fases intensivas de I/O. A melhoria exacta depende do tamanho dos dados, da complexidade da geometria, da velocidade do disco e do hardware."))
-
-    add(H(3, "Far fewer crashes on long runs", "Muito menos falhas em execuções longas"))
-    add(P(
-        "A 140+ GB peak-RSS swap stall on a 64 GB host showed where the previous memory budgets were too optimistic. Several layers now protect long-running jobs:",
-        "Uma paragem por swap com pico de RSS superior a 140 GB num computador de 64 GB de RAM revelou onde os antigos limites de memória eram demasiado optimistas. Várias camadas protegem agora os trabalhos longos:"))
+    add(H(2, "2.5 The Word report", "2.5 O relatório Word"))
     add(UL(
-        [
-            "Runtime auto-tuning of worker counts derived from the live host fingerprint and the project's data fingerprint.",
-            "Platform-aware memory budgets — Apple Silicon hosts use a tighter budget; Windows / Linux / Intel Mac hosts use a wider budget.",
-            "Pre-flight RAM/swap check before the flatten stage, so the run aborts cleanly instead of entering swap-death.",
-            "Per-pool memory panic watchdog for every multiprocessing pool.",
-            "Process-lifetime sentinel watchdog as a last-resort backstop covering parent-side work between pools.",
-            "Three-phase flatten split — huge / large / small partitions run with progressively wider parallelism.",
-            "Sliver cleanup that drops zero-area precision artefacts from tbl_flat after polygonisation.",
-        ],
-        [
-            "Auto-ajuste em tempo de execução do número de processos de trabalho com base na impressão digital do computador e dos dados do projecto.",
-            "Limites de memória sensíveis à plataforma — máquinas Apple Silicon usam um limite mais apertado; máquinas Windows / Linux / Mac Intel usam um limite mais largo.",
-            "Verificação prévia de RAM/swap antes da fase de achatamento, para que a execução aborte limpamente em vez de entrar em swap-death.",
-            "Vigilante de pânico de memória por pool de multiprocessamento.",
-            "Vigilante de tempo de vida do processo como rede de segurança final para trabalho do processo-pai entre pools.",
-            "Achatamento em três fases — partições enormes / grandes / pequenas executam com paralelismo progressivamente mais amplo.",
-            "Limpeza de fragmentos que remove artefactos de precisão de área zero de tbl_flat após a poligonização.",
-        ]))
-    add(P(
-        "A single [auto-tune] block at the top of each run log summarises the platform, hardware, data fingerprint, and per-key decisions, so operators can audit at a glance instead of grepping scattered log lines.",
-        "Um único bloco [auto-tune] no topo de cada registo de execução resume a plataforma, o hardware, a impressão digital dos dados e as decisões por chave, permitindo aos operadores auditar de relance em vez de procurar linhas de registo dispersas."))
+        ["Maps are wider and have a margin around the data. A heading, its introduction, the map and its legend stay on the same page, and table rows no longer split across pages.",
+         "The Other maps and atlas tile pages have a colour key under each map.",
+         "The table of geocode groups shows the average and the total area of the cells in each group.",
+         "The Classification section lists the sensitivity types in a table and draws each type as a grid of importance against susceptibility, with an explanation of how to read it.",
+         "A status line under the progress bar says which map is being drawn, how many basemap tiles are being downloaded and roughly how much time is left.",
+         "Only one report can run at a time. Pressing Create report while one is running says so and when it started."],
+        ["Os mapas são mais largos e têm uma margem em redor dos dados. Um título, a sua introdução, o mapa e a legenda ficam na mesma página, e as linhas das tabelas já não se dividem entre páginas.",
+         "As páginas Other maps e as dos mosaicos do atlas têm uma chave de cores sob cada mapa.",
+         "A tabela dos grupos de geocódigos mostra a área média e a área total das células de cada grupo.",
+         "A secção Classification apresenta os tipos de sensibilidade numa tabela e desenha cada tipo como uma grelha de importância por susceptibilidade, com uma explicação de como a ler.",
+         "Uma linha de estado sob a barra de progresso indica que mapa está a ser desenhado, quantos mosaicos de mapa-base estão a ser descarregados e quanto tempo falta, aproximadamente.",
+         "Só pode ser executado um relatório de cada vez. Se premir Create report com um relatório em curso, o MESA indica-o e diz quando começou."]))
+    add(IMG("ui_report_generate.png",
+            "The report window, where you choose what the report contains.",
+            "A janela do relatório, onde se escolhe o conteúdo do relatório.",
+            width_cm=15.0))
 
-    add(H(2, "2.4 Launcher and workflow", "2.4 Iniciador e fluxo de trabalho"))
-    add(H(3, "Tab structure", "Estrutura de separadores"))
-    add(P(
-        "The desktop launcher now has six tabs. A new Welcome tab opens first as the launcher's landing screen; the former Tune processing and Publish to GeoNode tabs were moved into popups so the day-to-day tabs stay focused:",
-        "O iniciador do ambiente de trabalho tem agora seis separadores. Um novo separador Boas-vindas abre primeiro como ecrã inicial do iniciador; os antigos separadores Afinação do processamento e Publicar no GeoNode foram convertidos em janelas pop-up para manter os separadores do dia-a-dia focados:"))
+    add(H(2, "2.6 Publishing, assets and project data", "2.6 Publicação, activos e dados do projecto"))
     add(UL(
-        ["Welcome — a short intro plus a Project name and About this project form (new in 5.1)",
-         "Workflows — launch the per-phase tools",
-         "Status — project counters, recent activity, and headline metrics",
-         "Manage data — backup, restore, clear output, and Publish to GeoNode",
-         "Config — direct config.ini editor; also opens the Tune processing popup",
-         "About — build banner, system profile, and the new Credits dialog"],
-        ["Boas-vindas — uma breve introdução mais um formulário de Nome do projecto e Sobre este projecto (novo na 5.1)",
-         "Fluxos de trabalho — abrem as ferramentas de cada fase",
-         "Estado — contadores do projecto, actividade recente e métricas principais",
-         "Gerir dados — cópia de segurança, restauro, limpeza dos resultados e Publicar no GeoNode",
-         "Config — editor directo de config.ini; abre também a janela Afinação do processamento",
-         "Sobre — informação da versão, perfil do sistema e a nova janela Créditos"]))
-    add(P(
-        "Two former top-level tabs were extracted into popups so the launcher stays focused on day-to-day work: Tune processing is now a popup launched from the Config tab, and Publish to GeoNode is now a popup launched from the Manage data tab.",
-        "Dois antigos separadores principais foram convertidos em janelas pop-up para manter o iniciador focado no trabalho do dia-a-dia: Afinação do processamento é agora uma janela aberta a partir do separador Config, e Publicar no GeoNode é agora uma janela aberta a partir do separador Gerir dados."))
+        ["Publish to GeoNode creates one map per geocode group, with Sensitivity, OWA index, Importance, number of asset groups and number of asset objects as switchable layers styled as in MESA. It can also create a dashboard per geocode group and segmentation level, and a Manage server tab lists and deletes what is on the server.",
+         "Upload assets copies .gpkg, .shp or .parquet files from anywhere on disk into the asset folder and offers to import them. Delete asset removes one asset group from the project and leaves the source file in place.",
+         "Delete all data on the Manage data tab empties results and source folders. config.ini and input/settings.xlsx are kept.",
+         "MESA is delivered without project data. Demonstration packages are published separately on Zenodo; see section 3.2."],
+        ["Publish to GeoNode cria um mapa por grupo de geocódigos, com Sensitivity, OWA index, Importance, número de grupos de activos e número de objectos de activos como camadas comutáveis, com o mesmo estilo do MESA. Pode também criar um painel por grupo de geocódigos e por nível de segmentação, e um separador Manage server lista e elimina o que está no servidor.",
+         "Upload assets copia ficheiros .gpkg, .shp ou .parquet de qualquer local do disco para a pasta de activos e propõe a sua importação. Delete asset remove um grupo de activos do projecto e mantém o ficheiro de origem.",
+         "Delete all data, no separador Manage data, esvazia os resultados e as pastas de origem. config.ini e input/settings.xlsx são mantidos.",
+         "O MESA é distribuído sem dados de projecto. Os pacotes de demonstração são publicados separadamente no Zenodo; ver a secção 3.2."]))
 
-    add(H(3, "Unified processing runner with numbered stages",
-          "Executor de processamento unificado com fases numeradas"))
+    add(H(2, "2.7 Upgrading from an earlier version", "2.7 Actualizar a partir de uma versão anterior"))
     add(UL(
-        [
-            "Numbered stages in both the run grid and the live status text, with rerun guidance when individual stages have already completed.",
-            "Backfill is its own pipeline stage with its own checkbox alongside Prep / Intersect / Flatten.",
-            "Normal / Advanced toggle hides per-stage selectors and the sliver-cleanup option behind a deliberate click.",
-            "Directional headers in the Advanced grid show stage order at a glance.",
-            "Progress map is launched from inside the runner window.",
-            "CLI flags (--no-prep, --no-intersect, --no-flatten, --no-cleanup-slivers) mirror the GUI controls for headless runs.",
-        ],
-        [
-            "Fases numeradas na grelha de execução e no texto de estado em tempo real, com orientação de re-execução quando as fases individuais já foram concluídas.",
-            "Backfill é uma fase própria da pipeline com a sua própria caixa de selecção ao lado de Prep / Intersect / Flatten.",
-            "Alternador Normal / Avançado oculta os selectores por fase e a opção de limpeza de fragmentos atrás de um clique deliberado.",
-            "Cabeçalhos direccionais na grelha Avançada mostram a ordem das fases num só olhar.",
-            "O Mapa de progresso é aberto a partir da própria janela do executor.",
-            "Os argumentos de linha de comandos (--no-prep, --no-intersect, --no-flatten, --no-cleanup-slivers) espelham os controlos da interface gráfica para execuções sem ecrã.",
-        ]))
-
-    add(H(3, "Tune processing is safer", "Afinação do processamento mais segura"))
-    add(P(
-        "Tune processing follows an evaluate-before-commit pattern: Evaluate shows current versus advised values first, Commit changes is separate, and Restore previous tuning rolls back the last committed tune set.",
-        "A Afinação do processamento segue um padrão avaliar-antes-de-confirmar: Avaliar mostra primeiro os valores actuais face aos valores aconselhados, Confirmar alterações é separado, e Restaurar afinação anterior reverte o último conjunto de afinação confirmado."))
-
-    add(H(2, "2.5 Authoring and reporting", "2.5 Autoria e relatórios"))
-    add(P(
-        "Asset import has two convenience options on by default: Dissolve adjacent polygons (merges touching polygons that share identical attribute values) and automatic buffering of point and line inputs using default_point_buffer_m and default_line_buffer_m so zero-area features still contribute. The atlas helper now reads existing atlas state on open and includes a Delete action. The Word report engine has had a layout pass — index maps include legends, area maps are scaled down with explanatory text, atlas tile maps show the full grid with the current tile highlighted, and each atlas tile heading begins on a fresh page.",
-        "A importação de Activos tem duas opções de conveniência activas por omissão: Dissolver polígonos adjacentes (combina polígonos contíguos que partilham valores de atributos idênticos) e amortecimento automático de entradas de pontos e linhas, utilizando default_point_buffer_m e default_line_buffer_m para que as feições de área zero continuem a contribuir. O auxiliar de atlas lê agora o estado existente do atlas ao abrir e inclui uma acção Eliminar. O motor de relatórios Word recebeu uma revisão de paginação — os mapas-índice incluem legendas, os mapas de área foram reduzidos com texto explicativo, os mapas dos azulejos do atlas mostram a grelha completa com o azulejo actual destacado, e cada cabeçalho de azulejo do atlas começa numa nova página."))
-
-    add(H(2, "2.6 Reliability and operator controls (from 5.1)",
-          "2.6 Fiabilidade e controlos do operador (da 5.1)"))
-    add(P(
-        "On top of the 5.0 reliability baseline, MESA 5.1 adds a layer of operator-facing controls that recover from trouble instead of aborting, and make long runs safer to start, stop, and resume:",
-        "Sobre a base de fiabilidade da 5.0, o MESA 5.1 acrescenta uma camada de controlos para o operador que recuperam de problemas em vez de abortar, e tornam as execuções longas mais seguras de iniciar, parar e retomar:"))
-    add(UL(
-        [
-            "Soft memory throttle. The per-pool memory watchdog now has two tiers. When RAM use crosses the soft threshold for a few seconds, the active pool is drained and restarted with half the workers — the run continues with reduced parallelism instead of aborting. The existing hard panic remains the last line of defence. Set mem_soft_throttle_percent = 0 to disable the soft tier.",
-            "Cancel that actually fires mid-stage. The Cancel button now interrupts a running stage within about half a second rather than waiting for it to finish, ending in a clear RUN CANCELLED marker; follow-on stages do not start.",
-            "Single-instance pipeline lock. Each project holds an exclusive output/.pipeline.lock for the duration of a run, so a second run on the same project is refused with a clear message instead of two pipelines interleaving. Stale locks from a crash are reclaimed automatically; different projects can still run in parallel.",
-            "Self-calibrating progress weights. The progress bar's split across Data / Tiles / Lines / Analysis is now learned from recent clean run times instead of fixed guesses, so the bar tracks reality after a couple of completed runs.",
-            "Smaller, faster GeoParquet (ZSTD-3). Processing outputs are now written with ZSTD level 3 instead of SNAPPY, roughly halving on-disk size on large partitions; reading is unchanged.",
-            "Threaded backup with a progress dialog. Create / Restore backup now run off the GUI thread with a proper progress dialog, plus options to include or skip MBTiles and to choose DEFLATE (Explorer-compatible) or LZMA (smaller) archives.",
-            "Tiles cleanup when unchecked. Unchecking Tiles and re-running deletes the existing .mbtiles at run start so they cannot silently misalign with new results; a warning label surfaces the deletion.",
-            "Asset-import provenance. Asset import records the source path, time, and layer count, shown above the parameter editor so you can tell which input/asset/ folder a parameter set came from after several re-imports.",
-            "Corrected GPU RAM and live version on the About tab. GPU VRAM now reads the full 64-bit value (no 4 GB truncation) and the reported MESA version always reflects the running build.",
-        ],
-        [
-            "Limitação suave de memória. O vigilante de memória por pool tem agora dois níveis. Quando o uso de RAM ultrapassa o limiar suave durante alguns segundos, o pool activo é esvaziado e reiniciado com metade dos processos — a execução continua com paralelismo reduzido em vez de abortar. O pânico rígido existente mantém-se como última linha de defesa. Defina mem_soft_throttle_percent = 0 para desactivar o nível suave.",
-            "Cancelar que actua mesmo a meio da fase. O botão Cancelar interrompe agora uma fase em curso em cerca de meio segundo, em vez de esperar que termine, terminando com um marcador claro EXECUÇÃO CANCELADA; as fases seguintes não arrancam.",
-            "Bloqueio de instância única da pipeline. Cada projecto mantém um output/.pipeline.lock exclusivo durante a execução, pelo que uma segunda execução no mesmo projecto é recusada com uma mensagem clara, em vez de duas pipelines se entrelaçarem. Bloqueios obsoletos de uma falha são recuperados automaticamente; projectos diferentes podem continuar a correr em paralelo.",
-            "Pesos de progresso auto-calibrados. A divisão da barra de progresso entre Dados / Azulejos / Linhas / Análise é agora aprendida a partir dos tempos de execuções limpas recentes, em vez de valores fixos, pelo que a barra acompanha a realidade após algumas execuções concluídas.",
-            "GeoParquet mais pequeno e rápido (ZSTD-3). Os resultados do processamento são agora escritos com ZSTD nível 3 em vez de SNAPPY, reduzindo para cerca de metade o tamanho em disco nas partições grandes; a leitura não muda.",
-            "Cópia de segurança em thread com janela de progresso. Criar / Restaurar cópia correm agora fora da thread da interface com uma janela de progresso adequada, com opções para incluir ou ignorar os MBTiles e para escolher arquivos DEFLATE (compatível com o Explorador) ou LZMA (mais pequenos).",
-            "Limpeza de azulejos quando desmarcado. Desmarcar Azulejos e voltar a executar elimina os .mbtiles existentes no início da execução para que não fiquem silenciosamente desalinhados com os novos resultados; um aviso assinala a eliminação.",
-            "Proveniência da importação de activos. A importação de activos regista o caminho de origem, a hora e o número de camadas, mostrados acima do editor de parâmetros para identificar de que pasta input/asset/ veio um conjunto de parâmetros após várias reimportações.",
-            "RAM da GPU corrigida e versão actual no separador Sobre. A VRAM da GPU lê agora o valor completo de 64 bits (sem truncagem a 4 GB) e a versão MESA indicada reflecte sempre a compilação em execução.",
-        ]))
+        ["Projects from earlier versions open as before. Grid names are migrated on first start.",
+         "Run Process again to get the smaller analysis table.",
+         "Scripts that pass --no-backfill to the processing runner must drop it, because the flag no longer exists. backfill_max_workers in config.ini is ignored.",
+         "If you relied on Classification running automatically, tick it under Configure, Classification."],
+        ["Os projectos de versões anteriores abrem como antes. Os nomes das grelhas são migrados no primeiro arranque.",
+         "Execute Process de novo para obter a tabela de análise mais pequena.",
+         "Os scripts que passam --no-backfill ao executor de processamento têm de o retirar, porque o argumento já não existe. backfill_max_workers em config.ini é ignorado.",
+         "Se dependia da execução automática de Classification, assinale-a em Configure, Classification."]))
     add(PB())
 
     # =========================================================================
@@ -286,8 +231,8 @@ def build_blocks():
         "This quick-start guide shows how to run the current MESA 5 workflow end-to-end: prepare inputs, configure parameters, run processing, and review outputs.",
         "Este guia de início rápido mostra como executar o fluxo de trabalho do MESA 5 de ponta a ponta: preparar entradas, configurar parâmetros, executar o processamento e rever os resultados."))
     add(IMG("process_overview.png",
-            "MESA process overview — prepare data, configure, process, review.",
-            "Visão geral do processo MESA — preparar dados, configurar, processar, rever.",
+            "MESA process overview: prepare data, configure, process, review.",
+            "Visão geral do processo MESA: preparar dados, configurar, processar, rever.",
             width_cm=15.0))
 
     add(H(2, "3.1 The MESA tool", "3.1 A ferramenta MESA"))
@@ -297,12 +242,12 @@ def build_blocks():
 
     add(H(2, "3.2 Getting ready", "3.2 Preparação"))
     add(OL(
-        ["System — Windows 11, minimum 16 GB RAM, minimum 8 CPU cores, and optional QGIS for atlas authoring.",
-         "Workspace — unzip the latest MESA release (packaged) or clone the repository (source). Keep the folder structure intact.",
-         "Disk space — plan for several GB free space for GeoParquet, MBTiles, logs, reports, and temporary processing files."],
-        ["Sistema — Windows 11, mínimo 16 GB de RAM, mínimo 8 núcleos de CPU, e QGIS opcional para autoria do atlas.",
-         "Espaço de trabalho — descomprima a versão mais recente do MESA (empacotada) ou clone o repositório (código-fonte). Mantenha a estrutura de pastas intacta.",
-         "Espaço em disco — planeie vários GB de espaço livre para GeoParquet, MBTiles, registos, relatórios e ficheiros temporários de processamento."]))
+        ["System: Windows 11, minimum 16 GB RAM, minimum 8 CPU cores, and optional QGIS for atlas authoring.",
+         "Workspace: unzip the latest MESA release (packaged) or clone the repository (source). Keep the folder structure intact.",
+         "Disk space: plan for several GB free space for GeoParquet, MBTiles, logs, reports, and temporary processing files."],
+        ["Sistema: Windows 11, mínimo 16 GB de RAM, mínimo 8 núcleos de CPU, e QGIS opcional para autoria do atlas.",
+         "Espaço de trabalho: descomprima a versão mais recente do MESA (empacotada) ou clone o repositório (código-fonte). Mantenha a estrutura de pastas intacta.",
+         "Espaço em disco: planeie vários GB de espaço livre para GeoParquet, MBTiles, registos, relatórios e ficheiros temporários de processamento."]))
 
     add(TBL(
         ["Data set", "Description", "Required"],
@@ -364,14 +309,14 @@ def build_blocks():
     add(H(2, "3.5 Running processing", "3.5 Execução do processamento"))
     add(OL(
         ["Open Workflows → Process (step 3) → Process.",
-         "In the process runner, select the steps you want: Data processing (Prep / Intersect / Flatten / Backfill / Segment), Tiles processing, Lines processing, Analysis processing.",
+         "In the process runner, select the steps you want: Data processing (Prep / Intersect / Flatten / Segment), Tiles processing, Lines processing, Analysis processing.",
          "Leave Data processing enabled at minimum for a first full run.",
          "Enable Tiles processing if you want MBTiles in the same run.",
          "Enable Lines and/or Analysis processing when those datasets have been prepared.",
          "Use Progress map inside the process runner if you want a live minimap during longer runs.",
          "Use the Normal / Advanced toggle at the top of the runner to expose per-stage selectors and the sliver-cleanup option."],
         ["Abra Fluxos de trabalho → Processar (passo 3) → Processar.",
-         "No executor de processamento, seleccione as fases pretendidas: Processamento de dados (Prep / Intersect / Flatten / Backfill / Segmentar), Processamento de azulejos, Processamento de linhas, Processamento de análise.",
+         "No executor de processamento, seleccione as fases pretendidas: Processamento de dados (Prep / Intersect / Flatten / Segmentar), Processamento de azulejos, Processamento de linhas, Processamento de análise.",
          "Mantenha pelo menos o Processamento de dados activado para uma primeira execução completa.",
          "Active o Processamento de azulejos se quiser MBTiles na mesma execução.",
          "Active o Processamento de linhas e/ou Análise quando esses dados estiverem preparados.",
@@ -407,105 +352,105 @@ def build_blocks():
         "The MESA 5.2 desktop launcher opens on the Welcome tab, where you can name the project and add a short description, then continue to Workflows. The Workflows tab organizes the project into four practical phases: prepare data, configure the project, run processing, and review results.",
         "O iniciador MESA 5.2 abre no separador Boas-vindas, onde pode nomear o projecto e adicionar uma breve descrição, e depois continuar para Fluxos de trabalho. O separador Fluxos de trabalho organiza o projecto em quatro fases práticas: preparar dados, configurar o projecto, executar o processamento e rever os resultados."))
     add(IMG("ui_workflows.png",
-            "Desktop launcher — Workflows tab.",
-            "Iniciador do ambiente de trabalho — separador Fluxos de trabalho.",
+            "Desktop launcher: Workflows tab.",
+            "Iniciador do ambiente de trabalho: separador Fluxos de trabalho.",
             width_cm=15.0))
     add(IMG("ui_status.png",
-            "Status tab — counters, recent activity, headline metrics.",
-            "Separador Estado — contadores, actividade recente, métricas principais.",
+            "Status tab: counters, recent activity, headline metrics.",
+            "Separador Estado: contadores, actividade recente, métricas principais.",
             width_cm=15.0))
     add(IMG("ui_manage.png",
-            "Manage data tab — backup, restore, clear output, GeoNode publish.",
-            "Separador Gerir dados — cópia de segurança, restauro, limpeza, publicação GeoNode.",
+            "Manage data tab: backup, restore, clear output, GeoNode publish.",
+            "Separador Gerir dados: cópia de segurança, restauro, limpeza, publicação GeoNode.",
             width_cm=15.0))
     add(IMG("ui_config.png",
-            "Config tab — direct editor for config.ini, with Tune processing popup.",
-            "Separador Config — editor directo de config.ini, com janela Afinação do processamento.",
+            "Config tab: direct editor for config.ini, with Tune processing popup.",
+            "Separador Config: editor directo de config.ini, com janela Afinação do processamento.",
             width_cm=15.0))
     add(IMG("ui_about.png",
-            "About tab — build banner and system profile.",
-            "Separador Sobre — informação da versão e perfil do sistema.",
+            "About tab: build banner and system profile.",
+            "Separador Sobre: informação da versão e perfil do sistema.",
             width_cm=15.0))
 
     add(H(2, "4.1 Prepare data (step 1)", "4.1 Preparar dados (passo 1)"))
     add(IMG("overview_prepare_data.png",
-            "Prepare data — assets, geocodes, atlas.",
-            "Preparar dados — activos, geocódigos, atlas.",
+            "Prepare data: assets, geocodes, atlas.",
+            "Preparar dados: activos, geocódigos, atlas.",
             width_cm=15.0))
     add(UL(
-        ["Assets — import area assets from input/asset/ and maintain asset-group metadata. Two convenience options are on by default: Dissolve adjacent polygons (removes source-grid moiré) and automatic buffering of point and line inputs.",
-         "Geocodes — import geocode layers or generate supported grids used by analysis and reporting.",
-         "Atlas — import or create atlas polygons and maintain atlas page metadata. The helper now surfaces existing atlas state on open and includes a Delete action."],
-        ["Activos — importar activos de área a partir de input/asset/ e manter metadados dos grupos. Duas opções de conveniência estão activas por omissão: Dissolver polígonos adjacentes (remove o efeito moiré da grelha de origem) e amortecimento automático de entradas de pontos e linhas.",
-         "Geocódigos — importar camadas ou gerar grelhas suportadas usadas pela análise e pelos relatórios.",
-         "Atlas — importar ou criar polígonos de atlas e manter os metadados das páginas. O auxiliar mostra agora o estado existente ao abrir e inclui uma acção Eliminar."]))
+        ["Assets: import area assets from input/asset/ and maintain asset-group metadata. Two convenience options are on by default: Dissolve adjacent polygons (removes source-grid moiré) and automatic buffering of point and line inputs.",
+         "Geocodes: import geocode layers or generate supported grids used by analysis and reporting.",
+         "Atlas: import or create atlas polygons and maintain atlas page metadata. The helper now surfaces existing atlas state on open and includes a Delete action."],
+        ["Activos: importar activos de área a partir de input/asset/ e manter metadados dos grupos. Duas opções de conveniência estão activas por omissão: Dissolver polígonos adjacentes (remove o efeito moiré da grelha de origem) e amortecimento automático de entradas de pontos e linhas.",
+         "Geocódigos: importar camadas ou gerar grelhas suportadas usadas pela análise e pelos relatórios.",
+         "Atlas: importar ou criar polígonos de atlas e manter os metadados das páginas. O auxiliar mostra agora o estado existente ao abrir e inclui uma acção Eliminar."]))
     add(IMG("ui_asset_manage.png",
-            "Asset manager — group metadata and per-layer controls.",
-            "Gestor de activos — metadados de grupo e controlos por camada.",
+            "Asset manager: group metadata and per-layer controls.",
+            "Gestor de activos: metadados de grupo e controlos por camada.",
             width_cm=15.0))
     add(IMG("ui_geocode_create.png",
-            "Geocode creation — generate or import geocode layers.",
-            "Criação de geocódigos — gerar ou importar camadas.",
+            "Geocode creation: generate or import geocode layers.",
+            "Criação de geocódigos: gerar ou importar camadas.",
             width_cm=15.0))
     add(IMG("ui_atlas_manage.png",
-            "Atlas manager — atlas pages and metadata.",
-            "Gestor de atlas — páginas e metadados.",
+            "Atlas manager: atlas pages and metadata.",
+            "Gestor de atlas: páginas e metadados.",
             width_cm=15.0))
 
     add(H(2, "4.2 Configure (step 2)", "4.2 Configurar (passo 2)"))
     add(IMG("overview_configure_analysis.png",
-            "Configure — parameters, lines, analysis.",
-            "Configurar — parâmetros, linhas, análise.",
+            "Configure: parameters, lines, analysis.",
+            "Configurar: parâmetros, linhas, análise.",
             width_cm=15.0))
     add(UL(
-        ["Parameters — adjust processing rules such as weights, thresholds, and related setup values.",
-         "Lines — import and edit line datasets such as transport, rivers, utilities, or coastlines.",
-         "Analysis — define study-area polygons and named analysis groups."],
-        ["Parâmetros — ajustar regras de processamento como pesos, limiares e valores relacionados.",
-         "Linhas — importar e editar conjuntos lineares como transportes, rios, infra-estruturas ou linhas costeiras.",
-         "Análise — definir polígonos de áreas de estudo e grupos de análise nomeados."]))
+        ["Parameters: adjust processing rules such as weights, thresholds, and related setup values.",
+         "Lines: import and edit line datasets such as transport, rivers, utilities, or coastlines.",
+         "Analysis: define study-area polygons and named analysis groups."],
+        ["Parâmetros: ajustar regras de processamento como pesos, limiares e valores relacionados.",
+         "Linhas: importar e editar conjuntos lineares como transportes, rios, infra-estruturas ou linhas costeiras.",
+         "Análise: definir polígonos de áreas de estudo e grupos de análise nomeados."]))
     add(IMG("ui_processing_setup.png",
-            "Parameters helper — sensitivity setup.",
-            "Auxiliar de parâmetros — pesos de sensibilidade e índices.",
+            "Parameters helper: sensitivity setup.",
+            "Auxiliar de parâmetros: pesos de sensibilidade e índices.",
             width_cm=15.0))
     add(IMG("ui_line_manage.png",
-            "Line manager — line layers and segmentation settings.",
-            "Gestor de linhas — camadas lineares e definições de segmentação.",
+            "Line manager: line layers and segmentation settings.",
+            "Gestor de linhas: camadas lineares e definições de segmentação.",
             width_cm=15.0))
     add(IMG("ui_analysis_setup.png",
-            "Analysis setup — study areas and analysis groups.",
-            "Configuração da análise — áreas de estudo e grupos.",
+            "Analysis setup: study areas and analysis groups.",
+            "Configuração da análise: áreas de estudo e grupos.",
             width_cm=15.0))
 
     add(H(2, "4.3 Process (step 3)", "4.3 Processar (passo 3)"))
     add(IMG("overview_run_processing.png",
-            "Process — unified processing runner.",
-            "Processar — executor de processamento unificado.",
+            "Process: unified processing runner.",
+            "Processar: executor de processamento unificado.",
             width_cm=15.0))
     add(P(
-        "The runner can execute eight numbered stages, in order: Data processing (prep, intersect, flatten, backfill, segment); Tiles processing; Lines processing; Analysis processing. The Segment sub-stage builds a per-geocode-layer segmentation (tbl_segmentation) and is on by default when data is available. Each materially-costly stage has its own checkbox in the run grid, so any one of them can be re-run without forcing the others to repeat. A Normal / Advanced toggle at the top keeps the default view simple. Worker counts for each stage are decided at runtime by the auto-tune step unless explicit values are set in config.ini.",
-        "O executor pode executar oito fases numeradas, por ordem: Processamento de dados (prep, intersect, flatten, backfill, segmentar); Processamento de azulejos; Processamento de linhas; Processamento de análise. A subfase Segmentar constrói uma segmentação por camada de geocódigos (tbl_segmentation) e está activa por omissão quando há dados disponíveis. Cada fase materialmente custosa tem a sua própria caixa na grelha de execução, pelo que qualquer uma pode ser executada novamente sem forçar a repetição das restantes. O alternador Normal / Avançado no topo mantém a vista simples. As contagens de processos de trabalho de cada fase são decididas em tempo de execução pelo passo de auto-ajuste, salvo se forem definidos valores explícitos em config.ini."))
+        "The runner can execute nine numbered stages, in order: Prep, Intersect, Flatten, Segment, Classification, Tiles, QGIS project, Lines and Analysis. Classification is off unless you have ticked it under Configure, Classification. The Segment sub-stage builds a per-geocode-layer segmentation (tbl_segmentation) and is on by default when data is available. Each materially-costly stage has its own checkbox in the run grid, so any one of them can be re-run without forcing the others to repeat. A Normal / Advanced toggle at the top keeps the default view simple. Worker counts for each stage are decided at runtime by the auto-tune step unless explicit values are set in config.ini.",
+        "O executor pode executar nove fases numeradas, por ordem: Prep, Intersect, Flatten, Segment, Classification, Tiles, QGIS project, Lines e Analysis. Classification fica desactivada, a menos que a tenha assinalado em Configure, Classification. A subfase Segmentar constrói uma segmentação por camada de geocódigos (tbl_segmentation) e está activa por omissão quando há dados disponíveis. Cada fase materialmente custosa tem a sua própria caixa na grelha de execução, pelo que qualquer uma pode ser executada novamente sem forçar a repetição das restantes. O alternador Normal / Avançado no topo mantém a vista simples. As contagens de processos de trabalho de cada fase são decididas em tempo de execução pelo passo de auto-ajuste, salvo se forem definidos valores explícitos em config.ini."))
     add(IMG("ui_processing_pipeline_run.png",
-            "Processing pipeline runner — numbered stages and per-stage controls.",
-            "Executor da pipeline de processamento — fases numeradas e controlos por fase.",
+            "Processing pipeline runner: numbered stages and per-stage controls.",
+            "Executor da pipeline de processamento: fases numeradas e controlos por fase.",
             width_cm=15.0,
             landscape=False))
 
     add(H(2, "4.4 Results (step 4)", "4.4 Resultados (passo 4)"))
     add(IMG("overview_review_and_report.png",
-            "Results — Maps, compare study areas, report engine.",
-            "Resultados — Mapas, comparar áreas de estudo, motor de relatórios.",
+            "Results: Maps, compare study areas, report engine.",
+            "Resultados: Mapas, comparar áreas de estudo, motor de relatórios.",
             width_cm=15.0))
     add(UL(
-        ["Maps — one tabbed window (replacing the former separate Asset map and Results map viewers) with Overview (index/sensitivity layers), Segmentation (Segment-stage output), and Assets (imported asset layers) tabs; linked zoom & pan, an opacity slider, a basemap selector, floating layer controls, and Export PNG.",
-         "Compare study areas — compare analysis groups side by side.",
-         "Report engine — create a Word report from the latest results, now including per-method segmentation sub-tables."],
-        ["Mapas — uma janela com separadores (substituindo os antigos visualizadores Mapa de Activos e Mapa de Resultados) com Visão Geral (camadas de índice/sensibilidade), Segmentação (resultado da fase Segmentar) e Activos (camadas de activos importadas); zoom e deslocamento ligados, cursor de opacidade, selector de mapa-base, controlos de camadas flutuantes e Exportar PNG.",
-         "Comparar áreas de estudo — comparar grupos de análise lado a lado.",
-         "Motor de relatórios — criar um relatório Word a partir dos resultados mais recentes, agora com subtabelas de segmentação por método."]))
+        ["Maps: one tabbed window (replacing the former separate Asset map and Results map viewers) with Overview (index/sensitivity layers), Segmentation (Segment-stage output), and Assets (imported asset layers) tabs; linked zoom & pan, an opacity slider, a basemap selector, floating layer controls, and Export PNG.",
+         "Compare study areas: compare analysis groups side by side.",
+         "Report engine: create a Word report from the latest results, now including per-method segmentation sub-tables."],
+        ["Mapas: uma janela com separadores (substituindo os antigos visualizadores Mapa de Activos e Mapa de Resultados) com Visão Geral (camadas de índice/sensibilidade), Segmentação (resultado da fase Segmentar) e Activos (camadas de activos importadas); zoom e deslocamento ligados, cursor de opacidade, selector de mapa-base, controlos de camadas flutuantes e Exportar PNG.",
+         "Comparar áreas de estudo: comparar grupos de análise lado a lado.",
+         "Motor de relatórios: criar um relatório Word a partir dos resultados mais recentes, agora com subtabelas de segmentação por método."]))
     add(IMG("ui_combined_map.png",
-            "Maps window — Overview / Segmentation / Assets tabs.",
-            "Janela de Mapas — separadores Visão Geral / Segmentação / Activos.",
+            "Maps window: Overview / Segmentation / Assets tabs.",
+            "Janela de Mapas: separadores Visão Geral / Segmentação / Activos.",
             width_cm=15.0))
     add(IMG("ui_analysis_present.png",
             "Compare study areas.",
@@ -518,8 +463,8 @@ def build_blocks():
 
     add(H(2, "4.5 Tune processing popup", "4.5 Janela Afinação do processamento"))
     add(IMG("ui_tune_processing_popup.png",
-            "Tune processing popup — evaluate, commit, restore.",
-            "Janela Afinação do processamento — avaliar, confirmar, restaurar.",
+            "Tune processing popup: evaluate, commit, restore.",
+            "Janela Afinação do processamento: avaliar, confirmar, restaurar.",
             width_cm=15.0))
     add(P(
         "Evaluate compares current values with advised values based on detected CPU and RAM. Commit changes writes the advised values into config.ini. Restore previous tuning restores the last saved pre-tuning values.",
@@ -544,7 +489,7 @@ def build_blocks():
         [
             ["input/asset/", "Area-asset datasets, organised into one subfolder per asset group.", "Yes"],
             ["input/geocode/", "Geocode layers (analysis grids / polygons).", "Yes (or generate inside MESA)"],
-            ["input/lines/", "Line datasets — pipelines, rivers, roads, transmission lines.", "Optional"],
+            ["input/lines/", "Line datasets: pipelines, rivers, roads, transmission lines.", "Optional"],
             ["input/atlas/", "Atlas-tile polygons used by QGIS atlas layouts.", "Optional"],
             ["input/images/", "Project imagery referenced by reports.", "Optional"],
             ["input/evaluate_landuse/", "Land-use classification inputs (advanced).", "Optional"],
@@ -553,7 +498,7 @@ def build_blocks():
         [
             ["input/asset/", "Conjuntos de activos de área, organizados numa subpasta por grupo de activos.", "Sim"],
             ["input/geocode/", "Camadas de geocódigos (grelhas / polígonos de análise).", "Sim (ou gerar dentro do MESA)"],
-            ["input/lines/", "Conjuntos lineares — oleodutos, rios, estradas, linhas eléctricas.", "Opcional"],
+            ["input/lines/", "Conjuntos lineares: oleodutos, rios, estradas, linhas eléctricas.", "Opcional"],
             ["input/atlas/", "Polígonos de azulejo de atlas usados em layouts QGIS.", "Opcional"],
             ["input/images/", "Imagens de projecto referenciadas nos relatórios.", "Opcional"],
             ["input/evaluate_landuse/", "Entradas de classificação de uso do solo (avançado).", "Opcional"],
@@ -566,17 +511,17 @@ def build_blocks():
 
     add(H(2, "5.3 Coordinate systems and projections", "5.3 Sistemas de coordenadas e projecções"))
     add(UL(
-        ["working_projection_epsg (default 4326) — the projection MESA uses for fast spatial work in lat/lon.",
-         "area_projection_epsg (default 3035 for Europe) — equal-area projection used to compute areas in m². Pick one appropriate to your study region.",
-         "output_projection_epsg (default 4326) — the projection MESA writes outputs in."],
-        ["working_projection_epsg (omissão 4326) — projecção utilizada pelo MESA para trabalho espacial rápido em lat/lon.",
-         "area_projection_epsg (omissão 3035 para a Europa) — projecção de igual área utilizada para calcular áreas em m². Escolha uma adequada à região de estudo.",
-         "output_projection_epsg (omissão 4326) — projecção em que o MESA escreve os resultados."]))
+        ["working_projection_epsg (default 4326): the projection MESA uses for fast spatial work in lat/lon.",
+         "area_projection_epsg (default 3035 for Europe): equal-area projection used to compute areas in m². Pick one appropriate to your study region.",
+         "output_projection_epsg (default 4326): the projection MESA writes outputs in."],
+        ["working_projection_epsg (omissão 4326): projecção utilizada pelo MESA para trabalho espacial rápido em lat/lon.",
+         "area_projection_epsg (omissão 3035 para a Europa): projecção de igual área utilizada para calcular áreas em m². Escolha uma adequada à região de estudo.",
+         "output_projection_epsg (omissão 4326): projecção em que o MESA escreve os resultados."]))
 
     add(H(2, "5.4 Preparing your data", "5.4 Preparação dos dados"))
     add(P(
-        "Ecological / organic asset polygons work best — wetland outlines, settlement footprints, river polygons, protected-area boundaries. The mosaic stays compact and the result map reads as discrete sensitivity zones. Gridded / raster-derived asset layers are the failure mode: per-cell visual moiré, and mosaic-face collapse if the layer has no honest classifier column. The takeaway: raster-derived asset layers without a classifying attribute are a known hazard. MESA handles them conservatively (no dissolve → moiré), but the right fix is upstream.",
-        "Os polígonos de activos ecológicos / orgânicos funcionam melhor — contornos de zonas húmidas, áreas de povoamento, polígonos de rios, limites de áreas protegidas. O mosaico mantém-se compacto e o mapa final lê-se como zonas discretas de sensibilidade. As camadas de activos derivadas de grelha / raster são o modo de falha: efeito moiré célula a célula e colapso de faces do mosaico quando a camada não tem uma coluna classificadora honesta. Conclusão: camadas de activos derivadas de raster sem atributo classificador são um perigo conhecido. O MESA trata-as de forma conservadora (sem dissolução → moiré), mas a correcção correcta é a montante."))
+        "Ecological / organic asset polygons work best: wetland outlines, settlement footprints, river polygons, protected-area boundaries. The mosaic stays compact and the result map reads as discrete sensitivity zones. Gridded / raster-derived asset layers are the failure mode: per-cell visual moiré, and mosaic-face collapse if the layer has no honest classifier column. The takeaway: raster-derived asset layers without a classifying attribute are a known hazard. MESA handles them conservatively (no dissolve → moiré), but the right fix is upstream.",
+        "Os polígonos de activos ecológicos / orgânicos funcionam melhor: contornos de zonas húmidas, áreas de povoamento, polígonos de rios, limites de áreas protegidas. O mosaico mantém-se compacto e o mapa final lê-se como zonas discretas de sensibilidade. As camadas de activos derivadas de grelha / raster são o modo de falha: efeito moiré célula a célula e colapso de faces do mosaico quando a camada não tem uma coluna classificadora honesta. Conclusão: camadas de activos derivadas de raster sem atributo classificador são um perigo conhecido. O MESA trata-as de forma conservadora (sem dissolução → moiré), mas a correcção correcta é a montante."))
     add(IMG("artefacts.png",
             "How gridded vector data creates map artefacts.",
             "Como os dados vectoriais em grelha geram artefactos cartográficos.",
@@ -584,12 +529,12 @@ def build_blocks():
 
     add(H(2, "5.5 What MESA does at import", "5.5 O que o MESA faz na importação"))
     add(OL(
-        ["Geometry validation (on by default; \"Validate geometries\" in the import window) — every geometry passes through make_valid() with a buffer(0) fallback.",
-         "Smart-key dissolve — classifies attribute columns as uniform or diverging; merges touching polygons that share uniform-attribute values.",
-         "Buffer points and lines (always on for non-polygon inputs) — Points and LineStrings are buffered using default_point_buffer_m and default_line_buffer_m before intersection."],
-        ["Validação geométrica (activa por omissão; \"Validate geometries\" na janela de importação) — toda a geometria passa por make_valid() com um buffer(0) como recurso.",
-         "Dissolução por chave inteligente — classifica colunas de atributos como uniformes ou divergentes; combina polígonos contíguos que partilham valores uniformes.",
-         "Amortecimento de pontos e linhas (sempre activo para entradas não-poligonais) — Pontos e LineStrings recebem um amortecimento usando default_point_buffer_m e default_line_buffer_m antes da intersecção."]))
+        ["Geometry validation (on by default; \"Validate geometries\" in the import window): every geometry passes through make_valid() with a buffer(0) fallback.",
+         "Smart-key dissolve: classifies attribute columns as uniform or diverging; merges touching polygons that share uniform-attribute values.",
+         "Buffer points and lines (always on for non-polygon inputs): Points and LineStrings are buffered using default_point_buffer_m and default_line_buffer_m before intersection."],
+        ["Validação geométrica (activa por omissão; \"Validate geometries\" na janela de importação): toda a geometria passa por make_valid() com um buffer(0) como recurso.",
+         "Dissolução por chave inteligente: classifica colunas de atributos como uniformes ou divergentes; combina polígonos contíguos que partilham valores uniformes.",
+         "Amortecimento de pontos e linhas (sempre activo para entradas não-poligonais): Pontos e LineStrings recebem um amortecimento usando default_point_buffer_m e default_line_buffer_m antes da intersecção."]))
 
     add(H(2, "5.6 Output data tables", "5.6 Tabelas de resultados"))
     add(TBL(
@@ -599,8 +544,8 @@ def build_blocks():
             ["tbl_asset_object", "One row per imported asset polygon, with attributes and serialised attributes string."],
             ["tbl_geocode_group", "One row per geocode group (basic_mosaic, H3 levels, ...)."],
             ["tbl_geocode_object", "One row per geocode cell, with parent group reference."],
-            ["tbl_stacked", "Where assets touch geocodes — one row per (asset, geocode) pair."],
-            ["tbl_flat", "Flattened analysis result — one row per cell with summary sensitivity (max, mean, count, codes, area_m²)."],
+            ["tbl_stacked", "Where assets touch geocodes: one row per (asset, geocode) pair."],
+            ["tbl_flat", "Flattened analysis result: one row per cell with summary sensitivity (max, mean, count, codes, area_m²)."],
             ["tbl_system_capabilities", "Host fingerprint snapshot used by About and auto_tune."],
         ],
         ["Tabela", "Conteúdo"],
@@ -609,8 +554,8 @@ def build_blocks():
             ["tbl_asset_object", "Uma linha por polígono de activo importado, com atributos e cadeia serializada de atributos."],
             ["tbl_geocode_group", "Uma linha por grupo de geocódigos (basic_mosaic, níveis H3, ...)."],
             ["tbl_geocode_object", "Uma linha por célula de geocódigo, com referência ao grupo-pai."],
-            ["tbl_stacked", "Onde os activos tocam os geocódigos — uma linha por par (activo, geocódigo)."],
-            ["tbl_flat", "Resultado de análise achatado — uma linha por célula com sensibilidade resumida (máx., média, contagem, códigos, área_m²)."],
+            ["tbl_stacked", "Onde os activos tocam os geocódigos: uma linha por par (activo, geocódigo)."],
+            ["tbl_flat", "Resultado de análise achatado: uma linha por célula com sensibilidade resumida (máx., média, contagem, códigos, área_m²)."],
             ["tbl_system_capabilities", "Fotografia da impressão digital do computador usada por Sobre e auto_tune."],
         ]))
     add(PB())
@@ -620,8 +565,8 @@ def build_blocks():
     # =========================================================================
     add(H(1, "6. Method", "6. Método"))
     add(IMG("sensitivity_table.png",
-            "MESA — Mapping Environmentally Sensitive Assets.",
-            "MESA — Mapeamento de Activos Ambientalmente Sensíveis.",
+            "MESA: Mapping Environmentally Sensitive Assets.",
+            "MESA: Mapeamento de Activos Ambientalmente Sensíveis.",
             width_cm=12.0))
     add(P(
         "MESA (Mapping Environmentally Sensitive Assets) is a method intended for a broad audience of individuals working on the development and use of environmental sensitivity maps. The method provides a step-by-step protocol for developing an environmental sensitivity atlas based on a standardized methodology that was developed following a review of several existing methods.",
@@ -635,22 +580,22 @@ def build_blocks():
         "In this broader planning context it is important to be explicit about the chain from activity → pressure → pathway → asset. Sensitivity is not an inherent property of a location: it is conditional on what pressure is being considered, how and when it is expressed, and which assets are valued.",
         "Neste contexto mais amplo de planeamento é importante ser explícito quanto à cadeia actividade → pressão → via → activo. A sensibilidade não é uma propriedade inerente a um local: depende da pressão considerada, da forma e momento em que é expressa, e dos activos valorizados."))
     add(IMG("process_overview.png",
-            "Process overview — methodological steps.",
-            "Visão geral do processo — passos metodológicos.",
+            "Process overview: methodological steps.",
+            "Visão geral do processo: passos metodológicos.",
             width_cm=15.0))
 
     add(H(2, "6.2 Importance, susceptibility, sensitivity", "6.2 Importância, susceptibilidade, sensibilidade"))
     add(IMG("calculation_mesa.png",
-            "MESA calculation — importance × susceptibility = sensitivity.",
-            "Cálculo MESA — importância × susceptibilidade = sensibilidade.",
+            "MESA calculation: importance × susceptibility = sensitivity.",
+            "Cálculo MESA: importância × susceptibilidade = sensibilidade.",
             width_cm=12.0))
     add(UL(
-        ["Asset importance — an asset's value based on its rarity, significance, functional and intrinsic value. Quantified with a value from 1 to 5.",
-         "Asset susceptibility — the degree to which an asset will be affected by a pressure, based on the predicted severity of the impact and the asset's ability to recover. Quantified from 1 to 5.",
-         "Sensitivity — the product of importance and susceptibility, also expressed on a 1–5 scale."],
-        ["Importância do activo — o seu valor baseado na raridade, significado, valor funcional e intrínseco. Quantificada de 1 a 5.",
-         "Susceptibilidade do activo — o grau em que um activo será afectado por uma pressão, com base na severidade prevista do impacte e na capacidade de recuperação. Quantificada de 1 a 5.",
-         "Sensibilidade — o produto de importância e susceptibilidade, também expressa numa escala 1–5."]))
+        ["Asset importance: an asset's value based on its rarity, significance, functional and intrinsic value. Quantified with a value from 1 to 5.",
+         "Asset susceptibility: the degree to which an asset will be affected by a pressure, based on the predicted severity of the impact and the asset's ability to recover. Quantified from 1 to 5.",
+         "Sensitivity: the product of importance and susceptibility, also expressed on a 1–5 scale."],
+        ["Importância do activo: o seu valor baseado na raridade, significado, valor funcional e intrínseco. Quantificada de 1 a 5.",
+         "Susceptibilidade do activo: o grau em que um activo será afectado por uma pressão, com base na severidade prevista do impacte e na capacidade de recuperação. Quantificada de 1 a 5.",
+         "Sensibilidade: o produto de importância e susceptibilidade, também expressa numa escala 1–5."]))
 
     add(H(2, "6.3 Intended use", "6.3 Utilização prevista"))
     add(P(
@@ -697,8 +642,8 @@ def build_blocks():
         "Geocode layers define how MESA aggregates results spatially. Drop polygon datasets (Quarter Degree Grid Cells, municipal boundaries, H3 hexagons, or any custom tessellation) into input/geocode/ and reference them in config.ini. Linear features follow a similar pattern: place line datasets under input/lines/. MESA buffers and optionally segments these features and stores results in tbl_segment_flat.parquet.",
         "As camadas de geocódigos definem como o MESA agrega os resultados espacialmente. Coloque conjuntos poligonais (células de grelha de quarto de grau, limites municipais, hexágonos H3 ou qualquer outra tesselação) em input/geocode/ e referencie-os em config.ini. As feições lineares seguem um padrão semelhante: coloque conjuntos lineares em input/lines/. O MESA aplica amortecimento e, opcionalmente, segmenta estas feições, armazenando os resultados em tbl_segment_flat.parquet."))
     add(P(
-        "Distinct from line segmentation, MESA 5.2 adds geocode-layer segmentation: the Segment stage of the processing runner groups the polygons of a geocode layer into a smaller number of zones that share a similar sensitivity profile, so a dense result map can be read as a handful of distinct area types instead of thousands of individual cells. Two methods are offered — Signatures, a deterministic typology where each polygon is labelled by the set of sensitivity codes (A–E) carried by its overlapping assets (the default, needing no tuning), and Clusters, an algorithmic grouping by numeric sensitivity profile (KMeans or a spatially-contiguous variant). The output (tbl_segmentation) carries no geometry and joins back to geocode polygons on code at render time; the resulting zones appear on the Segmentation tab of the Maps window and in the report engine.",
-        "Distinta da segmentação de linhas, o MESA 5.2 acrescenta a segmentação por camada de geocódigos: a fase Segmentar do executor agrupa os polígonos de uma camada de geocódigos num número menor de zonas que partilham um perfil de sensibilidade semelhante, permitindo ler um mapa de resultados denso como um punhado de tipos de área distintos em vez de milhares de células individuais. São oferecidos dois métodos — Assinaturas, uma tipologia determinística em que cada polígono é rotulado pelo conjunto de códigos de sensibilidade (A–E) dos activos que o sobrepõem (a opção por omissão, sem afinação), e Agrupamentos, um agrupamento algorítmico por perfil numérico de sensibilidade (KMeans ou uma variante espacialmente contígua). O resultado (tbl_segmentation) não contém geometria e associa-se de novo aos polígonos de geocódigo pelo campo code no momento da renderização; as zonas resultantes surgem no separador Segmentação da janela de Mapas e no motor de relatórios."))
+        "Distinct from line segmentation, MESA 5.2 adds geocode-layer segmentation: the Segment stage of the processing runner groups the polygons of a geocode layer into a smaller number of zones that share a similar sensitivity profile, so a dense result map can be read as a handful of distinct area types instead of thousands of individual cells. Two methods are offered, Signatures, a deterministic typology where each polygon is labelled by the set of sensitivity codes (A–E) carried by its overlapping assets (the default, needing no tuning), and Clusters, an algorithmic grouping by numeric sensitivity profile (KMeans or a spatially-contiguous variant). The output (tbl_segmentation) carries no geometry and joins back to geocode polygons on code at render time; the resulting zones appear on the Segmentation tab of the Maps window and in the report engine.",
+        "Distinta da segmentação de linhas, o MESA 5.2 acrescenta a segmentação por camada de geocódigos: a fase Segmentar do executor agrupa os polígonos de uma camada de geocódigos num número menor de zonas que partilham um perfil de sensibilidade semelhante, permitindo ler um mapa de resultados denso como um punhado de tipos de área distintos em vez de milhares de células individuais. São oferecidos dois métodos, Assinaturas, uma tipologia determinística em que cada polígono é rotulado pelo conjunto de códigos de sensibilidade (A–E) dos activos que o sobrepõem (a opção por omissão, sem afinação), e Agrupamentos, um agrupamento algorítmico por perfil numérico de sensibilidade (KMeans ou uma variante espacialmente contígua). O resultado (tbl_segmentation) não contém geometria e associa-se de novo aos polígonos de geocódigo pelo campo code no momento da renderização; as zonas resultantes surgem no separador Segmentação da janela de Mapas e no motor de relatórios."))
     add(PB())
 
     # =========================================================================
@@ -712,8 +657,8 @@ def build_blocks():
         "MESA produces one normalised composite index plus a set of raw indicators that summarise the intensity and composition of overlapping assets within each spatial reporting unit (a geocode polygon, and in some workflows along buffered/segmented lines). The OWA index (index_owa) serves as the precautionary primary overlay, alongside four supplementary per-cell indicators that provide raw maxima and counts: Sensitivity (sensitivity_max), Importance (importance_max), Asset groups (asset_groups_total), and Asset objects (assets_overlap_total). All five are stored as fields in tbl_flat.parquet and rendered as overlays in the desktop viewer. (The earlier Importance index and Sensitivity index were removed in MESA 5.2.)",
         "O MESA produz um índice composto normalizado mais um conjunto de indicadores em estado bruto que resumem a intensidade e a composição de activos sobrepostos em cada unidade espacial (um polígono de geocódigo, e em alguns fluxos de trabalho ao longo de linhas amortecidas/segmentadas). O Índice OWA (index_owa) funciona como sobreposição principal precaucional, juntamente com quatro indicadores complementares por célula que fornecem máximos e contagens em estado bruto: Sensibilidade (sensitivity_max), Importância (importance_max), Grupos de activos (asset_groups_total) e Objectos de activo (assets_overlap_total). Todos os cinco são guardados como campos em tbl_flat.parquet e renderizados como sobreposições no visualizador desktop. (O antigo Índice de Importância e Índice de Sensibilidade foram removidos no MESA 5.2.)"))
     add(P(
-        "For map presentation, an index value of 0 indicates the absence of relevant overlaps and is not symbolised in the index overlays — those units therefore remain blank in map outputs.",
-        "Para a apresentação cartográfica, um valor de índice igual a 0 indica a ausência de sobreposições relevantes e não é simbolizado nas sobreposições de índice — essas unidades aparecem em branco nos mapas."))
+        "For map presentation, an index value of 0 indicates the absence of relevant overlaps and is not symbolised in the index overlays: those units therefore remain blank in map outputs.",
+        "Para a apresentação cartográfica, um valor de índice igual a 0 indica a ausência de sobreposições relevantes e não é simbolizado nas sobreposições de índice: essas unidades aparecem em branco nos mapas."))
 
     add(H(2, "7.1 OWA index (index_owa)", "7.1 Índice OWA (index_owa)"))
     add(P(
@@ -722,8 +667,8 @@ def build_blocks():
 
     add(H(2, "7.2 Sensitivity (sensitivity_max)", "7.2 Sensibilidade (sensitivity_max)"))
     add(P(
-        "The single highest sensitivity value present in the overlap stack of a spatial unit. Sensitivity per overlap is the product of importance and susceptibility (typically 1–25); this layer reports the worst-case overlap — a single A-rated asset is enough to colour the cell as A, even if many lower-rated assets also overlap.",
-        "O valor de sensibilidade mais alto presente na sobreposição de uma unidade espacial. A sensibilidade por sobreposição é o produto da importância e da susceptibilidade (tipicamente 1–25); esta camada reporta a pior sobreposição — um único activo classificado como A é suficiente para colorir a célula como A, mesmo que muitos activos de classe inferior também se sobreponham."))
+        "The single highest sensitivity value present in the overlap stack of a spatial unit. Sensitivity per overlap is the product of importance and susceptibility (typically 1–25); this layer reports the worst-case overlap: a single A-rated asset is enough to colour the cell as A, even if many lower-rated assets also overlap.",
+        "O valor de sensibilidade mais alto presente na sobreposição de uma unidade espacial. A sensibilidade por sobreposição é o produto da importância e da susceptibilidade (tipicamente 1–25); esta camada reporta a pior sobreposição: um único activo classificado como A é suficiente para colorir a célula como A, mesmo que muitos activos de classe inferior também se sobreponham."))
 
     add(H(2, "7.3 Importance (importance_max)", "7.3 Importância (importance_max)"))
     add(P(
@@ -754,8 +699,8 @@ def build_blocks():
 
     add(H(2, "8.1 QGIS opened", "8.1 QGIS aberto"))
     add(P(
-        "When QGIS opens, the project can optionally pan/zoom to your data. This depends on QGIS macros: if you see a prompt about macros, enable them to allow the startup logic to run. If you prefer not to enable macros, you can still use the project — just zoom to your layers manually. If layers appear broken or empty, confirm that output/geoparquet/ and output/mbtiles/ were created by a successful MESA run.",
-        "Quando o QGIS abre, o projecto pode opcionalmente fazer pan/zoom até aos seus dados. Isto depende das macros do QGIS: se aparecer um aviso sobre macros, active-as para permitir a execução da lógica de arranque. Se preferir não activar as macros, pode continuar a usar o projecto — basta fazer zoom manualmente. Se as camadas aparecerem partidas ou vazias, confirme que output/geoparquet/ e output/mbtiles/ foram criadas por uma execução bem sucedida do MESA."))
+        "When QGIS opens, the project can optionally pan/zoom to your data. This depends on QGIS macros: if you see a prompt about macros, enable them to allow the startup logic to run. If you prefer not to enable macros, you can still use the project, just zoom to your layers manually. If layers appear broken or empty, confirm that output/geoparquet/ and output/mbtiles/ were created by a successful MESA run.",
+        "Quando o QGIS abre, o projecto pode opcionalmente fazer pan/zoom até aos seus dados. Isto depende das macros do QGIS: se aparecer um aviso sobre macros, active-as para permitir a execução da lógica de arranque. Se preferir não activar as macros, pode continuar a usar o projecto, basta fazer zoom manualmente. Se as camadas aparecerem partidas ou vazias, confirme que output/geoparquet/ e output/mbtiles/ foram criadas por uma execução bem sucedida do MESA."))
     add(IMG("qgis_default.png",
             "Default QGIS project view.",
             "Vista padrão do projecto QGIS.",
@@ -767,8 +712,8 @@ def build_blocks():
         "The Segments group visualizes results for processed line assets (roads, rivers, coastlines, pipelines, etc.). These layers are backed by GeoParquet tables under output/geoparquet/.",
         "O grupo Segmentos visualiza os resultados de activos lineares processados (estradas, rios, linhas costeiras, oleodutos, etc.). Estas camadas são suportadas pelas tabelas GeoParquet em output/geoparquet/."))
     add(IMG("qgis_segments.png",
-            "QGIS — segments group.",
-            "QGIS — grupo de segmentos.",
+            "QGIS: segments group.",
+            "QGIS: grupo de segmentos.",
             width_cm=15.0,
             landscape=False))
 
@@ -777,8 +722,8 @@ def build_blocks():
         "The Importance layers show the calculated importance index and/or categorical outputs. They are typically driven by tbl_flat.parquet (polygons) and related tables.",
         "As camadas de Importância mostram o índice de importância calculado e/ou os resultados categóricos. São tipicamente impulsionadas por tbl_flat.parquet (polígonos) e tabelas relacionadas."))
     add(IMG("qgis_importance.png",
-            "QGIS — importance overlay.",
-            "QGIS — sobreposição de importância.",
+            "QGIS: importance overlay.",
+            "QGIS: sobreposição de importância.",
             width_cm=15.0,
             landscape=False))
 
@@ -787,8 +732,8 @@ def build_blocks():
         "The Assets group shows imported assets (often with multiple geometry types) loaded from the GeoParquet store. Use these layers to QA imports and to understand which datasets contribute to hotspots.",
         "O grupo de Activos mostra os activos importados (frequentemente com múltiplos tipos de geometria) carregados a partir do repositório GeoParquet. Utilize estas camadas para validar importações e para perceber quais os conjuntos que contribuem para os pontos críticos."))
     add(IMG("qgis_assets.png",
-            "QGIS — assets group.",
-            "QGIS — grupo de activos.",
+            "QGIS: assets group.",
+            "QGIS: grupo de activos.",
             width_cm=15.0,
             landscape=False))
     add(PB())
@@ -799,8 +744,8 @@ def build_blocks():
     add(H(1, "9. Definitions", "9. Definições"))
     add(H(2, "9.1 Sensitivity mapping", "9.1 Mapeamento de sensibilidade"))
     add(P(
-        "Sensitivity mapping is a structured, anticipatory method for integrating environmental, social, and cultural considerations into spatial decision-making. It identifies assets that society values — habitats, species, ecosystem functions, cultural heritage, livelihoods — and evaluates their sensitivity to specific pressures or interventions. Sensitivity mapping is explicitly designed for early-stage planning and screening: it does not replace detailed impact assessments, but supports strategic choices by making trade-offs visible.",
-        "O mapeamento de sensibilidade é um método estruturado e antecipatório para integrar considerações ambientais, sociais e culturais na tomada de decisão espacial. Identifica os activos que a sociedade valoriza — habitats, espécies, funções de ecossistema, património cultural, meios de subsistência — e avalia a sua sensibilidade a pressões ou intervenções específicas. Está explicitamente desenhado para planeamento e triagem em fase inicial: não substitui as avaliações de impacte detalhadas, mas apoia escolhas estratégicas tornando visíveis as compensações."))
+        "Sensitivity mapping is a structured, anticipatory method for integrating environmental, social, and cultural considerations into spatial decision-making. It identifies assets that society values, habitats, species, ecosystem functions, cultural heritage, livelihoods, and evaluates their sensitivity to specific pressures or interventions. Sensitivity mapping is explicitly designed for early-stage planning and screening: it does not replace detailed impact assessments, but supports strategic choices by making trade-offs visible.",
+        "O mapeamento de sensibilidade é um método estruturado e antecipatório para integrar considerações ambientais, sociais e culturais na tomada de decisão espacial. Identifica os activos que a sociedade valoriza, habitats, espécies, funções de ecossistema, património cultural, meios de subsistência, e avalia a sua sensibilidade a pressões ou intervenções específicas. Está explicitamente desenhado para planeamento e triagem em fase inicial: não substitui as avaliações de impacte detalhadas, mas apoia escolhas estratégicas tornando visíveis as compensações."))
 
     add(H(2, "9.2 Geocodes", "9.2 Geocódigos"))
     add(P(
@@ -812,8 +757,8 @@ def build_blocks():
         "Lines in MESA are used to analyze sensitivity along linear features (rivers, roads, coastlines, power lines, pipelines, etc.). To represent their footprint or risk area, MESA buffers the input lines before analysis. Buffer width is configurable in config.ini. Lines can also be split into segments so results vary along the feature; MESA stores per-segment metrics in output/geoparquet/tbl_segment_flat.parquet.",
         "As linhas no MESA são utilizadas para analisar a sensibilidade ao longo de feições lineares (rios, estradas, linhas costeiras, linhas eléctricas, oleodutos, etc.). Para representar a sua pegada ou área de risco, o MESA aplica um amortecimento às linhas antes da análise. A largura do amortecimento é configurável em config.ini. As linhas podem também ser divididas em segmentos para que os resultados variem ao longo da feição; as métricas por segmento são guardadas em output/geoparquet/tbl_segment_flat.parquet."))
     add(IMG("segments.png",
-            "Line segments — sensitivity along linear features.",
-            "Segmentos de linha — sensibilidade ao longo de feições lineares.",
+            "Line segments: sensitivity along linear features.",
+            "Segmentos de linha: sensibilidade ao longo de feições lineares.",
             width_cm=14.0))
 
     add(H(2, "9.4 Atlas", "9.4 Atlas"))
@@ -823,22 +768,22 @@ def build_blocks():
 
     add(H(2, "9.5 Other definitions", "9.5 Outras definições"))
     add(UL(
-        ["Environmental Sensitivity Atlas — a collection of maps and supporting narrative text presenting spatial data on the sensitivity of ecological and/or socio-economic assets to a specific pressure.",
-         "Environmental Sensitivity — combination of susceptibility and importance of an affected asset that signifies the potential impact of a given pressure.",
-         "Pressure (stressor) — the source of potential impact from an activity (habitat loss, disturbance, pollution, altered water levels, ...).",
-         "Ecological Asset — naturally occurring entities that provide ecological functions or services, including those without monetary value.",
-         "Socio-Economic Asset — natural or anthropogenic entities providing social, cultural, economic or political value.",
-         "Importance — an asset's value at global, national, or local scale in relation to rarity, significance, functional and intrinsic value.",
-         "Susceptibility — the degree to which an asset will be affected by a pressure, based on severity of impact and recovery ability.",
-         "Sensitivity — overall rating of consequences of allowing an impact to occur. Combines importance and susceptibility for a given pressure."],
-        ["Atlas de Sensibilidade Ambiental — colectânea de mapas e texto narrativo de suporte que apresenta dados espaciais sobre a sensibilidade de activos ecológicos e/ou socioeconómicos a uma pressão específica.",
-         "Sensibilidade Ambiental — combinação da susceptibilidade e da importância de um activo afectado, indicando o impacte potencial de uma dada pressão.",
-         "Pressão (factor de stress) — fonte de impacte potencial de uma actividade (perda de habitat, perturbação, poluição, alteração de níveis de água, …).",
-         "Activo Ecológico — entidades naturais que prestam funções ou serviços ecológicos, incluindo as que não têm valor monetário.",
-         "Activo Socioeconómico — entidades naturais ou antropogénicas com valor social, cultural, económico ou político.",
-         "Importância — valor de um activo à escala global, nacional ou local, em relação à raridade, ao significado, ao valor funcional e intrínseco.",
-         "Susceptibilidade — grau em que um activo é afectado por uma pressão, com base na severidade do impacte e na capacidade de recuperação.",
-         "Sensibilidade — classificação global das consequências de permitir um impacte. Combina importância e susceptibilidade para uma dada pressão."]))
+        ["Environmental Sensitivity Atlas: a collection of maps and supporting narrative text presenting spatial data on the sensitivity of ecological and/or socio-economic assets to a specific pressure.",
+         "Environmental Sensitivity: combination of susceptibility and importance of an affected asset that signifies the potential impact of a given pressure.",
+         "Pressure (stressor): the source of potential impact from an activity (habitat loss, disturbance, pollution, altered water levels, ...).",
+         "Ecological Asset: naturally occurring entities that provide ecological functions or services, including those without monetary value.",
+         "Socio-Economic Asset: natural or anthropogenic entities providing social, cultural, economic or political value.",
+         "Importance: an asset's value at global, national, or local scale in relation to rarity, significance, functional and intrinsic value.",
+         "Susceptibility: the degree to which an asset will be affected by a pressure, based on severity of impact and recovery ability.",
+         "Sensitivity: overall rating of consequences of allowing an impact to occur. Combines importance and susceptibility for a given pressure."],
+        ["Atlas de Sensibilidade Ambiental: colectânea de mapas e texto narrativo de suporte que apresenta dados espaciais sobre a sensibilidade de activos ecológicos e/ou socioeconómicos a uma pressão específica.",
+         "Sensibilidade Ambiental: combinação da susceptibilidade e da importância de um activo afectado, indicando o impacte potencial de uma dada pressão.",
+         "Pressão (factor de stress): fonte de impacte potencial de uma actividade (perda de habitat, perturbação, poluição, alteração de níveis de água, …).",
+         "Activo Ecológico: entidades naturais que prestam funções ou serviços ecológicos, incluindo as que não têm valor monetário.",
+         "Activo Socioeconómico: entidades naturais ou antropogénicas com valor social, cultural, económico ou político.",
+         "Importância: valor de um activo à escala global, nacional ou local, em relação à raridade, ao significado, ao valor funcional e intrínseco.",
+         "Susceptibilidade: grau em que um activo é afectado por uma pressão, com base na severidade do impacte e na capacidade de recuperação.",
+         "Sensibilidade: classificação global das consequências de permitir um impacte. Combina importância e susceptibilidade para uma dada pressão."]))
     add(PB())
 
     # =========================================================================
@@ -854,8 +799,8 @@ def build_blocks():
     add(H(2, "10.2 Iterative workflow: full run first, then re-run only what changed",
           "10.2 Fluxo iterativo: primeiro a execução completa, depois reexecutar apenas o que mudou"))
     add(P(
-        "The processing pipeline is a chain of stages, each reading the previous stage's parquet output from disk and writing its own. That on-disk hand-off is what makes selective re-runs possible — once a stage has finished, you can change parameters that only affect a downstream stage and rerun just that stage without redoing the heavy work upstream.",
-        "O pipeline de processamento é uma cadeia de fases, cada uma a ler o resultado parquet da fase anterior em disco e a escrever o seu próprio. Essa transferência em disco é o que torna possíveis as reexecuções selectivas — assim que uma fase termina, pode alterar parâmetros que só afectam uma fase a jusante e reexecutar apenas essa fase, sem repetir o trabalho pesado a montante."))
+        "The processing pipeline is a chain of stages, each reading the previous stage's parquet output from disk and writing its own. That on-disk hand-off is what makes selective re-runs possible: once a stage has finished, you can change parameters that only affect a downstream stage and rerun just that stage without redoing the heavy work upstream.",
+        "O pipeline de processamento é uma cadeia de fases, cada uma a ler o resultado parquet da fase anterior em disco e a escrever o seu próprio. Essa transferência em disco é o que torna possíveis as reexecuções selectivas: assim que uma fase termina, pode alterar parâmetros que só afectam uma fase a jusante e reexecutar apenas essa fase, sem repetir o trabalho pesado a montante."))
     add(P(
         "The intended workflow is therefore:",
         "O fluxo de trabalho previsto é, portanto:"))
@@ -865,8 +810,8 @@ def build_blocks():
         ["Primeira vez: execute todo o pipeline de ponta a ponta para que cada fase tenha um resultado válido.",
          "Iterar: altere o parâmetro que pretende explorar, depois no executor de Processamento mude para Avançado, desactive tudo excepto a fase afectada e as fases a jusante, e reexecute."]))
     add(IMG("efficient_workflow.png",
-            "MESA pipeline scenarios — full run vs. selective re-runs. Each row is a scenario; bars show which stages run.",
-            "Cenários do pipeline MESA — execução completa vs. reexecuções selectivas. Cada linha é um cenário; as barras indicam que fases são executadas.",
+            "MESA pipeline scenarios: full run vs. selective re-runs. Each row is a scenario; bars show which stages run.",
+            "Cenários do pipeline MESA: execução completa vs. reexecuções selectivas. Cada linha é um cenário; as barras indicam que fases são executadas.",
             width_cm=15.5))
 
     add(H(2, "10.2.1 What each stage reads and writes",
@@ -877,7 +822,6 @@ def build_blocks():
             ["Prep", "input parquet metadata, asset/geocode counts", "workspace status files", "seconds"],
             ["Intersect", "tbl_asset_object, tbl_geocode_object", "tbl_stacked/ (partitioned dataset)", "minutes to hours; the heaviest stage"],
             ["Flatten", "tbl_stacked, sensitivity classification from config.ini", "tbl_flat.parquet", "seconds to minutes; scales with tbl_stacked size"],
-            ["Backfill", "tbl_flat, tbl_stacked", "per-cell area_m2 enriched into tbl_stacked", "minutes; mostly pandas merges"],
             ["Tiles", "tbl_flat", "output/mbtiles/*.mbtiles", "minutes; depends on zoom range and bounding box"],
             ["Lines", "line inputs, tbl_flat", "tbl_lines_buffered, tbl_segments, tbl_segment_flat", "seconds to minutes"],
             ["Analysis", "tbl_flat, tbl_stacked, analysis polygons", "tbl_analysis_* outputs and JSON summaries", "seconds per study area"],
@@ -887,14 +831,13 @@ def build_blocks():
             ["Prep", "metadados dos parquet de entrada, contagens de activos e geocódigos", "ficheiros de estado do espaço de trabalho", "segundos"],
             ["Intersect", "tbl_asset_object, tbl_geocode_object", "tbl_stacked/ (conjunto particionado)", "minutos a horas; a fase mais pesada"],
             ["Flatten", "tbl_stacked, pesos de sensibilidade/índice em config.ini", "tbl_flat.parquet", "segundos a minutos; escala com o tamanho de tbl_stacked"],
-            ["Backfill", "tbl_flat, tbl_stacked", "area_m2 por célula enriquecido em tbl_stacked", "minutos; sobretudo merges pandas"],
             ["Tiles", "tbl_flat", "output/mbtiles/*.mbtiles", "minutos; depende do intervalo de zoom e da extensão"],
             ["Lines", "linhas de entrada, tbl_flat", "tbl_lines_buffered, tbl_segments, tbl_segment_flat", "segundos a minutos"],
             ["Analysis", "tbl_flat, tbl_stacked, polígonos de análise", "tabelas tbl_analysis_* e resumos JSON", "segundos por área de estudo"],
         ]))
     add(P(
-        "A stage's checkbox is greyed out when its required input is missing on disk. That is the safety net — the runner refuses to run Tiles without tbl_flat, refuses to run Backfill without tbl_stacked, and so on.",
-        "A caixa de selecção de uma fase fica desactivada quando o seu input obrigatório está em falta no disco. É essa a rede de segurança — o executor recusa-se a correr Tiles sem tbl_flat, recusa-se a correr Backfill sem tbl_stacked, e assim por diante."))
+        "A stage's checkbox is greyed out when its required input is missing on disk. That is the safety net: the runner refuses to run Tiles without tbl_flat, refuses to run Flatten without tbl_stacked, and so on.",
+        "A caixa de selecção de uma fase fica desactivada quando o seu input obrigatório está em falta no disco. É essa a rede de segurança: o executor recusa-se a correr Tiles sem tbl_flat, recusa-se a correr Flatten sem tbl_stacked, e assim por diante."))
 
     add(H(2, "10.2.2 Cookbook: what changed → which stage to re-run",
           "10.2.2 Receituário: o que mudou → que fase reexecutar"))
@@ -905,10 +848,10 @@ def build_blocks():
         ["If you changed…", "Re-run from…", "Notes"],
         [
             ["Importance / susceptibility per asset group (Parameters helper)",
-             "Flatten + Backfill (plus Tiles / Analysis)",
+             "Flatten (plus Tiles / Analysis)",
              "Intersect output is unchanged; only tbl_flat recomputes. The cheapest meaningful iteration loop."],
             ["Sliver cleanup toggle (flatten_sliver_min_area_m2, the runner checkbox)",
-             "Flatten + Backfill (plus Tiles / Analysis)",
+             "Flatten (plus Tiles / Analysis)",
              "Sliver removal is part of flatten."],
             ["tiles_minzoom / tiles_maxzoom",
              "Tiles only",
@@ -920,21 +863,21 @@ def build_blocks():
              "Analysis only",
              "Reads existing tbl_flat and tbl_stacked."],
             ["cell_size, chunk_size, geocode_soft_limit, asset_soft_limit",
-             "Intersect + Flatten + Backfill (plus downstream)",
+             "Intersect + Flatten (plus downstream)",
              "These shape tbl_stacked itself."],
             ["Added a new H3 resolution or a new custom geocode group",
-             "Intersect + Flatten + Backfill (plus downstream)",
+             "Intersect + Flatten (plus downstream)",
              "New geocode IDs appear in tbl_stacked, so flatten and everything after must rerun."],
             ["Re-imported assets (Workflows → Prepare data → Assets)",
-             "Intersect + Flatten + Backfill (plus downstream)",
+             "Intersect + Flatten (plus downstream)",
              "New asset rows in tbl_asset_object invalidate the existing intersection."],
             ["Re-imported or regenerated geocodes",
-             "Intersect + Flatten + Backfill (plus downstream)",
-             "Same reason — tbl_geocode_object changed."],
+             "Intersect + Flatten (plus downstream)",
+             "Same reason: tbl_geocode_object changed."],
             ["Mosaic tuning (mosaic_coverage_union_batch, mosaic_line_union_max_partials, mosaic_coverage_union)",
-             "Re-publish basic_mosaic from Geocodes, then Intersect + Flatten + Backfill (plus downstream)",
+             "Re-publish basic_mosaic from Geocodes, then Intersect + Flatten (plus downstream)",
              "These tune the mosaic build. The mosaic is a geocode group, so changes propagate from intersect onwards."],
-            ["Worker counts (max_workers, flatten_*_workers, tiles_max_workers, backfill_max_workers)",
+            ["Worker counts (max_workers, flatten_*_workers, tiles_max_workers)",
              "Whatever stage is next",
              "These don't change outputs, only how the next run executes. Override what you need, rerun the affected stage."],
             ["report_basemap_mode, report-level layout / styling",
@@ -944,10 +887,10 @@ def build_blocks():
         ["Se alterou…", "Reexecute a partir de…", "Notas"],
         [
             ["Pesos de sensibilidade, pesos de importância, pesos de índice (auxiliar Parâmetros)",
-             "Flatten + Backfill (mais Tiles / Análise)",
+             "Flatten (mais Tiles / Análise)",
              "O resultado de Intersect não muda; apenas tbl_flat é recalculado. O ciclo de iteração mais barato."],
             ["Limpeza de fragmentos (flatten_sliver_min_area_m2, caixa de selecção no executor)",
-             "Flatten + Backfill (mais Tiles / Análise)",
+             "Flatten (mais Tiles / Análise)",
              "A remoção de fragmentos faz parte do flatten."],
             ["tiles_minzoom / tiles_maxzoom",
              "Apenas Tiles",
@@ -959,21 +902,21 @@ def build_blocks():
              "Apenas Analysis",
              "Lê o tbl_flat e o tbl_stacked existentes."],
             ["cell_size, chunk_size, geocode_soft_limit, asset_soft_limit",
-             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Intersect + Flatten (mais a jusante)",
              "Estes parâmetros moldam o próprio tbl_stacked."],
             ["Adicionou uma nova resolução H3 ou um novo grupo de geocódigos personalizado",
-             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Intersect + Flatten (mais a jusante)",
              "Aparecem novos identificadores de geocódigo em tbl_stacked, pelo que flatten e tudo o que se segue tem de reexecutar."],
             ["Reimportou activos (Fluxos de trabalho → Preparar dados → Activos)",
-             "Intersect + Flatten + Backfill (mais a jusante)",
+             "Intersect + Flatten (mais a jusante)",
              "Novas linhas de activos em tbl_asset_object invalidam a intersecção existente."],
             ["Reimportou ou regenerou geocódigos",
-             "Intersect + Flatten + Backfill (mais a jusante)",
-             "Pela mesma razão — tbl_geocode_object mudou."],
+             "Intersect + Flatten (mais a jusante)",
+             "Pela mesma razão: tbl_geocode_object mudou."],
             ["Afinação do mosaico (mosaic_coverage_union_batch, mosaic_line_union_max_partials, mosaic_coverage_union)",
-             "Republicar basic_mosaic em Geocodes, depois Intersect + Flatten + Backfill (mais a jusante)",
+             "Republicar basic_mosaic em Geocodes, depois Intersect + Flatten (mais a jusante)",
              "Estes parâmetros afinam a construção do mosaico. O mosaico é um grupo de geocódigos, pelo que as alterações se propagam a partir do intersect."],
-            ["Número de processos de trabalho (max_workers, flatten_*_workers, tiles_max_workers, backfill_max_workers)",
+            ["Número de processos de trabalho (max_workers, flatten_*_workers, tiles_max_workers)",
              "A fase seguinte que pretender executar",
              "Não alteram resultados, apenas como a próxima execução decorre. Sobrescreva o que precisa e reexecute a fase afectada."],
             ["report_basemap_mode, esquema / estilo do relatório",
@@ -983,56 +926,56 @@ def build_blocks():
 
     add(H(2, "10.2.3 Practical tips", "10.2.3 Sugestões práticas"))
     add(UL(
-        ["Read the [auto-tune] block at the top of every run log to verify the runner picked the worker counts you expected. If you have just set flatten_max_workers = 4 in config.ini but the log shows flatten_max_workers = 1, auto-tune was constrained by available RAM — close other apps or raise mem_target_frac and rerun.",
+        ["Read the [auto-tune] block at the top of every run log to verify the runner picked the worker counts you expected. If you have just set flatten_max_workers = 4 in config.ini but the log shows flatten_max_workers = 1, auto-tune was constrained by available RAM: close other apps or raise mem_target_frac and rerun.",
          "The pre-flight at the start of Flatten checks both system-wide RAM use and a dataset-aware peak estimate (see 10.4 Memory safety nets). It will let small datasets through on busy desktops; if it ever blocks you incorrectly, the abort message names the two operator knobs to relax.",
          "Use Manage data → Create backup before exploratory parameter sweeps. Reverting is one click; figuring out what changed three iterations later is not.",
          "The Status tab shows row counts for tbl_stacked and tbl_flat. If you tick 'Flatten only' and rerun, watch the tbl_flat row count change; tbl_stacked should stay the same.",
-         "For pure parameter sweeps (importance / susceptibility only), tick just Flatten + Backfill. Tiles and Analysis can wait until you have settled on a parameter set worth rendering."],
-        ["Leia o bloco [auto-tune] no topo de cada registo de execução para confirmar que o executor escolheu o número de processos esperado. Se acabou de definir flatten_max_workers = 4 em config.ini mas o registo mostra flatten_max_workers = 1, o auto-tune foi limitado pela RAM disponível — feche outras aplicações ou aumente mem_target_frac e volte a executar.",
+         "For pure parameter sweeps (importance / susceptibility only), tick just Flatten. Tiles and Analysis can wait until you have settled on a parameter set worth rendering."],
+        ["Leia o bloco [auto-tune] no topo de cada registo de execução para confirmar que o executor escolheu o número de processos esperado. Se acabou de definir flatten_max_workers = 4 em config.ini mas o registo mostra flatten_max_workers = 1, o auto-tune foi limitado pela RAM disponível: feche outras aplicações ou aumente mem_target_frac e volte a executar.",
          "A verificação prévia no início de Flatten avalia tanto a utilização global de RAM como uma estimativa do pico que tem em conta o tamanho dos dados (ver 10.4 Redes de segurança de memória). Permite passar conjuntos pequenos em computadores ocupados; se alguma vez bloquear incorrectamente, a mensagem de aborto identifica os dois parâmetros do operador a relaxar.",
          "Utilize Gerir dados → Criar cópia de segurança antes de explorações de parâmetros. Reverter é um clique; descobrir três iterações depois o que mudou não.",
          "A aba Estado mostra as contagens de linhas de tbl_stacked e tbl_flat. Se seleccionar apenas 'Flatten' e reexecutar, observe a variação na contagem de tbl_flat; tbl_stacked deve permanecer igual.",
-         "Para explorações puras de parâmetros (apenas pesos de sensibilidade/índice), seleccione apenas Flatten + Backfill. Tiles e Analysis podem esperar até ter um conjunto de parâmetros que valha a pena renderizar."]))
+         "Para explorações puras de parâmetros (apenas pesos de sensibilidade/índice), seleccione apenas Flatten. Tiles e Analysis podem esperar até ter um conjunto de parâmetros que valha a pena renderizar."]))
 
     add(H(2, "10.3 Performance knobs (config.ini)", "10.3 Parâmetros de desempenho (config.ini)"))
     add(UL(
-        ["chunk_size — processing chunk size for heavy spatial operations.",
-         "max_workers, flatten_max_workers, flatten_small_max_workers, tiles_max_workers, backfill_max_workers — per-stage worker caps. Leave at 0 to let auto_tune decide; set a positive integer to override exactly.",
-         "h3_max_cells — safeguard for extremely fine H3 resolutions.",
-         "tiles_minzoom / tiles_maxzoom — output MBTiles zoom range.",
-         "mem_target_frac / approx_gb_per_worker — memory targeting for the auto-tuner."],
-        ["chunk_size — tamanho do bloco de processamento para operações espaciais pesadas.",
-         "max_workers, flatten_max_workers, flatten_small_max_workers, tiles_max_workers, backfill_max_workers — limites de processos de trabalho por fase. Deixe a 0 para que o auto_tune decida; defina um inteiro positivo para forçar.",
-         "h3_max_cells — protecção para resoluções H3 extremamente finas.",
-         "tiles_minzoom / tiles_maxzoom — intervalo de zoom dos MBTiles produzidos.",
-         "mem_target_frac / approx_gb_per_worker — alvo de memória para o auto-ajuste."]))
+        ["chunk_size: processing chunk size for heavy spatial operations.",
+         "max_workers, flatten_max_workers, flatten_small_max_workers, tiles_max_workers: per-stage worker caps. Leave at 0 to let auto_tune decide; set a positive integer to override exactly.",
+         "h3_max_cells: safeguard for extremely fine H3 resolutions.",
+         "tiles_minzoom / tiles_maxzoom: output MBTiles zoom range.",
+         "mem_target_frac / approx_gb_per_worker: memory targeting for the auto-tuner."],
+        ["chunk_size: tamanho do bloco de processamento para operações espaciais pesadas.",
+         "max_workers, flatten_max_workers, flatten_small_max_workers, tiles_max_workers: limites de processos de trabalho por fase. Deixe a 0 para que o auto_tune decida; defina um inteiro positivo para forçar.",
+         "h3_max_cells: protecção para resoluções H3 extremamente finas.",
+         "tiles_minzoom / tiles_maxzoom: intervalo de zoom dos MBTiles produzidos.",
+         "mem_target_frac / approx_gb_per_worker: alvo de memória para o auto-ajuste."]))
 
     add(H(2, "10.4 Memory safety nets", "10.4 Redes de segurança de memória"))
     add(UL(
-        ["Pre-flight check before flatten — evaluates two signals and aborts only when both fail: system-wide RAM use above flatten_preflight_max_vm_percent AND available RAM below flatten_preflight_avail_safety_factor × estimated peak (estimated from on-disk tbl_stacked size and the auto-tuned worker counts). Pagefile/swap above flatten_preflight_max_swap_gb is still its own hard signal. Small datasets on busy desktops now go through; big datasets on starved hosts still abort cleanly.",
-         "Per-pool panic watchdog (mem_panic_percent / mem_panic_grace_secs) — if RAM crosses the threshold past the grace period, the pool is terminated cleanly.",
-         "Process-lifetime sentinel (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs) — last-resort backstop covering parent-side work between pools."],
-        ["Verificação prévia antes do flatten — avalia dois sinais e aborta apenas quando ambos falham: utilização global de RAM acima de flatten_preflight_max_vm_percent E memória disponível abaixo de flatten_preflight_avail_safety_factor × pico estimado (calculado a partir do tamanho em disco de tbl_stacked e do número de trabalhadores auto-ajustado). O swap acima de flatten_preflight_max_swap_gb continua a ser um sinal forte por si só. Conjuntos de dados pequenos em computadores ocupados passam agora a verificação; conjuntos grandes em computadores com pouca memória continuam a abortar limpamente.",
-         "Vigilante de pânico por pool (mem_panic_percent / mem_panic_grace_secs) — se a RAM ultrapassar o limite além do período de tolerância, o pool é encerrado limpamente.",
-         "Sentinela do tempo de vida do processo (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs) — rede de segurança final que cobre o trabalho do processo-pai entre pools."]))
+        ["Pre-flight check before flatten: evaluates two signals and aborts only when both fail: system-wide RAM use above flatten_preflight_max_vm_percent AND available RAM below flatten_preflight_avail_safety_factor × estimated peak (estimated from on-disk tbl_stacked size and the auto-tuned worker counts). Pagefile/swap above flatten_preflight_max_swap_gb is still its own hard signal. Small datasets on busy desktops now go through; big datasets on starved hosts still abort cleanly.",
+         "Per-pool panic watchdog (mem_panic_percent / mem_panic_grace_secs): if RAM crosses the threshold past the grace period, the pool is terminated cleanly.",
+         "Process-lifetime sentinel (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs): last-resort backstop covering parent-side work between pools."],
+        ["Verificação prévia antes do flatten: avalia dois sinais e aborta apenas quando ambos falham: utilização global de RAM acima de flatten_preflight_max_vm_percent E memória disponível abaixo de flatten_preflight_avail_safety_factor × pico estimado (calculado a partir do tamanho em disco de tbl_stacked e do número de trabalhadores auto-ajustado). O swap acima de flatten_preflight_max_swap_gb continua a ser um sinal forte por si só. Conjuntos de dados pequenos em computadores ocupados passam agora a verificação; conjuntos grandes em computadores com pouca memória continuam a abortar limpamente.",
+         "Vigilante de pânico por pool (mem_panic_percent / mem_panic_grace_secs): se a RAM ultrapassar o limite além do período de tolerância, o pool é encerrado limpamente.",
+         "Sentinela do tempo de vida do processo (mem_lifetime_panic_percent / mem_lifetime_panic_grace_secs): rede de segurança final que cobre o trabalho do processo-pai entre pools."]))
 
     add(H(2, "10.5 Mosaic union batching", "10.5 Lotes de união do mosaico"))
     add(UL(
-        ["mosaic_coverage_union_batch — bigger batches (~2000–4000 on 64+ GB hosts) produce fewer, larger intermediate unions.",
-         "mosaic_line_union_max_partials — higher cap (32–64) means fewer reduction rounds.",
-         "mosaic_coverage_union = false — escape hatch that skips the coverage-reduction stage entirely and falls back to STRtree filtering."],
-        ["mosaic_coverage_union_batch — lotes maiores (~2000–4000 em máquinas com 64+ GB) produzem uniões intermédias menores em número e maiores em tamanho.",
-         "mosaic_line_union_max_partials — limite mais alto (32–64) reduz o número de rondas de redução.",
-         "mosaic_coverage_union = false — saída de emergência que ignora completamente a fase de redução de cobertura e usa filtragem STRtree."]))
+        ["mosaic_coverage_union_batch: bigger batches (~2000–4000 on 64+ GB hosts) produce fewer, larger intermediate unions.",
+         "mosaic_line_union_max_partials: higher cap (32–64) means fewer reduction rounds.",
+         "mosaic_coverage_union = false: escape hatch that skips the coverage-reduction stage entirely and falls back to STRtree filtering."],
+        ["mosaic_coverage_union_batch: lotes maiores (~2000–4000 em máquinas com 64+ GB) produzem uniões intermédias menores em número e maiores em tamanho.",
+         "mosaic_line_union_max_partials: limite mais alto (32–64) reduz o número de rondas de redução.",
+         "mosaic_coverage_union = false: saída de emergência que ignora completamente a fase de redução de cobertura e usa filtragem STRtree."]))
 
     add(H(2, "10.6 Basemap and tile caching", "10.6 Mapas-base e cache de azulejos"))
     add(UL(
-        ["xyz — use the built-in downloader with persistent cache under output/tile_cache/.",
-         "contextily — use contextily if installed.",
-         "auto — prefer contextily, fall back to xyz."],
-        ["xyz — usa o transferidor incorporado com cache persistente em output/tile_cache/.",
-         "contextily — usa contextily se estiver instalado.",
-         "auto — prefere contextily, com xyz como recurso."]))
+        ["xyz: use the built-in downloader with persistent cache under output/tile_cache/.",
+         "contextily: use contextily if installed.",
+         "auto: prefer contextily, fall back to xyz."],
+        ["xyz: usa o transferidor incorporado com cache persistente em output/tile_cache/.",
+         "contextily: usa contextily se estiver instalado.",
+         "auto: prefere contextily, com xyz como recurso."]))
     add(P(
         "First-run cost: the first report run on a new AOI (or after the cache has expired) must download every basemap tile the report touches from tile.openstreetmap.org. With each map covering several hundred tiles across multiple zoom levels, this can add minutes to tens of minutes to the run depending on report scope, network speed, and OSM tile-server response. Subsequent runs that touch the same area read from output/tile_cache/ and complete much faster. Tiles are cached for 30 days (TILE_CACHE_MAX_AGE_DAYS in code/report_generate.py); older tiles are re-fetched the next time they are needed. The cache is keyed by zoom/x/y, so entries are reusable across atlases and reports that overlap geographically.",
         "Custo da primeira execução: a primeira geração de relatório numa nova AOI (ou após a cache ter expirado) tem de descarregar todos os azulejos do mapa-base que o relatório precisa, a partir de tile.openstreetmap.org. Como cada mapa cobre várias centenas de azulejos em vários níveis de zoom, isto pode acrescentar minutos a dezenas de minutos ao tempo de execução, conforme o âmbito do relatório, a velocidade da rede e a resposta do servidor de azulejos do OSM. Execuções subsequentes que toquem a mesma área leem de output/tile_cache/ e são muito mais rápidas. Os azulejos são guardados durante 30 dias (TILE_CACHE_MAX_AGE_DAYS em code/report_generate.py); azulejos mais antigos são novamente transferidos quando voltarem a ser necessários. A cache é indexada por zoom/x/y, pelo que as entradas são reutilizáveis entre atlas e relatórios que cobrem áreas sobrepostas."))
@@ -1078,23 +1021,23 @@ def build_blocks():
           "11.4 Armadilhas comuns na instalação Windows"))
     add(UL(
         ["Running from a protected folder (e.g. C:\\Program Files) can prevent MESA from writing output/ and logs. Prefer a user-writable workspace folder.",
-         "Unzipping 'partial' releases — keep the shipped folder structure intact (input/, output/, tools/, system_resources/, qgis/, config.ini).",
+         "Unzipping 'partial' releases: keep the shipped folder structure intact (input/, output/, tools/, system_resources/, qgis/, config.ini).",
          "On fresh Windows installs, maps may fail until all Windows updates and runtimes (including WebView2) are in place."],
         ["Executar a partir de uma pasta protegida (p. ex. C:\\Program Files) pode impedir o MESA de escrever em output/ e nos registos. Prefira uma pasta de espaço de trabalho com permissão de escrita do utilizador.",
-         "Descompactar versões 'parciais' — mantenha a estrutura de pastas entregue (input/, output/, tools/, system_resources/, qgis/, config.ini).",
+         "Descompactar versões 'parciais': mantenha a estrutura de pastas entregue (input/, output/, tools/, system_resources/, qgis/, config.ini).",
          "Em instalações Windows novas, os mapas podem falhar até que todas as actualizações Windows e runtimes (incluindo WebView2) estejam instalados."]))
 
     add(H(2, "11.5 Processing aborts at flatten with PRE-FLIGHT ABORT",
           "11.5 O processamento aborta no flatten com PRE-FLIGHT ABORT"))
     add(P(
-        "The flatten stage refuses to start if the host already looks too memory-pressured to finish safely. As of MESA 5.0.2 the check evaluates two signals together — system-wide RAM use AND a dataset-aware headroom estimate — and aborts only when both fail. The swap-residue check is still a separate hard signal. The log line names the gate that tripped it, for example 'vm.percent 78.4% > 60% AND avail 6.2 GB < 1.25 × est_peak 8.0 GB = 10.0 GB' or 'swap_used 7.3 GB > 5.0 GB'. Close other heavy applications, wait a minute for swap to drain, restart the MESA launcher, and rerun Process. If pre-flight keeps tripping on a host with plenty of free RAM, raise flatten_preflight_avail_safety_factor (default 1.25) or flatten_preflight_max_vm_percent (default 60) in config.ini; the abort message itself names both knobs.",
-        "A fase flatten recusa-se a iniciar se o computador já estiver sob demasiada pressão de memória para terminar com segurança. A partir do MESA 5.0.2, a verificação avalia dois sinais em conjunto — utilização global de RAM E uma estimativa de margem que considera o tamanho do conjunto de dados — e só aborta quando ambos falham. O resíduo de swap continua a ser um sinal independente. A linha de registo identifica o critério que disparou, por exemplo 'vm.percent 78.4% > 60% AND avail 6.2 GB < 1.25 × est_peak 8.0 GB = 10.0 GB' ou 'swap_used 7.3 GB > 5.0 GB'. Feche outras aplicações pesadas, aguarde um minuto para o swap baixar, reinicie o iniciador MESA e volte a executar Processar. Se o pre-flight continuar a disparar num computador com bastante RAM livre, aumente flatten_preflight_avail_safety_factor (predefinição 1.25) ou flatten_preflight_max_vm_percent (predefinição 60) em config.ini; a própria mensagem de aborto refere os dois parâmetros."))
+        "The flatten stage refuses to start if the host already looks too memory-pressured to finish safely. As of MESA 5.0.2 the check evaluates two signals together, system-wide RAM use AND a dataset-aware headroom estimate, and aborts only when both fail. The swap-residue check is still a separate hard signal. The log line names the gate that tripped it, for example 'vm.percent 78.4% > 60% AND avail 6.2 GB < 1.25 × est_peak 8.0 GB = 10.0 GB' or 'swap_used 7.3 GB > 5.0 GB'. Close other heavy applications, wait a minute for swap to drain, restart the MESA launcher, and rerun Process. If pre-flight keeps tripping on a host with plenty of free RAM, raise flatten_preflight_avail_safety_factor (default 1.25) or flatten_preflight_max_vm_percent (default 60) in config.ini; the abort message itself names both knobs.",
+        "A fase flatten recusa-se a iniciar se o computador já estiver sob demasiada pressão de memória para terminar com segurança. A partir do MESA 5.0.2, a verificação avalia dois sinais em conjunto, utilização global de RAM E uma estimativa de margem que considera o tamanho do conjunto de dados, e só aborta quando ambos falham. O resíduo de swap continua a ser um sinal independente. A linha de registo identifica o critério que disparou, por exemplo 'vm.percent 78.4% > 60% AND avail 6.2 GB < 1.25 × est_peak 8.0 GB = 10.0 GB' ou 'swap_used 7.3 GB > 5.0 GB'. Feche outras aplicações pesadas, aguarde um minuto para o swap baixar, reinicie o iniciador MESA e volte a executar Processar. Se o pre-flight continuar a disparar num computador com bastante RAM livre, aumente flatten_preflight_avail_safety_factor (predefinição 1.25) ou flatten_preflight_max_vm_percent (predefinição 60) em config.ini; a própria mensagem de aborto refere os dois parâmetros."))
 
     add(H(2, "11.6 'Reducing coverage' looks stuck",
           "11.6 'Reducing coverage' parece encravado"))
     add(P(
-        "Basic_mosaic's coverage-reduction stage runs single-threaded GEOS unions. On larger projects this can take hours, and the heartbeat goes silent during a single very-large union call. Confirm the process is alive in Task Manager (CPU at ~85% on a single core means it is grinding, not deadlocked). For long-term improvement, run Tune processing → Evaluate → Commit changes — advised values for mosaic_coverage_union_batch and mosaic_line_union_max_partials scale with the host's RAM tier and dramatically reduce reduction rounds. For an extreme dataset, set mosaic_coverage_union = false in config.ini to skip the coverage-reduction stage entirely.",
-        "A fase de redução de cobertura do basic_mosaic executa uniões GEOS num único thread. Em projectos maiores pode demorar horas, e o heartbeat fica em silêncio durante uma única chamada de união muito grande. Confirme no Gestor de Tarefas que o processo está vivo (CPU em ~85% num único núcleo significa que está a processar, não bloqueado). Para melhorias de longo prazo, execute Afinação do processamento → Avaliar → Confirmar alterações — os valores aconselhados para mosaic_coverage_union_batch e mosaic_line_union_max_partials escalam com o nível de RAM do computador e reduzem drasticamente o número de rondas. Para um conjunto de dados extremo, defina mosaic_coverage_union = false em config.ini para ignorar completamente a fase de redução de cobertura."))
+        "Basic_mosaic's coverage-reduction stage runs single-threaded GEOS unions. On larger projects this can take hours, and the heartbeat goes silent during a single very-large union call. Confirm the process is alive in Task Manager (CPU at ~85% on a single core means it is grinding, not deadlocked). For long-term improvement, run Tune processing → Evaluate → Commit changes: advised values for mosaic_coverage_union_batch and mosaic_line_union_max_partials scale with the host's RAM tier and dramatically reduce reduction rounds. For an extreme dataset, set mosaic_coverage_union = false in config.ini to skip the coverage-reduction stage entirely.",
+        "A fase de redução de cobertura do basic_mosaic executa uniões GEOS num único thread. Em projectos maiores pode demorar horas, e o heartbeat fica em silêncio durante uma única chamada de união muito grande. Confirme no Gestor de Tarefas que o processo está vivo (CPU em ~85% num único núcleo significa que está a processar, não bloqueado). Para melhorias de longo prazo, execute Afinação do processamento → Avaliar → Confirmar alterações: os valores aconselhados para mosaic_coverage_union_batch e mosaic_line_union_max_partials escalam com o nível de RAM do computador e reduzem drasticamente o número de rondas. Para um conjunto de dados extremo, defina mosaic_coverage_union = false em config.ini para ignorar completamente a fase de redução de cobertura."))
 
     add(H(2, "11.7 Still stuck?", "11.7 Ainda com problemas?"))
     add(P(
@@ -1200,7 +1143,7 @@ def _add_cover(doc, lang):
     if lang == "en":
         title = "MESA User Guide"
         subtitle = "Mapping Environmentally Sensitive Assets"
-        version_line = f"{VERSION} — desktop tool"
+        version_line = f"{VERSION}: desktop tool"
         author_label = "Author"
         affil_label = "Affiliation"
         date_label = "Issued"
@@ -1209,7 +1152,7 @@ def _add_cover(doc, lang):
     else:
         title = "Manual do Utilizador MESA"
         subtitle = "Mapeamento de Activos Ambientalmente Sensíveis"
-        version_line = f"{VERSION} — ferramenta de ambiente de trabalho"
+        version_line = f"{VERSION}: ferramenta de ambiente de trabalho"
         author_label = "Autor"
         affil_label = "Afiliação"
         date_label = "Edição"
@@ -1280,7 +1223,7 @@ def _add_toc(doc, lang):
     #      result is stale and needs (re)building when the document opens or
     #      the user presses F9), AND
     #   2. there is a body run with at least a placeholder <w:t> between the
-    #      separate and end fldChars — without it Word silently refuses to
+    #      separate and end fldChars: without it Word silently refuses to
     #      update the field.
     # Both were missing from the previous renderer, which is why F9 did not
     # engage in the generated docx.

@@ -954,3 +954,16 @@ testing the packages from here. It points out that the demo `config.ini` is gene
 older template (it still has `backfill_max_workers` and the old stage numbers), that the guide
 still mentions Backfill and "Analysis", and asks for confirmation of the DOIs and a test of each
 package in 5.7.0. Nothing was reported to mesa-server.
+
+## 2026-10-11 (late): the user guide brought up to 5.7
+
+The entry above says the user guides got the demonstration-data section and nothing else. On the
+user's go-ahead the rest followed the same evening. Chapter 2 of `devtools/build_user_guide.py`
+was still "What's new in MESA 5.2" and described Backfill as a stage of its own. It is rewritten
+for 5.7 in English and Portuguese from the release notes, with the report changes of the day
+added. Backfill is removed from the stage lists, the re-run table and the tuning notes in
+chapters 3, 4 and 10; the three mentions left are the ones that say it is gone. All 183 em dashes
+in the script were replaced (a colon after a label, commas where they came in pairs), and both
+`.docx` files were regenerated: no em dashes, 38 pictures each. The other chapters were not read
+through against 5.7. The Portuguese text is my translation and has not been reviewed by a
+speaker.
