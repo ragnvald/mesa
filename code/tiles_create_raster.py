@@ -103,6 +103,36 @@ def spill_wkb(geoms, out_path: Path, chunk: int = 500_000) -> np.ndarray:
     return offsets
 
 
+def spill_wkb_scratch(geoms, out_dir: Path, name: str, log_fn=None) -> Tuple[Path, np.ndarray]:
+    """spill_wkb() into a scratch file that is certain to be writable; returns (path, offsets).
+
+    The file normally goes beside the tiles. A project folder inside OneDrive or
+    another sync service is avoided: the client took hold of the previous run's
+    scratch file and the next run failed with "[Errno 22] Invalid argument" when it
+    opened the same name. There, and whenever the first place refuses the file, the
+    system temp folder is used. See learning.md "Scratch files do not belong in a
+    synced folder".
+    """
+    import tempfile
+    file_name = f"__wkb_{name}_{os.getpid()}.bin"      # the pid keeps two runs apart
+    beside_tiles = Path(out_dir) / file_name
+    in_temp = Path(tempfile.gettempdir()) / f"mesa{file_name}"
+    synced = mesa_shared.cloud_sync_provider(out_dir)
+    candidates = [in_temp, beside_tiles] if synced else [beside_tiles, in_temp]
+    last_error: Optional[OSError] = None
+    for k, path in enumerate(candidates):
+        try:
+            offsets = spill_wkb(geoms, path)
+            if log_fn is not None and (synced or k):
+                why = f"the project folder is in {synced}" if synced and not k else f"{candidates[0].parent} refused it ({last_error})"
+                log_fn(f"  → scratch file written to {path.parent} ({why})")
+            return path, offsets
+        except OSError as exc:
+            last_error = exc
+            _rm_quiet(path)
+    raise last_error if last_error is not None else OSError("no place to write the scratch file")
+
+
 def _swap_xy_geom(geom):
     if geom is None:
         return None
@@ -1297,8 +1327,7 @@ def main():
         # geometry to a WKB file and drop the GeoDataFrame *before* spawning: the
         # parent then holds neither the GeoDataFrame nor the blob, and the workers
         # map the file instead of each unpickling a copy of it.
-        wkb_path = out_dir / f"__wkb_{slug}.bin"
-        wkb_off = spill_wkb(gdf.geometry.values, wkb_path)
+        wkb_path, wkb_off = spill_wkb_scratch(gdf.geometry.values, out_dir, slug, log)
         del gdf
         gc.collect()
         log(f"  → payload {wkb_path.stat().st_size/1024**3:.2f} GB WKB mapped by every worker "
@@ -1466,8 +1495,7 @@ def main():
                         s_bboxes = None
                     s_tasks = plan_tile_tasks(s_bounds, args.minzoom, args.maxzoom, s_bboxes, len(sgeo))
                     del s_bboxes
-                    s_wkb_path = out_dir / f"__wkb_{slug}_segmv.bin"
-                    s_off = spill_wkb(sgeo.geometry.values, s_wkb_path)
+                    s_wkb_path, s_off = spill_wkb_scratch(sgeo.geometry.values, out_dir, f"{slug}_segmv", log)
                     del sgeo
                     gc.collect()
                     s_init = (str(s_wkb_path), s_off, np.zeros(0, dtype=np.int16), [], {}, {},

@@ -862,6 +862,119 @@ body.mesa-has-offline-banner { padding-top: 28px; }
     return bundle
 
 
+# ---------------------------------------------------------------------------
+# Workspace (the folder a packaged MESA keeps a project in)
+# ---------------------------------------------------------------------------
+WORKSPACE_MARKER = ".mesa_workspace.json"
+
+
+def cloud_sync_provider(path, env=None) -> str:
+    """Name of the sync service a folder sits in ("OneDrive", "Dropbox", ...), or "".
+
+    A MESA project is gigabytes of files that are rewritten while it runs; a sync
+    client uploads all of it and can hold files open while MESA writes them.
+    """
+    env = os.environ if env is None else env
+    try:
+        target = os.path.normcase(os.path.abspath(str(path)))
+    except Exception:
+        return ""
+    for key in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+        root = (env.get(key) or "").strip()
+        if root:
+            root = os.path.normcase(os.path.abspath(root))
+            if target == root or target.startswith(root + os.sep):
+                return "OneDrive"
+    parts = [part.lower() for part in Path(target).parts]
+    for marker, name in (("onedrive", "OneDrive"), ("dropbox", "Dropbox"),
+                         ("google drive", "Google Drive"), ("googledrive", "Google Drive"),
+                         ("icloud", "iCloud")):
+        if any(part == marker or part.startswith(marker + " ") or part.startswith(marker + "-")
+               or (marker == "icloud" and "icloud" in part) for part in parts):
+            return name
+    return ""
+
+
+def suggest_workspace_dir(documents_dir, home_dir, env=None) -> str:
+    """Where a new workspace is proposed: Documents/MESA, or the home folder when Documents is synced."""
+    default = os.path.join(str(documents_dir), "MESA")
+    if cloud_sync_provider(default, env):
+        return os.path.join(str(home_dir), "MESA")
+    return default
+
+
+def resolve_workspace_choice(picked) -> str:
+    """The folder MESA will use for a folder the user picked.
+
+    An empty folder, a folder that does not exist yet and an existing workspace
+    are used as they are. Any other folder gets a MESA subfolder, so that MESA
+    never spreads its files among somebody's other documents.
+    """
+    picked = os.path.abspath(str(picked))
+    try:
+        entries = [e for e in os.listdir(picked) if not e.startswith(".")]
+    except OSError:
+        return picked
+    if not entries or os.path.isfile(os.path.join(picked, "config.ini")):
+        return picked
+    return os.path.join(picked, "MESA")
+
+
+def config_mesa_version(config_path) -> str:
+    """mesa_version from a config.ini, read without interpreting the rest of the file."""
+    try:
+        with open(config_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = re.match(r"\s*mesa_version\s*[=:]\s*(.+?)\s*$", line)
+                if m:
+                    return m.group(1).strip()
+    except OSError:
+        pass
+    return ""
+
+
+def read_workspace_marker(workspace) -> dict:
+    try:
+        import json
+        data = json.loads((Path(workspace) / WORKSPACE_MARKER).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_workspace_marker(workspace, program_version: str) -> None:
+    """Record which MESA version last opened this workspace."""
+    try:
+        import json
+        (Path(workspace) / WORKSPACE_MARKER).write_text(
+            json.dumps({"program_version": str(program_version)}, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def workspace_version_seen(workspace) -> str:
+    """The MESA version this workspace was last used with, or "" for a folder that is not a workspace."""
+    if not os.path.isfile(os.path.join(str(workspace), "config.ini")):
+        return ""
+    seen = str(read_workspace_marker(workspace).get("program_version") or "").strip()
+    return seen or config_mesa_version(os.path.join(str(workspace), "config.ini")) or "an earlier version"
+
+
+def archive_workspace(workspace, label: str, now=None) -> str:
+    """Set a workspace aside by renaming it; nothing is deleted. Returns the new path."""
+    import datetime
+    workspace = os.path.abspath(str(workspace))
+    stamp = (now or datetime.datetime.now()).strftime("%Y-%m-%d_%H%M")
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", str(label or "old")).strip("_") or "old"
+    target = f"{workspace}_{safe}_{stamp}"
+    n = 2
+    while os.path.exists(target):
+        target = f"{workspace}_{safe}_{stamp}_{n}"
+        n += 1
+    os.rename(workspace, target)
+    return target
+
+
 # A window opened from the launcher has to come up in front of it. Windows lets a
 # newly started process take the foreground only until the user's next click, and a
 # packaged helper needs seconds to start, so its window used to appear behind the

@@ -1028,3 +1028,23 @@ code and passes on the new.
 
 Not confirmed with the user: whether a cancelled or failed run had preceded the one where they
 saw it. If it happens on the first run in a freshly opened window, the cause is something else.
+
+## 2026-10-12: the tile stage failed in a project folder inside OneDrive
+
+While trying the first 5.7.0 build the user got an "Unhandled exception in script" dialog from
+`tiles_create_raster`: `OSError: [Errno 22] Invalid argument` on
+`...\OneDrive - Miljødirektoratet\Documents\MESA\output\mbtiles\__wkb_...`, raised in
+`spill_wkb` when it opened its scratch file. log.txt shows two Process runs: the tile stage of the
+first completed at 00:37 ("All done"), the second run at 00:39 has no tile lines and ends in
+"[Process] FAILED". The folder held no leftover scratch file afterwards.
+
+The scratch file is the WKB blob the tile workers map instead of each receiving a copy. It was
+written beside the tiles, which for a packaged MESA with a redirected Documents folder is inside
+OneDrive. It now goes to the system temp folder when the project is in a synced folder, carries
+the process id in its name, and falls back to the temp folder if the first place refuses it.
+The fault was not reproduced; the user suggested the open progress map could be involved, which
+cannot be ruled out, and the fallback covers both.
+
+The same session added helper functions to `mesa_shared.py` for the workspace changes that are
+under way (recognising a synced folder, proposing a place for a new workspace, setting an old
+one aside by renaming it); the tile fix uses the first of them.
