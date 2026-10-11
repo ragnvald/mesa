@@ -1112,6 +1112,34 @@ class ReportEngine:
                 ),
             ]
 
+            # Colour keys for the four maps, from the same class definitions the tiles
+            # and the GeoNode styles use, so the legend cannot drift from the map.
+            legend_specs: dict[str, tuple[list, str]] = {}
+            try:
+                legend_specs["sensitivity_max"] = (
+                    [(f"{code} – {self.desc.get(code, '')}".rstrip(" –"), self.palette.get(code))
+                     for code in ("A", "B", "C", "D", "E") if self.palette.get(code)],
+                    "Highest sensitivity class in the cell")
+                from geonode_export import result_style_classes
+                _sub = flat_df[flat_df['name_gis_geocodegroup'].astype('string').str.strip().str.lower()
+                               == str(gname).strip().lower()]
+                _classes = result_style_classes(_sub, self.config_path)
+                for _key, _caption in (("importance_max", "Highest importance in the cell (1 = lowest, 5 = highest)"),
+                                       ("groupstotal", "Number of asset groups in the cell"),
+                                       ("assetstotal", "Number of asset objects in the cell")):
+                    if _classes.get(_key):
+                        legend_specs[_key] = ([(c[3], c[2]) for c in _classes[_key]], _caption)
+            except Exception as exc:
+                write_to_log(f"[{gname}] map legends unavailable: {exc}", self.base_dir)
+
+            def _append_legend(suffix: str, slug: str) -> None:
+                spec = legend_specs.get(suffix) or legend_specs.get("sensitivity_max" if suffix == "sensitivity" else "")
+                if not spec:
+                    return
+                legend_png = self.make_path("geocode", safe, slug, "legend")
+                if _build_class_legend_png(spec[0], legend_png, caption=spec[1]) and _file_ok(legend_png):
+                    pages.append(('image', (None, legend_png)))
+
             pages.append(('heading(2)', f"Other maps: {gname}"))
             pages.append(('text',
                 f"Per-cell summary maps for the <b>{gname}</b> grouping, rendered from MBTiles with a "
@@ -1135,6 +1163,7 @@ class ReportEngine:
                     pages.append(('heading(3)', title))
                     pages.append(('text', intro))
                     pages.append(('image_map', (title, out_png)))
+                    _append_legend(suffix, slug)
                     pages.append(('new_page', None))
                 else:
                     # Fallback (only for sensitivity): render polygons (no borders) if MBTiles missing
@@ -1147,6 +1176,7 @@ class ReportEngine:
                                 f"{intro} <i>Raster tiles for this layer were unavailable, so the same "
                                 "data has been redrawn from the analysis polygons.</i>"))
                             pages.append(('image_map', (title, out_png)))
+                            _append_legend(suffix, slug)
                             pages.append(('new_page', None))
                             continue
                     pages.append(('heading(3)', title))
@@ -1311,6 +1341,20 @@ class ReportEngine:
                     "small inset shows where the tile sits inside the study area; the main image is "
                     "the same data the &ldquo;Other maps&rdquo; section shows zoomed out for the full extent."))
                 pages.append(('image', ("Sensitivity atlas map", sens_png)))
+                # One shared key to the A-E colours under every tile.
+                try:
+                    # Not "atlas_..." in the name: compile_docx sizes and credits files by name.
+                    legend_png = str(self.tmp_dir / "sensitivity_class_legend.png")
+                    if not _file_ok(legend_png):
+                        self.register(legend_png)
+                        _build_class_legend_png(
+                            [(f"{code} – {self.desc.get(code, '')}".rstrip(" –"), self.palette.get(code))
+                             for code in ("A", "B", "C", "D", "E") if self.palette.get(code)],
+                            legend_png, caption="Highest sensitivity class in the cell")
+                    if _file_ok(legend_png):
+                        pages.append(('image', (None, legend_png)))
+                except Exception:
+                    pass
                 has_entries = True
             if has_entries:
                 pages.append(('spacer', 1))
@@ -3553,6 +3597,42 @@ def _build_index_legend_png(
             print(f"[report] legend builder failed: {exc}", flush=True)
         except Exception:
             pass
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+        return False
+
+
+def _build_class_legend_png(entries: list, output_path: str, caption: str = "") -> bool:
+    """A strip of colour swatches with a label under each: entries = [(label, hex colour), ...].
+
+    Used under the per-cell maps, which were printed without any key to their colours.
+    """
+    entries = [(str(lbl), str(col)) for lbl, col in (entries or []) if col]
+    if not entries:
+        return False
+    try:
+        n = len(entries)
+        fig_w_in = 16.0 / 2.54
+        fig_h_in = 0.55 / 2.54   # the swatch row; labels and caption are added outside it
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=200)
+        for i, (label, colour) in enumerate(entries):
+            ax.add_patch(plt.Rectangle((i + 0.04, 0.0), 0.92, 1.0, facecolor=colour, edgecolor="#8a8a8a", linewidth=0.4))
+        ax.set_xlim(0, n)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([])
+        ax.set_xticks([i + 0.5 for i in range(n)])
+        ax.set_xticklabels([lbl for lbl, _c in entries])
+        ax.tick_params(axis="x", labelsize=6 if n > 7 else 7, length=0, pad=2)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        if caption:
+            ax.set_xlabel(caption, fontsize=7)
+        fig.savefig(output_path, bbox_inches="tight", dpi=200)
+        plt.close(fig)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    except Exception:
         try:
             plt.close("all")
         except Exception:
