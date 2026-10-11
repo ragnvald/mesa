@@ -14,7 +14,7 @@ import os, sys, uuid, threading, locale, configparser, argparse, warnings, time,
 from pathlib import Path
 from typing import Any, Dict, Optional
 from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP, TABLE_GEOCODE_GROUP
-from mesa_shared import leaflet_bundle, mesa_version_label, read_config
+from mesa_shared import guard_unsaved_on_close, leaflet_bundle, mesa_version_label, read_config
 from mesa_osm_tiles import OsmTileProxyManager
 
 # --- pywebview config (quiet, Edge runtime preferred) ---
@@ -267,7 +267,10 @@ def save_lines_gdf(pq: str, gdf: gpd.GeoDataFrame) -> bool:
     try:
         gdf = _ensure_schema_types(gdf)
         os.makedirs(os.path.dirname(pq), exist_ok=True)
-        gdf.to_parquet(pq, index=False)
+        # Temp file + swap: a failed write must not leave a truncated table behind.
+        tmp = pq + ".tmp"
+        gdf.to_parquet(tmp, index=False)
+        os.replace(tmp, pq)
         return True
     except Exception as e:
         print("Save error:", e, file=sys.stderr)
@@ -471,6 +474,8 @@ class Api:
     "_input_folder_lines",
     "_segment_width",
     "_segment_length",
+        "_dirty",
+        "_pending_original",
     )
 
     def __init__(self, base_dir: str, _cfg: configparser.ConfigParser):
@@ -487,6 +492,8 @@ class Api:
 
         self._default_epsg = default_epsg
         self._asset_home_bounds = None
+        self._dirty = False             # staged edits not yet written by commit()
+        self._pending_original = None   # import snapshot waiting for commit()
 
         try:
             inp = str(_cfg["DEFAULT"].get("input_folder_lines", "input/lines"))
@@ -648,8 +655,30 @@ class Api:
 
     def commit(self):
         with self._lock:
+            # The Lines stage skips a line whose segment length or width is empty,
+            # without a message. Fill the configured defaults instead and say so.
+            filled = 0
+            for col, default in (("segment_length", self._segment_length), ("segment_width", self._segment_width)):
+                if col in self._gdf.columns:
+                    missing = self._gdf[col].isna()
+                    if bool(missing.any()):
+                        self._gdf.loc[missing, col] = default
+                        filled += int(missing.sum())
             ok = save_lines_gdf(self._pq_path, self._gdf)
-            return {"ok": bool(ok), "path": self._pq_path, "rows": int(len(self._gdf))}
+            if ok and self._pending_original is not None:
+                try:
+                    tmp = self._pq_orig_path + ".tmp"
+                    self._pending_original.to_parquet(tmp, index=False)
+                    os.replace(tmp, self._pq_orig_path)
+                except Exception:
+                    pass
+                self._pending_original = None
+            if ok:
+                self._dirty = False
+            return {"ok": bool(ok), "path": self._pq_path, "rows": int(len(self._gdf)), "defaults_filled": filled}
+
+    def has_unsaved(self):
+        return bool(self._dirty)
 
     def discard(self):
         with self._lock:
@@ -664,6 +693,8 @@ class Api:
                     self._storage_epsg = int(str(self._gdf.crs).split(":")[-1]) if "EPSG" in str(self._gdf.crs).upper() else (self._storage_epsg or 4326)
                 except Exception:
                     pass
+                self._dirty = False
+                self._pending_original = None
                 return {"ok": True, "rows": int(len(self._gdf))}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -712,25 +743,23 @@ class Api:
                     self._segment_length,
                 )
                 out_dir = gpq_dir(self._base_dir)
-                os.makedirs(out_dir, exist_ok=True)
-                try:
-                    lines_original.to_parquet(os.path.join(out_dir, "tbl_lines_original.parquet"), index=False)
-                except Exception:
-                    pass
-
+                # Staged like every other edit: the imported set replaces the lines in
+                # memory and reaches disk on commit(), so Discard can still undo it.
                 lines = _ensure_schema_types(lines)
-                lines.to_parquet(os.path.join(out_dir, "tbl_lines.parquet"), index=False)
-
-                # Reload editor state from the freshly written table
+                if lines.crs is None:
+                    lines = lines.set_crs(epsg=self._default_epsg, allow_override=True)
                 self._pq_path = os.path.join(out_dir, "tbl_lines.parquet")
                 self._pq_orig_path = os.path.join(out_dir, "tbl_lines_original.parquet")
-                self._gdf = load_lines_gdf_any(self._pq_path, self._default_epsg)
+                self._gdf = lines
+                self._pending_original = lines_original
+                self._dirty = True
                 self._asset_home_bounds = None
                 return {
                     "ok": True,
                     "rows": int(len(self._gdf)),
                     "input": str(self._input_folder_lines),
                     "out": out_dir,
+                    "staged": True,
                 }
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -752,6 +781,7 @@ class Api:
                 else:
                     self._gdf.loc[sel, field] = ("" if value is None else str(value)).strip()
                 self._gdf = _ensure_schema_types(self._gdf)
+                self._dirty = True
                 return {"ok": True, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -784,6 +814,7 @@ class Api:
                     "geometry": shp_to_geojson(g_ll.geometry.iloc[0]),
                     "properties": {"name_gis": new_id, "name_user":"", "segment_length": None, "segment_width": None, "description": ""}
                 }
+                self._dirty = True
                 return {"ok": True, "feature": feat, "record": {"name_gis": new_id, "name_user": ""}, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -799,6 +830,7 @@ class Api:
                 if not sel.any():
                     return {"ok": False, "error": f"Line '{name_gis}' not found."}
                 self._gdf.loc[sel, "geometry"] = [geom_s] * sel.sum()
+                self._dirty = True
                 return {"ok": True, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -810,6 +842,7 @@ class Api:
                 self._gdf = self._gdf[self._gdf["name_gis"].astype(str).str.strip() != str(name_gis).strip()].reset_index(drop=True)
                 if len(self._gdf) == before:
                     return {"ok": False, "error": f"Line '{name_gis}' not found."}
+                self._dirty = True
                 return {"ok": True, "staged": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -867,56 +900,64 @@ __MESA_LEAFLET_HEAD__
   .help strong { font-weight:600; }
   .badge { font-size:11px; color:#5c4a2f; border:1px solid #c6b089; border-radius:10px; padding:1px 6px; background:#f3ecdf; }
   .form-actions { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  .panel-h { font-size:12px; margin:10px 0 4px; text-transform:uppercase; letter-spacing:0.03em; color:#715a36; font-weight:600; }
+  #lineList { box-sizing:border-box; margin:0 0 4px; width:100%; min-height:70px; max-height:190px; overflow:auto;
+    border:1px solid #c6b089; border-radius:6px; padding:3px; background:#fff; }
+  #lineList li { list-style:none; border-bottom:1px solid #e3d7be; padding:4px 5px; cursor:pointer; border-radius:4px; }
+  #lineList li:last-child { border-bottom:none; }
+  #lineList li:hover { background:#f6efdf; }
+  #lineList li.selected { background:#f0deb4; }
+  #lineList .title { font-weight:600; }
+  #lineList .meta { font-size:11px; color:#8a7a5e; }
+  .hintline { font-size:11px; color:#8a7a5e; margin:2px 0 0; }
 </style>
 </head>
 <body>
 __MESA_LEAFLET_BODY_OPEN__
 <div class="wrap">
   <div class="bar">
-    <button id="homeBtn" class="btn">Home</button>
-    <button id="reloadBtn" class="btn">Reload</button>
-    <button id="saveBtn" class="btn primary" title="Commit all staged changes to disk">Save all</button>
-    <button id="discardBtn" class="btn">Discard</button>
-    <button id="importBtn" class="btn" title="Import lines from input/lines into GeoParquet">Import lines</button>
+    <button id="homeBtn" class="btn" title="Zoom to the project area">Home</button>
+    <button id="saveBtn" class="btn primary" title="Write every change on this tab to disk">Save</button>
+    <button id="discardBtn" class="btn" title="Drop every unsaved change and go back to what was last saved">Discard</button>
+    <button id="importBtn" class="btn" title="Replace the lines with the files in input/lines">Import&hellip;</button>
     <button id="exitBtn" class="btn">Exit</button>
     <span id="dirtyBadge" class="badge" style="display:none;">Unsaved changes</span>
-    <div class="hint">New: <span class="kbd">N</span> • Finish: <span class="kbd">Enter</span> or double-click • Cancel geometry: <span class="kbd">Esc</span> • Edit: <span class="kbd">E</span> • Delete selected: <span class="kbd">Del</span></div>
+    <div class="hint">New line: <span class="kbd">N</span>, click points • finish with <span class="kbd">Enter</span> or double-click • <span class="kbd">Esc</span> cancels • <span class="kbd">E</span> edit shape • <span class="kbd">Del</span> delete</div>
   </div>
 
   <div class="form">
-    <div class="row">
-      <label>Line</label>
-      <select id="pickerSel">
-        <option value="">Show all</option>
-      </select>
-    </div>
+    <div class="panel-h" style="margin-top:0;">Lines</div>
+    <!-- The select is the editor's internal list of ids; the visible list below mirrors it. -->
+    <select id="pickerSel" style="display:none;"><option value="">(none)</option></select>
 
-    <div class="toolbar">
-      <button id="newBtn" class="btn" title="Start drawing a new line (N)">New line</button>
-      <button id="editBtn" class="btn" title="Edit selected (E)" disabled>Edit</button>
-      <button id="delBtn" class="btn" title="Delete the selected line (Del)" disabled>Delete</button>
-      <button id="editApplyBtn" class="btn" style="display:none;" title="Apply geometry changes">Apply geometry</button>
-      <button id="editCancelBtn" class="btn" style="display:none;" title="Cancel geometry changes">Cancel geometry</button>
-      <button id="helpToggle" class="btn" title="Explain map/edit icons">?</button>
+    <div class="toolbar" style="margin-top:2px;">
+      <button id="newBtn" class="btn primary" title="Draw a new line on the map (N, or the line icon on the map)">New line</button>
+      <button id="editBtn" class="btn" title="Change the shape (E). Select a line first." disabled>Edit shape</button>
+      <button id="delBtn" class="btn" title="Delete the selected line (Del). Select a line first." disabled>Delete</button>
+      <button id="editApplyBtn" class="btn primary" style="display:none;" title="Keep the new shape">Apply shape</button>
+      <button id="editCancelBtn" class="btn" style="display:none;" title="Go back to the shape as it was">Cancel shape</button>
+      <button id="helpToggle" class="btn" title="How this tab works">?</button>
       <span id="countInfo" class="hint"></span>
     </div>
+    <ul id="lineList"></ul>
+    <p class="hintline">Click a line here or on the map to select it. Double-click zooms to it.</p>
 
     <div id="helpBox" class="help">
       <strong>Map & edit</strong><br>
-      • <strong>New line</strong> (or <span class="kbd">N</span>, or the line icon on the map): click to add points, double-click or <span class="kbd">Enter</span> to finish. The new line is not saved until you click <strong>Save all</strong>.<br>
-      • Edit: only the selected line is visible until you choose “Show all”. Use <strong>Apply geometry</strong> or <strong>Cancel geometry</strong>.<br>
-      • Delete removes the currently selected line (you’ll be asked to confirm).<br>
-      • Keys: <span class="kbd">N</span> new, <span class="kbd">E</span> edit, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel geometry.
+      • <strong>New line</strong> (or <span class="kbd">N</span>, or the line icon on the map): click to add points, double-click or <span class="kbd">Enter</span> to finish.<br>
+      • <strong>Edit shape</strong>: drag the points of the selected line, then <strong>Apply shape</strong> or <strong>Cancel shape</strong>.<br>
+      • Nothing is written until you click <strong>Save</strong>; <strong>Discard</strong> goes back to what was last saved. Process and the report use saved lines only.<br>
+      • Keys: <span class="kbd">N</span> new, <span class="kbd">E</span> edit shape, <span class="kbd">Del</span> delete, <span class="kbd">Esc</span> cancel.
     </div>
 
+    <div class="panel-h">Selected line</div>
     <div class="row"><label>GIS name</label><input id="f_name_gis" type="text" readonly></div>
-    <div class="row"><label>Title</label><input id="f_name_user" type="text" placeholder="Enter a user-friendly title"></div>
+    <div class="row"><label>Title</label><input id="f_name_user" type="text" placeholder="Select a line to edit it"></div>
     <div class="row"><label>Length of segments (m)</label><input id="f_seg_len" type="number" inputmode="numeric" placeholder="e.g., 500"></div>
     <div class="row"><label>Segment width (m)</label><input id="f_seg_wid" type="number" inputmode="numeric" placeholder="e.g., 20"></div>
     <div class="row"><label>Description</label><textarea id="f_desc" placeholder="Short description"></textarea></div>
 
     <div class="form-actions">
-      <button id="formSaveBtn" class="btn primary" style="white-space:nowrap; flex-shrink:0;" title="Same as Save all in the top bar">Save all</button>
       <span id="status" class="status-warn">Initializing…</span>
     </div>
   </div>
@@ -955,7 +996,6 @@ function setFootRight(m){ document.getElementById('foot-right').textContent = m 
 function dirtyBadge(show){ document.getElementById('dirtyBadge').style.display = show ? '' : 'none'; }
 function setSaveButtonsEnabled(enabled){
     document.getElementById('saveBtn').disabled = !enabled;
-    document.getElementById('formSaveBtn').disabled = !enabled;
     document.getElementById('discardBtn').disabled = !enabled;
 }
 function setDirty(v){ DIRTY = !!v; dirtyBadge(DIRTY); setSaveButtonsEnabled(DIRTY); }
@@ -982,7 +1022,7 @@ function enableEditButtons(enabled){
 
 function setSelected(id, fly=false){
   SELECTED_ID = id || null;
-  SHOW_ONLY_CURRENT = !!id;
+  SHOW_ONLY_CURRENT = false;   // lines are never hidden any more; see enforceVisibility
   const layer = id ? LAYER_BY_ID[id] : null;
   const props = (layer && layer.feature) ? layer.feature.properties : {};
   fillForm(props||{});
@@ -996,6 +1036,34 @@ function setSelected(id, fly=false){
   if (fly && id && LAYER_BY_ID[id]){
     try { MAP.fitBounds(LAYER_BY_ID[id].getBounds(), {padding:[20,20]}); } catch(e){}
   }
+}
+
+// The visible list of lines, rebuilt from what is on the map.
+function renderLineList(){
+  const ul = document.getElementById('lineList');
+  if (!ul) return;
+  ul.innerHTML = '';
+  Object.keys(LAYER_BY_ID).sort((a, b) => {
+    const pa = LAYER_BY_ID[a].feature?.properties || {}, pb = LAYER_BY_ID[b].feature?.properties || {};
+    return String(pa.name_user || a).toLowerCase().localeCompare(String(pb.name_user || b).toLowerCase());
+  }).forEach(id => {
+    const props = LAYER_BY_ID[id].feature?.properties || {};
+    const li = document.createElement('li');
+    li.dataset.id = id;
+    li.classList.toggle('selected', id === SELECTED_ID);
+    const t = document.createElement('div'); t.className = 'title';
+    t.textContent = (props.name_user && String(props.name_user).trim()) ? props.name_user : '(untitled)';
+    const m = document.createElement('div'); m.className = 'meta'; m.textContent = 'ID: ' + id;
+    li.appendChild(t); li.appendChild(m);
+    li.addEventListener('click', () => { if (!DRAWING && !SINGLE_EDIT_HANDLER) setSelected(id, false); });
+    li.addEventListener('dblclick', () => { try { MAP.fitBounds(LAYER_BY_ID[id].getBounds(), {padding:[20,20]}); } catch(e){} });
+    ul.appendChild(li);
+  });
+}
+
+function lineStyle(selected){
+  // Every line stays visible; the selected one has to stand out.
+  return selected ? {color:'#b45309', weight:7, opacity:1} : {color:'#ff7f50', weight:4, opacity:0.9};
 }
 
 function updatePicker(records){
@@ -1034,9 +1102,10 @@ function bindAuto(fieldId, fieldName){
             const title = (el.value && el.value.trim().length>0) ? el.value : '(untitled)';
             opt.textContent = `${title} — ${SELECTED_ID}`;
           }
+          renderLineList();
         }
         setDirty(true);
-        showStatus('Changed, not saved yet. Click “Save all” to keep it.','status-ok');
+        showStatus('Changed, not saved yet. Click Save to keep it.','status-ok');
       }
     }).catch(function(err){ showStatus('API error: '+err, 'status-err'); });
   });
@@ -1092,8 +1161,8 @@ function initMapOnce(){
       enableEditButtons(true);
       setSelected(res.record.name_gis, true);
       updateCountBadge();
-      showStatus('New line added, not saved yet. Give it a title, then click “Save all”.','status-ok');
-      setFootLeft('Only the new line is shown. Choose “Show all” in the Line list to see the others.');
+      showStatus('New line added, not saved yet. Give it a title, then click Save.','status-ok');
+      setFootLeft('Not saved yet. Process and the report use saved lines only.');
       try{ const t = document.getElementById('f_name_user'); t.focus(); }catch(e){}
     }).catch(err => { showStatus('API error: '+err, 'status-err'); LINES_GROUP.removeLayer(tmp); });
   });
@@ -1156,7 +1225,7 @@ function addFeature(feature, selectAfter=false){
     const id = feature.properties?.name_gis;
     if (!id) return;
     LAYER_BY_ID[id] = l;
-    l.on('click', ()=> setSelected(id, false));
+    l.on('click', ()=> { if (!DRAWING && !SINGLE_EDIT_HANDLER) setSelected(id, false); });
     l.addTo(LINES_GROUP);
     if (selectAfter) setSelected(id, true);
   });
@@ -1169,7 +1238,7 @@ function updateCountBadge(){
 
 function cleanupSingleHandlers(){
   if (SINGLE_EDIT_HANDLER){ try{ SINGLE_EDIT_HANDLER.disable(); }catch(e){} SINGLE_EDIT_HANDLER = null; }
-  if (SELECT_GROUP){ try{ MAP.removeLayer(SELECT_GROUP); }catch(e){} SELECT_GROUP = null; }
+  SELECT_GROUP = null;
   setEditActionButtons(false);
   enforceVisibility();
 }
@@ -1196,7 +1265,15 @@ function showOthers(){
 }
 
 function enforceVisibility(){
-  if (SHOW_ONLY_CURRENT && SELECTED_ID){ hideOthers(); } else { showOthers(); }
+  showOthers();
+  Object.keys(LAYER_BY_ID).forEach(id => {
+    const lyr = LAYER_BY_ID[id];
+    try {
+      lyr.setStyle(lineStyle(id === SELECTED_ID));
+      if (id === SELECTED_ID && lyr.bringToFront) lyr.bringToFront();
+    } catch(e){}
+  });
+  renderLineList();
 }
 
 function setEditActionButtons(visible){
@@ -1215,12 +1292,12 @@ function toggleSingleEdit(){
   if (SINGLE_EDIT_HANDLER){ cleanupSingleHandlers(); setFootLeft(''); return; }
   const layer = LAYER_BY_ID[SELECTED_ID];
   if (!layer){ showStatus('Selected line not found in map', 'status-err'); return; }
-  hideOthers();
-  SELECT_GROUP = L.featureGroup([layer]).addTo(MAP);
+  // The group only tells the edit handler which line to make editable; the line is on the map already.
+  SELECT_GROUP = L.featureGroup([layer]);
   SINGLE_EDIT_HANDLER = new L.EditToolbar.Edit(MAP, { featureGroup: SELECT_GROUP, poly:{ allowIntersection:false } });
   SINGLE_EDIT_HANDLER.enable();
   setEditActionButtons(true);
-  setFootLeft('Edit mode: adjust vertices, then “Apply geometry” or “Cancel geometry”.');
+  setFootLeft('Editing shape: drag the points, then “Apply shape”. “Cancel shape” (or Esc) puts it back.');
 }
 
 function applyEdit(){
@@ -1240,7 +1317,7 @@ function cancelEdit(){
     else if (typeof SINGLE_EDIT_HANDLER._revertLayers === 'function') SINGLE_EDIT_HANDLER._revertLayers();
   }catch(e){}
   cleanupSingleHandlers();
-  showStatus('Geometry edit canceled.','status-warn');
+  showStatus('Shape left as it was.','status-warn');
 }
 
 async function deleteSelected(){
@@ -1248,7 +1325,7 @@ async function deleteSelected(){
   const layer = LAYER_BY_ID[SELECTED_ID];
   const title = (layer && layer.feature && layer.feature.properties && layer.feature.properties.name_user) || '';
   const label = title && title.trim().length ? `${title} — ${SELECTED_ID}` : SELECTED_ID;
-  if (!confirm(`Delete the selected line:\n\n${label}\n\nIt is removed for good when you click “Save all”; “Discard” brings it back.`)) return;
+  if (!confirm(`Delete the selected line:\n\n${label}\n\nIt is gone for good once you click Save; Discard brings it back.`)) return;
 
   try{
     const res = await window.pywebview.api.delete_line(SELECTED_ID);
@@ -1259,7 +1336,7 @@ async function deleteSelected(){
     setSelected('');
     setDirty(true);
     updateCountBadge();
-    showStatus('Line deleted, not saved yet. Click “Save all” to keep the change.','status-ok');
+    showStatus('Line deleted, not saved yet. Click Save to keep the change.','status-ok');
     setFootLeft('Deleted (staged).');
   }catch(err){
     showStatus('API error: '+err,'status-err');
@@ -1325,17 +1402,11 @@ async function loadAll(){
 
 function boot(){
   document.getElementById('homeBtn').addEventListener('click', ()=> { if (HOME_BOUNDS) MAP.fitBounds(HOME_BOUNDS, {padding:[20,20]}); });
-    document.getElementById('reloadBtn').addEventListener('click', ()=> {
-        if (DIRTY && !confirm('You have unsaved changes. Reload anyway and keep staged changes in memory?')) return;
-        loadAll();
-    });
   // Inside Special focus the host window has the Exit button; a second one here only confuses.
   if (window.self !== window.top){ document.getElementById('exitBtn').style.display = 'none'; }
   window.mesaHasUnsaved = function(){ return DIRTY; };
-  document.getElementById('exitBtn').addEventListener('click', ()=> {
-    if (DIRTY && !confirm('You have unsaved changes to the lines.\n\nExit without saving them?')) return;
-    window.pywebview.api.exit_app();
-  });
+  // No prompt here: the window's closing hook asks about unsaved changes (it also covers the X).
+  document.getElementById('exitBtn').addEventListener('click', ()=> window.pywebview.api.exit_app());
   document.getElementById('newBtn').addEventListener('click', startNewLine);
   document.getElementById('editBtn').addEventListener('click', toggleSingleEdit);
   document.getElementById('delBtn').addEventListener('click', deleteSelected);
@@ -1351,18 +1422,22 @@ function boot(){
 
   async function doSave(){
         if (!DIRTY){ showStatus('No unsaved changes.','status-warn'); return; }
+    // With no lines saved, the Lines stage of Process writes three example lines of its own.
+    if (Object.keys(LAYER_BY_ID).length === 0 && !confirm('There are no lines left.\n\nIf you save an empty set, '
+        + 'the Lines stage of Process will create three example lines the next time it runs.\n\nSave anyway?')) return;
     showStatus('Saving…','status-warn');
     try{
       const res = await window.pywebview.api.commit();
       if (!res.ok){ showStatus('Save failed','status-err'); return; }
       setDirty(false);
-      showStatus('All changes saved.','status-ok');
+      showStatus('All changes saved.' + (res.defaults_filled ? ' Missing segment length/width was filled with the defaults.' : '')
+        + ' Run Process (Lines) to update the statistics.','status-ok');
+      setFootLeft('Saved.');
       if (SELECTED_ID) { reloadSelected(); }
     } catch(err){ showStatus('API error: '+err,'status-err'); }
   }
 
   document.getElementById('saveBtn').addEventListener('click', doSave);
-  document.getElementById('formSaveBtn').addEventListener('click', doSave);
 
   document.getElementById('discardBtn').addEventListener('click', async ()=>{
     if (!confirm('Discard all unsaved changes and reload from disk?')) return;
@@ -1379,16 +1454,16 @@ function boot(){
   });
 
   document.getElementById('importBtn').addEventListener('click', async ()=>{
-        if (!confirm('Import reads the files in input/lines and REPLACES every line in the project, '
-            + 'including lines drawn here.' + (DIRTY ? '\n\nYour unsaved changes are lost as well.' : '')
-            + '\n\nContinue?')) return;
+        if (!confirm('Import reads the files in input/lines and REPLACES every line here, including lines you have drawn.'
+            + '\n\nNothing is written until you click Save, and Discard brings the current lines back.\n\nContinue?')) return;
     showStatus('Importing lines…','status-warn');
     try{
       const res = await window.pywebview.api.import_lines_from_input();
       if (!res.ok){ showStatus(res.error || 'Import failed', 'status-err'); return; }
-      setDirty(false);
+      setSelected('');
       await loadAll();
-      showStatus('Imported lines.','status-ok');
+      setDirty(true);
+      showStatus('Imported ' + res.rows + ' line(s), not saved yet. Click Save to keep them; Discard brings the previous lines back.','status-ok');
     } catch(err){
       showStatus('API error: '+err, 'status-err');
     }
@@ -1476,6 +1551,7 @@ def run(base_dir: str) -> None:
         .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(resolved, mesa_version_label(cfg)))
     )
     window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770)
+    guard_unsaved_on_close(window, lambda: ["Lines"] if api.has_unsaved() else [])
     try:
         webview.start(gui='edgechromium', debug=False)
     except Exception as e:
@@ -1513,6 +1589,7 @@ def main():
         .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(base_dir, mesa_version_label(cfg)))
     )
     window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770)
+    guard_unsaved_on_close(window, lambda: ["Lines"] if api.has_unsaved() else [])
 
     try:
         webview.start(gui='edgechromium', debug=False)
