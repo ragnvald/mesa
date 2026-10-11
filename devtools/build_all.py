@@ -862,35 +862,59 @@ def flatten_onedir_output() -> None:
 # Copy resources next to the app (runtime layout)
 # ---------------------------------------------------------------------------
 
-# input/ and output/ ship as an empty SKELETON — the folder tree and its
-# readme.txt placeholders, never the project data that happens to sit in the
-# repo while developing. Users bring their own data by restoring a package;
-# whatever the developer last imported or processed is not a distributable.
-SKELETON_ONLY_FOLDERS = ("input", "output")
+# A distribution carries no project data and no developer state. Whatever sits in
+# the working tree while developing (a restored demo project, a tuned config.ini,
+# the QGIS project of the last run) stays out: these resources are taken from what
+# git tracks at HEAD, not from the folder. See learning.md "A build ships what git
+# tracks, not what the working folder holds".
+INPUT_SKELETON_FOLDERS = ("asset", "geocode", "lines", "images")
+# Shipped in docs/ for the application; correspondence with the sibling projects is not.
+DOCS_NOT_SHIPPED = ("exchange",)
+# Extensions that only a project or a run produces.
+DATA_EXTENSIONS = (".parquet", ".mbtiles", ".gpkg", ".shp", ".geojson", ".tif", ".tiff", ".xlsx", ".csv", ".zip")
 
 
-def _skeleton_ignore(src_dir, names):
-    """copytree ignore-callable for input/: keep the subfolders and their
-    readme.txt, drop data files. Those folders and readmes are instructions to the
-    operator about what goes where, so they are the point of shipping a skeleton."""
-    ignored = []
-    for name in names:
-        if (Path(src_dir) / name).is_dir():
-            continue
-        if name.lower() == "readme.txt":
-            continue
-        ignored.append(name)
-    return ignored
+def _git(*args: str) -> bytes:
+    result = subprocess.run(["git", "-C", str(PROJECT_ROOT), *args], capture_output=True)
+    if result.returncode != 0:
+        fail(f"git {' '.join(args)} failed: {result.stderr.decode(errors='replace').strip()}\n"
+             "The build takes config.ini, the input skeleton and qgis/ from git, so it must run in the repository.")
+    return result.stdout
 
 
-def _output_skeleton_ignore(src_dir, names):
-    """copytree ignore-callable for output/: ship the bare folder, nothing under it.
+def _git_tracked(prefix: str) -> list[str]:
+    """Paths under prefix that exist in HEAD (not the working tree, which may have lost or gained files)."""
+    out = _git("ls-tree", "-r", "--name-only", "HEAD", "--", prefix).decode("utf-8", errors="replace")
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
-    Everything below output/ is produced by a run and recreated on demand, so a
-    distribution has no use for it — and a per-run directory like
-    segmentation_mv/<run_id> is a timestamp from the developer's last session,
-    which is exactly the kind of thing a build must not carry to users."""
-    return list(names)
+
+def _write_from_head(repo_path: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_git("show", f"HEAD:{repo_path}"))
+
+
+def copy_input_skeleton(dst: Path) -> None:
+    """input/ as the four empty folders with their readme.txt, straight from git."""
+    shutil.rmtree(dst, ignore_errors=True)
+    for name in INPUT_SKELETON_FOLDERS:
+        (dst / name).mkdir(parents=True, exist_ok=True)
+    wanted = {f"input/{name}/readme.txt" for name in INPUT_SKELETON_FOLDERS}
+    for repo_path in _git_tracked("input"):
+        if repo_path in wanted:
+            _write_from_head(repo_path, dst.parent / repo_path)
+
+
+def copy_tracked_folder(folder: str, dst: Path) -> None:
+    """A folder exactly as git has it at HEAD; files a run has added locally are left behind."""
+    shutil.rmtree(dst, ignore_errors=True)
+    tracked = _git_tracked(folder)
+    for repo_path in tracked:
+        _write_from_head(repo_path, dst.parent / repo_path)
+    local_only = sorted(str(q.relative_to(PROJECT_ROOT)).replace("\\", "/")
+                        for q in (PROJECT_ROOT / folder).rglob("*") if q.is_file())
+    local_only = [q for q in local_only if q not in set(tracked)]
+    if local_only:
+        log(f"[NOTE] Not shipped from {folder}/ (not in git): {', '.join(local_only)}")
 
 
 def copy_resources() -> None:
@@ -908,17 +932,21 @@ def copy_resources() -> None:
         if not src:
             continue
         dst = FINAL_DIST / folder
-        if folder in SKELETON_ONLY_FOLDERS:
-            # Clear first: on a helpers-only build FINAL_DIST is preserved, and
-            # dirs_exist_ok would otherwise leave data from an earlier build in
-            # place. dst is always inside FINAL_DIST (build output, regenerable).
+        if folder == "input":
+            log("Writing 'input/' skeleton (four folders + readme.txt) from git ...")
+            copy_input_skeleton(dst)
+        elif folder == "output":
+            # Everything below output/ is produced by a run and recreated on demand.
+            log("Writing 'output/' as an empty folder ...")
             shutil.rmtree(dst, ignore_errors=True)
-            if folder == "output":
-                log(f"Copying '{folder}/' as an empty folder ...")
-                shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_output_skeleton_ignore)
-            else:
-                log(f"Copying '{folder}/' skeleton (folders + readme.txt only) from {src} ...")
-                shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_skeleton_ignore)
+            dst.mkdir(parents=True, exist_ok=True)
+        elif folder == "qgis":
+            log("Writing 'qgis/' from git ...")
+            copy_tracked_folder(folder, dst)
+        elif folder == "docs":
+            log(f"Copying '{folder}/' from {src} (without {', '.join(DOCS_NOT_SHIPPED)}/) ...")
+            shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns(*DOCS_NOT_SHIPPED))
         else:
             log(f"Copying '{folder}/' from {src} ...")
             shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -941,13 +969,60 @@ def copy_resources() -> None:
     if not copied_qgis_older:
         log("[NOTE] 'qgis older' folder not found in code/, repo root, or parent; skipping.")
 
-    # Copy config.ini next to mesa.exe
-    for cfg in [CODE_DIR / "config.ini", PROJECT_ROOT / "config.ini"]:
-        if cfg.exists():
-            shutil.copy2(cfg, FINAL_DIST / "config.ini")
-            break
+    # config.ini next to mesa.exe: the committed template, never the working copy,
+    # which is usually tuned for whatever project the developer has loaded.
+    _write_from_head("config.ini", FINAL_DIST / "config.ini")
+    working_cfg = PROJECT_ROOT / "config.ini"
+    if working_cfg.exists() and working_cfg.read_bytes().replace(b"\r\n", b"\n") != \
+            (FINAL_DIST / "config.ini").read_bytes().replace(b"\r\n", b"\n"):
+        log("[NOTE] config.ini in the working folder differs from git; the distribution gets the one in git.")
 
     # NOTE: Intentionally do NOT copy secrets/ into distributions.
+
+
+def verify_distribution() -> None:
+    """Stop the build if the distribution carries project data or developer state."""
+    problems: list[str] = []
+    out_dir = FINAL_DIST / "output"
+    if out_dir.exists() and any(out_dir.iterdir()):
+        problems.append("output/ is not empty: " + ", ".join(sorted(q.name for q in out_dir.iterdir())[:8]))
+    in_dir = FINAL_DIST / "input"
+    for q in (in_dir.rglob("*") if in_dir.exists() else []):
+        rel = q.relative_to(in_dir)
+        if q.is_dir():
+            if len(rel.parts) != 1 or rel.parts[0] not in INPUT_SKELETON_FOLDERS:
+                problems.append(f"input/{rel.as_posix()}/ is not part of the skeleton")
+        elif q.name.lower() != "readme.txt":
+            problems.append(f"input/{rel.as_posix()} is a data file")
+    for name in DOCS_NOT_SHIPPED:
+        if (FINAL_DIST / "docs" / name).exists():
+            problems.append(f"docs/{name}/ must not ship")
+    for name in ("secrets", "backup", "devtools", "tests", "plans_oversight"):
+        if (FINAL_DIST / name).exists():
+            problems.append(f"{name}/ must not ship")
+    cfg = FINAL_DIST / "config.ini"
+    if not cfg.exists():
+        problems.append("config.ini is missing")
+    elif cfg.read_bytes() != _git("show", "HEAD:config.ini"):
+        problems.append("config.ini is not the committed template")
+    tracked_qgis = set(_git_tracked("qgis"))
+    for q in ((FINAL_DIST / "qgis").rglob("*") if (FINAL_DIST / "qgis").exists() else []):
+        if q.is_file() and q.relative_to(FINAL_DIST).as_posix() not in tracked_qgis:
+            problems.append(f"{q.relative_to(FINAL_DIST).as_posix()} is not in git")
+    # Data files anywhere outside the bundled Python packages (those carry their own reference data).
+    for top in ("input", "output", "docs", "qgis"):
+        base = FINAL_DIST / top
+        for q in (base.rglob("*") if base.exists() else []):
+            if q.is_file() and q.suffix.lower() in DATA_EXTENSIONS:
+                problems.append(f"{q.relative_to(FINAL_DIST).as_posix()} looks like project data")
+    # Next to mesa.exe only project leftovers are looked for; PyInstaller keeps its own archives there.
+    for q in FINAL_DIST.glob("*"):
+        if q.is_file() and (q.suffix.lower() in (".parquet", ".mbtiles", ".gpkg", ".xlsx") or q.name.lower() == "log.txt"):
+            problems.append(f"{q.name} next to mesa.exe looks like project data")
+    if problems:
+        fail("The distribution is not clean:\n  - " + "\n  - ".join(dict.fromkeys(problems)))
+    log("[verify] Distribution carries no project data: input/ is the skeleton, output/ is empty, "
+        "config.ini is the committed template.")
 
 
 def write_build_metadata() -> None:
@@ -978,7 +1053,7 @@ def ensure_devtools_not_in_dist() -> None:
 #
 # This is the belt, not the braces: developer material belongs in `devtools/docs/`
 # (removed wholesale above) or at the repo root, neither of which the copy list in
-# copy_runtime_resources() reaches. `docs/` is a user-facing folder — it ships.
+# copy_resources() reaches. `docs/` is a user-facing folder: it ships, except docs/exchange/.
 # See learning.md "Developer docs must live outside docs/".
 DEVELOPER_ONLY_FILES = (
     "CLAUDE.md",
@@ -1145,6 +1220,7 @@ def main() -> None:
     write_build_metadata()
     ensure_devtools_not_in_dist()
     strip_developer_only_files()
+    verify_distribution()
 
     exe_path = FINAL_DIST / f"{APP_NAME}.exe"
     if BUILD_MAIN:

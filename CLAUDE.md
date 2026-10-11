@@ -22,7 +22,7 @@ The root holds only what has to be there. Everything else is filed. A new docume
 - **[plans_oversight/](plans_oversight/)** — roadmap and overview material, moved off the root 2026-08-12: `plans.md` (index of decided-but-not-done work and ideas), `MESA_system_overview.md` (user-oriented walkthrough of the workflow buttons), `presentasjon.md` (methodology framing for planning processes, Norwegian).
 - **[devtools/docs/](devtools/docs/)** — full design documents, capacity records, yEd `.graphml` diagram sources, the segmentation PoC. `build_all.py` removes `devtools/` from the distribution wholesale, so anything here is safe by construction.
 - **[devtools/](devtools/)** (top level) — dated release and build notes: `PUBLISERE_*.md`, `RELEASE_NOTES_*.md`, `ZENODO_*.md`, `MAC_BUILD.md`, `COUNTING_LOC.md`. They record the state at that release; do not rewrite them to match a later one.
-- **[docs/](docs/)** — **ships to end users.** The two manuals, `docs/templates/` (read at runtime by `report_generate`) and `docs/exchange/` correspondence. Never add developer material here; see learning.md "Developer docs must live outside docs/".
+- **[docs/](docs/)** — **ships to end users.** The two manuals and `docs/templates/` (read at runtime by `report_generate`). `docs/exchange/` correspondence is filed here but `build_all.py` leaves it out of the distribution (since 2026-10-11). Never add developer material here; see learning.md "Developer docs must live outside docs/".
 - **`mesa.wiki/`** — separate repo, canonical source for end-user prose.
 
 Neither `plans_oversight/` nor `devtools/` is in the `build_all.py` copy allowlist, so neither can reach a build. That allowlist — not the filename-matched `DEVELOPER_ONLY_FILES` list — is the real guarantee.
