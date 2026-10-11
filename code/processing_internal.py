@@ -4252,7 +4252,8 @@ __MESA_LEAFLET_HEAD__
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   .legend {
-    position:absolute; bottom:10px; left:10px;
+    /* z-index: Leaflet's panes sit at 200-700 and would otherwise cover it. */
+    position:absolute; bottom:10px; left:10px; z-index:1000;
     background:rgba(255,255,255,0.9); padding:6px 8px; border-radius:6px;
     font:12px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
   }
