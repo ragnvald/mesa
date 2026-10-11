@@ -864,3 +864,45 @@ assumes, so correcting only the key would break it.
 
 Nothing here touched the sibling projects, and table and column names are unchanged. Nothing was
 reported to mesa-server or mesa_demodata.
+
+## 2026-10-11 — Report review: average area, wider maps, page flow
+
+The user asked for four things on the Word report: average area in the "Geocode groups and object
+counts" table, more margin around the maps and wider maps where the page allows, headings kept on
+the page of their content, and a test of the result — with the Special focus changes (staged
+edits, "Study areas") taken into account. A look through the report engine for other obvious
+faults was part of the request.
+
+Tested on a copy of the development project with two study areas added and analysed, one of them
+edited afterwards. Each report was opened in a hidden Word instance to read the page of every
+paragraph and picture, and exported to PDF for a page-by-page look. The baseline was 60 pages:
+21 pictures ran past the right margin, 35 of 38 large maps were narrower than 12 cm, headings sat
+alone at the foot of pages, legends and ribbons alone on the next, the "Other maps" and atlas
+pages had no legend, the study-area maps were 2.5–4 cm wide, and areas read "4181.8031 km²".
+
+Shipped, one commit per purpose: average and total area in the geocode table, computed on
+EPSG:6933, and no more "nan" for a missing title (`031ce63`); area figures with digits that match
+their size (`e2908e9`); `_page_map_view()` — 12 % margin and a view widened to the 16 × 12 cm
+panel — for every page map (`7ed48f5`); the study-area map frame (`68af228`); line segments
+stroked over a white halo (`2b4d4fa`); colour keys under the "Other maps" and atlas tile maps,
+from the same class definitions as the tiles (`8c66d60`); page flow — A4 with a 16 cm column,
+keep-with-next from heading to legend, page breaks as a paragraph property, table rows that do
+not split, repeated figure titles dropped (`22a52ae`); "Study area analysis" headings and no
+"No index statistics" message when that section is off (`d9c5f9d`).
+
+The study-area map took two attempts. Taking the axes out of autoscale was a plausible fix and
+changed nothing; tracing the bounding box of every artist showed the scale-bar label 4,000 px
+below the map, because the frame was passed as (minx, miny, maxx, maxy) to a helper that takes
+(west, east, south, north). The fault predates this session.
+
+Result on a report generated from source with everything in: 50 pages, no heading separated from
+its content, no figure separated from its introduction, no picture wider than the column, no
+table over a page boundary; median width of the large maps 15.8 cm. Six new tests, 86 in all.
+The edited-after-analysis note appears under the right study area.
+
+Left as is: atlas tile maps are 10–11 cm wide because the tiles are portrait; they use 16.5 cm of
+height. The first baseline run took 78 minutes, nearly all of it basemap tile downloads; with the
+cache filled a run takes about five.
+
+Nothing here touched the sibling projects, and no table or column changed. Nothing was reported
+to mesa-server or mesa_demodata.
