@@ -860,3 +860,66 @@ body.mesa-has-offline-banner { padding-top: 28px; }
     bundle = LeafletBundle(head_block=head_block, body_open=banner_html)
     _LEAFLET_BUNDLE_CACHE[cache_key] = bundle
     return bundle
+
+
+def guard_unsaved_on_close(window, unsaved_fn) -> None:
+    """Ask before a pywebview window closes with unsaved edits; Cancel keeps it open.
+
+    unsaved_fn() returns the names of the parts that have unsaved edits. pywebview
+    fires `closing` for the window's X and for destroy_window() alike, synchronously
+    on the GUI thread, so this one hook covers every way out and can veto it.
+    """
+    def _on_closing():
+        try:
+            names = [str(n) for n in (unsaved_fn() or []) if n]
+        except Exception:
+            return None
+        if not names:
+            return None
+        keep_closing = window.create_confirmation_dialog(
+            "Unsaved changes",
+            f"You have unsaved changes in: {', '.join(names)}.\n\nClose without saving them?",
+        )
+        return None if keep_closing else False
+
+    window.events.closing += _on_closing
+
+
+def analysis_groups_edited_since_run(gpq_dir) -> dict:
+    """Study areas whose saved polygons are newer than the results computed for them.
+
+    Returns {group_id: "YYYY-MM-DD HH:MM"} with the time (UTC) of that group's last
+    Analysis run. The report takes a study area's total area and map from the
+    current polygons but its sensitivity figures from that run, so after an edit
+    the two describe different shapes; callers use this to say so. A group with no
+    results at all is not listed - "not analysed yet" is reported separately.
+    Any polygon edit counts, a renamed title included; re-running is cheap.
+    """
+    import pandas as pd
+
+    gpq = Path(gpq_dir)
+    polygons_path = gpq / "tbl_analysis_polygons.parquet"
+    flat_path = gpq / "tbl_analysis_flat.parquet"
+    if not polygons_path.is_file() or not flat_path.is_file():
+        return {}
+    try:
+        polygons = pd.read_parquet(polygons_path, columns=["group_id", "created_at", "updated_at"])
+        runs = pd.read_parquet(flat_path, columns=["analysis_group_id", "analysis_timestamp"])
+    except Exception:
+        return {}
+    if polygons.empty or runs.empty:
+        return {}
+
+    runs["ts"] = pd.to_datetime(runs["analysis_timestamp"], errors="coerce")
+    runs = runs.dropna(subset=["ts"])
+    last_run = runs.groupby(runs["analysis_group_id"].astype(str))["ts"].max()
+    edited = pd.concat([pd.to_datetime(polygons["created_at"], errors="coerce"),
+                        pd.to_datetime(polygons["updated_at"], errors="coerce")], axis=1).max(axis=1)
+    last_edit = edited.groupby(polygons["group_id"].astype(str)).max()
+
+    stale = {}
+    for group_id, run_ts in last_run.items():
+        edit_ts = last_edit.get(group_id)
+        if edit_ts is not None and pd.notna(edit_ts) and edit_ts > run_ts:
+            stale[str(group_id)] = run_ts.strftime("%Y-%m-%d %H:%M")
+    return stale

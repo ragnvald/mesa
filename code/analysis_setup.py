@@ -17,6 +17,8 @@ from mesa_shared import (
     mesa_version_label,
     read_config,
     parquet_dir,
+    guard_unsaved_on_close,
+    analysis_groups_edited_since_run,
 )
 from mesa_constants import (
     TABLE_ANALYSIS_POLYGONS as ANALYSIS_POLYGON_TABLE,
@@ -535,7 +537,12 @@ class AnalysisRecord:
 
 
 class AnalysisStorage:
-    """Persistence layer around analysis groups and polygons (GeoParquet)."""
+    """Study areas (groups) and their polygons, staged in memory and written by save().
+
+    Nothing but save() touches disk. The Analysis stage and the report read these
+    tables from disk, so they see saved state only. See
+    devtools/docs/SPECIAL_FOCUS_REDESIGN_PLAN.md.
+    """
 
     POLYGON_COLUMNS = ["id", "group_id", "title", "notes", "created_at", "updated_at", "geometry"]
     GROUP_COLUMNS = ["id", "name", "notes", "created_at", "updated_at", "default_geocode"]
@@ -595,7 +602,7 @@ class AnalysisStorage:
                 [
                     {
                         "id": "group_default",
-                        "name": "Area 1",
+                        "name": "Study area 1",
                         "notes": "",
                         "created_at": now,
                         "updated_at": now,
@@ -703,17 +710,59 @@ class AnalysisStorage:
                 return self._active_group_id
             return next(iter(valid))
 
+    @staticmethod
+    def _atomic_to_parquet(frame, path: Path) -> None:
+        """Write next to the target and swap it in, so a failed write leaves the old file."""
+        os.makedirs(path.parent, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            frame.to_parquet(tmp, index=False)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+
     def _write_groups(self) -> None:
-        os.makedirs(self.group_path.parent, exist_ok=True)
-        self._groups_df.to_parquet(self.group_path, index=False)
+        self._atomic_to_parquet(self._groups_df, self.group_path)
         self._existing_group_path = self.group_path
         debug_log(self.base_dir, f"Wrote analysis groups to {self.group_path} ({len(self._groups_df)} rows)")
 
     def _write_polygons(self) -> None:
-        os.makedirs(self.polygon_path.parent, exist_ok=True)
-        self._polygons_gdf.to_parquet(self.polygon_path, index=False)
+        self._atomic_to_parquet(self._polygons_gdf, self.polygon_path)
         self._existing_polygon_path = self.polygon_path
         debug_log(self.base_dir, f"Wrote analysis polygons to {self.polygon_path} ({len(self._polygons_gdf)} rows)")
+
+    def _purge_orphan_results(self) -> int:
+        """Drop result rows whose study area or polygon no longer exists; returns rows removed.
+
+        The Analysis stage only rewrites the groups it runs, so rows for a deleted
+        polygon or group would otherwise stay in the report totals for good.
+        """
+        group_ids = set(self._groups_df["id"].astype(str))
+        polygon_ids = set(self._polygons_gdf["id"].astype(str))
+        removed = 0
+        for path in (analysis_flat_path(self.base_dir, self.cfg), analysis_stacked_path(self.base_dir, self.cfg)):
+            if not path.exists():
+                continue
+            try:
+                ids = pd.read_parquet(path, columns=["analysis_group_id", "analysis_polygon_id"])
+            except Exception:
+                continue
+            keep = (ids["analysis_group_id"].astype(str).isin(group_ids)
+                    & ids["analysis_polygon_id"].astype(str).isin(polygon_ids))
+            if bool(keep.all()):
+                continue
+            try:
+                table = gpd.read_parquet(path)
+            except Exception:
+                table = pd.read_parquet(path)
+            self._atomic_to_parquet(table.loc[keep.values].reset_index(drop=True), path)
+            removed += int((~keep).sum())
+            debug_log(self.base_dir, f"Purged {int((~keep).sum())} orphan result row(s) from {path.name}")
+        return removed
 
     # ------------------------------------------------------------------ public API
     def active_group_id(self) -> str:
@@ -754,7 +803,6 @@ class AnalysisStorage:
                 else pd.concat([self._groups_df, new_row], ignore_index=True)
             )
             self._active_group_id = new_id
-            self._write_groups()
             return self._group_from_row(pd.Series(entry))
 
     def update_group(
@@ -778,7 +826,6 @@ class AnalysisStorage:
                 self._groups_df.loc[mask, "default_geocode"] = default_geocode or DEFAULT_ANALYSIS_GEOCODE
             self._groups_df.loc[mask, "updated_at"] = now
             row = self._groups_df.loc[mask].iloc[0]
-            self._write_groups()
         return self._group_from_row(row)
 
     def delete_group(self, identifier: str) -> None:
@@ -790,8 +837,6 @@ class AnalysisStorage:
             self._polygons_gdf = self._polygons_gdf[self._polygons_gdf["group_id"] != gid].reset_index(drop=True)
             remaining = self._groups_df["id"].astype(str)
             self._active_group_id = remaining.iloc[0]
-            self._write_groups()
-            self._write_polygons()
 
     def list_records(self, group_id: Optional[str] = None) -> List[AnalysisRecord]:
         gid = self._resolve_group_id(group_id)
@@ -836,10 +881,15 @@ class AnalysisStorage:
         geom_storage = gpd.GeoDataFrame(geometry=[geom_ll], crs=4326).to_crs(self.storage_epsg).geometry.iloc[0]
         new_id = self._ensure_unique_polygon_id()
         now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
+        title = str((feature.get("properties") or {}).get("title") or "").strip()
+        if not title:
+            # Never store an empty title; readers fall back to the raw id otherwise.
+            with self._lock:
+                title = f"Polygon {int((self._polygons_gdf['group_id'] == gid).sum()) + 1}"
         entry = {
             "id": new_id,
             "group_id": gid,
-            "title": feature.get("properties", {}).get("title") or new_id,
+            "title": title,
             "notes": feature.get("properties", {}).get("notes") or "",
             "created_at": now,
             "updated_at": now,
@@ -851,7 +901,6 @@ class AnalysisStorage:
                 new_row if self._polygons_gdf is None or self._polygons_gdf.empty
                 else pd.concat([self._polygons_gdf, new_row], ignore_index=True)
             )
-            self._write_polygons()
         return self._record_from_row(pd.Series(entry))
 
     def update_properties(self, identifier: str, group_id: Optional[str], title: str, notes: str) -> AnalysisRecord:
@@ -860,11 +909,11 @@ class AnalysisStorage:
             mask = (self._polygons_gdf["group_id"] == gid) & (self._polygons_gdf["id"].astype(str) == str(identifier))
             if not mask.any():
                 raise KeyError(identifier)
-            self._polygons_gdf.loc[mask, "title"] = title
+            if str(title or "").strip():  # an emptied title keeps the previous one
+                self._polygons_gdf.loc[mask, "title"] = str(title).strip()
             self._polygons_gdf.loc[mask, "notes"] = notes
             self._polygons_gdf.loc[mask, "updated_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             row = self._polygons_gdf.loc[mask].iloc[0]
-            self._write_polygons()
         return self._record_from_row(row)
 
     def update_geometry(self, identifier: str, group_id: Optional[str], geometry: Dict[str, Any]) -> AnalysisRecord:
@@ -880,7 +929,6 @@ class AnalysisStorage:
             self._polygons_gdf.loc[mask, "geometry"] = [geom_storage]
             self._polygons_gdf.loc[mask, "updated_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
             row = self._polygons_gdf.loc[mask].iloc[0]
-            self._write_polygons()
         return self._record_from_row(row)
 
     def delete(self, identifier: str, group_id: Optional[str]) -> None:
@@ -891,7 +939,6 @@ class AnalysisStorage:
             self._polygons_gdf = self._polygons_gdf.drop(self._polygons_gdf[mask].index).reset_index(drop=True)
             if len(self._polygons_gdf) == before:
                 raise KeyError(identifier)
-            self._write_polygons()
 
     def import_file(self, path: Path, group_id: Optional[str] = None) -> List[AnalysisRecord]:
         if not path.exists():
@@ -921,10 +968,25 @@ class AnalysisStorage:
             imported.append(self.add_polygon(feature, gid))
         return imported
 
-    def save(self) -> None:
+    def save(self) -> int:
+        """Write both tables and drop results for deleted items; returns result rows removed.
+
+        Both files are always written: with only the polygon file on disk the
+        Analysis stage reports itself unavailable and the report lists no study areas.
+        """
         with self._lock:
             self._write_groups()
             self._write_polygons()
+            return self._purge_orphan_results()
+
+    def discard(self) -> None:
+        """Drop staged edits and reload what is on disk."""
+        with self._lock:
+            self._existing_polygon_path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_POLYGON_TABLE)
+            self._existing_group_path = find_parquet_file(self.base_dir, self.cfg, ANALYSIS_GROUP_TABLE)
+            self._groups_df = self._load_or_init_groups()
+            self._polygons_gdf = self._load_or_init_polygons()
+            self._active_group_id = self._groups_df["id"].astype(str).iloc[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1196,6 +1258,13 @@ class WebApi:
             "updated_at": group.updated_at.isoformat(),
         }
 
+    def _stale_groups(self) -> Dict[str, str]:
+        """Study areas saved after their last Analysis run (id -> time of that run)."""
+        try:
+            return analysis_groups_edited_since_run(parquet_dir(self._base_dir, self._cfg))
+        except Exception:
+            return {}
+
     def _current_group(self) -> AnalysisGroup:
         return self._storage_obj().get_group(self._active_group_id)
 
@@ -1257,6 +1326,7 @@ class WebApi:
                 "asset_bounds": list(analyzer.asset_bounds) if analyzer.asset_bounds else None,
                 "bounds": bounds,
                 "dirty": self._is_dirty(),
+                "stale_groups": self._stale_groups(),
             }
         except Exception as exc:
             debug_log(self._base_dir, f"bootstrap: error {exc}")
@@ -1366,12 +1436,25 @@ class WebApi:
 
     def save(self) -> Dict[str, Any]:
         try:
-            self._storage_obj().save()
+            purged = self._storage_obj().save()
             self._set_dirty(False)
-            debug_log(self._base_dir, "save: wrote storage to parquet")
-            return {"ok": True, "dirty": False}
+            debug_log(self._base_dir, f"save: wrote storage to parquet (purged {purged} result row(s))")
+            return {"ok": True, "dirty": False, "purged_results": purged, "stale_groups": self._stale_groups()}
         except Exception as exc:
             debug_log(self._base_dir, f"save: error {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def discard(self, _payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Drop staged edits and return the state as it is on disk."""
+        try:
+            storage = self._storage_obj()
+            storage.discard()
+            self._active_group_id = storage.active_group_id()
+            self._set_dirty(False)
+            debug_log(self._base_dir, "discard: reloaded storage from parquet")
+            return self.bootstrap()
+        except Exception as exc:
+            debug_log(self._base_dir, f"discard: error {exc}")
             return {"ok": False, "error": str(exc)}
 
     def import_file(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1525,10 +1608,16 @@ HTML_TEMPLATE = """<!doctype html>
        text #3f3528/#5c4a2f, borders #cbb791/#c6b089. */
     html, body { height:100%; margin:0; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f3ecdf; color:#3f3528; }
-    .wrap { height:100vh; display:grid; grid-template-columns: 260px 260px 1fr; grid-template-rows: 100%; grid-template-areas: "panel-left panel-right map"; }
-    .panel { padding:8px 10px; display:flex; flex-direction:column; gap:8px; overflow:auto; background:#faf6ee; }
-    .panel-left { grid-area: panel-left; border-right:2px solid #cbb791; }
-    .panel-right { grid-area: panel-right; border-right:2px solid #cbb791; }
+    /* Same three zones as the Lines tab: toolbar, side panel + map, status line. */
+    .wrap { height:100vh; display:grid; grid-template-columns: 330px 1fr; grid-template-rows: 56px 1fr 26px; grid-template-areas: "bar bar" "panel map" "foot foot"; }
+    .bar { grid-area: bar; display:flex; gap:8px; align-items:center; padding:8px 12px; background:#f3ecdf; border-bottom:2px solid #cbb791; }
+    .bar button { padding:6px 10px; }
+    .bar .hint { font-size:12px; color:#715a36; margin-left:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .badge { font-size:11px; color:#5c4a2f; border:1px solid #c6b089; border-radius:10px; padding:1px 6px; background:#f3ecdf; white-space:nowrap; }
+    .panel { grid-area: panel; padding:8px 10px; display:flex; flex-direction:column; gap:8px; overflow:auto; background:#faf6ee; border-right:2px solid #cbb791; }
+    .foot { grid-area: foot; font-size:12px; color:#715a36; background:#f3ecdf; padding:4px 10px; border-top:1px solid #cbb791; display:flex; justify-content:space-between; gap:12px; align-items:center; white-space:nowrap; overflow:hidden; }
+    .foot .status { font-size:12px; overflow:hidden; text-overflow:ellipsis; }
+    .map-basemap { position:absolute; top:10px; right:10px; z-index:1000; background:#fff; border:2px solid rgba(0,0,0,0.2); border-radius:5px; padding:4px 6px; font-size:12px; }
     .panel h1 { font-size:16px; margin:0; color:#5c4a2f; }
     .panel h2 { font-size:12px; margin:4px 0 2px; text-transform:uppercase; letter-spacing:0.03em; color:#715a36; }
     .panel .buttons { display:flex; gap:5px; flex-wrap:wrap; }
@@ -1538,7 +1627,9 @@ HTML_TEMPLATE = """<!doctype html>
     button.primary:hover { background:#e1c78d; }
     button:disabled { opacity:0.45; cursor:not-allowed; }
     #polygonList { box-sizing:border-box; margin:0; width:100%; min-height:90px; border:1px solid #c6b089; border-radius:6px; padding:3px; overflow:auto; background:#fff; }
-    #polygonList li { list-style:none; border-bottom:1px solid #e3d7be; padding:4px 3px; display:flex; gap:6px; align-items:center; }
+    #polygonList li { list-style:none; border-bottom:1px solid #e3d7be; padding:4px 5px; cursor:pointer; border-radius:4px; }
+    #polygonList li:hover { background:#f6efdf; }
+    #polygonList li.selected { background:#f0deb4; }
     #polygonList li:last-child { border-bottom:none; }
     #polygonList .title { font-weight:600; color:#3f3528; }
     #polygonList .meta { font-size:11px; color:#8a7a5e; }
@@ -1563,56 +1654,47 @@ HTML_TEMPLATE = """<!doctype html>
 <body>
 __MESA_LEAFLET_BODY_OPEN__
 <div class="wrap">
-  <div class="panel panel-left">
-    <div>
-      <h1>Analysis setup</h1>
-      <p class="status" id="statusText">Initialising...</p>
-    </div>
+  <div class="bar">
+    <button id="homeBtn" title="Zoom to the project area">Home</button>
+    <button id="saveBtn" class="primary" title="Write every change on this tab to disk" disabled>Save</button>
+    <button id="discardBtn" title="Drop every unsaved change and go back to what was last saved" disabled>Discard</button>
+    <button id="importBtn" title="Add polygons from a file to this study area">Import&hellip;</button>
+    <span id="dirtyBadge" class="badge" style="display:none;">Unsaved changes</span>
+    <div class="hint">New polygon: click corners &bull; finish with Enter or double-click &bull; Esc cancels &bull; Ctrl-click selects several</div>
+  </div>
 
+  <div class="panel">
     <div>
       <h2>Study areas</h2>
       <div class="form-group">
         <label for="groupSelect">Study area</label>
         <select id="groupSelect"></select>
       </div>
-      <div class="buttons">
+      <div class="buttons" style="margin-top:5px;">
         <button id="newGroupBtn" title="Create a new study area. Each study area holds one or more polygons.">New study area</button>
         <button id="renameGroupBtn" title="Rename the study area shown above" disabled>Rename</button>
         <button id="deleteGroupBtn" title="Delete the study area shown above and its polygons" disabled>Delete</button>
       </div>
+      <p id="staleNote" class="hintline" style="display:none; color:#b45309;"></p>
       <div class="form-group" style="margin-top:6px;">
         <label for="groupNotesInput">Notes for this study area</label>
         <textarea id="groupNotesInput" placeholder="Optional: what this study area is for"></textarea>
       </div>
-      <p class="hintline">A study area is a named set of polygons. Everything here is saved as you go.</p>
     </div>
 
     <hr class="section-divider">
 
     <div>
-      <h2>Basemap</h2>
-      <div class="form-group">
-        <label for="basemapSelect">Basemap layer</label>
-        <select id="basemapSelect">
-          <option value="osm">OpenStreetMap</option>
-          <option value="topo">OpenTopoMap</option>
-          <option value="satellite">Satellite (Esri)</option>
-        </select>
-      </div>
-    </div>
-  </div>
-
-  <div class="panel panel-right">
-    <div>
       <h2>Polygons in this study area</h2>
       <div class="buttons" style="margin-bottom:6px;">
         <button id="newBtn" class="primary" title="Draw a new polygon on the map (same as the polygon icon on the map)">New polygon</button>
-        <button id="editBtn" title="Change the shape. Tick exactly one polygon in the list first." disabled>Edit shape</button>
-        <button id="deleteBtn" title="Delete the ticked polygon(s). Tick at least one in the list first." disabled>Delete</button>
-        <button id="importBtn" title="Add polygons from a file to this study area">Import&hellip;</button>
+        <button id="editBtn" title="Change the shape. Select exactly one polygon first." disabled>Edit shape</button>
+        <button id="deleteBtn" title="Delete the selected polygon(s). Select at least one first." disabled>Delete</button>
+        <button id="shapeApplyBtn" class="primary" style="display:none;" title="Keep the new shape">Apply shape</button>
+        <button id="shapeCancelBtn" style="display:none;" title="Go back to the shape as it was">Cancel shape</button>
       </div>
       <ul id="polygonList"></ul>
-      <p class="hintline">Tick a polygon to select it. Double-click it to zoom to it.</p>
+      <p class="hintline">Click a polygon here or on the map to select it. Double-click zooms to it.</p>
     </div>
 
     <hr class="section-divider">
@@ -1621,20 +1703,27 @@ __MESA_LEAFLET_BODY_OPEN__
       <h2>Selected polygon</h2>
       <div class="form-group">
         <label for="titleInput">Title</label>
-        <input id="titleInput" type="text" placeholder="Tick one polygon above to edit it" disabled>
+        <input id="titleInput" type="text" placeholder="Select one polygon to edit it" disabled>
       </div>
       <div class="form-group">
         <label for="notesInput">Notes</label>
         <textarea id="notesInput" placeholder="Optional notes or rationale" disabled></textarea>
       </div>
-      <button id="applyMetaBtn" title="Save the title and notes of the ticked polygon. Tick exactly one polygon first." disabled>Save title and notes</button>
     </div>
-
   </div>
 
   <div class="map"><div id="map"></div>
     <div id="drawBanner" class="draw-banner">Click on the map to add corners &nbsp;&bull;&nbsp; click the first corner, double-click or <b>Enter</b> to finish &nbsp;&bull;&nbsp; <b>Esc</b> cancels</div>
+    <div class="map-basemap">
+      <select id="basemapSelect" title="Basemap">
+        <option value="osm">OpenStreetMap</option>
+        <option value="topo">OpenTopoMap</option>
+        <option value="satellite">Satellite (Esri)</option>
+      </select>
+    </div>
   </div>
+
+  <div class="foot"><div id="statusText" class="status">Initialising...</div><div id="footRight"></div></div>
 </div>
 
 <script>
@@ -1648,6 +1737,9 @@ let BASE_LAYER = null;
 let POLYGON_SOURCE = {};
 let SELECTED_IDS = new Set();
 let DRAW_MODE = false;
+let DIRTY = false;            // staged edits not yet written by Save
+let STALE_GROUPS = {};        // study areas saved after their last Analysis run (id -> run time)
+let SHAPE_HANDLER = null;     // active "Edit shape" session, if any
 let GROUPS = [];
 let ACTIVE_GROUP_ID = null;
 let GEO_CATEGORIES = [];
@@ -1679,9 +1771,29 @@ const statusText = (msg, cls='') => {
 function notifyError(msg){ statusText(msg, 'error'); }
 
 function setDirtyState(dirty){
-  // Every operation writes to disk at once, so there is no Save button to light up.
-  const btn = document.getElementById('saveBtn');
-  if(btn){ btn.disabled = !dirty; }
+  DIRTY = !!dirty;
+  ['saveBtn', 'discardBtn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if(btn){ btn.disabled = !DIRTY; }
+  });
+  const badge = document.getElementById('dirtyBadge');
+  if(badge){ badge.style.display = DIRTY ? '' : 'none'; }
+}
+// Read by the Special focus window before it closes.
+window.mesaHasUnsaved = function(){ return DIRTY; };
+
+function updateStaleNote(){
+  const note = document.getElementById('staleNote');
+  if(!note){ return; }
+  const runAt = STALE_GROUPS[ACTIVE_GROUP_ID];
+  note.style.display = runAt ? '' : 'none';
+  note.textContent = runAt
+    ? 'Edited after the last Analysis run (' + runAt + ' UTC). The statistics and the report are out of date for this study area until Process is run.'
+    : '';
+}
+
+function idleStatus(){
+  return DIRTY ? 'Changed, not saved yet. Click Save to keep it; Process and the report use saved data only.' : 'Ready.';
 }
 
 const BACKEND_RETRY_MS = 250;
@@ -1883,7 +1995,8 @@ function polygonStyle(selected){
     fillOpacity: 0.18
   };
   if(selected){
-    return Object.assign({}, base, { weight: 3.5, fillOpacity: 0.24 });
+    // Everything stays visible; the selected polygon has to stand out clearly.
+    return Object.assign({}, base, { color: '#b45309', weight: 4, fillColor: '#f59e0b', fillOpacity: 0.35 });
   }
   return base;
 }
@@ -1920,10 +2033,15 @@ function syncSelectionHighlights(){
 
   const list = document.getElementById('polygonList');
   if(list){
-    list.querySelectorAll('input[type=\"checkbox\"]').forEach(input => {
-      const id = input.dataset.id;
-      input.checked = SELECTED_IDS.has(id);
+    list.querySelectorAll('li').forEach(li => {
+      li.classList.toggle('selected', SELECTED_IDS.has(li.dataset.id));
     });
+  }
+  const footRight = document.getElementById('footRight');
+  if(footRight){
+    const titles = Array.from(SELECTED_IDS).map(id => POLYGON_SOURCE[id]?.feature?.properties?.title || id);
+    footRight.textContent = titles.length === 0 ? 'No polygon selected'
+      : (titles.length === 1 ? titles[0] : titles.length + ' polygons selected');
   }
 
   if(SELECTED_IDS.size === 1){
@@ -1956,6 +2074,7 @@ function addFeatureToMap(feature){
 
   addedLayer.feature = feature;
   addedLayer.on('click', (evt) => {
+    if(DRAW_MODE || SHAPE_HANDLER){ return; }
     if(!evt?.originalEvent?.ctrlKey && !evt?.originalEvent?.metaKey){
       SELECTED_IDS.clear();
     }
@@ -2035,6 +2154,7 @@ function updateGroupSelect(){
       ? 'The last study area cannot be deleted. Create another one first.'
       : 'Delete the study area shown above and its polygons';
   }
+  updateStaleNote();
   const groupNotes = document.getElementById('groupNotesInput');
   if(groupNotes){
     const active = GROUPS.find(g => g.id === ACTIVE_GROUP_ID);
@@ -2115,6 +2235,9 @@ function fitPolygonBoundsWithPadding(){
 }
 
 function applyState(state){
+  // The first load calls this directly, not through callPython, so the flags are read here too.
+  if(state.dirty !== undefined){ setDirtyState(state.dirty); }
+  if(state.stale_groups){ STALE_GROUPS = state.stale_groups; }
   if(state.groups){ GROUPS = state.groups; }
   if(state.active_group_id){ ACTIVE_GROUP_ID = state.active_group_id; }
   if(Array.isArray(state.geocode_categories)){ GEO_CATEGORIES = state.geocode_categories; }
@@ -2195,10 +2318,10 @@ function updateActionButtons(){
   // Title and Notes belong to one polygon; with none or several ticked they have no target.
   ['titleInput', 'notesInput'].forEach(id => {
     const el = document.getElementById(id);
-    if(el){ el.disabled = DRAW_MODE || !one; }
+    if(el){ el.disabled = DRAW_MODE || !!SHAPE_HANDLER || !one; }
   });
-  if(DRAW_MODE){
-    ['editBtn', 'deleteBtn', 'applyMetaBtn'].forEach(id => {
+  if(DRAW_MODE || SHAPE_HANDLER){
+    ['editBtn', 'deleteBtn'].forEach(id => {
       const btn = document.getElementById(id);
       if(btn){ btn.disabled = true; }
     });
@@ -2206,19 +2329,13 @@ function updateActionButtons(){
   }
   document.getElementById('editBtn').disabled = !one;
   document.getElementById('deleteBtn').disabled = !hasSelection;
-  document.getElementById('applyMetaBtn').disabled = !one;
 }
 
 function listItemHtml(rec){
   return `
-    <label style="display:flex; gap:6px; align-items:flex-start;">
-      <input type="checkbox" data-id="${rec.id}">
-      <div>
-        <div class="title">${rec.title || rec.id}</div>
-        <div class="meta">ID: ${rec.id}&nbsp;&mdash;&nbsp;Created: ${rec.created_at?.substring(0,16) || ''}</div>
-        <div class="meta">${rec.notes ? rec.notes : ''}</div>
-      </div>
-    </label>
+    <div class="title">${rec.title || rec.id}</div>
+    <div class="meta">ID: ${rec.id}&nbsp;&mdash;&nbsp;Created: ${rec.created_at?.substring(0,16) || ''}</div>
+    <div class="meta">${rec.notes ? rec.notes : ''}</div>
   `;
 }
 
@@ -2227,23 +2344,19 @@ function refreshList(records){
   list.innerHTML = '';
   records.forEach(rec => {
     const li = document.createElement('li');
+    li.dataset.id = rec.id;
     li.innerHTML = listItemHtml(rec);
-    const checkbox = li.querySelector('input[type="checkbox"]');
-    checkbox.checked = SELECTED_IDS.has(rec.id);
-    checkbox.addEventListener('change', (evt) => {
-      if(evt.target.checked){
-        SELECTED_IDS.add(rec.id);
+    li.classList.toggle('selected', SELECTED_IDS.has(rec.id));
+    // One selected polygon at a time; Ctrl-click adds or removes one (same as on the map).
+    li.addEventListener('click', (evt) => {
+      if(DRAW_MODE || SHAPE_HANDLER){ return; }
+      if(evt.ctrlKey || evt.metaKey){
+        if(SELECTED_IDS.has(rec.id)){ SELECTED_IDS.delete(rec.id); } else { SELECTED_IDS.add(rec.id); }
       } else {
-        SELECTED_IDS.delete(rec.id);
+        SELECTED_IDS.clear();
+        SELECTED_IDS.add(rec.id);
       }
-      setPolygonSelected(rec.id, evt.target.checked);
-      if(SELECTED_IDS.size === 1){
-        const [onlyId] = Array.from(SELECTED_IDS);
-        populateForm(onlyId);
-      } else if(SELECTED_IDS.size === 0){
-        populateForm(null);
-      }
-      updateActionButtons();
+      syncSelectionHighlights();
     });
     li.addEventListener('dblclick', () => flyToPolygon(rec.id));
     list.appendChild(li);
@@ -2290,8 +2403,12 @@ function ensureMap(){
         showArea: true
       }
     },
+    // Shape editing is started and finished from the side panel (Edit shape /
+    // Apply shape / Cancel shape), as in the Lines tab; the toolbar's own edit
+    // mode made every polygon editable at once.
     edit: {
       featureGroup: EDIT_LAYER,
+      edit: false,
       remove: false
     }
   });
@@ -2324,11 +2441,11 @@ function ensureMap(){
   });
 
   MAP.on(L.Draw.Event.EDITSTART, () => {
-    statusText('Editing shape: drag the corners, then click Save in the map toolbar (beside the edit icon). Cancel there undoes it.');
+    statusText('Editing shape: drag the corners, then click Apply shape. Cancel shape (or Esc) puts it back.');
   });
 
   MAP.on(L.Draw.Event.EDITSTOP, () => {
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
+    statusText(GROUPS.length ? idleStatus() : 'Ready - create a study area to begin.');
   });
 
   // The polygon icon on the map starts the same drawing as the New polygon button.
@@ -2378,7 +2495,7 @@ function toggleDrawButtons(enable){
     }
   }
 
-  const lockDuringDraw = ['editBtn', 'deleteBtn', 'importBtn', 'applyMetaBtn'];
+  const lockDuringDraw = ['editBtn', 'deleteBtn', 'importBtn'];
   lockDuringDraw.forEach(id => {
     const btn = document.getElementById(id);
     if(!btn){ return; }
@@ -2404,7 +2521,7 @@ function toggleDrawButtons(enable){
   if(enteringDraw){
     statusText('Drawing a new polygon: click to add corners; click the first corner, double-click or press Enter to finish.');
   } else {
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
+    statusText(GROUPS.length ? idleStatus() : 'Ready - create a study area to begin.');
     updateActionButtons();
   }
 }
@@ -2451,6 +2568,7 @@ async function callPython(method, payload, handler){
     }
 
     if(result.dirty !== undefined){ setDirtyState(result.dirty); }
+    if(result.stale_groups){ STALE_GROUPS = result.stale_groups; updateStaleNote(); }
     if(result.groups || result.polygons || result.geocode_layer){
       applyState(result);
     }
@@ -2458,7 +2576,7 @@ async function callPython(method, payload, handler){
       addFeatureToMap(result.feature);
       const newId = result.feature?.properties?.id;
       if(newId){
-        // The new polygon becomes the only ticked one, so its Title and Notes are editable at once.
+        // The new polygon becomes the only selected one, so its Title and Notes are editable at once.
         SELECTED_IDS.clear();
         SELECTED_IDS.add(newId);
       }
@@ -2496,11 +2614,14 @@ async function callPython(method, payload, handler){
     if(method === 'bootstrap'){
       statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
     } else if(method === 'add_polygon'){
-      statusText('Polygon added and saved. Type a title for it; it is saved when you leave the field.');
-    } else if(method === 'update_properties'){
-      statusText('Title and notes saved.');
+      statusText('Polygon added, not saved yet. Type a title for it, then click Save.');
+    } else if(method === 'save'){
+      statusText('All changes saved.' + (result.purged_results ? ' Results for deleted polygons were removed.' : '')
+        + ' Run Process (Analysis) to update the statistics.');
+    } else if(method === 'discard'){
+      statusText('Back to the last saved state.');
     } else {
-      statusText('Ready.');
+      statusText(idleStatus());
     }
     return result;
   } catch(err){
@@ -2524,16 +2645,55 @@ if(newPolygonBtn){
   });
 }
 
+function setShapeEditUi(active){
+  document.getElementById('shapeApplyBtn').style.display = active ? '' : 'none';
+  document.getElementById('shapeCancelBtn').style.display = active ? '' : 'none';
+  ['newBtn', 'importBtn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if(btn){ btn.disabled = !!active; }
+  });
+  updateActionButtons();
+}
+
+function finishShapeEdit(keep){
+  if(!SHAPE_HANDLER){ return; }
+  const handler = SHAPE_HANDLER;
+  try {
+    if(keep){ handler.save(); } else { handler.revertLayers(); }
+  } catch(err){ notifyError(err); }
+  SHAPE_HANDLER = null;        // cleared first: disabling fires EDITSTOP, which reads it
+  try { handler.disable(); } catch(err){}
+  setShapeEditUi(false);
+}
+
 const editPolygonBtn = document.getElementById('editBtn');
 if(editPolygonBtn){
   editPolygonBtn.addEventListener('click', () => {
-    if(SELECTED_IDS.size !== 1){ return; }
+    if(SELECTED_IDS.size !== 1 || SHAPE_HANDLER){ return; }
     ensureMap();
-    const editToolbar = (DRAW_CONTROL && DRAW_CONTROL._toolbars && DRAW_CONTROL._toolbars.edit) ? DRAW_CONTROL._toolbars.edit : null;
-    const editHandler = editToolbar && editToolbar._modes && editToolbar._modes.edit && editToolbar._modes.edit.handler;
-    if(editHandler){
-      editHandler.enable();
-    }
+    const layer = POLYGON_SOURCE[[...SELECTED_IDS][0]];
+    if(!layer){ return; }
+    // Only the selected polygon becomes editable.
+    SHAPE_HANDLER = new L.EditToolbar.Edit(MAP, { featureGroup: L.featureGroup([layer]), poly: { allowIntersection: false } });
+    SHAPE_HANDLER.enable();
+    setShapeEditUi(true);
+  });
+}
+document.getElementById('shapeApplyBtn').addEventListener('click', () => finishShapeEdit(true));
+document.getElementById('shapeCancelBtn').addEventListener('click', () => finishShapeEdit(false));
+document.addEventListener('keydown', (e) => {
+  if(e.key === 'Escape' && SHAPE_HANDLER){ finishShapeEdit(false); }
+});
+
+const homeBtn = document.getElementById('homeBtn');
+if(homeBtn){ homeBtn.addEventListener('click', () => { ensureMap(); fitHomeBounds(); }); }
+
+const discardBtn = document.getElementById('discardBtn');
+if(discardBtn){
+  discardBtn.addEventListener('click', () => {
+    if(!confirm('Discard every unsaved change on this tab and go back to what was last saved?')){ return; }
+    SELECTED_IDS.clear();
+    callPython('discard');
   });
 }
 
@@ -2541,7 +2701,7 @@ const deletePolygonBtn = document.getElementById('deleteBtn');
 if(deletePolygonBtn){
   deletePolygonBtn.addEventListener('click', () => {
     if(SELECTED_IDS.size === 0){ return; }
-    if(!confirm('Delete the ticked polygon(s)? This cannot be undone.')){ return; }
+    if(!confirm('Delete the selected polygon(s)? They are gone for good once you click Save; Discard brings them back.')){ return; }
     const ids = Array.from(SELECTED_IDS);
     const processNext = () => {
       if(ids.length === 0){
@@ -2593,13 +2753,12 @@ function saveSelectedPolygonDetails(){
         layer.feature.properties.updated_at = result.record.updated_at;
       }
     }
-    // Only refill the form if this polygon is still the one ticked.
+    // Only refill the form if this polygon is still the one selected.
     if(SELECTED_IDS.size === 1 && SELECTED_IDS.has(id)){ populateForm(id); }
     reloadListFromMap();
   });
 }
-document.getElementById('applyMetaBtn').addEventListener('click', saveSelectedPolygonDetails);
-// Saved when the field is left as well, so a typed title is not lost by ticking another polygon.
+// Staged when the field is left, so a typed title is not lost by selecting another polygon.
 ['titleInput', 'notesInput'].forEach(id => {
   document.getElementById(id).addEventListener('change', saveSelectedPolygonDetails);
 });
@@ -2665,7 +2824,7 @@ const deleteGroupBtn = document.getElementById('deleteGroupBtn');
 if(deleteGroupBtn){
   deleteGroupBtn.addEventListener('click', () => {
     if(!ACTIVE_GROUP_ID){ return; }
-    if(!confirm('Delete this study area and all its polygons? This cannot be undone.')){ return; }
+    if(!confirm('Delete this study area and all its polygons? They are gone for good once you click Save; Discard brings them back.')){ return; }
     callPython('delete_group', {group_id: ACTIVE_GROUP_ID});
   });
 }
@@ -2806,6 +2965,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         height=680,
         resizable=True,
     )
+    guard_unsaved_on_close(window, lambda: ["Study areas"] if api._is_dirty() else [])
     webview.start(debug=False)
 
 
