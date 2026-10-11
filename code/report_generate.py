@@ -76,7 +76,7 @@ except ModuleNotFoundError as exc:
 MAX_MAP_PX_HEIGHT = 2000           # hard cap for saved map PNG height (px)
 # Opacity of the MBTiles overlay (sensitivity/index rasters) when composited over
 # the basemap in the report. < 1.0 lets the basemap read through for context.
-# Applied at report-render time — changing it does NOT require re-running Tiles.
+# Applied at report-render time; changing it does NOT require re-running Tiles.
 MBTILES_OVERLAY_ALPHA = 0.7
 RIBBON_CM_HEIGHT   = 0.6           # ribbon display height inside PDF (cm)
 ATLAS_FIGURE_INCHES = (7.2, 7.2)   # atlas tiles render smaller to fit more per page
@@ -274,7 +274,7 @@ def _analysis_primary_geocode(flat_df: pd.DataFrame) -> str:
 
     Prefers ``basic_mosaic`` if it appears in ``analysis_geocode``, otherwise
     the first sorted distinct value (puts ``H3_R06`` < ``H3_R07`` < … <
-    ``H3_R10`` ahead of arbitrary imported set names — coarsest-resolution
+    ``H3_R10`` ahead of arbitrary imported set names, coarsest-resolution
     H3 grid covers the most area, safest fallback when basic_mosaic was
     skipped per the project's geocode-strategy setting).
 
@@ -1179,7 +1179,7 @@ class ReportEngine:
             pages.append(('text',
                 f"Per-cell summary maps for the <b>{gname}</b> grouping, rendered from MBTiles with a "
                 "basemap underlay. Each map shows a different aggregation of the assets that overlap each "
-                "geocode cell — the <b>worst-case</b> sensitivity class, the highest <b>importance</b> "
+                "geocode cell: the <b>worst-case</b> sensitivity class, the highest <b>importance</b> "
                 "value, and counts of overlapping <b>asset groups</b> and <b>asset objects</b>. They are "
                 "complementary views of the same input data; read them together rather than in isolation."))
             pages.append(('rule', None))
@@ -1232,7 +1232,7 @@ class ReportEngine:
                                    "tbl_data_extent.parquet")
         if not os.path.exists(extent_path):
             write_to_log(
-                "tbl_data_extent.parquet not found — re-run Stage 1 (Prep) to "
+                "tbl_data_extent.parquet not found. Re-run Stage 1 (Prep) to "
                 "regenerate. Skipping area overview map.",
                 self.base_dir,
             )
@@ -1440,8 +1440,8 @@ class ReportEngine:
                     "<i>Worked example.</i> A cell containing even <b>one</b> overlap at sensitivity 25 outranks "
                     "every cell that has zero overlaps at 25, regardless of how many lower-class overlaps the "
                     "second cell has. Among cells that all have one overlap at 25, the next deciding criterion is "
-                    "the count at 24, then 23, and so on. The rule is fixed — there are no tunable weights for "
-                    "OWA — and uses only the sensitivity counts produced earlier in the pipeline.",
+                    "the count at 24, then 23, and so on. The rule is fixed (there are no tunable weights for "
+                    "OWA) and uses only the sensitivity counts produced earlier in the pipeline.",
                     "Read this map as the answer to &ldquo;<i>where would the worst case be worst?</i>&rdquo; Compared with "
                     "<b>Sensitive areas (A–E)</b>, OWA pushes isolated high-sensitivity hits up the ranking and is the "
                     "more conservative choice when any extreme-sensitivity overlap should dominate the result. Use "
@@ -1761,7 +1761,7 @@ class ReportEngine:
             second_page = [
                 ('heading(2)', f"Line: {ln_visible} (continued)"),
                 ('text',
-                    "Same line, this time rated by the <b>minimum sensitivity class</b> per segment — the "
+                    "Same line, this time rated by the <b>minimum sensitivity class</b> per segment, the "
                     "best (least sensitive) class encountered along the segment. The minimum view is the "
                     "right one when you need to know whether a segment ever passes through robust ground "
                     "at all; comparing it side-by-side with the maximum view from the previous page tells "
@@ -5086,7 +5086,7 @@ def _seg_legend_strip_png(rows, out_path, *, bar_title="Total area", unit="km²"
                 color="#222")
     ax.text(CMPx, hy - 0.18, "A–E composition", fontsize=7, color="#8a7c63", ha="left", va="center")
     _ulbl = (" " + unit) if unit else ""
-    ax.text(ARx, hy + 0.17, f"{bar_title} — max {maxA:,.0f}{_ulbl}", fontsize=7, color="#8a7c63",
+    ax.text(ARx, hy + 0.17, f"{bar_title}, max {maxA:,.0f}{_ulbl}", fontsize=7, color="#8a7c63",
             ha="left", va="center")
     fig.tight_layout(pad=0.4)
     try:
@@ -5181,7 +5181,7 @@ def _blend_area_overview_intro(default_intro: str, base_dir) -> str:
     txt = _report_ai_complete(prompt, base_dir)
     if txt:
         return txt
-    # No AI to weave it in — keep the boilerplate, then the project text verbatim.
+    # No AI to weave it in: keep the boilerplate, then the project text verbatim.
     return default_intro + "\n\n" + about
 
 
@@ -5633,7 +5633,7 @@ def generate_report(base_dir: str,
         about_text = _urls_to_footnotes(_read_text_file(about_path)).strip() if os.path.exists(about_path) else ""
 
         # The operator's "About this project" (Welcome tab) is woven into the
-        # Area-overview intro instead of shown here — see _blend_area_overview_intro.
+        # Area-overview intro instead of shown here; see _blend_area_overview_intro.
 
         # Build initial order_list up to About section
         order_list = [
@@ -5697,14 +5697,14 @@ def generate_report(base_dir: str,
                     ('text',
                         "<b>What is a geocode in MESA?</b> A <i>geocode group</i> is a set of "
                         "non-overlapping polygons that MESA uses as a common spatial reporting unit. "
-                        "Every analytical output in this report — sensitivity maxima, importance maxima, "
-                        "the three normalised indices, atlas tiles — is computed by overlaying assets "
+                        "Every analytical output in this report (sensitivity maxima, importance maxima, "
+                        "the three normalised indices, atlas tiles) is computed by overlaying assets "
                         "onto these polygons and aggregating per cell. Different geocode groups give "
                         "different views of the same input data: an asset-derived mosaic is shaped "
                         "exactly to where features actually occur, while a regular hex grid lets you "
                         "compare cell-for-cell across study areas at a fixed cell size."),
                     ('text',
-                        "<b>basic_mosaic — the default reporting unit.</b> <code>basic_mosaic</code> is "
+                        "<b>basic_mosaic, the default reporting unit.</b> <code>basic_mosaic</code> is "
                         "produced by MESA itself from the imported assets: their footprints are "
                         "buffered, unioned, and then polygonised into the smallest set of "
                         "non-overlapping atomic faces that still distinguish every overlap pattern. "
@@ -5720,14 +5720,14 @@ def generate_report(base_dir: str,
                         "hex tessellations from Uber's open H3 spec. Of the levels named here R6 is the "
                         "coarsest (cells ≈36 km², about the size of a small district); each finer "
                         "level has cells about one seventh the area, so R9 cells are ≈0.1 km². H3 grids are useful when you need consistent "
-                        "cell sizes across runs or when comparing study areas — a value at H3_R08 in "
+                        "cell sizes across runs or when comparing study areas: a value at H3_R08 in "
                         "one project is directly comparable to H3_R08 in another, regardless of the "
                         "asset footprint. The fields used for ranking and weighting are identical to "
                         "those on basic_mosaic, only aggregated to a different polygon set."),
                     ('text',
                         "<b>Custom geocode sets.</b> Any polygon dataset placed under "
                         "<code>input/geocode/</code> and registered with MESA becomes a geocode group "
-                        "with the same machinery — administrative boundaries, statistical units, "
+                        "with the same machinery: administrative boundaries, statistical units, "
                         "Quarter Degree Grid Cells, marine spatial planning blocks, and so on. "
                         "Provided the polygons are non-overlapping and cover the assets, the rest of "
                         "the report works without modification."),
@@ -5827,7 +5827,7 @@ def generate_report(base_dir: str,
                             order_list.append((
                                 'text',
                                 f"Note: per-class areas above are aggregated by {primary_gc} cell shape, "
-                                f"not by asset boundaries. Treat as approximations — basic_mosaic was "
+                                f"not by asset boundaries. Treat as approximations: basic_mosaic was "
                                 f"skipped per the project geocode-strategy setting."
                             ))
                     order_list.append(('new_page', None))
@@ -5983,7 +5983,7 @@ def generate_report(base_dir: str,
                     "single very-sensitive overlap dominate the result. It is scaled relative to "
                     "the current study area (most-loaded cell = 100), so the colour ramp is comparable "
                     "<i>within</i> the report but not across different runs. The index reflects ranking; the "
-                    "supplementary indicators reflect raw maxima and counts — read them together to ground-truth "
+                    "supplementary indicators reflect raw maxima and counts. Read them together to ground-truth "
                     "what the index summarises."),
                 ('text',
                     "The OWA index gets a statistics page (area distribution chart) followed by its map. "
@@ -6047,8 +6047,8 @@ def generate_report(base_dir: str,
                     mm = re.match(r"(agglomerative_ward|kmeans)_k(\d+)$", str(m))
                     if mm:
                         algo = "agglomerative ward" if mm.group(1) == "agglomerative_ward" else "k-means"
-                        return f"Zones — {algo} (k={mm.group(2)})"
-                    return f"Zones — {m}"
+                        return f"Zones: {algo} (k={mm.group(2)})"
+                    return f"Zones: {m}"
 
                 def _fmt_area(v) -> str:
                     try:
@@ -6061,7 +6061,7 @@ def generate_report(base_dir: str,
                 order_list.append(('text',
                     "Segmentation groups the analytical cells into a small number of interpretable "
                     "<b>area types</b>. The deterministic <i>overlap signature</i> labels each cell by the "
-                    "set of sensitivity classes (A–E) of the assets it overlaps — e.g. <b>B+C+D+E</b>. Where "
+                    "set of sensitivity classes (A–E) of the assets it overlaps, e.g. <b>B+C+D+E</b>. Where "
                     "algorithmic clustering was enabled, contiguous <i>zones</i> are reported as well. Each "
                     "table lists the zones largest-first by total area; the mosaic shows how the area divides "
                     "across signatures, with column width proportional to frequency."))
@@ -6262,7 +6262,7 @@ def generate_report(base_dir: str,
         if atlas_pages:
             order_list.append(('heading(2)', "Atlas maps"))
             atlas_intro = (
-                "Atlas tiles split the study area into named sub-areas — typically prepared in advance so "
+                "Atlas tiles split the study area into named sub-areas, typically prepared in advance so "
                 "that each tile covers a manageable extent at usable detail. Every tile gets its own page "
                 "with a sensitivity map (A–E palette) and a small inset locating the tile inside the full "
                 "study area. Use this section when you need to see local detail that the study-area-wide "
@@ -6524,13 +6524,13 @@ class ReportGeneratorWindow(QMainWindow):
                 import pyarrow.parquet as _pq
                 _atlas_ok = _pq.ParquetFile(_atlas_pq).metadata.num_rows > 0
             except Exception:
-                _atlas_ok = True  # exists but metadata unreadable — don't hard-block
+                _atlas_ok = True  # exists but metadata unreadable: don't hard-block
         self._chk_atlas = QCheckBox("Atlas maps (detailed)")
         self._chk_atlas.setChecked(False)
         self._chk_atlas.setEnabled(_atlas_ok)
         if not _atlas_ok:
-            self._chk_atlas.setToolTip("No atlas tiles defined — create them with the Atlas tool first")
-        # Classification (multivariate sensitivity types, tbl_seg_mv) — offered
+            self._chk_atlas.setToolTip("No atlas tiles defined. Create them with the Atlas tool first.")
+        # Classification (multivariate sensitivity types, tbl_seg_mv), offered
         # only when a Classification run has produced the profile table.
         _segmv_ok = os.path.exists(os.path.join(
             base_dir, "output", "geoparquet", "tbl_seg_mv_profile.parquet"))
@@ -6813,8 +6813,8 @@ class ReportGeneratorWindow(QMainWindow):
                 f"A report has been rendering since {since}.\n\n"
                 "Only one report can render at a time: two runs share the scratch "
                 "files in output/tmp/ and would overwrite each other's .docx.\n\n"
-                "Wait for it to finish — it is saved with its own date and time "
-                "stamp — then press Create report again.",
+                "Wait for it to finish (it is saved with its own date and time "
+                "stamp), then press Create report again.",
             )
         self._sync_busy_button()
 
