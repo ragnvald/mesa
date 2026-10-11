@@ -501,7 +501,7 @@ def _analysis_write_area_map_png(
 
         # 30% padding so the analysis area sits inside a clear border of context
         # rather than filling the frame edge-to-edge.
-        bounds_3857 = _expand_bounds(g3857.total_bounds, pad_ratio=0.30)
+        bounds_3857, fig_w_in, fig_h_in = _page_map_view(g3857.total_bounds, pad_ratio=0.30, fig_width_in=7.0)
 
         # Union geometry for clipping/masking
         clip_geom = None
@@ -513,8 +513,6 @@ def _analysis_write_area_map_png(
         except Exception:
             clip_geom = None
 
-        fig_h_in = 4.2
-        fig_w_in = 5.8
         dpi = 180
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
@@ -2353,6 +2351,27 @@ def _expand_bounds(bounds, pad_ratio=0.08):
     pad_x, pad_y = dx * pad_ratio, dy * pad_ratio
     return (minx - pad_x, miny - pad_y, maxx + pad_x, maxy + pad_y)
 
+
+# The map panel on a report page is the text width by the height cap in compile_docx
+# (MAX_OVERVIEW_MAP_WIDTH_CM x MAX_OVERVIEW_MAP_HEIGHT_CM). A view with this shape
+# fills the panel; a taller one is height-bound and comes out narrow.
+MAP_PANEL_ASPECT = 12.0 / 16.0   # height / width
+MAP_PAD_RATIO = 0.12             # margin of context around the data on every side
+
+
+def _page_map_view(bounds, pad_ratio: float = MAP_PAD_RATIO, fig_width_in: float = 7.6):
+    """View bounds and figure size for a page map: (bounds, fig_w_in, fig_h_in).
+
+    Pads the data extent, then widens a tall extent to the panel's shape so the map
+    uses the full text width, with the extra width shown as surrounding context. A
+    very wide extent is given a little more height so it does not become a strip.
+    """
+    b = _expand_bounds(tuple(float(v) for v in bounds), pad_ratio)
+    b = _normalize_bounds_aspect(b, min_aspect=0.50, max_aspect=MAP_PANEL_ASPECT)
+    dx, dy = b[2] - b[0], b[3] - b[1]
+    aspect = (dy / dx) if (dx > 0 and dy > 0) else MAP_PANEL_ASPECT
+    return b, float(fig_width_in), float(fig_width_in) * aspect
+
 # ---------------- MBTiles rendering (raster) ----------------
 WEBMERCATOR_MAX_LAT = 85.05112878
 MAX_MAP_PX_WIDTH = 2000
@@ -2774,17 +2793,18 @@ def render_mbtiles_to_png_best_fit(mbtiles_path: str,
 
             # Composite over a basemap for context
             try:
-                fig_h_in = 8.2
-                fig_w_in = 6.2
+                west_x, north_y = lonlat_to_merc(minlon, maxlat)
+                east_x, south_y = lonlat_to_merc(maxlon, minlat)
+                # The data keeps its own extent; the view around it is padded and
+                # widened to the page panel, so the map is not cropped to the data edge.
+                view, fig_w_in, fig_h_in = _page_map_view((west_x, south_y, east_x, north_y))
                 dpi = 180
                 fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
                 ax.set_axis_off()
 
                 # Set extent first (basemap fetch depends on ax limits)
-                west_x, north_y = lonlat_to_merc(minlon, maxlat)
-                east_x, south_y = lonlat_to_merc(maxlon, minlat)
-                ax.set_xlim(west_x, east_x)
-                ax.set_ylim(south_y, north_y)
+                ax.set_xlim(view[0], view[2])
+                ax.set_ylim(view[1], view[3])
                 try:
                     ax.set_aspect('equal', adjustable='box')
                 except Exception:
@@ -2803,7 +2823,7 @@ def render_mbtiles_to_png_best_fit(mbtiles_path: str,
                     alpha=MBTILES_OVERLAY_ALPHA,
                     zorder=10,
                 )
-                _add_map_decorations(ax, (west_x, east_x, south_y, north_y), base_dir=base_dir, add_inset=True)
+                _add_map_decorations(ax, (view[0], view[2], view[1], view[3]), base_dir=base_dir, add_inset=True)
                 # tight_layout frequently warns with inset axes; bbox_inches='tight' is sufficient here.
                 plt.savefig(out_png, bbox_inches='tight')
                 plt.close(fig)
@@ -2850,8 +2870,7 @@ def compute_fixed_bounds_3857(flat_df: gpd.GeoDataFrame, base_dir: str | None = 
         g3857 = _safe_to_3857(poly)
         if g3857.empty:
             return None
-        b = g3857.total_bounds
-        b = _expand_bounds(b, pad_ratio=0.08)
+        b, _w, _h = _page_map_view(g3857.total_bounds)
         return b
     except Exception as e:
         write_to_log(f"Failed computing fixed bounds: {e}", base_dir)
@@ -2873,8 +2892,13 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
             return False
 
         g = _safe_to_3857(g)
-        fig_h_in = 10.0  # square to preserve detail
-        fig_w_in = 10.0
+        # Figure in the shape of the view, so the map fills it instead of sitting in a square.
+        fig_w_in, fig_h_in = 10.0, 10.0
+        if fixed_bounds_3857:
+            _bw = float(fixed_bounds_3857[2] - fixed_bounds_3857[0])
+            _bh = float(fixed_bounds_3857[3] - fixed_bounds_3857[1])
+            if _bw > 0 and _bh > 0:
+                fig_h_in = fig_w_in * (_bh / _bw)
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
@@ -2944,7 +2968,7 @@ def draw_atlas_map(tile_row: pd.Series,
             write_to_log(f"[Atlas {tile_name}] Reprojection failed; skipping map.", base_dir)
             return False
 
-        tile_bounds = _expand_bounds(tile_3857.total_bounds, pad_ratio=0.05)
+        tile_bounds = _expand_bounds(tile_3857.total_bounds, pad_ratio=0.10)
 
         subset = gpd.GeoDataFrame()
         if atlas_polys_3857 is not None and not atlas_polys_3857.empty:
@@ -3046,12 +3070,10 @@ def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
             return False
 
         if global_bounds_3857:
-            bounds = global_bounds_3857
+            # Already a page view (compute_fixed_bounds_3857); only take its shape.
+            bounds, fig_w_in, fig_h_in = _page_map_view(global_bounds_3857, pad_ratio=0.0, fig_width_in=10.0)
         else:
-            bounds = _expand_bounds(atlas_3857.total_bounds, pad_ratio=0.08)
-
-        fig_h_in = 10.0
-        fig_w_in = 10.0
+            bounds, fig_w_in, fig_h_in = _page_map_view(atlas_3857.total_bounds, fig_width_in=10.0)
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
@@ -3100,10 +3122,7 @@ def draw_data_extent_overview_map(extent_gdf: gpd.GeoDataFrame,
             write_to_log("Data extent reprojection failed; skipping overview.", base_dir)
             return False
 
-        bounds = _expand_bounds(extent_3857.total_bounds, pad_ratio=0.10)
-
-        fig_h_in = 10.0
-        fig_w_in = 10.0
+        bounds, fig_w_in, fig_h_in = _page_map_view(extent_3857.total_bounds, fig_width_in=10.0)
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
@@ -3196,12 +3215,11 @@ def draw_line_segments_map_with_context_inset(segments_df: gpd.GeoDataFrame,
 
         b = tuple(segs.total_bounds)
         # Main map bounds: pad, then normalize aspect so it doesn't become ultra-narrow.
-        main_bounds = _expand_bounds(b, pad_ratio)
-        main_bounds = _normalize_bounds_aspect(main_bounds, min_aspect=0.70, max_aspect=1.30)
+        # Same panel shape as the other page maps, so map + distribution + ribbon
+        # fit on one page instead of the ribbon spilling onto the next.
+        main_bounds, fig_w_in, fig_h_in = _page_map_view(b, pad_ratio=pad_ratio, fig_width_in=10.0)
         minx, miny, maxx, maxy = main_bounds
 
-        fig_h_in = 10.0
-        fig_w_in = 10.0
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
@@ -3325,16 +3343,15 @@ def draw_lines_overview_map(segments_df: gpd.GeoDataFrame,
             write_to_log("Lines overview map reprojection failed; skipping.", base_dir)
             return False
 
-        fig_h_in = 10.0
-        fig_w_in = 10.0
+        (minx, miny, maxx, maxy), fig_w_in, fig_h_in = _page_map_view(
+            segs.total_bounds, pad_ratio=max(float(pad_ratio), MAP_PAD_RATIO), fig_width_in=10.0)
         dpi = _dpi_for_fig_height(fig_h_in)
         fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in), dpi=dpi)
         ax.set_axis_off()
 
-        b = segs.total_bounds
-        minx, miny, maxx, maxy = _expand_bounds(b, pad_ratio)
         ax.set_xlim(minx, maxx)
         ax.set_ylim(miny, maxy)
+        ax.set_autoscale_on(False)   # plotting must not change the view
 
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
 
@@ -4127,10 +4144,10 @@ def compile_docx(output_docx: str, order_list: list):
     # margins) and forced their heading + description onto a separate page.
     # Cap the height so heading + intro text + tile fit on one page; width
     # is still scaled by ATLAS_DOC_WIDTH_SCALE * MAX_IMAGE_WIDTH_CM.
-    MAX_ATLAS_HEIGHT_CM = 14.3   # +40% then -15%: tall enough to fill the page without running too tall
+    MAX_ATLAS_HEIGHT_CM = 16.5   # a tile page has only a short introduction above it and a legend below
     # Line maps are inserted together with distribution + ribbon.
     # Allow a taller cap now that we use a single combined map (segments + context inset).
-    MAX_LINE_MAP_HEIGHT_CM = 14.0
+    MAX_LINE_MAP_HEIGHT_CM = 12.0
     # Overview / index / "other maps" area maps used to fill the full text width
     # at 10 cm tall, which forced their explanatory text onto a separate page.
     # Shrink them to a panel size so heading + intro paragraphs + map fit on one
@@ -4138,7 +4155,8 @@ def compile_docx(output_docx: str, order_list: list):
     # +40% on the height (the binding dimension for these portrait maps); width cap
     # raised too but kept within the page text width so wider maps can grow as well.
     MAX_OVERVIEW_MAP_WIDTH_CM = 16.0
-    MAX_OVERVIEW_MAP_HEIGHT_CM = 13.3
+    # 12 cm leaves room on the page for the heading, the introduction and a legend.
+    MAX_OVERVIEW_MAP_HEIGHT_CM = 12.0
     # Index legends are emitted right after the map and should align visually
     # with it, so they share the overview width.
     MAX_LEGEND_WIDTH_CM = MAX_OVERVIEW_MAP_WIDTH_CM
