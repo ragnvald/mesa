@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from ui_style import apply_shared_stylesheet
 
 from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
+from report_progress import ReportProgress, load_history, save_history
 _ensure_geo_data()  # repair a machine-wide PROJ/GDAL env before the GIS stack loads
 import geopandas as gpd
 import pandas as pd
@@ -46,6 +47,7 @@ import threading
 from pathlib import Path
 import subprocess
 import io, math, time, urllib.request
+import functools
 import sqlite3
 try:
     from docx import Document
@@ -102,6 +104,7 @@ _REPORT_INSET_SHADOW_DY = 0.008
 # ---------------- GUI / globals ----------------
 log_widget = None        # QPlainTextEdit (set when GUI is up)
 progress_var = None      # QProgressBar (set when GUI is up)
+status_var = None        # QLabel under the bar: what is being drawn and the time left
 last_report_path = None
 link_var = None          # QLabel used as hyperlink
 
@@ -112,11 +115,42 @@ class _ReportSignals(QObject):
     """Thread-safe signals for updating the GUI from background threads."""
     log_message = Signal(str)
     progress_update = Signal(float)
+    status_update = Signal(str)
     link_update = Signal(str)
     busy_changed = Signal(bool)
 
 
 _signals: _ReportSignals | None = None
+
+# Set for the duration of one report run; None otherwise. While it is set the bar
+# follows its estimate and the fixed percentages passed to set_progress() are ignored.
+_PROGRESS: ReportProgress | None = None
+
+
+def _emit_progress(pct: float, text: str) -> None:
+    try:
+        if _signals is not None:
+            _signals.progress_update.emit(float(pct))
+            _signals.status_update.emit(str(text))
+    except Exception:
+        pass
+
+
+def _map_unit(kind: str):
+    """Mark a function as drawing one report map of this kind (see report_progress.py)."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            tracker = _PROGRESS
+            if tracker is None:
+                return fn(*args, **kwargs)
+            tracker.begin_map(kind)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                tracker.end_map()
+        return wrapper
+    return decorate
 
 # Only one report run at a time. Two concurrent runs render into the same
 # output/tmp/ scratch files and pick the same minute-stamped .docx name, so
@@ -465,6 +499,7 @@ def _analysis_polygon_total_km2(polygons_gdf: gpd.GeoDataFrame) -> float:
         return 0.0
 
 
+@_map_unit("area")
 def _analysis_write_area_map_png(
     polygons_gdf: gpd.GeoDataFrame,
     out_path: str,
@@ -2351,13 +2386,22 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
         cache_hits = 0
         fetched = 0
 
+        tracker = _PROGRESS
+        if tracker is not None:
+            missing = sum(1 for x in range(xmin, xmax + 1) for y in range(ymin, ymax + 1)
+                          if not (cache_root / str(z) / str(x) / f"{y}.png").exists())
+            tracker.tiles_needed(tile_span, missing)
+
         for xi, x in enumerate(range(xmin, xmax+1)):
             for yi, y in enumerate(range(ymin, ymax+1)):
                 cache_path = cache_root / str(z) / str(x) / f"{y}.png"
                 img = _load_cached_tile(cache_path)
                 if img is not None:
                     cache_hits += 1
+                    if tracker is not None:
+                        tracker.tile_done(False)
                 else:
+                    t_fetch = time.monotonic()
                     try:
                         url = tile_url(z, x, y)
                         with urllib.request.urlopen(url, timeout=5) as resp:
@@ -2367,6 +2411,9 @@ def _plot_basemap(ax, crs_epsg=3857, base_dir: str | None = None):
                         fetched += 1
                     except Exception:
                         img = None
+                    if tracker is not None:
+                        # a failed download costs time too, so it counts
+                        tracker.tile_done(True, time.monotonic() - t_fetch)
                 if img is not None:
                     mosaic.paste(img, (xi*TILE, yi*TILE))
 
@@ -2752,6 +2799,7 @@ def _add_map_decorations(ax,
     except Exception:
         return
 
+@_map_unit("group")
 def render_mbtiles_to_png_best_fit(mbtiles_path: str,
                                   out_png: str,
                                   base_dir: str | None = None) -> tuple[bool, str]:
@@ -2924,6 +2972,7 @@ def compute_fixed_bounds_3857(flat_df: gpd.GeoDataFrame, base_dir: str | None = 
         write_to_log(f"Failed computing fixed bounds: {e}", base_dir)
         return None
 
+@_map_unit("group")
 def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
                                group_name: str,
                                palette: dict,
@@ -2989,6 +3038,7 @@ def draw_group_map_sensitivity(gdf_group: gpd.GeoDataFrame,
         plt.close('all')
         return False
 
+@_map_unit("atlas")
 def draw_atlas_map(tile_row: pd.Series,
                    atlas_crs,
                    atlas_polys_3857: gpd.GeoDataFrame,
@@ -3087,6 +3137,7 @@ def draw_atlas_map(tile_row: pd.Series,
         plt.close('all')
         return False
 
+@_map_unit("overview")
 def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
                             atlas_crs,
                             atlas_polys_3857: gpd.GeoDataFrame,
@@ -3153,6 +3204,7 @@ def draw_atlas_overview_map(atlas_df: gpd.GeoDataFrame,
         return False
 
 
+@_map_unit("overview")
 def draw_data_extent_overview_map(extent_gdf: gpd.GeoDataFrame,
                                   out_path: str,
                                   base_dir: str | None = None) -> bool:
@@ -3235,6 +3287,7 @@ def _normalize_bounds_aspect(bounds: tuple[float, float, float, float],
     return bounds
 
 
+@_map_unit("line")
 def draw_line_segments_map_with_context_inset(segments_df: gpd.GeoDataFrame,
                                               line_name: str,
                                               palette: dict,
@@ -3364,6 +3417,7 @@ def draw_line_segments_map_with_context_inset(segments_df: gpd.GeoDataFrame,
         return False
 
 # ---------------- Lines: overview across all lines ----------------
+@_map_unit("overview")
 def draw_lines_overview_map(segments_df: gpd.GeoDataFrame,
                             palette: dict,
                             out_path: str,
@@ -4653,11 +4707,62 @@ def _urls_to_footnotes(text: str) -> str:
     foot = "\n\nFootnotes:\n" + "\n".join([f"[{i}] {u}" for i, u in enumerate(urls, start=1)])
     return out + foot
 
+def _parquet_row_count(path: str) -> int:
+    """Row count from the file footer; nothing is read into memory."""
+    try:
+        import pyarrow.parquet as pq
+        if os.path.isdir(path):
+            return int(pq.ParquetDataset(path).read(columns=[]).num_rows)
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        return 0
+
+
+def _plan_report_maps(gpq_dir: str, *, include_other_maps: bool, include_index_statistics: bool,
+                      include_lines_and_segments: bool, include_atlas_maps: bool,
+                      include_analysis_presentation: bool, analysis_mode: str | None,
+                      n_geocode_groups: int = 1) -> dict[str, int]:
+    """How many maps of each kind this report will draw, before any is drawn.
+
+    A count that turns out too high is corrected when its stage ends (close_kind).
+    """
+    plan = {"overview": 0, "line": 0, "atlas": 0, "group": 0, "area": 0}
+    uses_engine = bool(include_other_maps or include_index_statistics or include_lines_and_segments or include_atlas_maps)
+    if uses_engine and os.path.exists(os.path.join(gpq_dir, "tbl_data_extent.parquet")):
+        plan["overview"] += 1
+    if include_lines_and_segments:
+        n_lines = _parquet_row_count(os.path.join(gpq_dir, "tbl_lines.parquet"))
+        if n_lines:
+            plan["line"] = 2 * n_lines      # a maximum and a minimum map per line
+            plan["overview"] += 1
+    if include_atlas_maps:
+        n_tiles = _parquet_row_count(os.path.join(gpq_dir, "tbl_atlas.parquet"))
+        if n_tiles:
+            plan["atlas"] = n_tiles
+            plan["overview"] += 1
+    groups = max(1, int(n_geocode_groups or 1))
+    if include_other_maps:
+        plan["group"] += 4 * groups          # sensitivity, importance, asset groups, asset objects
+    if include_index_statistics:
+        plan["group"] += groups              # the OWA index map
+    if include_analysis_presentation:
+        mode = str(analysis_mode or "single").strip().lower()
+        if mode == "all":
+            plan["area"] = _parquet_row_count(os.path.join(gpq_dir, _ANALYSIS_GROUP_TABLE))
+        else:
+            plan["area"] = 2 if mode == "compare" else 1
+    return plan
+
+
 def set_progress(pct: float, message: str | None = None):
     try:
         pct = max(0.0, min(100.0, float(pct)))
         if message:
             write_to_log(message, _LOG_BASE_DIR)
+        tracker = _PROGRESS
+        if tracker is not None and pct < 100.0:
+            tracker.tick()   # the bar follows the tracker's estimate, not these stage marks
+            return
         # Thread-safe progress update via signal
         try:
             if _signals is not None:
@@ -5121,6 +5226,28 @@ def generate_report(base_dir: str,
         tmp_dir   = str(tmp_dir_path)
         set_progress(6, "Paths prepared.")
 
+        global _PROGRESS
+        timing_path = output_subpath(base_dir, "cache", "report_timing.json")
+        try:
+            _plan = _plan_report_maps(
+                gpq_dir,
+                include_other_maps=include_other_maps, include_index_statistics=include_index_statistics,
+                include_lines_and_segments=include_lines_and_segments, include_atlas_maps=include_atlas_maps,
+                include_analysis_presentation=include_analysis_presentation, analysis_mode=analysis_mode,
+                n_geocode_groups=len(report_geocode_groups or []) or 1)
+            try:
+                _cache_empty = not any(_tile_cache_root(base_dir).iterdir())
+            except Exception:
+                _cache_empty = False
+            _PROGRESS = ReportProgress(_plan, emit=_emit_progress, history=load_history(timing_path),
+                                       cache_is_empty=_cache_empty)
+            write_to_log(f"Report plan: {sum(_plan.values())} maps ({', '.join(f'{v} {k}' for k, v in _plan.items() if v)}); "
+                         f"basemap tile cache is {'empty' if _cache_empty else 'in use'}.", base_dir)
+            _PROGRESS.tick()
+        except Exception as exc:
+            _PROGRESS = None
+            write_to_log(f"Progress estimate unavailable: {exc}", base_dir)
+
         # Ensure the OSM tile cache folder exists in the expected place, even when basemap is served
         # via contextily (which doesn't use our XYZ-tile cache).
         try:
@@ -5241,6 +5368,8 @@ def generate_report(base_dir: str,
                         reason_bits.append(f"tbl_lines missing columns: {', '.join(missing_l)}")
                 msg = "; ".join(reason_bits) if reason_bits else "missing/invalid inputs"
                 write_to_log(f"Skipping line/segment pages ({msg}).", base_dir)
+            if _PROGRESS is not None:
+                _PROGRESS.close_kind("line")
             set_progress(35, "Lines/segments processed.")
         else:
             write_to_log("Skipping lines/segments section (not selected).", base_dir)
@@ -5273,6 +5402,8 @@ def generate_report(base_dir: str,
             write_to_log("Per-atlas maps created.", base_dir)
         elif include_atlas_maps:
             write_to_log("Atlas maps requested but none were rendered.", base_dir)
+        if _PROGRESS is not None:
+            _PROGRESS.close_kind("atlas")
         if include_atlas_maps:
             set_progress(45, "Atlas maps processed.")
         else:
@@ -5343,6 +5474,8 @@ def generate_report(base_dir: str,
             set_progress(_index_start + 5, "Index charts completed.")
         else:
             write_to_log("Skipping index statistics section (not selected).", base_dir)
+        if _PROGRESS is not None:
+            _PROGRESS.close_kind("group")
         # ---- Compose PDF ----
         timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
 
@@ -6097,7 +6230,13 @@ def generate_report(base_dir: str,
             output_docx_path = output_subpath(base_dir, "reports", f"MESA-report_{ts_docx}_{_seq}.docx")
             _seq += 1
         output_docx = str(output_docx_path)
+        if _PROGRESS is not None:
+            _PROGRESS.begin_compose()
         compile_docx(output_docx, order_list)
+        if _PROGRESS is not None:
+            _PROGRESS.end_compose()
+            save_history(timing_path, _PROGRESS.to_history())
+            _PROGRESS.finish("Report completed.")
         engine.cleanup()
         engine = None
         set_progress(100, "Report completed.")
@@ -6123,8 +6262,11 @@ def generate_report(base_dir: str,
                     write_to_log(line, base_dir)
         except Exception:
             pass
+        if _PROGRESS is not None:
+            _PROGRESS.finish("Report failed.")
         set_progress(100, "Report failed.")
     finally:
+        _PROGRESS = None
         try:
             _LOG_BASE_DIR = None
         except Exception:
@@ -6246,7 +6388,7 @@ class ReportGeneratorWindow(QMainWindow):
 
     def __init__(self, base_dir: str, config_file: str, palette: dict, desc: dict, parent=None):
         super().__init__(parent)
-        global log_widget, progress_var, link_var, _gui_window, _signals
+        global log_widget, progress_var, status_var, link_var, _gui_window, _signals
 
         _gui_window = self
         _signals = _ReportSignals()
@@ -6297,6 +6439,9 @@ class ReportGeneratorWindow(QMainWindow):
         progress_var.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         pframe.addWidget(progress_var, stretch=1)
         main_layout.addLayout(pframe)
+        status_var = QLabel("")
+        status_var.setStyleSheet("color: #5c4a2f;")
+        main_layout.addWidget(status_var)
 
         # --- Report options group ---
         action_group = QGroupBox("Report")
@@ -6492,6 +6637,7 @@ class ReportGeneratorWindow(QMainWindow):
         # --- Signals ---
         _signals.log_message.connect(self._on_log_message)
         _signals.progress_update.connect(self._on_progress_update)
+        _signals.status_update.connect(self._on_status_update)
         _signals.link_update.connect(self._on_link_update)
         _signals.busy_changed.connect(self._on_busy_changed)
         # A run may already be in flight when this window appears; the busy
@@ -6520,6 +6666,10 @@ class ReportGeneratorWindow(QMainWindow):
     def _on_progress_update(self, pct: float):
         if progress_var is not None:
             progress_var.setValue(int(pct))
+
+    def _on_status_update(self, text: str):
+        if status_var is not None:
+            status_var.setText(text)
 
     def _on_link_update(self, text: str):
         if link_var is not None:
