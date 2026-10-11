@@ -65,6 +65,15 @@ The two tabs of the Special focus window followed different logics: Lines kept c
 
 Fixed at the same time, because they affected figures: a study area with only a drawn polygon could be invisible to Process and the report; results for deleted polygons stayed in the totals; and nothing said when a study area had been edited after its analysis ran — the tab, the report and Compare study areas now do.
 
+### The program folder and the data folder (Windows)
+
+The folder you unzip now holds only the program: `mesa.exe`, its tools and a `READ ME FIRST.txt`. The `input`, `output` and `config.ini` that used to lie beside `mesa.exe` are gone from there, because nothing put in them was ever read.
+
+- **First start:** MESA asks where to keep your data before it writes anything. It proposes `Documents\MESA`, or a folder outside OneDrive when your Documents are synchronised, and you can choose another.
+- **Data from an earlier version:** if the data folder was last used with another MESA version, MESA asks whether to continue with that data or start with an empty project. Starting empty renames the old folder and keeps it. Nothing is deleted.
+- **Always in view:** the data folder is shown at the bottom of the main window, with a button that opens it and a note when it is inside a synchronised folder.
+- **Windows open in front:** windows opened from the workflow buttons no longer come up behind the main window.
+
 ### Buttons and confirmations
 
 - Exit is top-right in every window.

@@ -1895,9 +1895,9 @@ def _resolve_working_dir() -> str:
     if pinned:
         os.makedirs(pinned, exist_ok=True)
         return pinned
-    d = os.path.join(_known_documents_dir(), "MESA")
-    os.makedirs(d, exist_ok=True)
-    return d
+    # Not created here: on a first start the user is asked where it should be
+    # (_choose_workspace_at_start), and _bootstrap_config() creates what was chosen.
+    return os.path.join(_known_documents_dir(), "MESA")
 
 original_working_directory = _resolve_working_dir()
 config_file = os.path.join(original_working_directory, "config.ini")
@@ -1958,7 +1958,8 @@ def _has_user_data(base: str) -> bool:
             return True
         for sub in ("asset", "geocode", "lines"):
             d = os.path.join(base, "input", sub)
-            if os.path.isdir(d) and any(not f.startswith(".") for f in os.listdir(d)):
+            if os.path.isdir(d) and any(not f.startswith(".") and f.lower() != "readme.txt"
+                                        for f in os.listdir(d)):
                 return True
     except Exception:
         pass
@@ -2042,6 +2043,170 @@ def _seed_working_dir() -> None:
             pass
 
 
+# What the start-up questions below led to; read by the UI once it is up.
+_ws_asked = False
+_ws_archived_to: str | None = None
+
+
+def _program_version() -> str:
+    """mesa_version of the config.ini template this build ships."""
+    from mesa_shared import config_mesa_version
+    for base in (RESOURCE_BASE, PROJECT_BASE):
+        version = config_mesa_version(os.path.join(base, "config.ini"))
+        if version:
+            return version
+    return ""
+
+
+def _set_working_dir(path: str) -> None:
+    global original_working_directory, config_file, gpkg_file
+    original_working_directory = os.path.abspath(path)
+    config_file = os.path.join(original_working_directory, "config.ini")
+    gpkg_file = os.path.join(original_working_directory, "output", "mesa.gpkg")
+
+
+def _ask_for_new_workspace(ms) -> None:
+    """First start: let the user decide where the data folder goes, before anything is written."""
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox
+    global _ws_asked
+    QApplication.instance() or QApplication(sys.argv)
+    documents_default = os.path.join(_known_documents_dir(), "MESA")
+    suggested = ms.suggest_workspace_dir(_known_documents_dir(), os.path.expanduser("~"))
+
+    dlg = QDialog()
+    dlg.setWindowTitle("Welcome to MESA")
+    dlg.setMinimumWidth(620)
+    lay = QVBoxLayout(dlg)
+    intro = QLabel(
+        "MESA keeps a project's input data, results, reports and settings in a <b>data folder</b> "
+        "of its own, separate from the program. The folder with mesa.exe is only the program: "
+        "nothing you put there is read.<br><br>"
+        "Choose where the data folder should be. You can open it or move it later under the "
+        "Config tab.")
+    intro.setWordWrap(True)
+    lay.addWidget(intro)
+    row = QHBoxLayout()
+    field = QLineEdit(suggested)
+    field.setReadOnly(True)
+    browse = QPushButton("Choose another folder…")
+    row.addWidget(field, 1)
+    row.addWidget(browse)
+    lay.addLayout(row)
+    note = QLabel("")
+    note.setWordWrap(True)
+    lay.addWidget(note)
+
+    def _refresh() -> None:
+        provider = ms.cloud_sync_provider(field.text())
+        if provider:
+            note.setText(
+                f"<b>This folder is synchronised by {provider}.</b> A MESA project is often several "
+                "gigabytes of files that change while MESA runs. Synchronising them is slow and can "
+                "interrupt processing. A folder outside the synchronised area is the safer choice.")
+        elif os.path.normcase(field.text()) != os.path.normcase(documents_default) and \
+                ms.cloud_sync_provider(documents_default):
+            note.setText(
+                f"Your Documents folder is synchronised by {ms.cloud_sync_provider(documents_default)}, "
+                "so a folder outside it is proposed.")
+        else:
+            note.setText("")
+
+    def _browse() -> None:
+        picked = QFileDialog.getExistingDirectory(dlg, "Choose where MESA keeps your data",
+                                                  os.path.dirname(field.text()) or os.path.expanduser("~"))
+        if picked:
+            field.setText(ms.resolve_workspace_choice(picked))
+            _refresh()
+
+    browse.clicked.connect(_browse)
+    buttons = QDialogButtonBox()
+    use_btn = buttons.addButton("Use this folder", QDialogButtonBox.AcceptRole)
+    buttons.addButton("Exit", QDialogButtonBox.RejectRole)
+    use_btn.setDefault(True)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    lay.addWidget(buttons)
+    _refresh()
+
+    if dlg.exec() != QDialog.Accepted:
+        raise SystemExit(0)
+    chosen = os.path.abspath(field.text())
+    os.makedirs(chosen, exist_ok=True)
+    if os.path.normcase(chosen) != os.path.normcase(os.path.abspath(documents_default)):
+        _write_workspace_pointer(chosen)
+    _set_working_dir(chosen)
+    _ws_asked = True
+
+
+def _ask_about_existing_workspace(ms, seen: str, program: str) -> None:
+    """A data folder from another MESA version: keep working in it, or set it aside and start empty."""
+    from PySide6.QtWidgets import QApplication
+    global _ws_asked, _ws_archived_to
+    QApplication.instance() or QApplication(sys.argv)
+    workspace = os.path.abspath(original_working_directory)
+    while True:
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Existing MESA data found")
+        box.setText(f"This is MESA {program}. Your data folder was last used with MESA {seen}:")
+        box.setInformativeText(
+            f"{workspace}\n\n"
+            "Continue with this data: the project is kept as it is. Results made by the earlier "
+            "version may not match this one, so run Process again if anything looks wrong.\n\n"
+            "Start with an empty project: the folder above is renamed so the old data is kept, "
+            "and a new, empty data folder takes its place. Nothing is deleted.")
+        keep_btn = box.addButton("Continue with this data", QMessageBox.AcceptRole)
+        fresh_btn = box.addButton("Start with an empty project", QMessageBox.DestructiveRole)
+        box.addButton("Exit", QMessageBox.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is keep_btn:
+            _ws_asked = True
+            return
+        if clicked is not fresh_btn:
+            raise SystemExit(0)
+        try:
+            _ws_archived_to = ms.archive_workspace(workspace, seen)
+            _ws_asked = True
+            return
+        except OSError as exc:
+            QMessageBox.warning(
+                None, "Could not set the old data aside",
+                f"The folder could not be renamed:\n\n{exc}\n\n"
+                "A file in it is probably open in another program, or still being synchronised. "
+                "Close what is using it and try again, or continue with the existing data.")
+
+
+def _choose_workspace_at_start() -> None:
+    """Packaged builds: ask where the data goes on a first start, and what to do with
+    data from another version. Runs before anything is written, and never in a child process."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import multiprocessing
+        if multiprocessing.parent_process() is not None or any(
+                str(a).startswith("--multiprocessing") for a in sys.argv[1:]):
+            return
+    except Exception:
+        pass
+    _ensure_code_dir_on_syspath()
+    try:
+        import mesa_shared as ms
+    except Exception:
+        return
+    program = _program_version()
+    seen = ms.workspace_version_seen(original_working_directory)
+    if not seen:
+        legacy_data_beside_exe = (os.path.isfile(os.path.join(PROJECT_BASE, "log.txt"))
+                                  and _has_user_data(PROJECT_BASE))
+        if legacy_data_beside_exe or _read_workspace_pointer():
+            return      # an upgrade in place is migrated; a pinned folder was chosen already
+        _ask_for_new_workspace(ms)
+    elif program and seen != program:
+        _ask_about_existing_workspace(ms, seen, program)
+
+
 def _bootstrap_config() -> None:
     """Read config.ini and prepare project folders. Main process only."""
     global config, mesa_version, mesa_version_display
@@ -2050,6 +2215,7 @@ def _bootstrap_config() -> None:
 
     # Frozen first run = the working dir has no config.ini yet (checked before we
     # seed one in). Recorded here, surfaced to the user once the UI is up.
+    os.makedirs(original_working_directory, exist_ok=True)
     _ws_first_run = getattr(sys, "frozen", False) and not os.path.exists(config_file)
     _ws_migrated_from = _migrate_legacy_workspace()
     _seed_working_dir()
@@ -2063,6 +2229,12 @@ def _bootstrap_config() -> None:
     packaged_build_info = _read_packaged_build_info()
     packaged_build_timestamp = str(packaged_build_info.get("build_timestamp", "") or "").strip()
     check_and_create_folders()
+    if getattr(sys, "frozen", False):
+        try:
+            from mesa_shared import write_workspace_marker
+            write_workspace_marker(original_working_directory, _program_version() or mesa_version)
+        except Exception:
+            pass
 
     if _ws_migrated_from:
         log_to_logfile(
@@ -2076,6 +2248,7 @@ def _bootstrap_config() -> None:
 # globals are ready before the module-level UI code below runs.
 if __name__ == "__main__":
     _maybe_run_helper()  # macOS: dispatch --run-helper re-exec before UI bootstrap (no-op elsewhere)
+    _choose_workspace_at_start()
     _bootstrap_config()
 
 
@@ -3539,7 +3712,7 @@ class TuneProcessingWindow(QMainWindow):
         self._pending_tune_values: dict[str, str] = {}
         self._pending_before_values: dict[str, str] = {}
         self._pending_eval_rationale = ""
-        self._tune_backup_path = os.path.join(PROJECT_BASE, "output", "processing_tuning_backup.json")
+        self._tune_backup_path = os.path.join(original_working_directory, "output", "processing_tuning_backup.json")
 
 
     # ------------------------------------------------------------------
@@ -4058,6 +4231,7 @@ class MesaMainWindow(QMainWindow):
         # Build UI
         self._build_header()
         self._build_tabs()
+        self._build_workspace_line()
 
         # Tell the user where their data lives — once, after the window is up.
         QTimer.singleShot(0, self._maybe_show_workspace_notice)
@@ -4171,6 +4345,33 @@ class MesaMainWindow(QMainWindow):
     def _welcome_values(self) -> tuple:
         return (self._project_name_edit.text().strip(),
                 self._project_about_edit.toPlainText().strip())
+
+    def _build_workspace_line(self):
+        """One line under the tabs that says where the project is, with a way to open it."""
+        row = QHBoxLayout()
+        row.setContentsMargins(2, 0, 2, 0)
+        label = QLabel(f"Data folder:  {os.path.abspath(original_working_directory)}")
+        label.setStyleSheet("color: #6a5533; font-size: 10px;")
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setToolTip("Where MESA keeps this project's input, results, reports and settings.")
+        provider = ""
+        try:
+            from mesa_shared import cloud_sync_provider
+            provider = cloud_sync_provider(original_working_directory)
+        except Exception:
+            pass
+        row.addWidget(label, 1)
+        if provider:
+            synced = QLabel(f"Synchronised by {provider}")
+            synced.setStyleSheet("color: #9a5b12; font-size: 10px;")
+            synced.setToolTip("Large projects are slow to synchronise and processing can be interrupted. "
+                              "Move the data folder under the Config tab.")
+            row.addWidget(synced)
+        open_btn = QPushButton("Open folder")
+        open_btn.setStyleSheet("font-size: 10px; padding: 2px 10px;")
+        open_btn.clicked.connect(self._open_workspace_folder)
+        row.addWidget(open_btn)
+        self._main_layout.addLayout(row)
 
     def _build_welcome_tab(self):
         tab = QWidget()
@@ -5348,7 +5549,12 @@ class MesaMainWindow(QMainWindow):
                 "Keeping it here (separate from the application) means future "
                 "upgrades never touch your data. You can move it elsewhere under "
                 "the Config tab.")
-        elif _ws_first_run:
+        elif _ws_archived_to:
+            QMessageBox.information(
+                self, "A new, empty project",
+                f"MESA now works in a new, empty data folder:\n\n{loc}\n\n"
+                f"Your earlier data is kept in:\n\n{_ws_archived_to}")
+        elif _ws_first_run and not _ws_asked:
             QMessageBox.information(
                 self, "Welcome to MESA",
                 f"MESA stores your input, output and settings in:\n\n{loc}\n\n"
@@ -6478,7 +6684,7 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
 
     # Generate checkmark / radio-dot indicator images for QSS
     _indicator_dir = os.path.join(tempfile.gettempdir(), "mesa_indicators")

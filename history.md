@@ -1048,3 +1048,37 @@ cannot be ruled out, and the fallback covers both.
 The same session added helper functions to `mesa_shared.py` for the workspace changes that are
 under way (recognising a synced folder, proposing a place for a new workspace, setting an old
 one aside by renaming it); the tile fix uses the first of them.
+
+## 2026-10-12: the program folder, the first start, and data from an earlier version
+
+After trying the build the user pointed out that the Windows package is confusing: the unzipped
+folder has `input`, `output` and `config.ini` beside `mesa.exe`, yet a packaged MESA has kept
+its data elsewhere since 5.6 and copies those in on the first start without asking. There was a
+notice afterwards, but the lookalike folders stayed, and on this machine the data had gone to
+`OneDrive - Miljødirektoratet\Documents\MESA` because Windows redirects Documents there. The
+macOS package hides the templates inside the application bundle.
+
+Four measures, agreed with the user, plus one they added while the work was under way:
+
+- The templates (`config.ini`, `docs`, `qgis`, `input`, `system_resources`) moved from beside
+  `mesa.exe` into `_internal/`, where `resolve_path()` already looks. Beside the program there is
+  now only the program and `READ ME FIRST.txt`, and the build's verification checks exactly that.
+- On a first start MESA asks where the data folder should be before anything is written. It
+  proposes `Documents\MESA`, or the home folder when Documents is inside a sync service.
+- The data folder is shown at the bottom of the main window with an Open folder button and a
+  note when it is synchronised.
+- The read-me, the release notes and the wiki Quickstart say the same thing.
+- Added by the user: when the data folder was last used with another MESA version, MESA asks
+  whether to continue with it or start with an empty project. The user asked for a choice between
+  deleting the old data and attaching to it; "start empty" renames the old folder instead of
+  deleting it, so the choice cannot destroy anything. A marker file in the data folder records
+  the version that last opened it.
+
+Two things found on the way: `_has_user_data()` counted a `readme.txt` as user data, and the
+tuning backup was written to `output/` beside the program, a folder that no longer exists there.
+
+Checked without a visible window (the user had asked for that the same night): the helper
+functions by unit tests, the two dialogs and the decision of when each is shown by driving them
+offscreen against temporary folders, the package layout by running the build's copy and
+verification steps into a temporary folder. Not checked: the real packaged start, which needs a
+new build and a click through by the user.

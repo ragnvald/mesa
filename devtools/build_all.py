@@ -868,6 +868,13 @@ def flatten_onedir_output() -> None:
 # git tracks at HEAD, not from the folder. See learning.md "A build ships what git
 # tracks, not what the working folder holds".
 INPUT_SKELETON_FOLDERS = ("asset", "geocode", "lines", "images")
+# The templates a first start copies into the user's data folder. They sit inside
+# _internal/ (PyInstaller's sys._MEIPASS, where mesa.py's resolve_path() finds them),
+# not beside mesa.exe: an input/ and a config.ini next to the program looked like the
+# place to put data, and nothing put there is ever read.
+SEED_SUBDIR = "_internal"
+SEEDED_NAMES = ("config.ini", "docs", "qgis", "input", "system_resources")
+READ_ME_NAME = "READ ME FIRST.txt"
 # Shipped in docs/ for the application; correspondence with the sibling projects is not.
 DOCS_NOT_SHIPPED = ("exchange",)
 # Extensions that only a project or a run produces.
@@ -931,15 +938,13 @@ def copy_resources() -> None:
         src = next((c for c in candidates if c.exists()), None)
         if not src:
             continue
-        dst = FINAL_DIST / folder
+        if folder == "output":
+            continue      # made in the data folder at run time; the program folder has none
+        dst = FINAL_DIST / SEED_SUBDIR / folder
+        dst.parent.mkdir(parents=True, exist_ok=True)
         if folder == "input":
             log("Writing 'input/' skeleton (four folders + readme.txt) from git ...")
             copy_input_skeleton(dst)
-        elif folder == "output":
-            # Everything below output/ is produced by a run and recreated on demand.
-            log("Writing 'output/' as an empty folder ...")
-            shutil.rmtree(dst, ignore_errors=True)
-            dst.mkdir(parents=True, exist_ok=True)
         elif folder == "qgis":
             log("Writing 'qgis/' from git ...")
             copy_tracked_folder(folder, dst)
@@ -971,11 +976,15 @@ def copy_resources() -> None:
 
     # config.ini next to mesa.exe: the committed template, never the working copy,
     # which is usually tuned for whatever project the developer has loaded.
-    _write_from_head("config.ini", FINAL_DIST / "config.ini")
+    seed_cfg = FINAL_DIST / SEED_SUBDIR / "config.ini"
+    _write_from_head("config.ini", seed_cfg)
     working_cfg = PROJECT_ROOT / "config.ini"
     if working_cfg.exists() and working_cfg.read_bytes().replace(b"\r\n", b"\n") != \
-            (FINAL_DIST / "config.ini").read_bytes().replace(b"\r\n", b"\n"):
+            seed_cfg.read_bytes().replace(b"\r\n", b"\n"):
         log("[NOTE] config.ini in the working folder differs from git; the distribution gets the one in git.")
+
+    # The one text file beside mesa.exe: what this folder is, and where the data goes.
+    shutil.copy2(DEVTOOLS_DIR / "READ_ME_FIRST.txt", FINAL_DIST / READ_ME_NAME)
 
     # NOTE: Intentionally do NOT copy secrets/ into distributions.
 
@@ -983,10 +992,20 @@ def copy_resources() -> None:
 def verify_distribution() -> None:
     """Stop the build if the distribution carries project data or developer state."""
     problems: list[str] = []
-    out_dir = FINAL_DIST / "output"
-    if out_dir.exists() and any(out_dir.iterdir()):
-        problems.append("output/ is not empty: " + ", ".join(sorted(q.name for q in out_dir.iterdir())[:8]))
-    in_dir = FINAL_DIST / "input"
+    seed = FINAL_DIST / SEED_SUBDIR
+    # Beside mesa.exe: the program only. Nothing there may look like a place for data.
+    for name in (*SEEDED_NAMES, "output", "secrets", "backup", "devtools", "tests", "plans_oversight", "log.txt"):
+        if (FINAL_DIST / name).exists():
+            problems.append(f"{name} must not be beside mesa.exe")
+    if not (FINAL_DIST / READ_ME_NAME).is_file():
+        problems.append(f"{READ_ME_NAME} is missing")
+    for q in FINAL_DIST.glob("*"):
+        if q.is_file() and q.suffix.lower() in (".parquet", ".mbtiles", ".gpkg", ".xlsx"):
+            problems.append(f"{q.name} beside mesa.exe looks like project data")
+    # The templates.
+    in_dir = seed / "input"
+    if not in_dir.is_dir():
+        problems.append(f"{SEED_SUBDIR}/input is missing")
     for q in (in_dir.rglob("*") if in_dir.exists() else []):
         rel = q.relative_to(in_dir)
         if q.is_dir():
@@ -994,35 +1013,29 @@ def verify_distribution() -> None:
                 problems.append(f"input/{rel.as_posix()}/ is not part of the skeleton")
         elif q.name.lower() != "readme.txt":
             problems.append(f"input/{rel.as_posix()} is a data file")
+    if (seed / "output").exists():
+        problems.append("a template output/ folder must not ship")
     for name in DOCS_NOT_SHIPPED:
-        if (FINAL_DIST / "docs" / name).exists():
+        if (seed / "docs" / name).exists():
             problems.append(f"docs/{name}/ must not ship")
-    for name in ("secrets", "backup", "devtools", "tests", "plans_oversight"):
-        if (FINAL_DIST / name).exists():
-            problems.append(f"{name}/ must not ship")
-    cfg = FINAL_DIST / "config.ini"
+    cfg = seed / "config.ini"
     if not cfg.exists():
         problems.append("config.ini is missing")
     elif cfg.read_bytes() != _git("show", "HEAD:config.ini"):
         problems.append("config.ini is not the committed template")
     tracked_qgis = set(_git_tracked("qgis"))
-    for q in ((FINAL_DIST / "qgis").rglob("*") if (FINAL_DIST / "qgis").exists() else []):
-        if q.is_file() and q.relative_to(FINAL_DIST).as_posix() not in tracked_qgis:
-            problems.append(f"{q.relative_to(FINAL_DIST).as_posix()} is not in git")
-    # Data files anywhere outside the bundled Python packages (those carry their own reference data).
-    for top in ("input", "output", "docs", "qgis"):
-        base = FINAL_DIST / top
+    for q in ((seed / "qgis").rglob("*") if (seed / "qgis").exists() else []):
+        if q.is_file() and q.relative_to(seed).as_posix() not in tracked_qgis:
+            problems.append(f"{q.relative_to(seed).as_posix()} is not in git")
+    for top in ("input", "docs", "qgis"):
+        base = seed / top
         for q in (base.rglob("*") if base.exists() else []):
             if q.is_file() and q.suffix.lower() in DATA_EXTENSIONS:
-                problems.append(f"{q.relative_to(FINAL_DIST).as_posix()} looks like project data")
-    # Next to mesa.exe only project leftovers are looked for; PyInstaller keeps its own archives there.
-    for q in FINAL_DIST.glob("*"):
-        if q.is_file() and (q.suffix.lower() in (".parquet", ".mbtiles", ".gpkg", ".xlsx") or q.name.lower() == "log.txt"):
-            problems.append(f"{q.name} next to mesa.exe looks like project data")
+                problems.append(f"{q.relative_to(seed).as_posix()} looks like project data")
     if problems:
         fail("The distribution is not clean:\n  - " + "\n  - ".join(dict.fromkeys(problems)))
-    log("[verify] Distribution carries no project data: input/ is the skeleton, output/ is empty, "
-        "config.ini is the committed template.")
+    log("[verify] Distribution carries no project data: beside mesa.exe there is only the program and "
+        f"'{READ_ME_NAME}'; the templates in {SEED_SUBDIR}/ are the input skeleton and the committed config.ini.")
 
 
 def write_build_metadata() -> None:
