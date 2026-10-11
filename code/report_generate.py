@@ -3788,8 +3788,19 @@ def format_area(row):
     return "-"
 
 
+def _km2_text(km2: float) -> str:
+    """km² with digits that match the size: 4,182 / 766.4 / 71.00 / 3.510 (was always 4 decimals)."""
+    if km2 >= 1000:
+        return f"{km2:,.0f} km²"
+    if km2 >= 100:
+        return f"{km2:,.1f} km²"
+    if km2 >= 10:
+        return f"{km2:.2f} km²"
+    return f"{km2:.3f} km²"
+
+
 def _format_area_m2(area_m2: float) -> str:
-    """Format an area in m² as either m² (<0.1 km²) or km² (max 4 decimals)."""
+    """Format an area given in m² as m² (below 1 km²) or km²."""
     try:
         a = float(area_m2)
     except Exception:
@@ -3798,17 +3809,12 @@ def _format_area_m2(area_m2: float) -> str:
         return "-"
     # Use m² for small areas (<1 km² == 1,000,000 m²)
     if a < 1_000_000:
-        return f"{a:.0f} m²"
-    km2 = a / 1_000_000.0
-    s = f"{km2:.4f}"  # max 4 decimals
-    # Trim trailing zeros while keeping <= 4 decimals.
-    if "." in s:
-        s = s.rstrip("0").rstrip(".")
-    return f"{s} km²"
+        return f"{a:,.0f} m²"
+    return _km2_text(a / 1_000_000.0)
 
 
 def _format_area_km2(area_km2: float) -> str:
-    """Format an area in km² as either m² (<1 km²) or km² (max 4 decimals)."""
+    """Format an area given in km² as m² (below 1 km²) or km²."""
     try:
         km2 = float(area_km2)
     except Exception:
@@ -3817,10 +3823,7 @@ def _format_area_km2(area_km2: float) -> str:
         return "-"
     if km2 < 1.0:
         return _format_area_m2(km2 * 1_000_000.0)
-    s = f"{km2:.4f}"  # max 4 decimals
-    if "." in s:
-        s = s.rstrip("0").rstrip(".")
-    return f"{s} km²"
+    return _km2_text(km2)
 
 
 def _analysis_assets_within_area_table(
