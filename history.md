@@ -984,3 +984,28 @@ starting assumption was changed: it opened with "about 6 min left" for a run of 
 time-left figure was off by 6.8 % of the run on average, and the bar by 2.7 points (6.8 at most).
 
 Nothing was reported to the sibling projects.
+
+## 2026-10-12: workflow windows opened behind the launcher
+
+The first 5.7.0 build (427 s, verified clean of project data) was tried by the user, who found
+that windows opened from the workflow buttons came up behind the launcher. The launcher never
+asked for them to be in front: in-process Qt helpers are deliberately unparented, and the
+packaged webview helpers start as detached processes that have lost the right to take the
+foreground by the time their window exists.
+
+Fixed in `mesa_shared.py` with two small functions, used by the launcher's in-process path,
+`segmentation_setup`, and the four webview windows (Special focus, Maps, and the standalone Lines
+and Study areas editors). The webview windows are created "always on top" and made ordinary
+again 1.5 s after they appear. The first two ways of releasing the flag were unreliable and are
+described in learning.md; the third held in eight consecutive starts of Special focus (in front
+throughout, flag cleared) and in one start each of Maps and Special focus followed by minimise,
+restore and maximise.
+
+Those checks were made by starting the real helpers about 25 times on the user's desktop while
+the user was working, which the user rightly objected to. The in-process Qt part was therefore
+not checked on screen at all and is left for the user to try in the next build.
+
+Also asked the same night: where the AI token is kept. It is `secrets/ai_connection.parquet` in
+the project folder, which the build does not ship by design.
+
+Nothing was reported to the sibling projects.

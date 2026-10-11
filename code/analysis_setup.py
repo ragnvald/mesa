@@ -18,6 +18,7 @@ from mesa_shared import (
     read_config,
     parquet_dir,
     guard_unsaved_on_close,
+    release_on_top_when_shown,
     analysis_groups_edited_since_run,
 )
 from mesa_constants import (
@@ -2964,7 +2965,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         width=1080,
         height=680,
         resizable=True,
+        on_top=True,
     )
+    release_on_top_when_shown(window)
     guard_unsaved_on_close(window, lambda: ["Study areas"] if api._is_dirty() else [])
     webview.start(debug=False)
 

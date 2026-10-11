@@ -14,7 +14,8 @@ import os, sys, uuid, threading, locale, configparser, argparse, warnings, time,
 from pathlib import Path
 from typing import Any, Dict, Optional
 from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP, TABLE_GEOCODE_GROUP
-from mesa_shared import guard_unsaved_on_close, leaflet_bundle, mesa_version_label, read_config
+from mesa_shared import (guard_unsaved_on_close, leaflet_bundle, mesa_version_label, read_config,
+                         release_on_top_when_shown)
 from mesa_osm_tiles import OsmTileProxyManager
 
 # --- pywebview config (quiet, Edge runtime preferred) ---
@@ -1550,7 +1551,9 @@ def run(base_dir: str) -> None:
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
         .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(resolved, mesa_version_label(cfg)))
     )
-    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770)
+    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770,
+                                   on_top=True)
+    release_on_top_when_shown(window)
     guard_unsaved_on_close(window, lambda: ["Lines"] if api.has_unsaved() else [])
     try:
         webview.start(gui='edgechromium', debug=False)
@@ -1588,7 +1591,9 @@ def main():
         .replace("__MESA_LEAFLET_BODY_OPEN__", bundle.body_open)
         .replace("__MESA_OSM_TILE_URL__", OSM_PROXY.tile_layer_url(base_dir, mesa_version_label(cfg)))
     )
-    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770)
+    window = webview.create_window(title="Edit line (GeoParquet)", html=html_payload, js_api=api, width=1150, height=770,
+                                   on_top=True)
+    release_on_top_when_shown(window)
     guard_unsaved_on_close(window, lambda: ["Lines"] if api.has_unsaved() else [])
 
     try:

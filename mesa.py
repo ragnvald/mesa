@@ -741,7 +741,16 @@ def _launch_helper_inprocess(file_name: str, base_dir: str | None = None):
     # These helpers are standalone Qt windows. Do not parent them to the
     # launcher main window, or Windows can treat them as owned child windows
     # with inconsistent title-bar/taskbar icon behaviour.
-    return _track_helper_window(run_fn(launch_base, master=None))
+    window = _track_helper_window(run_fn(launch_base, master=None))
+    # Not parented, so nothing puts it in front of the launcher by itself. Once now,
+    # and once after the click that opened it has been delivered to the launcher.
+    try:
+        from mesa_shared import bring_qt_window_to_front
+        bring_qt_window_to_front(window)
+        QTimer.singleShot(200, lambda: bring_qt_window_to_front(window))
+    except Exception as exc:
+        log_to_logfile(f"Could not bring {file_name} to the front: {exc}")
+    return window
 
 
 def _maybe_run_helper() -> None:

@@ -2334,7 +2334,9 @@ def run(base: str | None = None) -> None:
         url=url,
         js_api=api,
         width=1360, height=860, resizable=True,
+        on_top=True,
     )
+    mesa_shared.release_on_top_when_shown(window)
     api.set_window(window)
     # No gui= override → cross-platform (Cocoa on macOS, EdgeChromium on Windows).
     webview.start(debug=False)

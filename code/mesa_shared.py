@@ -862,6 +862,109 @@ body.mesa-has-offline-banner { padding-top: 28px; }
     return bundle
 
 
+# A window opened from the launcher has to come up in front of it. Windows lets a
+# newly started process take the foreground only until the user's next click, and a
+# packaged helper needs seconds to start, so its window used to appear behind the
+# launcher. "Always on top" needs no such permission; it is held while the window
+# appears and then dropped. See learning.md "Helper windows opened behind the launcher".
+FRONT_HOLD_SECONDS = 1.5
+
+
+def _own_topmost_windows() -> list:
+    """Handles of this process's visible top-level windows that are "always on top" (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+    found: list = []
+    pid_here = os.getpid()
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def _each(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == pid_here and user32.IsWindowVisible(hwnd) and (user32.GetWindowLongPtrW(hwnd, -20) & 0x8):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(_each, 0)
+    return found
+
+
+def release_on_top_when_shown(window, hold_seconds: float = FRONT_HOLD_SECONDS) -> None:
+    """For a pywebview window created with on_top=True: make it an ordinary window again once it is up."""
+    import threading
+    import time
+
+    started = threading.Event()
+
+    def _ask_pywebview() -> None:
+        try:
+            window.on_top = False
+        except Exception:
+            pass
+
+    def _release() -> None:
+        time.sleep(hold_seconds)
+        if sys.platform != "win32":
+            _ask_pywebview()
+            return
+        # On Windows pywebview is not asked: it sets the WinForms property from this
+        # foreign thread, which sometimes never returns and sometimes drops the window
+        # behind the launcher. The Win32 call is thread-safe. It is repeated for a
+        # while, because a window left "always on top" would cover everything else.
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            clear_rounds = 0
+            for _attempt in range(40):
+                handles = _own_topmost_windows()
+                for hwnd in handles:
+                    user32.SetWindowPos(hwnd, wintypes.HWND(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # HWND_NOTOPMOST
+                clear_rounds = 0 if handles else clear_rounds + 1
+                if clear_rounds >= 5:        # stayed ordinary for 1.5 s
+                    return
+                time.sleep(0.3)
+        except Exception:
+            pass
+
+    def _start(*_args) -> None:
+        if not started.is_set():
+            started.set()
+            threading.Thread(target=_release, name="mesa-release-on-top", daemon=True).start()
+
+    try:
+        window.events.shown += _start
+        window.events.loaded += _start      # in case "shown" is not delivered
+    except Exception:
+        _start()
+
+
+def bring_qt_window_to_front(widget) -> None:
+    """Show a Qt top-level window in front of the window that opened it, and give it focus."""
+    try:
+        if widget is None or not hasattr(widget, "raise_"):
+            return
+        if widget.isMinimized():
+            widget.showNormal()
+        widget.raise_()
+        widget.activateWindow()
+        if sys.platform == "win32":
+            import ctypes
+            hwnd = int(widget.winId())
+            flags = 0x0001 | 0x0002 | 0x0010          # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, flags)   # HWND_TOPMOST: to the front
+            user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, flags)   # HWND_NOTOPMOST: and ordinary again
+            user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def guard_unsaved_on_close(window, unsaved_fn) -> None:
     """Ask before a pywebview window closes with unsaved edits; Cancel keeps it open.
 

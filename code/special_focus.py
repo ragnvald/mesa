@@ -294,7 +294,9 @@ def run(base: str | None = None) -> None:
         url=url,
         js_api=_HostApi(),
         width=1180, height=780, resizable=True,
+        on_top=True,
     )
+    mesa_shared.release_on_top_when_shown(window)
     # Register the two apps' bridges under namespaced names.
     window.expose(*_namespaced_wrappers(lines_api, "lines"))
     window.expose(*_namespaced_wrappers(analysis_api, "analysis"))

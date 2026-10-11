@@ -403,6 +403,7 @@ def run(base_dir: str, master=None):
         own = True
     win = SegmentationSetupWindow(bd)
     win.show()
+    mesa_shared.bring_qt_window_to_front(win)
     if own:
         app.exec()
     return win
