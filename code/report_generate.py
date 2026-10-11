@@ -3247,14 +3247,11 @@ def draw_line_segments_map_with_context_inset(segments_df: gpd.GeoDataFrame,
         if not polys.empty:
             polys_ann = _prepare_sensitivity_annotations(polys, col, value_col)
             colors_polys = _colors_from_annotations(polys_ann, palette)
-            polys_ann.plot(
-                ax=ax,
-                color=colors_polys,
-                edgecolor='white',
-                linewidth=0.4,
-                alpha=0.95,
-                zorder=12,
-            )
+            # A segment is a buffer a few hundred metres wide - thinner than a pixel on
+            # a map of a long line. Stroke it in its class colour over a white halo so
+            # the line reads at any scale.
+            polys_ann.plot(ax=ax, color=colors_polys, edgecolor='white', linewidth=4.6, alpha=0.9, zorder=11)
+            polys_ann.plot(ax=ax, color=colors_polys, edgecolor=colors_polys, linewidth=2.6, alpha=1.0, zorder=12)
 
         if not lines.empty:
             lines_ann = _prepare_sensitivity_annotations(lines, col, value_col)
@@ -3368,12 +3365,9 @@ def draw_lines_overview_map(segments_df: gpd.GeoDataFrame,
         if not polys.empty:
             polys_ann = _prepare_sensitivity_annotations(polys, col, value_col)
             colors_polys = _colors_from_annotations(polys_ann, palette)
-            polys_ann.plot(ax=ax,
-                           color=colors_polys,
-                           edgecolor='white',
-                           linewidth=0.35,
-                           alpha=0.90,
-                           zorder=12)
+            # Stroked in the class colour over a white halo; see draw_line_segments_map_with_context_inset.
+            polys_ann.plot(ax=ax, color=colors_polys, edgecolor='white', linewidth=4.2, alpha=0.9, zorder=11)
+            polys_ann.plot(ax=ax, color=colors_polys, edgecolor=colors_polys, linewidth=2.2, alpha=1.0, zorder=12)
 
         if not lines.empty:
             lines_ann = _prepare_sensitivity_annotations(lines, col, value_col)
