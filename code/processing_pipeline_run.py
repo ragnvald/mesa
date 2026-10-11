@@ -803,24 +803,28 @@ def run_data_process(
             step=1.2,
             interval_s=0.8,
         )
-        dpi.run_headless(
-            str(base_dir),
-            explode_flat_multipolygons=bool(explode_flat_multipolygons),
-            log_fn=log_fn,
-            run_prep=bool(run_prep),
-            run_intersect=bool(run_intersect),
-            run_flatten=bool(run_flatten),
-            run_segment=bool(run_segment),
-            segment_layers=list(segment_layers) if segment_layers else None,
-            segment_mode=str(segment_mode or ""),
-            segment_n_clusters=int(segment_n_clusters or 0),
-            cleanup_slivers=bool(cleanup_slivers),
-        )
-        stop_pulse.set()
+        # The pulse must stop on every way out. Left running after a cancelled or
+        # failed run it kept pushing its own percentage into the bar of the next run.
         try:
-            pulse_thread.join(timeout=0.2)
-        except Exception:
-            pass
+            dpi.run_headless(
+                str(base_dir),
+                explode_flat_multipolygons=bool(explode_flat_multipolygons),
+                log_fn=log_fn,
+                run_prep=bool(run_prep),
+                run_intersect=bool(run_intersect),
+                run_flatten=bool(run_flatten),
+                run_segment=bool(run_segment),
+                segment_layers=list(segment_layers) if segment_layers else None,
+                segment_mode=str(segment_mode or ""),
+                segment_n_clusters=int(segment_n_clusters or 0),
+                cleanup_slivers=bool(cleanup_slivers),
+            )
+        finally:
+            stop_pulse.set()
+            try:
+                pulse_thread.join(timeout=0.2)
+            except Exception:
+                pass
     except Exception as exc:
         _log_line(base_dir, log_fn, f"ERROR: data processing failed: {exc}")
         raise
@@ -3109,8 +3113,14 @@ class ProcessRunnerWindow(QMainWindow):
             def log_from_worker(msg: str) -> None:
                 self._signals.log_message.emit(msg)
 
+            # Progress from this run only. A force-stopped run can leave a worker
+            # thread alive that still reports; its closure holds the old token.
+            run_token = object()
+            self._progress_token = run_token
+
             def progress_from_worker(v: float) -> None:
-                self._signals.progress_update.emit(v)
+                if self._progress_token is run_token:
+                    self._signals.progress_update.emit(v)
 
             # Bridge the pause-state changes (raised from inside the worker
             # thread by processing_internal._check_pause_or_cancel) to the

@@ -1009,3 +1009,22 @@ Also asked the same night: where the AI token is kept. It is `secrets/ai_connect
 the project folder, which the build does not ship by design.
 
 Nothing was reported to the sibling projects.
+
+## 2026-10-12: the Process bar jumped up and down at the start of a run
+
+Reported by the user from the first 5.7.0 build: at the very start of processing the bar and its
+percentage went up and down. Found by reading the code, with no test run on screen. The bar has a
+single source, the worker's progress callback, and each stage reports rising values inside its
+own slice. The exception was the data stage's progress pulse, a thread that nudges the bar forward
+every 0.8 s while the pipeline runs: it was stopped after `run_headless` returned, not in a
+`finally`, so a cancelled or failed data stage left it running towards 93 % of its slice. The
+window lives across runs, so the next run's 0, 5, 12 % alternated with the old pulse's higher
+values until the pulse reached its cap. The other three pulses already stopped in a `finally`.
+
+Fixed twice over: the pulse stops on every way out, and the window gives each run a token so that
+progress from an earlier run's worker is dropped. The second part covers a force-stopped run,
+whose worker can hang on a killed pool and never reach the `finally`. A test fails on the old
+code and passes on the new.
+
+Not confirmed with the user: whether a cancelled or failed run had preceded the one where they
+saw it. If it happens on the first run in a freshly opened window, the cause is something else.
