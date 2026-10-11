@@ -155,3 +155,36 @@ def test_word_page_flow(tmp_path: Path) -> None:
         assert row._tr.trPr is not None and row._tr.trPr.find(qn('w:cantSplit')) is not None
     assert table.rows[0]._tr.trPr.find(qn('w:tblHeader')) is not None
 
+
+
+def _type_records() -> list:
+    cols = [f"h_i{i}_s{s}" for i in range(1, 6) for s in range(1, 6)]
+    uniform = dict.fromkeys(cols, 0.0) | {"h_i5_s3": 1.0}
+    mixed = dict.fromkeys(cols, 0.0) | {"h_i4_s4": 0.6, "h_i2_s5": 0.4}
+    return [
+        {"cluster_id": 0, "cluster_label": "type 1", "n_polygons": 1200, "total_area_km2": 990.0,
+         "mean_importance": 5.0, "mean_susceptibility": 3.0, "mean_coverage_index": 1.0,
+         "top_asset_groups": "settlements,roads", **uniform},
+        {"cluster_id": 1, "cluster_label": "type 2", "n_polygons": 40, "total_area_km2": 5.0,
+         "mean_importance": 3.2, "mean_susceptibility": 4.4, "mean_coverage_index": 2.5,
+         "top_asset_groups": "", **mixed},
+    ]
+
+
+def test_sensitivity_types_are_listed_as_a_table() -> None:
+    rows = rg._classification_type_table(_type_records(), 995.0)
+    assert rows[0] == ["Type", "Character", "Area", "Cells", "Mean imp. / sus.", "Overlap depth", "Dominant asset groups"]
+    assert rows[1] == ["type 1", "High importance, moderate susceptibility", "990.0 km² (99%)", "1,200",
+                       "5.0 / 3.0", "1.0", "settlements, roads"]
+    # a type too small to round to a whole percent is not shown as 0%
+    assert rows[2][2] == "5.000 km² (<1%)" and rows[2][1] == "Moderate importance, high susceptibility"
+
+
+def test_type_fingerprints_are_drawn_one_grid_per_type(tmp_path: Path) -> None:
+    records = _type_records()
+    cols = [c for c in records[0] if c.startswith("h_i")]
+    out = tmp_path / "fingerprints.png"
+    assert rg._type_fingerprints_png(records, cols, str(out), {"type 1": "#8dd3c7"}, 995.0)
+    width, height = Image.open(out).size
+    assert width > 1.6 * height            # two grids side by side
+    assert not rg._type_fingerprints_png([], cols, str(tmp_path / "none.png"))

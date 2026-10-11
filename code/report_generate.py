@@ -4884,6 +4884,104 @@ def _seg_mv_certainty(gpq_dir) -> dict:
 AREA_BAR_COLOR = "#6b8aa6"  # single accent, matches the Maps legend area bar
 
 
+def _type_fingerprints_png(records: list, hist_cols: list, out_path: str, colours: dict | None = None,
+                           total_area: float = 0.0) -> bool:
+    """One small importance x susceptibility grid per sensitivity type.
+
+    Each cell shows the share (percent) of the type's asset overlaps with that
+    combination; the ring marks the type's mean. colours: cluster_label -> hex.
+    """
+    try:
+        recs = [r for r in (records or []) if r is not None]
+        if not recs or not hist_cols:
+            return False
+        nv = int(round(len(hist_cols) ** 0.5)) or 5
+        ncol = min(4, len(recs))
+        nrow = (len(recs) + ncol - 1) // ncol
+        fig, axes = plt.subplots(nrow, ncol, figsize=(2.55 * ncol, 2.75 * nrow), squeeze=False)
+        cmap = mcolors.LinearSegmentedColormap.from_list("fingerprint", ["#ffffff", "#f4d9a0", "#d9772b", "#8f1d21"])
+        for i, rec in enumerate(recs):
+            ax = axes[i // ncol][i % ncol]
+            grid = np.array([float(rec.get(c, 0) or 0) for c in hist_cols], dtype=float).reshape(nv, nv)
+            total = float(grid.sum())
+            share = grid / total if total > 0 else grid
+            # One scale for every grid, so a colour means the same share in all of them.
+            ax.imshow(share, cmap=cmap, origin="lower", norm=mcolors.PowerNorm(0.6, vmin=0.0, vmax=1.0), aspect="equal")
+            for iy in range(nv):
+                for ix in range(nv):
+                    v = share[iy, ix]
+                    if v >= 0.05:
+                        ax.text(ix, iy, f"{v * 100:.0f}", ha="center", va="center", fontsize=7.5,
+                                color="white" if v >= 0.45 else "#3f3528")
+            try:
+                mi, ms = float(rec.get("mean_importance")), float(rec.get("mean_susceptibility"))
+                if mi == mi and ms == ms:
+                    ax.plot([ms - 1], [mi - 1], marker="o", markersize=17, markeredgewidth=1.8,
+                            markerfacecolor="none", markeredgecolor="#1f4e79", zorder=5)
+            except (TypeError, ValueError):
+                pass
+            ax.set_xticks(np.arange(-0.5, nv, 1), minor=True); ax.set_yticks(np.arange(-0.5, nv, 1), minor=True)
+            ax.grid(which="minor", color="#d5c3a4", linewidth=0.6)
+            ax.tick_params(which="minor", length=0)
+            ax.set_xticks(range(nv)); ax.set_xticklabels(range(1, nv + 1), fontsize=7)
+            ax.set_yticks(range(nv)); ax.set_yticklabels(range(1, nv + 1), fontsize=7)
+            ax.set_xlabel("Susceptibility  (low → high)", fontsize=7)
+            ax.set_ylabel("Importance  (low → high)", fontsize=7)
+            label = str(rec.get("cluster_label", ""))
+            title = label
+            try:
+                area = float(rec.get("total_area_km2"))
+                if total_area > 0 and area == area:
+                    pct = 100.0 * area / total_area
+                    title = f"{label} – {'under 1' if 0 < pct < 1 else f'{pct:.0f}'}% of area"
+            except (TypeError, ValueError):
+                pass
+            ax.set_title(title, fontsize=8.5, fontweight="bold", pad=10)
+            colour = (colours or {}).get(label)
+            if colour:   # the type's colour on the map and in the area chart
+                ax.add_patch(Rectangle((0.0, 1.02), 1.0, 0.035, transform=ax.transAxes, clip_on=False,
+                                       facecolor=colour, edgecolor="none"))
+        for j in range(len(recs), nrow * ncol):
+            axes[j // ncol][j % ncol].axis("off")
+        fig.tight_layout()
+        try:
+            fig.savefig(out_path, dpi=170)
+        finally:
+            plt.close(fig)
+        return _file_ok(out_path)
+    except Exception:
+        return False
+
+
+def _classification_type_table(records: list, total_area: float) -> list:
+    """The sensitivity types as table rows: what each type is, how large, and what dominates it."""
+    def _num(value) -> float:
+        try:
+            f = float(value)
+            return f if f == f else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    rows = [["Type", "Character", "Area", "Cells", "Mean imp. / sus.", "Overlap depth", "Dominant asset groups"]]
+    for r in records or []:
+        area = _num(r.get("total_area_km2"))
+        pct = _rep_pct(area, total_area)
+        share = (" (<1%)" if 0 < pct < 1 else f" ({pct:.0f}%)") if total_area > 0 else ""
+        character = _imp_sus_corner(r.get("mean_importance"), r.get("mean_susceptibility"))
+        character = character.replace("-importance / ", " importance, ").replace("-susceptibility", " susceptibility").capitalize()
+        cells = r.get("n_polygons")
+        rows.append([
+            str(r.get("cluster_label", "")),
+            character,
+            (_format_area_km2(area) + share) if area > 0 else "–",
+            f"{int(cells):,}" if cells is not None and cells == cells else "–",
+            f"{_num(r.get('mean_importance')):.1f} / {_num(r.get('mean_susceptibility')):.1f}",
+            f"{_num(r.get('mean_coverage_index')):.1f}",
+            str(r.get("top_asset_groups", "") or "").replace(",", ", ").replace(",  ", ", "),
+        ])
+    return rows
+
+
 def _area_barh_png(items, out_path, *, xlabel="Total area (km²)"):
     """Horizontal 'data-science' area chart mirroring the Maps legend: one bar per
     zone/type (largest first), each coloured with the same fill the map uses, value
@@ -6057,63 +6155,20 @@ def generate_report(base_dir: str,
                         r["name_gis_geocodegroup"]), axis=1)]
                 order_list.append(('heading(2)', "Classification (sensitivity types)"))
                 order_list.append(('text',
-                    "The A–E sensitivity classes above answer <b>“how sensitive is this place?”</b> — a "
+                    "The A–E sensitivity classes above answer <b>“how sensitive is this place?”</b> This is a "
                     "level of intensity, scored one polygon at a time. This section answers a different, "
                     "complementary question: <b>“what kind of sensitivity pattern is this place part of?”</b> "
                     "Cells are grouped by the <i>shape</i> of their (importance, susceptibility) histogram, "
                     "so a place dominated by high-importance / low-susceptibility assets forms a different "
                     "<b>type</b> from a high-susceptibility / low-importance one even when their A–E "
                     "sensitivity code is identical. The number of types is chosen automatically by BIC. "
-                    "Each type's <i>fingerprint</i> below is its mean histogram in the importance × "
-                    "susceptibility plane."))
+                    "For each geocode group the section gives a table of the types, a chart of their areas, "
+                    "and a <i>fingerprint</i> of each type that shows which combinations of importance and "
+                    "susceptibility it is made of."))
                 order_list.append(('rule', None))
 
                 hist_cols = [c for c in mv.columns if str(c).startswith("h_i")]
                 nv = int(round(len(hist_cols) ** 0.5)) or 5
-
-                def _fmt_mv_area(v) -> str:
-                    try:
-                        f = float(v)
-                        return f"{f:,.2f}" if f == f else "–"
-                    except (TypeError, ValueError):
-                        return "–"
-
-                def _fingerprint_png_for_layer(lp_df, layer_name):
-                    """Grid of small importance×susceptibility heatmaps, one per type."""
-                    if not hist_cols:
-                        return None
-                    try:
-                        import matplotlib
-                        matplotlib.use("Agg")
-                        import matplotlib.pyplot as plt
-                        import numpy as np
-                    except Exception:
-                        return None
-                    recs = lp_df.to_dict("records")
-                    n = len(recs)
-                    if not n:
-                        return None
-                    ncol = min(5, n)
-                    nrow = (n + ncol - 1) // ncol
-                    fig, axes = plt.subplots(nrow, ncol, figsize=(1.9 * ncol, 2.1 * nrow), squeeze=False)
-                    for i, rec in enumerate(recs):
-                        ax = axes[i // ncol][i % ncol]
-                        grid = np.array([float(rec.get(c, 0) or 0) for c in hist_cols]).reshape(nv, nv)
-                        ax.imshow(grid, cmap="magma", origin="lower", vmin=0.0,
-                                  vmax=max(1e-6, float(grid.max())), aspect="equal")
-                        ax.set_title(str(rec.get("cluster_label", "")), fontsize=8)
-                        ax.set_xticks(range(nv)); ax.set_xticklabels(range(1, nv + 1), fontsize=6)
-                        ax.set_yticks(range(nv)); ax.set_yticklabels(range(1, nv + 1), fontsize=6)
-                        ax.set_xlabel("sus", fontsize=6); ax.set_ylabel("imp", fontsize=6)
-                    for j in range(n, nrow * ncol):
-                        axes[j // ncol][j % ncol].axis("off")
-                    fig.tight_layout()
-                    out = output_subpath(base_dir, "tmp", f"segmv_fp_{_safe_name(str(layer_name))}.png")
-                    try:
-                        fig.savefig(str(out), dpi=130)
-                    finally:
-                        plt.close(fig)
-                    return str(out)
 
                 _cert = _seg_mv_certainty(gpq_dir)
                 for layer in sorted(mv["name_gis_geocodegroup"].astype(str).unique()):
@@ -6130,49 +6185,11 @@ def generate_report(base_dir: str,
                     _ov_text, _ov_ai = _classification_overview(lp.to_dict("records"), layer, base_dir)
                     if _ov_text:
                         order_list.append(('text', ("<b>AI overview.</b> " if _ov_ai else "") + _ov_text))
-                    # No Description column: the per-type AI/description text is rendered
-                    # as prose below, where long text reads without crushing the table.
-                    header = ["Type", "Cells", "Area (km²)", "Mean imp.", "Mean sus.", "Coverage",
-                              "Top asset groups"]
-                    tbl = [header]
-                    for _, r in lp.iterrows():
-                        row = [
-                            str(r.get("cluster_label", "")),
-                            f"{int(r['n_polygons']):,}" if pd.notna(r.get("n_polygons")) else "–",
-                            _fmt_mv_area(r.get("total_area_km2")),
-                            f"{float(r.get('mean_importance', 0) or 0):.2f}",
-                            f"{float(r.get('mean_susceptibility', 0) or 0):.2f}",
-                            f"{float(r.get('mean_coverage_index', 0) or 0):.2f}",
-                            str(r.get("top_asset_groups", "") or ""),
-                        ]
-                        tbl.append(row)
-                    order_list.append(('table', tbl))
-                    fp_png = _fingerprint_png_for_layer(lp, layer)
-                    if fp_png:
-                        order_list.append(('image',
-                            (f"Type fingerprints – {layer} (importance × susceptibility)", fp_png)))
-                    # Type-area chart (mirrors the Maps classification legend; same colours).
-                    try:
-                        import segmentation as _segc
-                        _citems = []
-                        for _, _rr in lp.iterrows():
-                            try:
-                                _cid = int(_rr.get("cluster_id"))
-                            except Exception:
-                                _cid = -1
-                            _citems.append((str(_rr.get("cluster_label", "")),
-                                            _rr.get("total_area_km2"),
-                                            _segc._overview_colour(str(_cid), "clusters")))
-                        _cpng = str(output_subpath(base_dir, "tmp", f"segmv_areas_{_safe_name(str(layer))}.png"))
-                        if _area_barh_png(_citems, _cpng):
-                            order_list.append(('image', (f"Sensitivity-type areas – {layer}", _cpng)))
-                    except Exception as _exc:
-                        write_to_log(f"Classification area chart failed for {layer}: {_exc}", base_dir)
-                    # Interpretive prose — promote the profile + AI descriptions to readable text.
                     _recs = lp.to_dict("records")
+                    _nf = lambda x: float(x) if pd.notna(x) else 0.0
+                    _tot_area = sum(_nf(x.get("total_area_km2")) for x in _recs)
+
                     if _recs:
-                        _nf = lambda x: float(x) if pd.notna(x) else 0.0
-                        _tot_area = sum(_nf(x.get("total_area_km2")) for x in _recs)
                         _big = _recs[0]
                         _lead = (f"These <b>{k_types}</b> sensitivity types"
                                  + (f" cover <b>{_tot_area:,.0f} km²</b>" if _tot_area else "")
@@ -6185,24 +6202,61 @@ def generate_report(base_dir: str,
                         if _cpair and _cpair[0] is not None:
                             _lead += f", and mean assignment certainty is <b>{_cpair[0]:.2f}</b>"
                         order_list.append(('text', _lead + "."))
-                        for _x in _recs:
-                            _a = _nf(_x.get("total_area_km2"))
-                            _np = int(_x["n_polygons"]) if pd.notna(_x.get("n_polygons")) else 0
-                            _sent = (f"<b>{_x.get('cluster_label', '')}</b> — "
-                                     f"{_imp_sus_corner(_x.get('mean_importance'), _x.get('mean_susceptibility'))}; "
-                                     f"<b>{_a:,.0f} km²</b> ({_rep_pct(_a, _tot_area):.0f}% of the area) over "
-                                     f"<b>{_np:,}</b> cells (mean importance {_nf(_x.get('mean_importance')):.1f}, "
-                                     f"susceptibility {_nf(_x.get('mean_susceptibility')):.1f}).")
-                            _tg = str(_x.get("top_asset_groups", "") or "").strip()
-                            if _tg:
-                                _sent += f" Dominant asset groups: {_tg}."
-                            # Guard against a NaN float: `nan or ""` is nan (NaN is
-                            # truthy), which str()s to the literal "nan" in the report.
-                            _da_raw = _x.get("description_ai")
-                            _da = str(_da_raw).strip() if pd.notna(_da_raw) else ""
-                            if _da:
-                                _sent += f" {_da}"
-                            order_list.append(('text', _sent))
+
+                    order_list.append(('text',
+                        "The table lists the types from largest to smallest. <b>Character</b> sums up a type "
+                        "from its mean importance and mean susceptibility (both on the 1–5 scale; 3.5 and "
+                        "above reads as high, 2.5 and below as low). <b>Overlap depth</b> is the mean number "
+                        "of assets that overlap in a cell of that type, and <b>Dominant asset groups</b> "
+                        "names the groups that contribute most to it."))
+                    order_list.append(('table_data', (f"Sensitivity types – {layer}", _classification_type_table(_recs, _tot_area))))
+
+                    # Type-area chart (mirrors the Maps classification legend; same colours).
+                    _type_colours: dict = {}
+                    try:
+                        import segmentation as _segc
+                        _citems = []
+                        for _, _rr in lp.iterrows():
+                            try:
+                                _cid = int(_rr.get("cluster_id"))
+                            except Exception:
+                                _cid = -1
+                            _colour = _segc._overview_colour(str(_cid), "clusters")
+                            _type_colours[str(_rr.get("cluster_label", ""))] = _colour
+                            _citems.append((str(_rr.get("cluster_label", "")), _rr.get("total_area_km2"), _colour))
+                        _cpng = str(output_subpath(base_dir, "tmp", f"segmv_areas_{_safe_name(str(layer))}.png"))
+                        if _area_barh_png(_citems, _cpng):
+                            order_list.append(('image', (f"Sensitivity-type areas – {layer}", _cpng)))
+                    except Exception as _exc:
+                        write_to_log(f"Classification area chart failed for {layer}: {_exc}", base_dir)
+
+                    fp_png = str(output_subpath(base_dir, "tmp", f"segmv_fp_{_safe_name(str(layer))}.png"))
+                    if _type_fingerprints_png(_recs, hist_cols, fp_png, _type_colours, _tot_area):
+                        order_list.append(('heading(3)', f"Type fingerprints – {layer}"))
+                        order_list.append(('text',
+                            "<b>How to read a fingerprint.</b> Every asset has an importance and a "
+                            "susceptibility, each from 1 (low) to 5 (high). Each grid below is one type: "
+                            "susceptibility runs from left to right and importance from bottom to top, so "
+                            "the <b>upper right corner</b> holds assets that are both important and "
+                            "susceptible, and the lower left those that are neither. The number in a square "
+                            "is the percentage of the type's asset overlaps with that combination (shares "
+                            "under 5% are left blank), and the darker the square, the larger the share. "
+                            "The blue ring marks the type's average."))
+                        order_list.append(('text',
+                            "A type with one dark square is uniform: nearly everything in it has the same "
+                            "importance and susceptibility. A type whose numbers are spread over several "
+                            "squares is a mixture, typically where many different assets overlap. Two types "
+                            "can share the same average and still differ, which is why the classification "
+                            "looks at the whole pattern rather than the average. The coloured bar above "
+                            "each grid is the type's colour in the area chart and on the classification map."))
+                        order_list.append(('image', (None, fp_png)))
+
+                    # AI descriptions, where a run has produced them, read better as prose than in a table.
+                    for _x in _recs:
+                        _da_raw = _x.get("description_ai")
+                        _da = str(_da_raw).strip() if pd.notna(_da_raw) else ""
+                        if _da:
+                            order_list.append(('text', f"<b>{_x.get('cluster_label', '')}:</b> {_da}"))
                     order_list.append(('new_page', None))
 
         if atlas_pages:
