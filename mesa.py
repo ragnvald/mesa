@@ -484,9 +484,11 @@ def get_status(geoparquet_dir):
                       "Geocodes are missing. Import assets by pressing the Assets button.",
                       "https://github.com/ragnvald/mesa/wiki/User-interface#prepare-data-step-1")
 
+        # tbl_lines is what the Lines stage and the report use. tbl_lines_original is only
+        # an import snapshot and is never updated by edits, so counting it showed a stale number.
         lines_original_count = read_table_and_count('tbl_lines_original')
         lines_processed_count = read_table_and_count('tbl_lines')
-        visible_lines_count = lines_original_count if lines_original_count is not None else lines_processed_count
+        visible_lines_count = lines_processed_count if lines_processed_count is not None else lines_original_count
         append_status("+" if visible_lines_count is not None else "/",
                   f"Lines: {visible_lines_count}" if visible_lines_count is not None else
                   "Lines are missing. Import or initiate lines if you want to use the line feature.",
@@ -4270,7 +4272,7 @@ class MesaMainWindow(QMainWindow):
                 ("Classification", open_segmentation_setup,
                  "Set up the \"what kind\" sensitivity-pattern typology and choose whether it runs during Process."),
                 ("Special focus", open_special_focus,
-                 "Lines and Analysis setup, grouped in one popup."),
+                 "Lines and study areas for the line and area analyses, in one window."),
             ]),
             ("Process (step 3)", "Execute the automated steps that build fresh outputs.",
              f"{_WIKI}/User-interface#process-step-3", [
