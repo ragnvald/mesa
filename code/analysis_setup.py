@@ -785,7 +785,7 @@ class AnalysisStorage:
         gid = self._resolve_group_id(identifier)
         with self._lock:
             if len(self._groups_df) <= 1:
-                raise ValueError("More than one area is required; cannot delete the last remaining area.")
+                raise ValueError("The last study area cannot be deleted; create another one first.")
             self._groups_df = self._groups_df[self._groups_df["id"] != gid].reset_index(drop=True)
             self._polygons_gdf = self._polygons_gdf[self._polygons_gdf["group_id"] != gid].reset_index(drop=True)
             remaining = self._groups_df["id"].astype(str)
@@ -1537,17 +1537,24 @@ HTML_TEMPLATE = """<!doctype html>
     button.primary { background:#d9bd7d; color:#3f3018; border-color:#9b7c3d; font-weight:600; }
     button.primary:hover { background:#e1c78d; }
     button:disabled { opacity:0.45; cursor:not-allowed; }
-    #polygonList { width:100%; min-height:90px; border:1px solid #c6b089; border-radius:6px; padding:3px; overflow:auto; background:#fff; }
+    #polygonList { box-sizing:border-box; margin:0; width:100%; min-height:90px; border:1px solid #c6b089; border-radius:6px; padding:3px; overflow:auto; background:#fff; }
     #polygonList li { list-style:none; border-bottom:1px solid #e3d7be; padding:4px 3px; display:flex; gap:6px; align-items:center; }
     #polygonList li:last-child { border-bottom:none; }
     #polygonList .title { font-weight:600; color:#3f3528; }
     #polygonList .meta { font-size:11px; color:#8a7a5e; }
     .form-group { display:flex; flex-direction:column; gap:2px; }
-    .form-group input, .form-group textarea { border:1px solid #c6b089; border-radius:6px; padding:4px 6px; font-size:12px; width:100%; background:#fff; color:#3f3528; }
+    /* border-box: width:100% plus padding and border overflowed the panel and gave it a scrollbar. */
+    .form-group input, .form-group textarea { box-sizing:border-box; border:1px solid #c6b089; border-radius:6px; padding:4px 6px; font-size:12px; width:100%; background:#fff; color:#3f3528; }
+    .form-group input:disabled, .form-group textarea:disabled { background:#f1e9da; color:#8a7a5e; }
+    .hintline { font-size:11px; color:#8a7a5e; margin:2px 0 0; }
     .form-group textarea { min-height:40px; resize:vertical; }
     .status { font-size:11px; color:#715a36; }
     .status.error { color:#b91c1c; }
     .map { grid-area: map; position:relative; }
+    /* z-index above Leaflet's panes and controls (up to 1000). */
+    .draw-banner { display:none; position:absolute; top:10px; left:50%; transform:translateX(-50%); z-index:1100;
+      background:#3f3018; color:#fff; padding:7px 14px; border-radius:6px; font-size:13px; white-space:nowrap;
+      box-shadow:0 2px 6px rgba(0,0,0,.25); pointer-events:none; }
     #map { position:absolute; inset:0; }
     .grid-label { font-size:11px; font-weight:500; color:#3f3528; background:rgba(250,246,238,0.9); padding:2px 4px; border-radius:4px; }
     .section-divider { border:none; border-top:1px solid #e3d7be; margin:3px 0 2px; }
@@ -1563,16 +1570,21 @@ __MESA_LEAFLET_BODY_OPEN__
     </div>
 
     <div>
-      <h2>Analysis areas</h2>
+      <h2>Study areas</h2>
       <div class="form-group">
-        <label for="groupSelect">Area</label>
+        <label for="groupSelect">Study area</label>
         <select id="groupSelect"></select>
       </div>
       <div class="buttons">
-        <button id="newGroupBtn" title="Create a new analysis area">New area</button>
-        <button id="renameGroupBtn" title="Rename selected area" disabled>Rename</button>
-        <button id="deleteGroupBtn" title="Delete selected area" disabled>Delete</button>
+        <button id="newGroupBtn" title="Create a new study area. Each study area holds one or more polygons.">New study area</button>
+        <button id="renameGroupBtn" title="Rename the study area shown above" disabled>Rename</button>
+        <button id="deleteGroupBtn" title="Delete the study area shown above and its polygons" disabled>Delete</button>
       </div>
+      <div class="form-group" style="margin-top:6px;">
+        <label for="groupNotesInput">Notes for this study area</label>
+        <textarea id="groupNotesInput" placeholder="Optional: what this study area is for"></textarea>
+      </div>
+      <p class="hintline">A study area is a named set of polygons. Everything here is saved as you go.</p>
     </div>
 
     <hr class="section-divider">
@@ -1592,35 +1604,37 @@ __MESA_LEAFLET_BODY_OPEN__
 
   <div class="panel panel-right">
     <div>
-      <h2>This area</h2>
-      <div class="form-group">
-        <label for="titleInput">Title</label>
-        <input id="titleInput" type="text" placeholder="Area of interest">
+      <h2>Polygons in this study area</h2>
+      <div class="buttons" style="margin-bottom:6px;">
+        <button id="newBtn" class="primary" title="Draw a new polygon on the map (same as the polygon icon on the map)">New polygon</button>
+        <button id="editBtn" title="Change the shape. Tick exactly one polygon in the list first." disabled>Edit shape</button>
+        <button id="deleteBtn" title="Delete the ticked polygon(s). Tick at least one in the list first." disabled>Delete</button>
+        <button id="importBtn" title="Add polygons from a file to this study area">Import&hellip;</button>
       </div>
-      <div class="form-group">
-        <label for="notesInput">Notes</label>
-        <textarea id="notesInput" placeholder="Optional notes or rationale"></textarea>
-      </div>
-      <button id="applyMetaBtn" title="Update title and notes" disabled>Update details</button>
+      <ul id="polygonList"></ul>
+      <p class="hintline">Tick a polygon to select it. Double-click it to zoom to it.</p>
     </div>
 
     <hr class="section-divider">
 
     <div>
-      <h2>Areas</h2>
-      <div class="buttons" style="margin-bottom:6px;">
-        <button id="newBtn" class="primary" title="Draw a new polygon">New polygon</button>
-        <button id="editBtn" title="Edit selected polygon" disabled>Edit</button>
-        <button id="deleteBtn" title="Delete selected polygon" disabled>Delete</button>
-        <button id="importBtn" title="Import polygons">Import&hellip;</button>
-        <button id="saveBtn" title="Persist changes to disk" disabled>Save</button>
+      <h2>Selected polygon</h2>
+      <div class="form-group">
+        <label for="titleInput">Title</label>
+        <input id="titleInput" type="text" placeholder="Tick one polygon above to edit it" disabled>
       </div>
-      <ul id="polygonList"></ul>
+      <div class="form-group">
+        <label for="notesInput">Notes</label>
+        <textarea id="notesInput" placeholder="Optional notes or rationale" disabled></textarea>
+      </div>
+      <button id="applyMetaBtn" title="Save the title and notes of the ticked polygon. Tick exactly one polygon first." disabled>Save title and notes</button>
     </div>
 
   </div>
 
-  <div class="map"><div id="map"></div></div>
+  <div class="map"><div id="map"></div>
+    <div id="drawBanner" class="draw-banner">Click on the map to add corners &nbsp;&bull;&nbsp; click the first corner, double-click or <b>Enter</b> to finish &nbsp;&bull;&nbsp; <b>Esc</b> cancels</div>
+  </div>
 </div>
 
 <script>
@@ -1665,7 +1679,9 @@ const statusText = (msg, cls='') => {
 function notifyError(msg){ statusText(msg, 'error'); }
 
 function setDirtyState(dirty){
-  document.getElementById('saveBtn').disabled = !dirty;
+  // Every operation writes to disk at once, so there is no Save button to light up.
+  const btn = document.getElementById('saveBtn');
+  if(btn){ btn.disabled = !dirty; }
 }
 
 const BACKEND_RETRY_MS = 250;
@@ -2013,7 +2029,17 @@ function updateGroupSelect(){
   select.value = ACTIVE_GROUP_ID || '';
 
   if(renameBtn){ renameBtn.disabled = !ACTIVE_GROUP_ID; }
-  if(deleteBtn){ deleteBtn.disabled = GROUPS.length <= 1; }
+  if(deleteBtn){
+    deleteBtn.disabled = GROUPS.length <= 1;
+    deleteBtn.title = GROUPS.length <= 1
+      ? 'The last study area cannot be deleted. Create another one first.'
+      : 'Delete the study area shown above and its polygons';
+  }
+  const groupNotes = document.getElementById('groupNotesInput');
+  if(groupNotes){
+    const active = GROUPS.find(g => g.id === ACTIVE_GROUP_ID);
+    groupNotes.value = (active && active.notes) ? active.notes : '';
+  }
 }
 
 function updateGeocodeSelect(){
@@ -2130,7 +2156,7 @@ function applyState(state){
     if(!fitted){ fitHomeBounds(); }
     statusText('Ready.');
   } else {
-    statusText('Ready - create an area to begin.');
+    statusText('Ready - create a study area to begin.');
   }
 }
 
@@ -2165,6 +2191,12 @@ function handleAnalysisResult(result){
 
 function updateActionButtons(){
   const hasSelection = SELECTED_IDS.size > 0;
+  const one = SELECTED_IDS.size === 1;
+  // Title and Notes belong to one polygon; with none or several ticked they have no target.
+  ['titleInput', 'notesInput'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el){ el.disabled = DRAW_MODE || !one; }
+  });
   if(DRAW_MODE){
     ['editBtn', 'deleteBtn', 'applyMetaBtn'].forEach(id => {
       const btn = document.getElementById(id);
@@ -2172,9 +2204,9 @@ function updateActionButtons(){
     });
     return;
   }
-  document.getElementById('editBtn').disabled = SELECTED_IDS.size !== 1;
+  document.getElementById('editBtn').disabled = !one;
   document.getElementById('deleteBtn').disabled = !hasSelection;
-  document.getElementById('applyMetaBtn').disabled = SELECTED_IDS.size !== 1;
+  document.getElementById('applyMetaBtn').disabled = !one;
 }
 
 function listItemHtml(rec){
@@ -2272,6 +2304,8 @@ function ensureMap(){
     const layer = evt.layer;
     const geojson = layer.toGeoJSON();
     layer.remove();
+    // A readable default title; the backend would otherwise fall back to the raw id.
+    geojson.properties = Object.assign({}, geojson.properties, {title: 'Polygon ' + (Object.keys(POLYGON_SOURCE).length + 1)});
     callPython('add_polygon', {group_id: ACTIVE_GROUP_ID, feature: geojson});
   });
 
@@ -2290,14 +2324,26 @@ function ensureMap(){
   });
 
   MAP.on(L.Draw.Event.EDITSTART, () => {
-    statusText('Editing mode: adjust vertices then click the save icon in the map toolbar.');
+    statusText('Editing shape: drag the corners, then click Save in the map toolbar (beside the edit icon). Cancel there undoes it.');
   });
 
   MAP.on(L.Draw.Event.EDITSTOP, () => {
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
+    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
+  });
+
+  // The polygon icon on the map starts the same drawing as the New polygon button.
+  // Before, a polygon drawn from the icon was dropped without a word.
+  MAP.on(L.Draw.Event.DRAWSTART, () => {
+    if(!GROUPS.length){
+      notifyError('Create a study area before drawing.');
+      return;
+    }
+    if(!DRAW_MODE){ toggleDrawButtons(true); }
+    document.getElementById('drawBanner').style.display = 'block';
   });
 
   MAP.on(L.Draw.Event.DRAWSTOP, () => {
+    document.getElementById('drawBanner').style.display = 'none';
     if(DRAW_MODE){
       toggleDrawButtons(false);
     }
@@ -2356,9 +2402,9 @@ function toggleDrawButtons(enable){
   }
 
   if(enteringDraw){
-    statusText('Drawing mode: click on the map to sketch the polygon.');
+    statusText('Drawing a new polygon: click to add corners; click the first corner, double-click or press Enter to finish.');
   } else {
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
+    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
     updateActionButtons();
   }
 }
@@ -2412,9 +2458,17 @@ async function callPython(method, payload, handler){
       addFeatureToMap(result.feature);
       const newId = result.feature?.properties?.id;
       if(newId){
+        // The new polygon becomes the only ticked one, so its Title and Notes are editable at once.
+        SELECTED_IDS.clear();
         SELECTED_IDS.add(newId);
       }
       reloadListFromMap();
+      if(newId){
+        populateForm(newId);
+        updateActionButtons();
+        const t = document.getElementById('titleInput');
+        if(t && !t.disabled){ t.focus(); t.select(); }
+      }
     }
     if(result.features){
       result.features.forEach(addFeatureToMap);
@@ -2440,7 +2494,11 @@ async function callPython(method, payload, handler){
     }
 
     if(method === 'bootstrap'){
-      statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
+      statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
+    } else if(method === 'add_polygon'){
+      statusText('Polygon added and saved. Type a title for it; it is saved when you leave the field.');
+    } else if(method === 'update_properties'){
+      statusText('Title and notes saved.');
     } else {
       statusText('Ready.');
     }
@@ -2455,7 +2513,7 @@ const newPolygonBtn = document.getElementById('newBtn');
 if(newPolygonBtn){
   newPolygonBtn.addEventListener('click', () => {
     if(!GROUPS.length){
-      notifyError('Create or select an analysis area before drawing.');
+      notifyError('Create or select a study area before drawing.');
       return;
     }
     if(DRAW_MODE){
@@ -2483,7 +2541,7 @@ const deletePolygonBtn = document.getElementById('deleteBtn');
 if(deletePolygonBtn){
   deletePolygonBtn.addEventListener('click', () => {
     if(SELECTED_IDS.size === 0){ return; }
-    if(!confirm('Delete selected polygon(s)?')){ return; }
+    if(!confirm('Delete the ticked polygon(s)? This cannot be undone.')){ return; }
     const ids = Array.from(SELECTED_IDS);
     const processNext = () => {
       if(ids.length === 0){
@@ -2505,7 +2563,7 @@ const importBtn = document.getElementById('importBtn');
 if(importBtn){
   importBtn.addEventListener('click', () => {
     if(!GROUPS.length){
-      notifyError('Create or select an analysis area before importing polygons.');
+      notifyError('Create or select a study area before importing polygons.');
       return;
     }
     callPython('import_file', {group_id: ACTIVE_GROUP_ID});
@@ -2519,11 +2577,13 @@ if(saveBtn){
   });
 }
 
-document.getElementById('applyMetaBtn').addEventListener('click', () => {
+function saveSelectedPolygonDetails(){
   if(SELECTED_IDS.size !== 1) return;
   const id = [...SELECTED_IDS][0];
   const title = document.getElementById('titleInput').value.trim();
   const notes = document.getElementById('notesInput').value.trim();
+  const props = POLYGON_SOURCE[id]?.feature?.properties || {};
+  if(title === (props.title || '') && notes === (props.notes || '')){ return; }
   callPython('update_properties', {identifier: id, group_id: ACTIVE_GROUP_ID, title, notes}, (result) => {
     if(result?.record){
       const layer = POLYGON_SOURCE[id];
@@ -2533,10 +2593,35 @@ document.getElementById('applyMetaBtn').addEventListener('click', () => {
         layer.feature.properties.updated_at = result.record.updated_at;
       }
     }
-    populateForm(id);
+    // Only refill the form if this polygon is still the one ticked.
+    if(SELECTED_IDS.size === 1 && SELECTED_IDS.has(id)){ populateForm(id); }
     reloadListFromMap();
   });
+}
+document.getElementById('applyMetaBtn').addEventListener('click', saveSelectedPolygonDetails);
+// Saved when the field is left as well, so a typed title is not lost by ticking another polygon.
+['titleInput', 'notesInput'].forEach(id => {
+  document.getElementById(id).addEventListener('change', saveSelectedPolygonDetails);
 });
+
+// Enter finishes the polygon being drawn (three corners or more).
+document.addEventListener('keydown', (e) => {
+  if(!DRAW_MODE || e.key !== 'Enter'){ return; }
+  const tb = (DRAW_CONTROL && DRAW_CONTROL._toolbars) ? DRAW_CONTROL._toolbars.draw : null;
+  const h = tb && tb._modes && tb._modes.polygon && tb._modes.polygon.handler;
+  if(!h){ return; }
+  e.preventDefault();
+  if(h._markers && h._markers.length >= 3){ h.completeShape(); }
+  else { statusText('A polygon needs at least three corners.', 'error'); }
+});
+
+const groupNotesEl = document.getElementById('groupNotesInput');
+if(groupNotesEl){
+  groupNotesEl.addEventListener('change', () => {
+    if(!ACTIVE_GROUP_ID){ return; }
+    callPython('update_group', {group_id: ACTIVE_GROUP_ID, notes: groupNotesEl.value.trim()});
+  });
+}
 
 const groupSelectEl = document.getElementById('groupSelect');
 if(groupSelectEl){
@@ -2553,8 +2638,8 @@ if(groupSelectEl){
 const newGroupBtn = document.getElementById('newGroupBtn');
 if(newGroupBtn){
   newGroupBtn.addEventListener('click', () => {
-    const suggested = `Area ${GROUPS.length + 1}`;
-    const name = prompt('Area name', suggested);
+    const suggested = `Study area ${GROUPS.length + 1}`;
+    const name = prompt('Name of the new study area', suggested);
     if(name === null){ return; }
     const trimmed = name.trim();
     if(!trimmed){ return; }
@@ -2568,7 +2653,7 @@ if(renameGroupBtn){
   renameGroupBtn.addEventListener('click', () => {
     if(!ACTIVE_GROUP_ID){ return; }
     const current = GROUPS.find(g => g.id === ACTIVE_GROUP_ID);
-    const name = prompt('Rename area', current?.name || '');
+    const name = prompt('New name for this study area', current?.name || '');
     if(name === null){ return; }
     const trimmed = name.trim();
     if(!trimmed){ return; }
@@ -2580,7 +2665,7 @@ const deleteGroupBtn = document.getElementById('deleteGroupBtn');
 if(deleteGroupBtn){
   deleteGroupBtn.addEventListener('click', () => {
     if(!ACTIVE_GROUP_ID){ return; }
-    if(!confirm('Delete current area and its polygons?')){ return; }
+    if(!confirm('Delete this study area and all its polygons? This cannot be undone.')){ return; }
     callPython('delete_group', {group_id: ACTIVE_GROUP_ID});
   });
 }
@@ -2654,7 +2739,7 @@ function startBootstrap(){
 function loadCanvasLayer(category){
   const target = category || ACTIVE_GEOCODE;
   if(!target){
-    statusText(GROUPS.length ? 'Ready.' : 'Ready - create an area to begin.');
+    statusText(GROUPS.length ? 'Ready.' : 'Ready - create a study area to begin.');
     return;
   }
   statusText('Loading background...');
