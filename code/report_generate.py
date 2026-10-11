@@ -524,6 +524,10 @@ def _analysis_write_area_map_png(
             ax.set_aspect('equal', adjustable='box')
         except Exception:
             pass
+        # GeoSeries.plot() autoscales the axes to whatever it draws. The context
+        # cells reach far beyond the frame, so without this the limits grew to their
+        # full extent and the saved image became a tall strip with a tiny map in it.
+        ax.set_autoscale_on(False)
 
         _plot_basemap(ax, crs_epsg=3857, base_dir=base_dir)
 
@@ -628,7 +632,10 @@ def _analysis_write_area_map_png(
         except Exception:
             pass
 
-        _add_map_decorations(ax, bounds_3857, base_dir=base_dir, add_inset=False)
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+        # (west, east, south, north) - not the (minx, miny, maxx, maxy) order of bounds
+        _add_map_decorations(ax, (minx, maxx, miny, maxy), base_dir=base_dir, add_inset=False)
         plt.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         return True
