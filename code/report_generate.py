@@ -5309,9 +5309,28 @@ def generate_report(base_dir: str,
                 # context (surroundings) behind each area's own sensitivity fill.
                 analysis_context_cells = load_tbl_flat(gpq_dir_analysis, base_dir=base_dir)
 
+                # Total area and the map come from the current polygons, the sensitivity
+                # figures from the last Analysis run; after an edit they differ. Say so.
+                try:
+                    from mesa_shared import analysis_groups_edited_since_run
+                    edited_since_run = analysis_groups_edited_since_run(gpq_dir_analysis)
+                except Exception:
+                    edited_since_run = {}
+
+                def _edited_note(group_id: str, title: str = "") -> None:
+                    run_at = edited_since_run.get(str(group_id))
+                    if not run_at:
+                        return
+                    who = f"<b>{title}</b>" if title else "This study area"
+                    order_list.append(('text',
+                        f"<b>Note:</b> {who} was edited after its analysis was last run ({run_at} UTC). "
+                        "The map and the total area show the polygons as they are now; the sensitivity figures "
+                        "are from that earlier run. Run Process (Analysis) to bring them in line."))
+
                 def _add_single(group_id: str):
                     group_title = _analysis_group_title(gpq_dir_analysis, group_id)
                     order_list.append(('heading(2)', f"Analysis – {group_title}"))
+                    _edited_note(group_id)
 
                     polys = _analysis_polygons_for_group(gpq_dir_analysis, group_id)
                     flat_cells = _analysis_flat_geo_for_group(gpq_dir_analysis, group_id)
@@ -5389,6 +5408,8 @@ def generate_report(base_dir: str,
                         left_title = _analysis_group_title(gpq_dir_analysis, left)
                         right_title = _analysis_group_title(gpq_dir_analysis, right)
                         order_list.append(('heading(2)', f"Analysis – Compare: {left_title} vs {right_title}"))
+                        _edited_note(left, left_title)
+                        _edited_note(right, right_title)
 
                         left_polys = _analysis_polygons_for_group(gpq_dir_analysis, left)
                         right_polys = _analysis_polygons_for_group(gpq_dir_analysis, right)

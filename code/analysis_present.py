@@ -831,6 +831,13 @@ class AnalysisData:
         summary["total_area_label"] = format_km2(area_to_km2(total_area_m2))
         summary["last_run"] = last_run
         summary["last_run_label"] = format_timestamp(last_run)
+        # Polygons edited after that run: the figures below describe the earlier shapes.
+        try:
+            from mesa_shared import analysis_groups_edited_since_run, parquet_dir
+            summary["edited_since_run"] = str(group_id) in analysis_groups_edited_since_run(
+                parquet_dir(self.base_dir, self.cfg))
+        except Exception:
+            summary["edited_since_run"] = False
 
         totals_by_code: Dict[str, float] = {}
         fallback_desc: Dict[str, str] = {}
@@ -1161,7 +1168,10 @@ class GroupHeader(QFrame):
         processed = summary.get("processed_count", 0)
         configured = summary.get("configured_count", 0)
         last_run = summary.get("last_run_label", "--")
-        self.summary_label.setText(f"Total: {total_label} | Polygons: {processed}/{configured} | Last run: {last_run}")
+        text = f"Total: {total_label} | Polygons: {processed}/{configured} | Last run: {last_run}"
+        if summary.get("edited_since_run"):
+            text += " | Edited since - run Process (Analysis) to update"
+        self.summary_label.setText(text)
 
 
 class SensitivityChart(QFrame):
