@@ -906,3 +906,51 @@ cache filled a run takes about five.
 
 Nothing here touched the sibling projects, and no table or column changed. Nothing was reported
 to mesa-server or mesa_demodata.
+
+## 2026-10-11 (evening): report progress, type fingerprints, and a build that ships no data
+
+Four smaller requests and one larger one, all the same day as the report layout review above.
+
+Tiles in the Special focus editors stayed grey for seconds after a zoom. Nothing failed: OSM
+answered 200, the cache held no broken files and the log had no errors. The local tile proxy
+opened a new TLS connection for every tile, about 1.2 s each. With one kept-alive connection per
+proxy thread a tile costs about 0.45 s and a screen of 30 uncached tiles 3.3 s instead of 6
+(`4db74d0`). The tab bar of the same window was redrawn to match the Qt dialogs (`12719b6`).
+
+The user asked whether a realistic progress indicator for the report was possible. It was: the
+report is a countable set of maps, and the unpredictable part, basemap tile downloads, can be
+counted in the cache before each map is assembled. `report_progress.py` prices the remaining maps
+from measured drawing time and tile time (`5ae6546`). Four full runs on a 36-map test report:
+the bar was 3.9 points from true progress on average with no earlier run, 1.5 with one, and 3.4
+when 12 % of the tiles had to be downloaded (608 s instead of 267 s). The first version let one
+quick map set the price for its kind and ignored work between maps; both were corrected after the
+first run. Two runs opened with "about 16 min left" for a 4.5 and a 10 minute run, because 10 % of
+the tiles were assumed missing although an earlier run had filled the cache; the assumption is
+now 1 % when an earlier run is on record. That last change is unit-tested, not re-measured.
+
+The Classification section's fingerprints were redrawn with percentages, axis labels and an
+explanation, and the prose list of types became a table (`abb7d84`). The user then asked for no
+em dashes anywhere in the report text, calling them a tell of machine writing; all 28 in
+`report_generate.py` were rewritten (`64aa8b4`). Many remain in other windows and in the wiki.
+
+The larger request: 5.7.0 is to be built without data, with the documentation pointing to the
+demonstration data on Zenodo. The build already shipped `input/` and `output/` as a skeleton, but
+took `config.ini`, the three `readme.txt` files and `qgis/` from the working folder, which at the
+time held a restored demo project: a demo `config.ini` with Classification switched on, the
+readme files deleted, a generated `qgis/mesa_results.qgz` and an extra `input/` folder. The build
+now takes these from git at HEAD, leaves `docs/exchange/` out by the user's decision, and stops if
+the distribution holds project data. The copy and the check were run into a temporary folder and
+six deliberate faults were each caught; a full `build_all.py` run is the user's to make.
+
+The documentation (wiki Home and Quickstart, the release notes, a new `input/asset/readme.txt`
+and the user guides, which were regenerated) now names the two concept DOIs for the
+demonstration data, `10.5281/zenodo.21744272` and `10.5281/zenodo.21744039`, taken from
+`mesa_demodata`'s own `zenodo/5.7.0/manifest.json`. The user guides got the new section and
+nothing else: their "What's new" chapter was not rewritten for 5.7.
+
+Reported to mesa_demodata: an instruction prompt,
+`docs/exchange/2026-10-11-demodata-5-7-utgivelse-prompt.md`, at the user's suggestion instead of
+testing the packages from here. It points out that the demo `config.ini` is generated from an
+older template (it still has `backfill_max_workers` and the old stage numbers), that the guide
+still mentions Backfill and "Analysis", and asks for confirmation of the DOIs and a test of each
+package in 5.7.0. Nothing was reported to mesa-server.
