@@ -50,6 +50,12 @@ Two related bugs are fixed:
 - **Parameters could overwrite edits made in Assets.** It saved the whole asset-group table on every close from the copy loaded when it opened. It now saves only importance and susceptibility, into the table as it is on disk, and no longer saves by itself on close.
 - **Tune processing could be undone by "Save all".** The Config tab kept showing pre-tuning values after a commit; it now shows the tuned values at once.
 
+### Lines and study areas are edited the same way
+
+The two tabs of the Special focus window followed different logics: Lines kept changes until you saved, Analysis wrote every change at once with no way back. Both now have **Save** and **Discard**, the same layout (toolbar, list, form, map), and the same way of adding an item — click the points, finish with Enter or a double-click. The second tab is called **Study areas**. If you are used to that tab saving by itself: it no longer does.
+
+Fixed at the same time, because they affected figures: a study area with only a drawn polygon could be invisible to Process and the report; results for deleted polygons stayed in the totals; and nothing said when a study area had been edited after its analysis ran — the tab, the report and Compare study areas now do.
+
 ### Buttons and confirmations
 
 - Exit is top-right in every window.
@@ -80,6 +86,8 @@ Two related bugs are fixed:
 
 - **Reports:** one report run at a time, one report window; pressing Create report while one is running says so and when it started. Two simultaneous runs could produce a Word file that would not open.
 - **Maps:** "Link zoom & pan" holds the view across tabs again, and switching layer on the Overview tab no longer resets the zoom.
+- **Progress map legend** is visible again; it was drawn under the map tiles.
+- **Status tab** counts the lines in use, not the ones from the last import.
 - **Progress map** shows the areas actually computed: light green when intersected, dark green when their results are written.
 - **Geocode tables without a GeoParquet header** (written by early 5.7 development builds) are read correctly; they could stop processing or hide the Classification rasters.
 - **Assets editor:** saving no longer strips spatial metadata from the asset-group table, which broke atlas generation.
