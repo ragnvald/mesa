@@ -905,6 +905,10 @@ __MESA_LEAFLET_HEAD__
   .help { font-size:12px; color:#5c4a2f; border:1px dashed #c6b089; padding:6px 8px; border-radius:6px; display:none; background:#faf6ee; }
   .help strong { font-weight:600; }
   .badge { font-size:11px; color:#5c4a2f; border:1px solid #c6b089; border-radius:10px; padding:1px 6px; background:#f3ecdf; }
+  /* Unsaved work is shown where the eye already is: on Save, and beside it. */
+  #dirtyBadge { font-size:12px; font-weight:600; color:#7a3d06; border-color:#d08a2e; background:#fde9c8; padding:3px 9px; }
+  #saveBtn.needs-save { background:#c9781b; border-color:#8a4f0c; color:#fff; box-shadow:0 0 0 3px rgba(201,120,27,.28); }
+  #saveBtn.needs-save:hover { background:#b56a14; }
   .form-actions { display:flex; gap:8px; align-items:center; margin-top:8px; }
   .panel-h { font-size:12px; margin:10px 0 4px; text-transform:uppercase; letter-spacing:0.03em; color:#715a36; font-weight:600; }
   #lineList { box-sizing:border-box; margin:0 0 4px; width:100%; min-height:70px; max-height:190px; overflow:auto;
@@ -927,7 +931,7 @@ __MESA_LEAFLET_BODY_OPEN__
     <button id="discardBtn" class="btn" title="Drop every unsaved change and go back to what was last saved">Discard</button>
     <button id="importBtn" class="btn" title="Replace the lines with the files in input/lines">Import&hellip;</button>
     <button id="exitBtn" class="btn">Exit</button>
-    <span id="dirtyBadge" class="badge" style="display:none;">Unsaved changes</span>
+    <span id="dirtyBadge" class="badge" style="display:none;">Not saved yet</span>
     <div class="hint">New line: <span class="kbd">N</span>, click points • finish with <span class="kbd">Enter</span> or double-click • <span class="kbd">Esc</span> cancels • <span class="kbd">E</span> edit shape • <span class="kbd">Del</span> delete</div>
   </div>
 
@@ -1004,7 +1008,12 @@ function setSaveButtonsEnabled(enabled){
     document.getElementById('saveBtn').disabled = !enabled;
     document.getElementById('discardBtn').disabled = !enabled;
 }
-function setDirty(v){ DIRTY = !!v; dirtyBadge(DIRTY); setSaveButtonsEnabled(DIRTY); }
+function setDirty(v){
+  DIRTY = !!v; dirtyBadge(DIRTY); setSaveButtonsEnabled(DIRTY);
+  const save = document.getElementById('saveBtn');
+  save.classList.toggle('needs-save', DIRTY);
+  save.textContent = DIRTY ? 'Save changes' : 'Save';
+}
 
 function setFormEnabled(enabled){
     ['f_name_user','f_seg_len','f_seg_wid','f_desc'].forEach(function(id){
@@ -1094,7 +1103,7 @@ function bindAuto(fieldId, fieldName){
   const el = document.getElementById(fieldId);
   el.addEventListener('change', function(){
     if (!SELECTED_ID) return;
-    showStatus('Staging…','status-warn');
+    showStatus('Noting the change…','status-warn');
     window.pywebview.api.update_attribute(SELECTED_ID, fieldName, el.value).then(function(res){
       if (!res.ok){ showStatus(res.error || 'Update failed', 'status-err'); }
       else {
@@ -1167,7 +1176,7 @@ function initMapOnce(){
       enableEditButtons(true);
       setSelected(res.record.name_gis, true);
       updateCountBadge();
-      showStatus('New line added, not saved yet. Give it a title, then click Save.','status-ok');
+      showStatus('New line added, not saved yet. Give it a title, then click Save.','status-warn');
       setFootLeft('Not saved yet. Process and the report use saved lines only.');
       try{ const t = document.getElementById('f_name_user'); t.focus(); }catch(e){}
     }).catch(err => { showStatus('API error: '+err, 'status-err'); LINES_GROUP.removeLayer(tmp); });
@@ -1188,7 +1197,8 @@ function initMapOnce(){
       const f = layer.feature; if (!f || !f.properties || !f.properties.name_gis) return;
       window.pywebview.api.update_geometry(f.properties.name_gis, layer.toGeoJSON().geometry).then(function(res){
         if (!res.ok){ showStatus(res.error || 'Geometry update failed','status-err'); }
-        else { setDirty(true); setFootLeft('Geometry staged for ' + f.properties.name_gis); showStatus('Geometry staged.','status-ok'); }
+        else { setDirty(true); setFootLeft('Shape of ' + f.properties.name_gis + ' changed, not saved yet.');
+               showStatus('Shape changed, not saved yet. Click Save to keep it.','status-warn'); }
       }).catch(err => showStatus('API error: '+err,'status-err'));
     });
   });
@@ -1230,6 +1240,10 @@ function addFeature(feature, selectAfter=false){
   layer.eachLayer(function(l){
     const id = feature.properties?.name_gis;
     if (!id) return;
+    // Never two layers for one line: a copy that nothing tracks stays on the map
+    // as a ghost when the line is reshaped or deleted.
+    const previous = LAYER_BY_ID[id];
+    if (previous && previous !== l){ try{ LINES_GROUP.removeLayer(previous); }catch(e){} }
     LAYER_BY_ID[id] = l;
     l.on('click', ()=> { if (!DRAWING && !SINGLE_EDIT_HANDLER) setSelected(id, false); });
     l.addTo(LINES_GROUP);
@@ -1342,8 +1356,8 @@ async function deleteSelected(){
     setSelected('');
     setDirty(true);
     updateCountBadge();
-    showStatus('Line deleted, not saved yet. Click Save to keep the change.','status-ok');
-    setFootLeft('Deleted (staged).');
+    showStatus('Line deleted, not saved yet. Click Save to keep the change; Discard brings it back.','status-warn');
+    setFootLeft('Line deleted, not saved yet.');
   }catch(err){
     showStatus('API error: '+err,'status-err');
   }
@@ -1363,19 +1377,24 @@ async function reloadSelected(){
     addFeature(f, false);
     enforceVisibility();
     fillForm(f.properties || {});
-    setFootLeft('Line reloaded.');
+    if (DIRTY) setFootLeft('You have changes that are not saved yet.');
+    else setFootLeft('');
   } catch(err){
     showStatus('API error: '+err, 'status-err');
   }
 }
 
+let LOAD_SEQ = 0;   // only the newest loadAll() may draw; an older one that is still waiting gives up
+
 async function loadAll(){
+  const mine = ++LOAD_SEQ;
   try{
     initMapOnce();
     cleanupSingleHandlers();
     clearLayers();
 
     const st = await window.pywebview.api.get_state();
+    if (mine !== LOAD_SEQ) return;
     if (!st.ok){ showStatus(st.error || 'State failed', 'status-err'); return; }
     updatePicker(st.records || []);
 
@@ -1388,8 +1407,10 @@ async function loadAll(){
         } catch(e){}
 
     const res = await window.pywebview.api.get_all_lines();
+    if (mine !== LOAD_SEQ) return;
     if (!res.ok){ showStatus(res.error || 'Load failed', 'status-err'); return; }
     const feats = res.geojson && res.geojson.features ? res.geojson.features : [];
+    clearLayers();      // again, right before drawing: nothing drawn while we waited may stay
     feats.forEach(f => addFeature(f, false));
     HOME_BOUNDS = res.home_bounds || null;
     updateCountBadge();
@@ -1512,16 +1533,24 @@ function boot(){
         else if (e.key === 'Escape'){ cancelEdit(); }
     });
 
-  if (window.pywebview && window.pywebview.api) {
+  // The backend announces itself by an event and is also polled for. Both fired, so
+  // the lines were loaded twice at once and every line was drawn twice.
+  let started = false, tic = null;
+  function startOnce(){
+    if (started) return;
+    started = true;
+    if (tic) clearInterval(tic);
     loadAll();
+  }
+  if (window.pywebview && window.pywebview.api) {
+    startOnce();
   } else {
     showStatus('Waiting for backend…', 'status-warn');
-    window.addEventListener('pywebviewready', () => { loadAll(); });
+    window.addEventListener('pywebviewready', startOnce);
     let tries = 0;
-    const tic = setInterval(()=>{
+    tic = setInterval(()=>{
       if (window.pywebview && window.pywebview.api){
-        clearInterval(tic);
-        loadAll();
+        startOnce();
       } else if (++tries > 50) {
         clearInterval(tic);
         showStatus('Backend did not initialize. Are you opening the HTML directly?', 'status-err');

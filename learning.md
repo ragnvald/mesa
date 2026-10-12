@@ -1332,3 +1332,9 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - Rule: any script that calls `run_headless()` or anything else that opens a `spawn` pool must do so under `if __name__ == "__main__":`.
 - Why: a reproduction script without the guard hung for ten minutes and left nine processes. Under `spawn` every worker imports the main script, and without the guard each import started the pipeline again.
 - How to apply: write the guard first in any scratch script that touches `processing_internal`, `tiles_create_raster` or the report's worker pools, and give the run a timeout.
+
+## A page that can be told twice to start will draw everything twice (2026-10-12)
+
+- Rule: a web page that waits for its backend starts loading exactly once, and a load that draws on a map must be safe to run twice.
+- Why: reshaped and deleted lines stayed on the Lines map as ghosts. The page listened for `pywebviewready` and also polled for the backend; inside Special focus both fired, two loads overlapped, and every line was drawn twice with only one copy tracked. The copies coincided, so nothing showed until a line was changed. It could not be seen by reading one function at a time: each load is correct alone.
+- How to apply: guard the start (`startOnce`), give an asynchronous load a sequence number and let only the newest draw, clear immediately before drawing rather than before waiting, and make the function that adds an item replace an existing one with the same id. To check without a screen, drive the page in QtWebEngine offscreen with a stub `window.pywebview.api` that becomes ready by event after the page has started, and compare the number of layers on the map with the number tracked.

@@ -1189,3 +1189,27 @@ removes, so the assets must be imported again before Process.
 Found on the way: Delete all data also removed the `readme.txt` in each source folder, the note
 that says what belongs there. They are kept now. This is very likely why three of those files
 were missing from the user's working copy throughout this release work.
+
+## 2026-10-12: ghost lines in the Lines editor
+
+From the fifth 5.7.0 build the user reported that reshaped and deleted lines stayed on the map
+as fainter "ghosts", also after Save, and that it was easy to believe a change was kept when it
+had only been made in the editor.
+
+The ghosts were second copies. The page starts loading when the backend is ready, and it learned
+of that in two ways at once: the `pywebviewready` event and a polling timer. Inside Special focus
+both fired, two loads ran at the same time, each cleared the map before waiting for the data,
+and both then drew every line. One copy was tracked, the other was not, and the two lay exactly
+on top of each other until one of them was changed. Driven without a screen against a stub
+backend that becomes ready the same way: the old page had 6 layers for 3 lines, still 6 after a
+reshape and 5 after a delete; the corrected page has 3, 3 and 2.
+
+Three changes, any one of which would have been enough: loading starts once, only the newest
+load may draw and it clears the map again right before drawing, and adding a line removes any
+earlier layer for the same line. The Study areas editor had the same double start; it drew
+correctly because it clears and draws in one step, and now starts once as well.
+
+For the second complaint the staging model stays, as decided on 2026-10-11, but the page says
+it plainly. Messages read "Shape changed, not saved yet. Click Save to keep it." instead of
+"Geometry staged.", in the warning colour. While there are unsaved changes the Save button is
+orange and reads "Save changes", and the badge beside it reads "Not saved yet".

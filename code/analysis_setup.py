@@ -2916,8 +2916,12 @@ function loadCanvasLayer(category){
   });
 }
 
-window.addEventListener('pywebviewready', startBootstrap);
-startBootstrap();
+// Started once: the direct call already retries until the backend is there, and a second
+// start from the event would load the state twice (the fault behind the ghost lines in Lines).
+let BOOTSTRAP_STARTED = false;
+function startBootstrapOnce(){ if (BOOTSTRAP_STARTED) return; BOOTSTRAP_STARTED = true; startBootstrap(); }
+window.addEventListener('pywebviewready', startBootstrapOnce);
+startBootstrapOnce();
 (function waitForLeaflet(){
   if(typeof L !== 'undefined'){
     ensureMap();
