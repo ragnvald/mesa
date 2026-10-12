@@ -1170,3 +1170,22 @@ MESA's documentation uses now lead to 5.7.0 data, and every file on Zenodo has t
 of the file in `exported/`. The first step of the agreed order is thereby done; the application
 record is next. The reply in `docs/exchange/` is the updated one, the version DOIs are noted in
 `cooperation.md` and in `devtools/ZENODO_5.7.0.md`, and no documentation text needed changing.
+
+## 2026-10-12: "Import new data to start over", on a tab with no Import button
+
+Trying the fourth 5.7.0 build, the user emptied a project with Delete all data and was told
+"The project is empty. Import new data to start over." The tab it stands on has Store data and
+Restore data, and no Import. The message also said "Kept: 0 system files" although `config.ini`
+and `input/settings.xlsx` are kept; the count was of `.git` entries inside the emptied folders.
+
+The user asked what the best approach was and accepted all four parts of the proposal. The two
+words keep their meanings: restore is for packages, import is for one's own files, and "import"
+is never used without saying where. The message now says how many items were removed, or that
+the project was already empty, names the two files that are kept, and points to both ways on:
+Restore data on the same tab, or Workflows, Assets. It has a button for each. Clear output got
+the same treatment, and its texts now say that the tables made at import are among what it
+removes, so the assets must be imported again before Process.
+
+Found on the way: Delete all data also removed the `readme.txt` in each source folder, the note
+that says what belongs there. They are kept now. This is very likely why three of those files
+were missing from the user's working copy throughout this release work.

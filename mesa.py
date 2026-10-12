@@ -5896,14 +5896,15 @@ class MesaMainWindow(QMainWindow):
         clear_layout.setSpacing(8)
 
         clear_intro = QLabel(
-            "<b>Clear output</b> removes all imported and processed data from the "
-            "output/ folder. Your original source files in input/ and your "
-            "configuration are kept intact. Use this to start fresh or free disk "
-            "space after a completed project cycle.<br><br>"
+            "<b>Clear output</b> removes everything in the output/ folder: the tables "
+            "MESA made when it imported your files, and all results. Your source files "
+            "in input/ and your settings are kept. Afterwards, import the assets again "
+            "under Workflows, Assets, and run Process.<br><br>"
             "<b>Delete all data</b> additionally empties the source folders "
             "input/asset, input/geocode, input/lines and input/images, leaving an "
             "empty project. config.ini and input/settings.xlsx are kept, so the "
-            "project keeps its settings."
+            "project keeps its settings. To start over afterwards, restore a package "
+            "with Restore data above, or add your own files under Workflows, Assets."
         )
         clear_intro.setWordWrap(True)
         clear_intro.setStyleSheet("color: #6a5533; font-size: 10px;")
@@ -6343,15 +6344,16 @@ class MesaMainWindow(QMainWindow):
         self._restore_worker_thread.start()
 
     @staticmethod
-    def _purge_directory(directory: str) -> tuple[int, list[str], list[str]]:
-        """Delete the contents of *directory*, keeping .git* entries and the
-        directory itself. Returns (removed, kept, failures)."""
+    def _purge_directory(directory: str, keep: tuple[str, ...] = ()) -> tuple[int, list[str], list[str]]:
+        """Delete the contents of *directory*, keeping .git* entries, the files
+        named in *keep* and the directory itself. Returns (removed, kept, failures)."""
         removed, kept, failed = 0, [], []
         if not os.path.isdir(directory):
             return removed, kept, failed
+        keep_names = {k.lower() for k in keep}
         for name in os.listdir(directory):
             lname = name.strip().lower()
-            if lname.startswith(".git") or lname == ".github":
+            if lname.startswith(".git") or lname == ".github" or lname in keep_names:
                 kept.append(name)
                 continue
             path = os.path.join(directory, name)
@@ -6373,8 +6375,10 @@ class MesaMainWindow(QMainWindow):
             return
         confirm = QMessageBox.question(
             self, "Confirm clear output",
-            "This will permanently delete imported and processed data from the output/ folder.\n\n"
-            "Your source files in input/ and your configuration are not affected.\n\n"
+            "This permanently deletes everything in the output/ folder: the tables MESA made "
+            "when it imported your files, and all results.\n\n"
+            "Your source files in input/ and your settings are not affected. Afterwards you "
+            "import the assets again under Workflows, Assets, and run Process.\n\n"
             "Do you want to continue?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
@@ -6390,14 +6394,17 @@ class MesaMainWindow(QMainWindow):
                 details += f"\n... and {len(failed) - 6} more"
             QMessageBox.warning(
                 self, "Clear output completed with issues",
-                f"Removed: {removed} items\nKept: {len(kept)} system files"
-                f"\nFailed: {len(failed)}\n\n{details}",
+                f"Removed {removed} item(s) from output/, but {len(failed)} could not be removed:\n\n{details}",
             )
             return
-        self._manage_status.setText(f"Cleared output. Removed: {removed} items, kept: {len(kept)} system files.")
+        done = (f"Removed {removed} item(s) from output/." if removed
+                else "The output/ folder was already empty.")
+        self._manage_status.setText(done)
         QMessageBox.information(
             self, "Clear output completed",
-            f"Removed: {removed} items\nKept: {len(kept)} system files",
+            f"{done}\n\nYour source files in input/ and your settings are kept.\n\n"
+            "To build the results again, import the assets under Workflows, Assets, "
+            "and run Process.",
         )
 
     def _do_delete_all_data(self):
@@ -6429,7 +6436,9 @@ class MesaMainWindow(QMainWindow):
         kept: list[str] = []
         failed: list[str] = []
         for target in targets:
-            r, k, f = self._purge_directory(target)
+            # The readme.txt in each source folder says what belongs there; it is not data.
+            r, k, f = self._purge_directory(
+                target, keep=() if os.path.basename(target) == "output" else ("readme.txt",))
             removed += r
             kept.extend(k)
             failed.extend(f"{os.path.basename(target)}/{item}" for item in f)
@@ -6445,22 +6454,43 @@ class MesaMainWindow(QMainWindow):
                 details += f"\n... and {len(failed) - 6} more"
             QMessageBox.warning(
                 self, "Delete all data completed with issues",
-                f"Removed: {removed} items\nKept: {len(kept)} system files"
-                f"\nFailed: {len(failed)}\n\n{details}",
+                f"Removed {removed} item(s), but {len(failed)} could not be removed:\n\n{details}\n\n"
+                "config.ini and input/settings.xlsx are kept.",
             )
         else:
-            self._manage_status.setText(
-                f"Deleted all data. Removed: {removed} items, kept: {len(kept)} system files."
-            )
-            QMessageBox.information(
-                self, "Delete all data completed",
-                f"Removed: {removed} items\nKept: {len(kept)} system files\n\n"
-                "The project is empty. Import new data to start over.",
-            )
+            done = f"Removed {removed} item(s)." if removed else "The project was already empty."
+            self._manage_status.setText(f"{done} config.ini and input/settings.xlsx are kept.")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("Delete all data completed")
+            box.setText(f"{done}\n\nKept: config.ini and input/settings.xlsx.")
+            box.setInformativeText(
+                "To start over, either restore a package with Restore data on this tab, "
+                "or add your own files under Workflows, Assets.")
+            restore_btn = box.addButton("Restore a package…", QMessageBox.ActionRole)
+            assets_btn = box.addButton("Go to Assets", QMessageBox.ActionRole)
+            close_btn = box.addButton("Close", QMessageBox.AcceptRole)
+            box.setDefaultButton(close_btn)
+            box.exec()
+            next_step = box.clickedButton()
+            choice = "restore" if next_step is restore_btn else ("assets" if next_step is assets_btn else "")
+            if choice:
+                # after this handler has returned and the status tab is refreshed
+                QTimer.singleShot(0, lambda: self._after_delete_all(choice))
         try:
             self._refresh_status_tab()
         except Exception:
             pass
+
+    def _after_delete_all(self, choice: str) -> None:
+        """Take the user to the place the 'Delete all data' message pointed at."""
+        if choice == "restore":
+            self._do_restore()
+        elif choice == "assets":
+            for i in range(self._tabs.count()):
+                if self._tabs.tabText(i).strip().lower() == "workflows":
+                    self._tabs.setCurrentIndex(i)
+                    break
 
     def _open_geonode_publisher(self):
         """Show the standalone GeoNode publish window (lazily constructed)."""
