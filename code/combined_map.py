@@ -1231,12 +1231,16 @@ HTML = r"""<!doctype html>
      (bg #f3ecdf, buttons #e6dac2, accent #d9bd7d/#9b7c3d, text #3f3528/#5c4a2f). */
   html,body{height:100%;margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:13px;color:#3f3528}
   #app{display:flex;flex-direction:column;height:100vh}
-  #bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f3ecdf;border-bottom:2px solid #cbb791}
-  .tab{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;padding:6px 12px;cursor:pointer;border-radius:6px;font-size:13px}
-  .tab:hover{background:#eadbbd}
-  .tab:active{transform:translateY(1px)}
-  .tab.active{background:#d9bd7d;color:#3f3018;border-color:#9b7c3d;font-weight:600}
+  /* Tabs drawn like the QTabBar in ui_style.py (and like Special focus), so the
+     map window matches the Qt dialogs. The controls to the right stay buttons. */
+  #bar{display:flex;align-items:flex-end;gap:2px;padding:8px 12px 0 12px;background:#f3ecdf;border-bottom:1px solid #c6b089}
+  .tab{background:#e6dac2;color:#5c4a2f;border:1px solid #c6b089;border-bottom:none;padding:8px 18px;margin:2px 0 0 0;
+       cursor:pointer;border-radius:5px 5px 0 0;font:inherit;font-size:13px;font-weight:500}
+  .tab:hover{background:#efe3cc}
+  .tab.active{background:#f8f3e9;color:#3f3528;font-weight:600;margin-top:0;margin-bottom:-1px;padding-bottom:9px}
   #spacer{flex:1}
+  #opwrap,#linkwrap,#export,#exit{align-self:center;margin-bottom:6px}
+  #export{margin-right:6px}
   #opwrap{display:flex;align-items:center;gap:6px;margin-right:12px;font-size:12px;color:#3f3528}
   #opacity{width:120px;accent-color:#9b7c3d}
   #linkwrap{display:flex;align-items:center;gap:6px;margin-right:8px;font-size:12px;color:#3f3528}
