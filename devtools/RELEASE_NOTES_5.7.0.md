@@ -1,10 +1,9 @@
 A release about scale and safety. Projects take far less disk and memory, map tiles render faster, and a data-loss bug that affected every earlier MESA 5 release is fixed. Around that the interface was gone through window by window: MESA now asks before unsaved edits are lost, destructive actions are harder to trigger by accident, and the QGIS project, GeoNode publishing and the asset tools gained functionality.
 
-> Draft, written 2026-10-10 from the commits between `5.6.0` and `main`. The Zenodo record, file names and demonstration-data links are placeholders until the build is published.
-
 ### Where can I find it?
 
-- Zenodo record — *to be added* (`MESA_570_win11_<date>.zip`, `MESA_570_macos_<date>.dmg`)
+- [Zenodo record](https://doi.org/10.5281/zenodo.23314128): `MESA_570_win11_2026_10_12.zip` (Windows 11, 64-bit). The macOS build for Apple Silicon follows as a later version of the same record.
+- [All versions, and the reference to cite](https://doi.org/10.5281/zenodo.10775727)
 - [MESA project wiki](https://github.com/ragnvald/mesa/wiki), with the full [changelog](https://github.com/ragnvald/mesa/wiki/Mesa-changelog-overview)
 
 ### Demonstration data
@@ -105,6 +104,8 @@ The folder you unzip now holds only the program: `mesa.exe`, its tools and a `RE
 - **Results:** the numbers for importance, sensitivity and susceptibility (minimum and maximum per cell) were written empty in projects where a geocode's rows were spread over several files, so the **Importance (max)** map layer was blank and the QGIS project and GeoNode export lacked those figures. The A to E classes, the OWA index and the counts were not affected. Run **Flatten** and **Tiles** again. The fault has been present since 5.0.
 - **Tiles:** processing no longer fails with "Invalid argument" when the project folder is inside OneDrive or another synchronised folder.
 - **Process:** the progress bar no longer jumps up and down at the start of a run that follows a cancelled or failed one.
+- **Lines:** a reshaped or deleted line no longer stays on the map as a faint copy. While there are unsaved changes the Save button is highlighted and reads **Save changes**.
+- **Manage data:** after **Delete all data** the message says what was kept and where to go next, with a button for each way; the notes in the source folders are no longer deleted.
 - **Reports:** the three example lines that Process draws in a project without lines are left out of the report. Reshape one in **Special focus → Lines** and it counts as your own.
 - **Reports:** one report run at a time, one report window; pressing Create report while one is running says so and when it started. Two simultaneous runs could produce a Word file that would not open.
 - **Maps:** "Link zoom & pan" holds the view across tabs again, and switching layer on the Overview tab no longer resets the zoom.
