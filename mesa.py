@@ -6283,10 +6283,20 @@ class MesaMainWindow(QMainWindow):
             # drops any stale copy first, so this can only be THIS archive's readme.
             readme = Path(original_working_directory) / DEMO_README_MEMBER
             text = f"Package restored successfully.\n\nFrom: {zip_path}"
+            # A package with input data only cannot go straight to Process: nothing is
+            # imported yet. Say what comes first; demo packages are all of this kind.
+            no_results = not os.path.isfile(
+                os.path.join(original_working_directory, "output", "geoparquet", "tbl_flat.parquet"))
+            next_steps = ("\n\nThis project has input data only. Before Process can run:\n"
+                          "  1. Assets: Import assets from folder\n"
+                          "  2. Parameters: Load from Excel (reads input/settings.xlsx)\n"
+                          "  3. Geocodes: Build mosaic\n"
+                          "Then run Process.")
             if restore_mode == "reimport":
                 text += ("\n\nSource data restored and marked as MESA " + str(stamp_ver) +
-                         ". No results yet — run Process (Workflows → Process) to generate them "
-                         "in this version.")
+                         ". There are no results yet in this version.") + next_steps
+            elif no_results:
+                text += next_steps
             elif restore_mode == "upgrade":
                 text += ("\n\nMarked as MESA " + str(stamp_ver) + ", keeping the stored results. "
                          "Those numbers were computed by MESA " + str(arch_ver) +
