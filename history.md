@@ -1253,3 +1253,13 @@ Open on the Zenodo record, for the user to correct as metadata: the ORCID is sti
 `0000-0003-0331-5596` where `0000-0002-4184-5224` is right, the title has "Environmentaly",
 and keywords and related identifiers are empty. The user passes the application's DOI on to
 mesa_demodata.
+
+## 2026-10-13: the 5.7.0 announcement on GitHub Discussions
+
+At the user's request an announcement for the Windows build was posted in the Announcements
+category, in the form of the one for 5.6.0: https://github.com/ragnvald/mesa/discussions/38. It
+leads with the two reasons to run Process again (the mosaic that could be deleted, and the empty
+importance figures), says that the macOS build follows as a later version of the same Zenodo
+record, gives the steps from a restored demonstration package to Process, and names one known
+issue in the published build: the console window that can flash by during processing, fixed on
+`main` in `0215efb`.
