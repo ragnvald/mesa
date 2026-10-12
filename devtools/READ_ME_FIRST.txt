@@ -26,10 +26,19 @@ Put your own files in the data folder, not here:
 No data of your own yet?
 ------------------------
 MESA is delivered without project data. Demonstration packages are published on Zenodo.
-Download one, load it in MESA under Manage data, Restore data, and run Process.
 
-    Open data from Uganda, Kenya and Ghana:   https://doi.org/10.5281/zenodo.21744272
-    Synthetic test data:                       https://doi.org/10.5281/zenodo.21744039
+    Synthetic test data (small, start here):   https://doi.org/10.5281/zenodo.21744039
+    Open data from Uganda, Kenya and Ghana:    https://doi.org/10.5281/zenodo.21744272
+
+A package holds input data only. To get from a package to results:
+
+    1. Manage data:  Restore data, and pick the zip file
+    2. Assets:       Import assets from folder
+    3. Parameters:   Load from Excel (reads input\settings.xlsx)
+    4. Geocodes:     Build mosaic
+    5. Process
+
+MESA lists these steps when the restore has finished. Each record on Zenodo includes a guide.
 
 Upgrading
 ---------

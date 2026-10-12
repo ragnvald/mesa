@@ -9,12 +9,12 @@ A release about scale and safety. Projects take far less disk and memory, map ti
 
 ### Demonstration data
 
-The download contains no project data: `input/` holds four empty folders and `output/` is empty. Demonstration packages are published as their own records. Download one, load it under **Manage data → Restore data**, and run **Process**; the packages hold input data only.
+The download contains no project data. Nine demonstration packages are published as two records of their own, each with a guide:
 
-- [Open data from sites in Uganda, Kenya and Ghana](https://doi.org/10.5281/zenodo.21744272), built from ESA WorldCover, OpenStreetMap and the Allen Coral Atlas
-- [Synthetic test data](https://doi.org/10.5281/zenodo.21744039), with invented and deliberately overlapping asset layers
+- [Synthetic test data](https://doi.org/10.5281/zenodo.21744039): four small projects with invented, deliberately overlapping asset layers. Process takes 12 to 15 seconds. The right first choice.
+- [Open data from Uganda, Kenya and Ghana](https://doi.org/10.5281/zenodo.21744272): five projects built from ESA WorldCover, OpenStreetMap and the Allen Coral Atlas.
 
-Both links always lead to the newest version of the data. The 5.7.0 versions of the two records are to be confirmed before publication.
+A package holds input data only. After **Manage data → Restore data**, import the assets (**Assets → Import assets from folder**), load the parameters (**Parameters → Load from Excel**, which reads `input/settings.xlsx`), build the mosaic under **Geocodes**, and then run **Process**. MESA lists these steps when the restore has finished. Classification is switched off in the packages. Both links always lead to the newest version of the data.
 
 ## Read this first
 
@@ -102,6 +102,10 @@ The folder you unzip now holds only the program: `mesa.exe`, its tools and a `RE
 
 ## Fixes
 
+- **Results:** the numbers for importance, sensitivity and susceptibility (minimum and maximum per cell) were written empty in projects where a geocode's rows were spread over several files, so the **Importance (max)** map layer was blank and the QGIS project and GeoNode export lacked those figures. The A to E classes, the OWA index and the counts were not affected. Run **Flatten** and **Tiles** again. The fault has been present since 5.0.
+- **Tiles:** processing no longer fails with "Invalid argument" when the project folder is inside OneDrive or another synchronised folder.
+- **Process:** the progress bar no longer jumps up and down at the start of a run that follows a cancelled or failed one.
+- **Reports:** the three example lines that Process draws in a project without lines are left out of the report. Reshape one in **Special focus → Lines** and it counts as your own.
 - **Reports:** one report run at a time, one report window; pressing Create report while one is running says so and when it started. Two simultaneous runs could produce a Word file that would not open.
 - **Maps:** "Link zoom & pan" holds the view across tabs again, and switching layer on the Overview tab no longer resets the zoom.
 - **Progress map legend** is visible again; it was drawn under the map tiles.

@@ -268,15 +268,29 @@ def build_blocks():
         ]))
 
     add(P(
-        "Demonstration data. MESA is delivered without project data: input/ holds four empty folders and output/ is empty. To try MESA before you have your own data, download a demonstration package from Zenodo and load it under Manage data, Restore data. The packages hold input data only, so run Process after restoring one. Restore replaces the input/, output/ and config.ini of the project you restore into.",
-        "Dados de demonstração. O MESA é distribuído sem dados de projecto: input/ contém quatro pastas vazias e output/ está vazia. Para experimentar o MESA antes de ter os seus próprios dados, descarregue um pacote de demonstração do Zenodo e carregue-o em Manage data, Restore data. Os pacotes contêm apenas dados de entrada, pelo que deve executar Process depois de restaurar um deles. O restauro substitui input/, output/ e config.ini do projecto de destino."))
+        "Demonstration data. MESA is delivered without project data. To try MESA before you have your own data, download a demonstration package from Zenodo. A package holds input data only, and restoring it replaces the input/, output/ and config.ini of the project you restore into. Classification is switched off in the packages.",
+        "Dados de demonstração. O MESA é distribuído sem dados de projecto. Para experimentar o MESA antes de ter os seus próprios dados, descarregue um pacote de demonstração do Zenodo. Um pacote contém apenas dados de entrada, e o seu restauro substitui input/, output/ e config.ini do projecto de destino. Classification está desactivada nos pacotes."))
     add(UL(
-        ["Open data from sites in Uganda, Kenya and Ghana (ESA WorldCover, OpenStreetMap, Allen Coral Atlas): https://doi.org/10.5281/zenodo.21744272",
-         "Synthetic test data with invented, deliberately overlapping asset layers: https://doi.org/10.5281/zenodo.21744039",
+        ["Synthetic test data, four small projects with invented and deliberately overlapping asset layers. Process takes 12 to 15 seconds, so start here: https://doi.org/10.5281/zenodo.21744039",
+         "Open data from sites in Uganda, Kenya and Ghana, five projects built from ESA WorldCover, OpenStreetMap and the Allen Coral Atlas: https://doi.org/10.5281/zenodo.21744272",
          "Each record includes a guide, and every package carries docs/readme_demodata.txt with its sources and credits. Both links always lead to the newest version of the data."],
-        ["Dados abertos de locais no Uganda, Quénia e Gana (ESA WorldCover, OpenStreetMap, Allen Coral Atlas): https://doi.org/10.5281/zenodo.21744272",
-         "Dados de teste sintéticos, com camadas inventadas e deliberadamente sobrepostas: https://doi.org/10.5281/zenodo.21744039",
+        ["Dados de teste sintéticos, quatro projectos pequenos com camadas inventadas e deliberadamente sobrepostas. Process demora 12 a 15 segundos, pelo que deve começar por aqui: https://doi.org/10.5281/zenodo.21744039",
+         "Dados abertos de locais no Uganda, Quénia e Gana, cinco projectos construídos a partir de ESA WorldCover, OpenStreetMap e Allen Coral Atlas: https://doi.org/10.5281/zenodo.21744272",
          "Cada registo inclui um guia, e cada pacote traz docs/readme_demodata.txt com as fontes e os créditos. Ambas as ligações conduzem sempre à versão mais recente dos dados."]))
+    add(P(
+        "From a package to results takes five steps, and MESA lists them when the restore has finished:",
+        "De um pacote aos resultados são cinco passos, que o MESA indica quando o restauro termina:"))
+    add(OL(
+        ["Manage data, Restore data: pick the zip file.",
+         "Assets, Import assets from folder.",
+         "Parameters, Load from Excel. This reads importance and susceptibility from input/settings.xlsx. Without it Process stops in its check before it starts.",
+         "Geocodes, Build mosaic.",
+         "Process."],
+        ["Manage data, Restore data: escolha o ficheiro zip.",
+         "Assets, Import assets from folder.",
+         "Parameters, Load from Excel. Lê a importância e a susceptibilidade de input/settings.xlsx. Sem este passo, Process pára na verificação inicial.",
+         "Geocodes, Build mosaic.",
+         "Process."]))
 
     add(H(2, "3.3 Importing data", "3.3 Importação de dados"))
     add(OL(
