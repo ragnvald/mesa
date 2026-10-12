@@ -1119,3 +1119,44 @@ At the same time the four map tabs (Overview, Segmentation, Classifications, Ass
 the look of the Qt tabs, as in Special focus. Not seen on screen.
 
 Reported to nobody yet. mesa-server mirrors the flatten step and should be told.
+
+## 2026-10-12: the reply from mesa_demodata, and what it changed here
+
+mesa_demodata answered the task of 2026-10-11
+(`docs/exchange/2026-10-12-demodata-5-7-utgivelse-svar.md`). All nine packages were rebuilt with
+a `config.ini` generated from the current template and run through MESA 5.7.0 from a copy of
+`main` at `a809713`: restore, asset import, parameters, mosaic, Process and a report, without
+errors. The two concept DOIs in our documentation are right. `uganda_eacop` is not published.
+
+Three findings concerned MESA.
+
+Our documentation was wrong, and theirs had been since 5.6.0: "restore a package, then run
+Process" does not work. After a restore nothing is imported, so Process reports the asset and
+geocode tables missing. The assets must be imported, the parameters loaded from
+`input/settings.xlsx` and the mosaic built first. Corrected in the wiki (Home with the five steps
+and a line per package, Quickstart), the release notes, `READ ME FIRST.txt`,
+`input/asset/readme.txt` and the user guide, which was regenerated. The message MESA shows when a
+restore finishes now lists the steps when the project has no results.
+
+A report took six to nine minutes on the smallest packages, nearly all of it basemap tiles. They
+measured at `a809713`, before the download was made about five times faster (`bf03015`), so the
+figure does not describe the current build.
+
+Six of thirteen maps in those reports showed lines the user does not have: Process draws three
+example lines in a project without lines, and the report treated them as data. The user decided
+that they stay out of the report. They are recognised by the description Process gives them, and
+the line editor clears that description when a line is reshaped, so a line the user has made
+their own counts again.
+
+One correction to our task letter: it said their overrides switched Classification on. They do
+not. The values were in the user's working copy of `config.ini`, saved there by the
+Classification dialog. Classification is off in the packages, confirmed by the user.
+
+Also written the same morning: `devtools/ZENODO_5.7.0.md`, the text for the application's Zenodo
+record, with the corrections mesa_demodata pointed out in the 5.6.0 record (ORCID
+`0000-0002-4184-5224`, nine projects, concept DOIs for the data), and the agreed order of
+publication in `cooperation.md`: data first, then the application.
+
+Not reported back to mesa_demodata yet: that the report now leaves example lines out, and that
+the importance figures were empty in `volta_delta`-sized projects before `9c1e913`, which their
+test at `a809713` would have had too without it showing in what they checked.

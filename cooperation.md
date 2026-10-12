@@ -109,6 +109,15 @@ code in `code` are unchanged. `basic_mosaic` and imported groups keep their name
 - The demo packages (5.7.0) carry no group names beyond the `config.ini` example, which comes from
   the template (`e0e75a0`).
 
+## Demonstration data for a release (agreed 2026-10-12, desktop + mesa_demodata)
+
+- MESA is published without project data. The demonstration packages are two Zenodo records owned by mesa_demodata, and MESA's documentation cites their **concept DOIs**, which always resolve to the newest version: open data `10.5281/zenodo.21744272`, synthetic test data `10.5281/zenodo.21744039`.
+- For 5.7.0 there are nine packages: five in the open data record (`zirimiti_sample`, `my_area`, `volta_delta`, `mombasa_reef`, `rwenzori`) and four synthetic (`coastal_zone`, `river_system`, `mountain_area`, `mount_kenya`). `uganda_eacop` is not published.
+- A package holds input data only, with a `config.ini` generated from MESA's template plus a few overrides. Classification is off in the packages (`segmv_enabled = 0`).
+- A restored package cannot go straight to Process. The steps are: import the assets, load `input/settings.xlsx` under Parameters, build the mosaic, then Process. Both projects' texts say so, and MESA says so when a restore finishes.
+- Order at a release: the data records first, then the application. The data records do not refer to the application, so nothing locks the order; the application's DOI can be added to them afterwards as a metadata change.
+- mesa_demodata tests each package against MESA's `main` from a copy, never in `d:\code\mesa`.
+
 ## Open across the two projects
 
 - **5.7.0 packages with output are refused by mesa-server.** Their contract accepts pre-built
