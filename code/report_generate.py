@@ -4290,6 +4290,20 @@ def fetch_lines_and_segments(parquet_dir: str):
         segments_df = gpd.read_parquet(segments_pq) if os.path.exists(segments_pq) else gpd.GeoDataFrame()
     except Exception:
         segments_df = gpd.GeoDataFrame()
+    # The three example lines Process draws for a project without lines are not the
+    # user's data: in a report they were six of thirteen maps of a demo project.
+    try:
+        from mesa_shared import example_line_mask
+        examples = example_line_mask(lines_df)
+        if len(lines_df) and bool(examples.any()):
+            names = set(lines_df.loc[examples, "name_gis"].astype(str)) if "name_gis" in lines_df.columns else set()
+            lines_df = lines_df.loc[~examples].reset_index(drop=True)
+            if names and len(segments_df) and "name_gis" in segments_df.columns:
+                segments_df = segments_df.loc[~segments_df["name_gis"].astype(str).isin(names)].reset_index(drop=True)
+            write_to_log(f"Report: {int(examples.sum())} example line(s) made by Process are left out "
+                         f"({len(lines_df)} line(s) of your own remain).", _LOG_BASE_DIR)
+    except Exception as exc:
+        write_to_log(f"Report: could not tell example lines apart ({exc}); all lines are included.", _LOG_BASE_DIR)
     return lines_df, segments_df
 
 def _clean_docx_text(txt: str) -> str:
@@ -4786,6 +4800,12 @@ def _plan_report_maps(gpq_dir: str, *, include_other_maps: bool, include_index_s
         plan["overview"] += 1
     if include_lines_and_segments:
         n_lines = _parquet_row_count(os.path.join(gpq_dir, "tbl_lines.parquet"))
+        try:   # example lines are left out of the report (fetch_lines_and_segments)
+            from mesa_shared import example_line_mask
+            _desc = pd.read_parquet(os.path.join(gpq_dir, "tbl_lines.parquet"), columns=["description"])
+            n_lines -= int(example_line_mask(_desc).sum())
+        except Exception:
+            pass
         if n_lines:
             plan["line"] = 2 * n_lines      # a maximum and a minimum map per line
             plan["overview"] += 1

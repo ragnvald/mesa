@@ -863,6 +863,23 @@ body.mesa-has-offline-banner { padding-top: 28px; }
 
 
 # ---------------------------------------------------------------------------
+# Example lines
+# ---------------------------------------------------------------------------
+# Process draws three random lines across a project that has none, so that the
+# Lines stage has something to show. They carry this description until the user
+# makes one of them their own (the line editor clears it when a line is reshaped).
+EXAMPLE_LINE_DESCRIPTION = "auto line"
+
+
+def example_line_mask(lines_df):
+    """True for the rows of tbl_lines that are still Process's untouched example lines."""
+    import pandas as pd
+    if lines_df is None or len(lines_df) == 0 or "description" not in lines_df.columns:
+        return pd.Series(False, index=getattr(lines_df, "index", None))
+    return lines_df["description"].astype("string").str.strip().str.lower().eq(EXAMPLE_LINE_DESCRIPTION).fillna(False)
+
+
+# ---------------------------------------------------------------------------
 # Workspace (the folder a packaged MESA keeps a project in)
 # ---------------------------------------------------------------------------
 WORKSPACE_MARKER = ".mesa_workspace.json"

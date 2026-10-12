@@ -106,3 +106,20 @@ def test_close_guard_only_asks_when_something_is_unsaved() -> None:
 
     window.answer = True
     assert closing() is None                                   # OK lets it close
+
+
+def test_reshaping_an_example_line_makes_it_the_users_own(tmp_path: Path) -> None:
+    # The report leaves Process's untouched example lines out. A line the user has
+    # reshaped must count again, so the editor clears the marker.
+    api = _api(tmp_path)
+    first = api.add_line(LINE)
+    second = api.add_line(LINE)
+    assert first["ok"] and second["ok"]
+    api._gdf["description"] = "auto line"
+    names = api._gdf["name_gis"].astype(str).tolist()
+
+    result = api.update_geometry(names[0], {"type": "LineString", "coordinates": [[0, 0], [2, 2], [3, 1]]})
+
+    assert result["ok"]
+    assert api._gdf["description"].tolist() == ["", "auto line"]
+    assert mesa_shared.example_line_mask(api._gdf).tolist() == [False, True]

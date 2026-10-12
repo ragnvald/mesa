@@ -14,7 +14,7 @@ import os, sys, uuid, threading, locale, configparser, argparse, warnings, time,
 from pathlib import Path
 from typing import Any, Dict, Optional
 from mesa_constants import TABLE_LINES, TABLE_LINES_ORIGINAL, TABLE_ASSET_GROUP, TABLE_GEOCODE_GROUP
-from mesa_shared import (guard_unsaved_on_close, leaflet_bundle, mesa_version_label, read_config,
+from mesa_shared import (example_line_mask, guard_unsaved_on_close, leaflet_bundle, mesa_version_label, read_config,
                          release_on_top_when_shown)
 from mesa_osm_tiles import OsmTileProxyManager
 
@@ -831,6 +831,11 @@ class Api:
                 if not sel.any():
                     return {"ok": False, "error": f"Line '{name_gis}' not found."}
                 self._gdf.loc[sel, "geometry"] = [geom_s] * sel.sum()
+                # A reshaped example line is the user's own line from here on: it must
+                # count in the report, which leaves untouched example lines out.
+                if "description" in self._gdf.columns:
+                    was_example = sel & example_line_mask(self._gdf)
+                    self._gdf.loc[was_example, "description"] = ""
                 self._dirty = True
                 return {"ok": True, "staged": True}
             except Exception as e:

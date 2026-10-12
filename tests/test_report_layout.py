@@ -225,3 +225,27 @@ def test_basemap_fetches_only_missing_tiles_and_caches_them(tmp_path: Path, monk
 
     draw()
     assert len(asked) - first == failed                     # the second map asks only for what is still missing
+
+
+def test_example_lines_made_by_process_stay_out_of_the_report(tmp_path: Path) -> None:
+    from shapely.geometry import LineString
+    lines = gpd.GeoDataFrame(
+        {"name_gis": ["line_001", "line_002", "road_north"],
+         "description": ["auto line", "Auto line ", "the northern road"]},
+        geometry=[LineString([(0, 0), (1, 1)]), LineString([(0, 1), (1, 0)]), LineString([(0, 0), (2, 0)])],
+        crs="EPSG:4326")
+    segments = gpd.GeoDataFrame(
+        {"name_gis": ["line_001", "line_002", "road_north", "road_north"], "segment_id": [1, 1, 1, 2]},
+        geometry=[box(0, 0, 1, 1)] * 4, crs="EPSG:4326")
+    lines.to_parquet(tmp_path / "tbl_lines.parquet", index=False)
+    segments.to_parquet(tmp_path / "tbl_segment_flat.parquet", index=False)
+
+    kept_lines, kept_segments = rg.fetch_lines_and_segments(str(tmp_path))
+
+    assert kept_lines["name_gis"].tolist() == ["road_north"]
+    assert kept_segments["name_gis"].tolist() == ["road_north", "road_north"]
+    # and the plan counts the same lines the report will draw
+    plan = rg._plan_report_maps(str(tmp_path), include_other_maps=False, include_index_statistics=False,
+                                include_lines_and_segments=True, include_atlas_maps=False,
+                                include_analysis_presentation=False, analysis_mode="single")
+    assert plan["line"] == 2
