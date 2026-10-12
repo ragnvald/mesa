@@ -111,3 +111,29 @@ def test_tile_scratch_file_falls_back_when_the_first_place_refuses_it(tmp_path: 
     monkeypatch.setattr(tcr, "spill_wkb", refusing)
     path, offsets = tcr.spill_wkb_scratch(_geoms(), tmp_path, "grid")
     assert path.parent == scratch and len(offsets) == 3
+
+
+def test_programs_started_by_a_packaged_mesa_get_no_console_window() -> None:
+    # joblib asks PowerShell for the core count the first time scikit-learn runs; in a
+    # packaged MESA that showed as a black window flashing by during processing.
+    import subprocess
+    import pytest
+    if sys.platform != "win32":
+        pytest.skip("Windows only")
+    probe = [sys.executable, "-c",
+             "import ctypes; print(int(bool(ctypes.windll.kernel32.GetConsoleWindow())))"]
+    try:
+        ms.hide_child_console_windows()
+        ms.hide_child_console_windows()          # calling it twice changes nothing
+        hidden = subprocess.run(probe, capture_output=True, text=True).stdout.strip()
+    finally:
+        subprocess.Popen.__init__ = subprocess.Popen._mesa_original_init
+        subprocess.Popen._mesa_no_console = False
+    assert hidden == "0"            # an ordinary child has no console window
+
+    # a caller that asks for a console of its own still gets one (checked on the flags
+    # only: starting such a child would put a window on the screen)
+    asked = subprocess.CREATE_NEW_CONSOLE
+    assert ms.child_creation_flags(asked) == asked
+    assert ms.child_creation_flags(0) == subprocess.CREATE_NO_WINDOW
+    assert ms.child_creation_flags(subprocess.CREATE_NEW_PROCESS_GROUP) & subprocess.CREATE_NO_WINDOW

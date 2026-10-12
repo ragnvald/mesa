@@ -863,6 +863,49 @@ body.mesa-has-offline-banner { padding-top: 28px; }
 
 
 # ---------------------------------------------------------------------------
+# No console windows from a packaged MESA
+# ---------------------------------------------------------------------------
+def child_creation_flags(flags: int) -> int:
+    """Creation flags for a child of a packaged MESA: no console window, unless one is asked for."""
+    import subprocess
+    flags = int(flags or 0)
+    if flags & subprocess.CREATE_NEW_CONSOLE:
+        return flags
+    return flags | subprocess.CREATE_NO_WINDOW
+
+
+def hide_child_console_windows() -> None:
+    """Make every program this process starts run without a console window (Windows).
+
+    A packaged MESA has no console of its own, so Windows opens one for any
+    console program it starts, and the user sees a black window flash by. It is
+    not only MESA's own calls: joblib asks PowerShell for the number of processor
+    cores the first time scikit-learn runs. Setting the flag where a process is
+    created covers all of them. See learning.md "A console window that flashes by".
+    """
+    if sys.platform != "win32":
+        return
+    import subprocess
+    if getattr(subprocess.Popen, "_mesa_no_console", False):
+        return
+    original_init = subprocess.Popen.__init__
+
+    def __init__(self, *args, **kwargs):
+        kwargs["creationflags"] = child_creation_flags(kwargs.get("creationflags"))
+        original_init(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = __init__
+    subprocess.Popen._mesa_no_console = True
+    subprocess.Popen._mesa_original_init = original_init
+
+
+# Every MESA process, the helpers and the worker processes included, imports this
+# module early. From source there is a terminal and children should show in it.
+if getattr(sys, "frozen", False):
+    hide_child_console_windows()
+
+
+# ---------------------------------------------------------------------------
 # Example lines
 # ---------------------------------------------------------------------------
 # Process draws three random lines across a project that has none, so that the

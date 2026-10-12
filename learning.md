@@ -1338,3 +1338,9 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - Rule: a web page that waits for its backend starts loading exactly once, and a load that draws on a map must be safe to run twice.
 - Why: reshaped and deleted lines stayed on the Lines map as ghosts. The page listened for `pywebviewready` and also polled for the backend; inside Special focus both fired, two loads overlapped, and every line was drawn twice with only one copy tracked. The copies coincided, so nothing showed until a line was changed. It could not be seen by reading one function at a time: each load is correct alone.
 - How to apply: guard the start (`startOnce`), give an asynchronous load a sequence number and let only the newest draw, clear immediately before drawing rather than before waiting, and make the function that adds an item replace an existing one with the same id. To check without a screen, drive the page in QtWebEngine offscreen with a stub `window.pywebview.api` that becomes ready by event after the page has started, and compare the number of layers on the map with the number tracked.
+
+## A console window that flashes by (2026-10-12)
+
+- Rule: a packaged MESA starts every child program without a console window, set once where processes are created, not call by call.
+- Why: a black window appeared and closed during processing. MESA's own PowerShell calls already passed `CREATE_NO_WINDOW`; the one that did not belongs to joblib, which asks PowerShell for the core count the first time scikit-learn runs. A library's call cannot be given a flag at the call site, and the next library will have another.
+- How to apply: `hide_child_console_windows()` in `mesa_shared.py` runs at import in a frozen build. Do not add `creationflags` to individual calls for this purpose. A child that must have a console passes `CREATE_NEW_CONSOLE` and keeps it. A test for this must not start such a child: it puts a window on the screen.

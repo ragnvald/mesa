@@ -1213,3 +1213,18 @@ For the second complaint the staging model stays, as decided on 2026-10-11, but 
 it plainly. Messages read "Shape changed, not saved yet. Click Save to keep it." instead of
 "Geometry staged.", in the warning colour. While there are unsaved changes the Save button is
 orange and reads "Save changes", and the badge beside it reads "Not saved yet".
+
+## 2026-10-12: a console window flashed by during processing
+
+Reported from the sixth 5.7.0 build: a command-line window appears and closes during processing.
+MESA's helpers are built without a console, and MESA's own calls to PowerShell already ask for
+no window. The likely source is a library: joblib, which scikit-learn uses, asks PowerShell for
+the number of processor cores the first time it needs it, with a plain `subprocess.run`. In a
+program without a console Windows opens one for that child. It runs in the Classification stage,
+which is switched on in the user's project.
+
+Not observed directly: no stage was run on screen to catch the window. The fix does not depend on
+which program it was. `mesa_shared.hide_child_console_windows()` sets "no window" where a process
+is created, for every child, unless the caller asks for a console of its own. It is applied when
+`mesa_shared` is imported in a packaged build, which every MESA process does early, the helpers
+and the worker processes included. From source nothing changes.
