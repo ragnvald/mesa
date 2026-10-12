@@ -1082,3 +1082,40 @@ functions by unit tests, the two dialogs and the decision of when each is shown 
 offscreen against temporary folders, the package layout by running the build's copy and
 verification steps into a temporary folder. Not checked: the real packaged start, which needs a
 new build and a click through by the user.
+
+## 2026-10-12: "Importance (max)" was blank, because tbl_flat had no numbers
+
+From the second 5.7.0 build the user reported that the Importance (max) layer on the Overview tab
+of the map window showed nothing. The tile log said why: `importance_max: tiles written 0 /
+scheduled 17` for every geocode group. The tiles were empty because the column was: in the
+project's `tbl_flat` all of `importance_min/max`, `sensitivity_min/max` and
+`susceptibility_min/max` were null in 9,148 of 9,148 rows, while the class codes beside them were
+filled. `tbl_stacked` and `tbl_asset_group` held the values.
+
+Reproduced from source on a copy of the project. The flatten workers return correct values per
+partition. The loss is in the parent, in the branch that runs when a geocode's rows are spread
+over several partition files ("Resolving split geocodes"): the per-code table already has
+`importance_max`, the table of (value, class) winners has it too, and the plain merge renamed the
+two copies to `importance_max_x` and `importance_max_y`. The table was written without the
+column, and the schema step filled it with nulls. The code has been there since 5.0; it shows
+only for projects whose codes are split over partitions, which this small demo project's seven
+partitions are and the large development project's are not.
+
+Fixed with `_merge_code_extremes()`, which drops the aggregated copy before the merge. The same
+flatten on the same copy then gave 9,148 of 9,148 values. A second fault was found beside it and
+fixed: the sort key for a missing value was written into a nullable Int64 column, which raises
+when a value is actually missing.
+
+What it affected in a project that hit it: the Importance (max) map layer and its tiles, the
+numeric min/max columns in the QGIS project and GeoNode export, and anything reading those
+numbers from `tbl_flat`. The A to E sensitivity classes, the OWA index and the counts were not
+affected. An affected project needs Flatten and Tiles run again with the corrected build.
+
+The first attempt at the reproduction hung for ten minutes: the script called the pipeline
+without an `if __name__ == "__main__"` guard, so each spawned worker started the pipeline again.
+Nine processes were left and were stopped.
+
+At the same time the four map tabs (Overview, Segmentation, Classifications, Assets) were given
+the look of the Qt tabs, as in Special focus. Not seen on screen.
+
+Reported to nobody yet. mesa-server mirrors the flatten step and should be told.

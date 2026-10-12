@@ -1320,3 +1320,15 @@ This guidance was folded into the wiki **Data** page (`mesa.wiki/Data.md`) on 20
 - Rule: a packaged MESA has nothing beside `mesa.exe` that looks like a place for data. Templates ship inside `_internal/`; the user is asked where the data folder goes before anything is written; the location is always visible in the main window.
 - Why: since 5.6 a packaged build keeps its project under Documents, but the Windows package still had `input/`, `output/` and `config.ini` beside the program, and the first start copied them to the data folder without a question. A user who put files in `input/asset` beside `mesa.exe` saw nothing happen. On a machine where Documents is redirected to OneDrive the project landed in a synchronised folder, which is also where the tile stage then failed.
 - How to apply: `SEEDED_NAMES` in `devtools/build_all.py` lists what a first start copies; add a new template there, never beside the program, and `verify_distribution()` will hold the line. Anything the program writes goes under `original_working_directory`, not `PROJECT_BASE`. Questions that must be answered before the data folder exists belong in `_choose_workspace_at_start()` in `mesa.py`, which runs before `_bootstrap_config()` and only in a packaged build.
+
+## A merge that renames a column loses it (2026-10-12)
+
+- Rule: before merging two tables on a key, make sure no other column is in both. If one is, decide which copy wins and drop the other first.
+- Why: `tbl_flat` was written with every numeric min/max (`importance_max`, `sensitivity_max` and their like) empty, in all 9,148 rows of a project, while the class codes were filled. The per-code aggregate and the table of (value, class) winners both carried the value column; `merge(on="code")` renamed them `_x` and `_y`, nothing downstream looked for those names, and the schema step created the expected column as nulls. The first visible symptom was a blank Importance (max) map layer three stages later. The branch only runs when a geocode's rows are split over partition files, so the large development project never showed it, and it has been in every MESA 5 release.
+- How to apply: after a merge in the pipeline, a column ending in `_x` or `_y` is a bug; `_merge_code_extremes()` in `processing_internal.py` shows the pattern. When a map layer is blank, read the tile log line "tiles written 0 / scheduled N" and then count non-null values in the column, before looking at the viewer. Test on a small project as well as a large one: they take different branches.
+
+## A script that starts the pipeline needs a main guard (2026-10-12)
+
+- Rule: any script that calls `run_headless()` or anything else that opens a `spawn` pool must do so under `if __name__ == "__main__":`.
+- Why: a reproduction script without the guard hung for ten minutes and left nine processes. Under `spawn` every worker imports the main script, and without the guard each import started the pipeline again.
+- How to apply: write the guard first in any scratch script that touches `processing_internal`, `tiles_create_raster` or the report's worker pools, and give the run a timeout.

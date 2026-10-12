@@ -2911,6 +2911,22 @@ def _compute_index_owa_from_counts(
 # ----------------------------
 # Parallel Flattening Workers
 # ----------------------------
+def _merge_code_extremes(tbl: pd.DataFrame, extremes: list) -> pd.DataFrame:
+    """Join the per-code (value, class) winners onto the per-code table.
+
+    The value column (importance_max and its like) is in both. Merging it as it
+    stood made pandas rename the two copies to _x and _y, so the table went out
+    with no importance_max at all and every numeric min/max was written as empty.
+    The winner's value replaces the aggregated one: it is the same number, and it
+    is the one its class code was chosen with.
+    See learning.md "A merge that renames a column loses it".
+    """
+    for winners in extremes:
+        shared = [c for c in winners.columns if c != "code" and c in tbl.columns]
+        tbl = tbl.drop(columns=shared).merge(winners, on="code", how="left")
+    return tbl
+
+
 def _flatten_worker_named(args):
     """Wrapper so the drain+restart orchestrator can track which input
     partition produced which result. Files for which we receive a tuple
@@ -3000,11 +3016,14 @@ def _flatten_worker(args):
         numeric_values = pd.to_numeric(frame[base], errors="coerce")
         category_codes = _pick_base_category(frame, base)
         local_df = pd.DataFrame({"code": frame["code"], "val": numeric_values, "cat": category_codes})
+        # The sort key is a float copy: a nullable Int64 column cannot hold the
+        # infinity that puts a missing value last, and raises instead.
+        sort_key = local_df["val"].astype("float64")
         if pick == "max":
-            local_df["sv"] = local_df["val"].fillna(-np.inf)
+            local_df["sv"] = sort_key.fillna(-np.inf)
             local_df = local_df.sort_values(["code","sv","cat"], ascending=[True, False, True], kind="mergesort")
         else:
-            local_df["sv"] = local_df["val"].fillna(np.inf)
+            local_df["sv"] = sort_key.fillna(np.inf)
             local_df = local_df.sort_values(["code","sv","cat"], ascending=[True, True, True], kind="mergesort")
         return local_df.drop_duplicates(subset=["code"], keep="first")[["code","val","cat"]].rename(
             columns={"val": f"{base}_{pick}", "cat": f"{base}_code_{pick}"}
@@ -3708,8 +3727,7 @@ def flatten_tbl_stacked(config_file: Path, working_epsg: str,
         tbl_flat = res_simple
         tbl_flat = tbl_flat.merge(asset_counts, on="code", how="left")
         tbl_flat = tbl_flat.merge(asset_names, on="code", how="left")
-        for df_ex in merged_extremes:
-            tbl_flat = tbl_flat.merge(df_ex, on="code", how="left")
+        tbl_flat = _merge_code_extremes(tbl_flat, merged_extremes)
             
     else:
         # No duplicates, just clean up the list columns
