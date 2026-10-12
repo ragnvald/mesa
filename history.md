@@ -1228,3 +1228,28 @@ which program it was. `mesa_shared.hide_child_console_windows()` sets "no window
 is created, for every child, unless the caller asks for a console of its own. It is applied when
 `mesa_shared` is imported in a packaged build, which every MESA process does early, the helpers
 and the worker processes included. From source nothing changes.
+
+## 2026-10-12 and 13: MESA 5.7.0 is published
+
+The user published the Windows build on Zenodo on 2026-10-12 as `10.5281/zenodo.23314128`, a new
+version under the concept DOI `10.5281/zenodo.10775727`, and created the GitHub release `5.7.0`
+the same evening (published 22:22 UTC, marked as latest), with `devtools/RELEASE_NOTES_5.7.0.md`
+as its text. The tag points at `752eb37`, the commit the uploaded file was built from; the file
+on Zenodo has the same MD5 as the build in `D:\dist`. The data records had been published
+earlier the same day, so the agreed order held.
+
+Not in the published build: `0215efb`, which stops a console window flashing by during
+processing. It is on `main` and goes out with the next build.
+
+The macOS build could not be made, since the user is travelling and away from the Mac. It is to
+follow as a new version of the same Zenodo record, containing both files; the steps are in
+`devtools/ZENODO_5.7.0.md`.
+
+The first attempt to create the GitHub release failed with "Release.target_commitish is
+invalid": the command I had given used the abbreviated commit id, and GitHub accepts only a
+branch or the full id as target. Nothing was created by the failed attempt.
+
+Open on the Zenodo record, for the user to correct as metadata: the ORCID is still
+`0000-0003-0331-5596` where `0000-0002-4184-5224` is right, the title has "Environmentaly",
+and keywords and related identifiers are empty. The user passes the application's DOI on to
+mesa_demodata.
