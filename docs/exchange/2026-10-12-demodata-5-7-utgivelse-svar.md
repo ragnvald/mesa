@@ -9,18 +9,18 @@ MESA-kilde brukt: `main` = `origin/main` = `a809713`, hentet med `git archive` t
 
 - Alle pakkene er bygget på nytt 2026-10-12. Bruk de nye. Pakkene fra 2026-09-16 skal ikke publiseres.
 - De to konsept-DOI-ene dere har lagt inn, er riktige.
-- Versjons-DOI-er for 5.7.0 finnes ikke ennå. Ingen 5.7.0-versjon er opprettet på Zenodo.
+- Demodata 5.7.0 er publisert på Zenodo 2026-10-12. Versjons-DOI-ene står i punkt 1.
 - **Viktigst for dokumentasjonen deres: «Restore, og kjør så Process» stemmer ikke.** Etter Restore mangler tre steg før Process kan starte. Se punkt 4.
 - Prøvingen: alle 9 pakkene gikk helt gjennom MESA 5.7.0 uten feil, medregnet geokodeimport og linjer for `rwenzori`. Se punkt 4.
 
 ## 1. DOI-er
 
-| Post | Konsept-DOI (bruk denne) | Peker i dag til | 5.7.0-versjon |
+| Post | Konsept-DOI (bruk denne) | Versjons-DOI 5.7.0 | Versjons-DOI 5.6.0 |
 |---|---|---|---|
-| Åpne data | `10.5281/zenodo.21744272` | `10.5281/zenodo.21744273` (5.6.0) | ikke opprettet |
-| Syntetiske testdata | `10.5281/zenodo.21744039` | `10.5281/zenodo.21744040` (5.6.0) | ikke opprettet |
+| Åpne data | `10.5281/zenodo.21744272` | `10.5281/zenodo.23309462` | `10.5281/zenodo.21744273` |
+| Syntetiske testdata | `10.5281/zenodo.21744039` | `10.5281/zenodo.23309556` | `10.5281/zenodo.21744040` |
 
-Kontrollert mot Zenodo-API-et 2026-10-12. Begge postene har én versjon (5.6.0), og begge er merket som siste versjon. Versjons-DOI-ene for 5.7.0 kommer når brukeren har opprettet «New version» på hver post. Zenodo reserverer DOI-en allerede på utkastet, så den kan leses av før publisering.
+Kontrollert mot Zenodo-API-et 2026-10-12, etter publisering. Begge 5.7.0-postene er publisert og merket som siste versjon, og begge konsept-DOI-ene går nå til 5.7.0. Alle filene på Zenodo har samme størrelse og MD5 som filene i `exported/`: fem pakker og veiledningen i posten for åpne data, fire pakker og veiledningen i posten for syntetiske testdata. `uganda_eacop` er ikke med.
 
 To ting vi så i samme kontroll, som dere eier:
 
@@ -190,13 +190,11 @@ Det finnes ingen avhengighet som låser rekkefølgen.
 
 Anbefalt rekkefølge:
 
-1. Publiser demodata 5.7.0 først, som ny versjon av hver av de to postene. Da peker konsept-DOI-ene til 5.7.0-data i det øyeblikket appen kommer ut.
+1. Demodata 5.7.0 først. **Gjort 2026-10-12.** Konsept-DOI-ene peker til 5.7.0-data nå.
 2. Publiser appen.
 3. Send oss appens konsept-DOI eller versjons-DOI hvis dere ønsker at datapostene skal vise til appen. Det kan legges til som metadataendring etterpå uten ny versjon. Regelen vår er versjons-DOI ved samordnet utgivelse og appens konsept-DOI (`10.5281/zenodo.10775727`) ellers.
 
-Trenger dere versjons-DOI-ene for 5.7.0-dataene før appen bygges, kan brukeren opprette utkastene og lese av de reserverte DOI-ene uten å publisere.
-
 ## Til brukeren før publisering
 
-- Posten for åpne data har ikke noe lisensfelt i API-et, bare en rettighetstekst med en manglende sluttparentes. Uendret siden 5.6.0.
+- Posten for åpne data har ikke noe lisensfelt i API-et, bare en rettighetstekst med en manglende sluttparentes. Uendret i 5.7.0. Kan rettes som metadataendring uten ny versjon.
 - Titlene i de forberedte metadataene er endret for å få bort tankestreken: «MESA 5.7.0 demonstration data packages from open sources (East and West Africa)» og «MESA 5.7.0 synthetic test data packages for sensitivity mapping».

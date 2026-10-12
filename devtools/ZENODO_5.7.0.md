@@ -8,7 +8,7 @@ Skrivestil som i 5.5.0-posten: flytende prosa, ingen overskrifter, punktlister e
 
 Avtalt med mesa_demodata 2026-10-12 (`docs/exchange/2026-10-12-demodata-5-7-utgivelse-svar.md`):
 
-1. Publiser demodata 5.7.0 først, som ny versjon av hver av de to datapostene. Da peker konsept-DOI-ene til 5.7.0-data i det øyeblikket appen kommer ut.
+1. Demodata 5.7.0 først. **Gjort 2026-10-12.** Versjons-DOI-ene er `10.5281/zenodo.23309462` (åpne data) og `10.5281/zenodo.23309556` (syntetiske testdata), og konsept-DOI-ene peker nå til dem.
 2. Publiser denne posten.
 3. Send appens versjons-DOI til mesa_demodata hvis datapostene skal vise til appen. Det kan legges til som metadataendring uten ny versjon.
 

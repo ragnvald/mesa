@@ -1160,3 +1160,13 @@ publication in `cooperation.md`: data first, then the application.
 Not reported back to mesa_demodata yet: that the report now leaves example lines out, and that
 the importance figures were empty in `volta_delta`-sized projects before `9c1e913`, which their
 test at `a809713` would have had too without it showing in what they checked.
+
+## 2026-10-12: the demonstration data for 5.7.0 is published
+
+The user published the 5.7.0 versions of the two data records on Zenodo, and mesa_demodata
+updated its reply with the result: open data `10.5281/zenodo.23309462`, synthetic test data
+`10.5281/zenodo.23309556`. Both are marked as the latest version, so the concept DOIs that
+MESA's documentation uses now lead to 5.7.0 data, and every file on Zenodo has the size and MD5
+of the file in `exported/`. The first step of the agreed order is thereby done; the application
+record is next. The reply in `docs/exchange/` is the updated one, the version DOIs are noted in
+`cooperation.md` and in `devtools/ZENODO_5.7.0.md`, and no documentation text needed changing.
