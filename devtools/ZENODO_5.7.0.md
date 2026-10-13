@@ -31,7 +31,7 @@ Posten for 5.6.0 (`10.5281/zenodo.21745481`) har tre ting som ikke skal følge m
 
 ## Tittel
 
-> MESA 5.7.0: Environmental sensitivity assessment tool (compiled Windows build)
+> MESA 5.7.0: Mapping Environmentally Sensitive Assets (compiled Windows build)
 
 Tittelen **må** inneholde `5.7.0`. `github_release_from_zenodo.py` utleder GitHub-taggen fra den.
 
