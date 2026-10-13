@@ -4382,7 +4382,7 @@ class MesaMainWindow(QMainWindow):
         intro_group = QGroupBox("Welcome to MESA")
         intro_layout = QVBoxLayout(intro_group)
         intro_text = QLabel(
-            "MESA (Method for an Easy Sensitivity Assessment) helps you run a complete "
+            "MESA (Mapping Environmentally Sensitive Assets) helps you run a complete "
             "sensitivity assessment on your own machine: import spatial data, configure "
             "the analysis, run the processing pipeline, and produce maps and reports. "
             "All data stays local — nothing is uploaded to external services.\n\n"
@@ -6527,7 +6527,7 @@ class MesaMainWindow(QMainWindow):
         about_layout.addWidget(about_text)
 
         about_desc = QLabel(
-            "MESA (Method for an Easy Sensitivity Assessment) is a desktop application "
+            "MESA (Mapping Environmentally Sensitive Assets) is a desktop application "
             "for environmental sensitivity assessment. It guides analysts through a "
             "complete workflow: importing spatial data, configuring analysis parameters, "
             "running automated processing, and reviewing results through interactive "

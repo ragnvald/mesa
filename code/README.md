@@ -1,7 +1,7 @@
 # MESA Tool (compiled distribution)
 
 ## Overview
-The MESA (Methods for Environmental Sensitivity Assessment) tool is a Windows desktop package built for assessing and mapping environmental sensitivity, particularly around marine pollution incidents and land-use planning. It bundles the full Python/Tkinter application plus helper executables (`mesa.exe`, `processing_setup.exe`, `processing_pipeline_run.exe`, etc.) so teams can evaluate coastal assets, ecosystems, and wildlife without installing Python or GIS drivers. Everything needed to score vulnerability, process geospatial datasets, and export reports lives inside one extracted folder.
+The MESA (Mapping Environmentally Sensitive Assets) tool is a Windows desktop package built for assessing and mapping environmental sensitivity, particularly around marine pollution incidents and land-use planning. It bundles the full Python/Tkinter application plus helper executables (`mesa.exe`, `processing_setup.exe`, `processing_pipeline_run.exe`, etc.) so teams can evaluate coastal assets, ecosystems, and wildlife without installing Python or GIS drivers. Everything needed to score vulnerability, process geospatial datasets, and export reports lives inside one extracted folder.
 
 ## Highlights
 - Environmental sensitivity assessment: systematic scoring of assets against importance and sensitivity indices.

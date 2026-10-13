@@ -1,7 +1,7 @@
 # MESA System Overview
 
 ## 1. What MESA Delivers
-MESA (Methods for Environmental Sensitivity Assessment) is a guided desktop workspace for teams that need to understand which assets are most vulnerable. Instead of stitching together numerous GIS tools, MESA offers one launcher with clearly labelled buttons. Each button opens a focused helper window that walks you through a single task—importing assets, setting up scoring rules, processing results, or exporting maps and reports. The helpers share the same project data, so once a step is completed every other screen can immediately build on it. The result is a predictable workflow that produces comparable outputs every time.
+MESA (Mapping Environmentally Sensitive Assets) is a guided desktop workspace for teams that need to understand which assets are most vulnerable. Instead of stitching together numerous GIS tools, MESA offers one launcher with clearly labelled buttons. Each button opens a focused helper window that walks you through a single task—importing assets, setting up scoring rules, processing results, or exporting maps and reports. The helpers share the same project data, so once a step is completed every other screen can immediately build on it. The result is a predictable workflow that produces comparable outputs every time.
 
 ## 2. A Typical Assessment Journey
 1. **Bring assets into the project.** Start with the *Import* button to load wildlife sites, infrastructure, or other layers. The importer checks projection, duplicates, and attribute names so later steps run smoothly.
