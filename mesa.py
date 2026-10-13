@@ -2225,6 +2225,17 @@ def _bootstrap_config() -> None:
     _migrate_geocode_group_names(original_working_directory)
     config = read_config(config_file)
     mesa_version = config['DEFAULT'].get('mesa_version', 'MESA 5')
+    # A packaged build is the version it ships. A data folder kept from an earlier
+    # version has that version in its config.ini; see learning.md "The program's
+    # version is the program's, not the data folder's".
+    program_version = _program_version() if getattr(sys, "frozen", False) else ""
+    if program_version and program_version != mesa_version:
+        stamped = _stamp_config_version(Path(config_file), program_version)
+        log_to_logfile(
+            f"Data folder was last written by {mesa_version}; this is {program_version}. "
+            f"config.ini {'updated' if stamped else 'could not be updated'}.")
+        mesa_version = program_version
+        config['DEFAULT']['mesa_version'] = program_version
     mesa_version_display = _format_display_version(mesa_version)
     packaged_build_info = _read_packaged_build_info()
     packaged_build_timestamp = str(packaged_build_info.get("build_timestamp", "") or "").strip()
