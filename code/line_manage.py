@@ -1422,8 +1422,10 @@ async function loadAll(){
 
     enforceVisibility();
     showStatus('Ready.','status-ok');
+    return true;
   } catch(err){
     showStatus('API error: '+err, 'status-err');
+    return false;
   }
 }
 
@@ -1540,7 +1542,12 @@ function boot(){
     if (started) return;
     started = true;
     if (tic) clearInterval(tic);
-    loadAll();
+    // One start, but not one attempt: the backend can be there before its methods are.
+    let attempts = 0;
+    (async function attempt(){
+      const ok = await loadAll();
+      if (ok === false && ++attempts < 40){ showStatus('Waiting for backend…', 'status-warn'); setTimeout(attempt, 250); }
+    })();
   }
   if (window.pywebview && window.pywebview.api) {
     startOnce();

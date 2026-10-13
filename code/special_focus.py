@@ -84,9 +84,18 @@ _SHIM_JS = r"""(function(){
     if(!window.pywebview){ window.pywebview={ api:new Proxy({}, handler) }; }
     try{ window.dispatchEvent(new Event('pywebviewready')); }catch(e){}
   }
-  if(real()){ ready(); }
+  // Live means that this app's own methods are there. The parent's api object
+  // exists a moment before the namespaced methods are added to it, and a page
+  // that called in that moment got "no bridge method".
+  function live(){
+    var r=real(); if(!r) return false;
+    try{ for(var k in r){ if(k.indexOf(NS+'__')===0 && typeof r[k]==='function') return true; } }catch(e){}
+    return false;
+  }
+  if(live()){ ready(); }
   else { var n=0, iv=setInterval(function(){
-    if(real()){ clearInterval(iv); ready(); } else if(++n>200){ clearInterval(iv); }
+    if(live()){ clearInterval(iv); ready(); }
+    else if(++n>400){ clearInterval(iv); if(real()) ready(); }
   }, 50); }
 })();"""
 
