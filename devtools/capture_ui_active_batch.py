@@ -41,6 +41,7 @@ TARGET_SCRIPT_NAMES = {
     "analysis_present.py",
     "line_manage.py",
     "segmentation_setup.py",
+    "special_focus.py",
 }
 
 
@@ -572,6 +573,8 @@ def main() -> None:
         HelperCapture("asset_manage", ["code/asset_manage.py", "--original_working_directory", str(repo)], "asset", 35.0),
         HelperCapture("processing_setup", ["code/processing_setup.py", "--original_working_directory", str(repo)], "setup", 40.0),
         HelperCapture("processing_pipeline_run", ["code/processing_pipeline_run.py", "--original_working_directory", str(repo)], "process all", 40.0),
+        HelperCapture("processing_pipeline_run_advanced", ["code/processing_pipeline_run.py", "--original_working_directory", str(repo)], "process all", 40.0,
+                      env={"MESA_DEVTOOLS_PROCESS": "advanced"}),
         HelperCapture("atlas_manage", ["code/atlas_manage.py", "--original_working_directory", str(repo)], "atlas", 35.0),
         HelperCapture("combined_map", ["code/combined_map.py"], "mesa maps", 50.0),
         # Segmentation tab with the Zones table pre-sorted (by mean sensitivity)
@@ -592,7 +595,12 @@ def main() -> None:
         HelperCapture("analysis_setup", ["code/analysis_setup.py", "--original_working_directory", str(repo)], "area analysis", 40.0),
         HelperCapture("analysis_present", ["code/analysis_present.py", "--original_working_directory", str(repo)], "comparison", 40.0),
         HelperCapture("geocode_group_edit", ["code/geocode_manage.py", "--start-tab", "edit", "--original_working_directory", str(repo)], "geocode manage", 35.0),
-        HelperCapture("line_manage", ["code/line_manage.py", "--original_working_directory", str(repo)], "edit line", 40.0),
+        # Lines and Study areas as the user meets them: the two tabs of the Special
+        # focus window, not the standalone editors. The second uses the devtools hook
+        # MESA_DEVTOOLS_FOCUS=analysis in special_focus.py to open on that tab.
+        HelperCapture("line_manage", ["code/special_focus.py", "--original_working_directory", str(repo)], "special focus", 45.0),
+        HelperCapture("special_focus_study_areas", ["code/special_focus.py", "--original_working_directory", str(repo)], "special focus", 45.0,
+                      env={"MESA_DEVTOOLS_FOCUS": "analysis"}, out_filename="ui_analysis_setup.png"),
         # Configure -> Classification (the opt-in tick and its settings).
         HelperCapture("segmentation_setup", ["code/segmentation_setup.py", "--original_working_directory", str(repo)], "classification (setup)", 35.0),
     ]
@@ -616,7 +624,9 @@ def main() -> None:
     # MESA_DEVTOOLS_POPUP env hook in mesa.py's __main__ block.
     popups = [
         PopupCapture("tune", "tune processing", "ui_tune_processing_popup.png", 35.0),
+        # The devtools hook fills in example connection values, so neither capture shows the real server.
         PopupCapture("geonode", "publish to geonode", "ui_geonode_publish_popup.png", 35.0),
+        PopupCapture("geonode_manage", "publish to geonode", "ui_geonode_manage_server.png", 35.0),
     ]
 
     if not args.skip_popups:

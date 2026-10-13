@@ -867,7 +867,7 @@ class AnalysisData:
         summary["sensitivity"] = self._sensitivity_entries(totals_by_code, fallback_desc)
 
         if not totals_by_code and summary["processed_count"] == 0:
-            summary["message"] = "No analysis results found. Run analysis_process.py to generate outputs."
+            summary["message"] = "No analysis results found. Run Process with Analysis ticked to make them."
         else:
             summary["message"] = ""
         return summary
@@ -886,7 +886,7 @@ class AnalysisData:
             return summary
 
         if not self.has_stacked:
-            summary["message"] = "No comprehensive analysis available yet. Run analysis_process.py to populate tbl_analysis_stacked.parquet."
+            summary["message"] = "No analysis results for this study area yet. Run Process with Analysis ticked."
             return summary
 
         subset = self.stacked[self.stacked["analysis_group_id"].astype(str) == str(group_id)].copy()
@@ -1107,8 +1107,7 @@ class AnalysisData:
             return "No analysis areas available. Run analysis_setup.py to create them."
         if not self.has_analysis:
             return (
-                "No analysis results detected. Run analysis_process.py "
-                "to populate tbl_analysis_flat.parquet and tbl_analysis_stacked.parquet."
+                "No analysis results yet. Run Process with Analysis ticked."
             )
         return f"Loaded {len(self.groups)} area(s). Select two areas to compare."
 

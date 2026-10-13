@@ -6847,9 +6847,19 @@ QRadioButton::indicator:checked {{
     # without having to drive the UI via click coordinates.
     _devtools_popup = os.environ.get("MESA_DEVTOOLS_POPUP", "").strip().lower()
     if _devtools_popup:
+        def _devtools_geonode(tab: int = 0) -> None:
+            # A screenshot must never show the real server: example values, no password.
+            main_window._open_geonode_publisher()
+            win = main_window._geonode_window
+            win._geonode_url.setText("https://geonode.example.org/")
+            win._geonode_username.setText("mesa_user")
+            win._geonode_password.clear()
+            win._geonode_tabs.setCurrentIndex(tab)
+
         _popup_dispatch = {
             "tune": main_window._open_tune_processing,
-            "geonode": main_window._open_geonode_publisher,
+            "geonode": lambda: _devtools_geonode(0),
+            "geonode_manage": lambda: _devtools_geonode(1),
         }
         _popup_call = _popup_dispatch.get(_devtools_popup)
         if _popup_call is not None:

@@ -27,6 +27,7 @@ CALLED BY
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -236,7 +237,7 @@ HOST_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   }
   // Paint the host chrome first, then load the default (Lines) tab — keeps the
   // window from appearing blank while a heavy embedded app initialises.
-  window.addEventListener('load', function(){ show('lines'); });
+  window.addEventListener('load', function(){ show('__MESA_START_TAB__'); });
   document.querySelectorAll('.tab').forEach(function(b){ b.addEventListener('click', function(){ show(b.dataset.tab); }); });
   document.getElementById('exit').addEventListener('click', function(){
     // No prompt here: the window's closing hook asks about unsaved changes on
@@ -266,7 +267,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?", 1)[0]
         if p in ("/", "/index.html"):
-            self._send_html(HOST_HTML)
+            # Devtools hook for the screenshot tool: MESA_DEVTOOLS_FOCUS=analysis opens on Study areas.
+            start_tab = os.environ.get("MESA_DEVTOOLS_FOCUS", "").strip().lower()
+            self._send_html(HOST_HTML.replace("__MESA_START_TAB__", start_tab if start_tab in ("lines", "analysis") else "lines"))
         elif p == "/lines":
             self._send_html(_page("lines"))
         elif p == "/analysis":

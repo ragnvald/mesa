@@ -2434,6 +2434,9 @@ class ProcessRunnerWindow(QMainWindow):
         self._rb_normal   = QRadioButton("Normal")
         self._rb_advanced = QRadioButton("Advanced")
         self._rb_normal.setChecked(True)
+        # Devtools hook for the screenshot tool: MESA_DEVTOOLS_PROCESS=advanced.
+        if os.environ.get("MESA_DEVTOOLS_PROCESS", "").strip().lower() == "advanced":
+            QTimer.singleShot(300, lambda: self._rb_advanced.setChecked(True))
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._rb_normal)
         self._mode_group.addButton(self._rb_advanced)
