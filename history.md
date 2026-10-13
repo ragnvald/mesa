@@ -1302,3 +1302,34 @@ with `0215efb`. Nothing was reported to mesa-server or mesa_demodata; neither is
 
 The title in `devtools/ZENODO_5.7.0.md` was set to the one the user chose for the record, "MESA
 5.7.0: Mapping Environmentally Sensitive Assets (compiled Windows build)".
+
+## 2026-10-13: 5.7.1 prepared; the first build called itself 5.7.0
+
+The user asked for 5.7.1 to be made ready for publishing, with the Windows build, a written list
+of the steps so that publishing can be automated, and an assessment of doing the Zenodo part
+through its API.
+
+The version was stamped in `config.ini` and the user guide (`54b634a`), and a first build was
+made from that commit at 10:31. I checked `_internal/config.ini` in the distribution, found
+5.7.1 there and reported the build as checked. The user started it and sent a screenshot: the
+title bar and the banner both said 5.7.0.
+
+The launcher took the version it displays from the config.ini in the data folder, and the user's
+data folder was the one kept from 5.7.0. Every user who upgrades and keeps their data would have
+seen the old version number. The fault came with the separation of program folder and data
+folder in 5.7.0 and could not show before there was a second version to upgrade to. A packaged
+build now takes its version from the config.ini it ships and updates the one in the data folder.
+The build was run again.
+
+Written in the same round: `devtools/RELEASE_NOTES_5.7.1.md`, `devtools/ZENODO_5.7.1.md` and
+`devtools/docs/release_procedure.md`, the last with the seventeen steps of a release and what in
+each can be automated. The assessment of the Zenodo API is in that document: upload, metadata
+and publishing can all be done with a personal token, publishing should stay behind its own
+flag since it cannot be undone, and three points have to be tried in the Zenodo sandbox before
+a script is trusted. Nothing was sent to Zenodo.
+
+The user started the second build, built at 11:00 from `e3179b5`, and confirmed it. It was
+zipped as `MESA_571_win11_2026_10_13.zip` (1 512 656 083 bytes, MD5
+`be718ea1309a8c246fb96ed3383a3856`), and `devtools/zenodo_release.py` was written to make the
+new version on Zenodo. At the time of this entry it had been run only as far as it goes without
+a token: reading the texts, checking the zip, finding the newest record.
