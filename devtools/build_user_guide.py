@@ -27,7 +27,7 @@ DOCS = REPO / "docs"
 
 AUTHOR = "Ragnvald Larsen"
 AFFILIATION = "Norwegian Environment Agency"
-VERSION = "MESA 5.7.0"
+VERSION = "MESA 5.7.1"
 
 PT_MONTHS = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -127,6 +127,10 @@ def build_blocks():
     add(P(
         "MESA 5.7 is a release about scale and safety. Projects take far less disk and memory, map tiles render faster, and a data-loss bug that affected every earlier MESA 5 release is fixed. Around that, the interface was gone through window by window: MESA now asks before unsaved edits are lost, destructive actions are harder to trigger by accident, and the report, the QGIS project and GeoNode publishing have gained new features.",
         "O MESA 5.7 é uma versão centrada na escala e na segurança. Os projectos ocupam muito menos disco e memória, os mosaicos de mapa são gerados mais depressa, e foi corrigido um erro de perda de dados que afectava todas as versões anteriores do MESA 5. Além disso, a interface foi revista janela a janela: o MESA pergunta agora antes de se perderem edições não guardadas, as acções destrutivas são mais difíceis de accionar por engano, e o relatório, o projecto QGIS e a publicação no GeoNode ganharam novas funcionalidades."))
+
+    add(P(
+        "MESA 5.7.1 corrects four things in 5.7.0 and adds nothing new. The Welcome and About tabs spelled out the name of the program wrongly; MESA is Mapping Environmentally Sensitive Assets. The Lines tab in Special focus could open empty with an error message. Windows that were too small for their content cut off text and tick boxes; they now open large enough, and scroll when the screen is too low. A black command-line window no longer flashes by during processing. Projects and results are not affected, and nothing needs to be run again.",
+        "O MESA 5.7.1 corrige quatro aspectos da versão 5.7.0 e não acrescenta nada de novo. Os separadores Welcome e About apresentavam o nome do programa por extenso de forma errada; MESA significa Mapping Environmentally Sensitive Assets (Mapeamento de Activos Ambientalmente Sensíveis). O separador Lines em Special focus podia abrir vazio com uma mensagem de erro. As janelas demasiado pequenas para o seu conteúdo cortavam texto e caixas de selecção; agora abrem com tamanho suficiente e permitem deslocar o conteúdo quando o ecrã é demasiado baixo. Deixou de aparecer por instantes uma janela preta de linha de comandos durante o processamento. Os projectos e os resultados não são afectados, e não é necessário voltar a executar nada."))
 
     add(H(2, "2.1 Read this first: check your mosaic", "2.1 Leia primeiro: verifique o seu mosaico"))
     add(P(
