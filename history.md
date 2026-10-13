@@ -1263,3 +1263,42 @@ importance figures), says that the macOS build follows as a later version of the
 record, gives the steps from a restored demonstration package to Process, and names one known
 issue in the published build: the console window that can flash by during processing, fixed on
 `main` in `0215efb`.
+
+## 2026-10-13: the wiki for 5.7, a review of every screenshot, and two faults in the published build
+
+The user asked for the wiki to be brought up to 5.7 and then for new screenshots, and, having
+seen cut-off text in some of them, for every existing screenshot to be checked first.
+
+The texts went in as `8778d4c` in mesa.wiki: changelog, User interface, Data, Advanced, Home and
+Troubleshooting.
+
+The review found that the faults were in the program and not in the capturing. Config, Manage
+data, the report window, the GeoNode window and Process in Advanced mode opened too small for
+what they hold, and Qt cut text and tick boxes without complaint. This was corrected with a
+shared scroll area and a fit-to-content helper in `ui_style.py`, shorter tick box labels in the
+GeoNode window, and a resize when Process goes to Advanced (`c55cb59`). Two side effects appeared on the
+way and were removed before anything was kept: the scroll area's style took the colours off the
+buttons inside it, and the main window grew wider. The capture tool got hooks for the Study areas
+tab, Process in Advanced mode and the Manage server tab, and the GeoNode captures now always show
+example connection values instead of the real server (`0c8fade`). All captures were taken again and pushed
+to the wiki as `10a877f`; the backup and restore image from 5.0 was removed.
+
+Two faults came to light that are in the published 5.7.0 build (`752eb37`):
+
+- The Welcome and About tabs spelled MESA out as "Method for an Easy Sensitivity Assessment".
+  The user saw it in a new screenshot. The Welcome text has been wrong since 5.1 and the About
+  text since 5.0; two developer documents had "Methods for Environmental Sensitivity
+  Assessment". The name is Mapping Environmentally Sensitive Assets. All four places are
+  corrected (`0b0abd3`) and a test now fails on any other expansion.
+- The Lines tab in Special focus can open empty with "API error: Error: no bridge method
+  get_state". It showed in the fourth capture run and not in the three before it. The page asks
+  for its data a moment before its methods are registered; before 5.7.0 a second load hid this,
+  and the ghost-line fix removed that second load. The shim now waits for the methods and the
+  first load retries (`1592fd9`). A user who meets it in 5.7.0 can close and reopen Special
+  focus.
+
+Both corrections are on `main` after the published build and go out with the next one, together
+with `0215efb`. Nothing was reported to mesa-server or mesa_demodata; neither is affected.
+
+The title in `devtools/ZENODO_5.7.0.md` was set to the one the user chose for the record, "MESA
+5.7.0: Mapping Environmentally Sensitive Assets (compiled Windows build)".
