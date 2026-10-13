@@ -3070,14 +3070,14 @@ class GeoNodePublishWindow(QMainWindow):
         outer.insertLayout(0, exit_row)
 
         # Map option
-        self._geonode_create_map_cb = QCheckBox(
-            "Create a GeoNode map per geocode group and segmentation level "
-            "(one layer per MESA style)")
+        # Short labels: a tick box does not wrap, and the long ones were cut off at the
+        # edge of the window. The detail is in the tooltip.
+        self._geonode_create_map_cb = QCheckBox("Create a map per geocode group and segmentation level")
+        self._geonode_create_map_cb.setToolTip("A GeoNode map with one switchable layer per MESA style.")
         self._geonode_create_map_cb.setChecked(True)
         right.addWidget(self._geonode_create_map_cb)
-        self._geonode_create_dash_cb = QCheckBox(
-            "Create a GeoNode dashboard per geocode group and segmentation level "
-            "(area charts, counters and a map)")
+        self._geonode_create_dash_cb = QCheckBox("Create a dashboard per geocode group and segmentation level")
+        self._geonode_create_dash_cb.setToolTip("A GeoNode dashboard with area charts, counters and a map.")
         self._geonode_create_dash_cb.setChecked(True)
         right.addWidget(self._geonode_create_dash_cb)
 
@@ -4233,6 +4233,9 @@ class MesaMainWindow(QMainWindow):
         self._build_tabs()
         self._build_workspace_line()
 
+        # Open tall enough for the tallest tab, as far as the screen allows.
+        QTimer.singleShot(0, self._fit_window_to_tabs)
+
         # Tell the user where their data lives — once, after the window is up.
         QTimer.singleShot(0, self._maybe_show_workspace_notice)
 
@@ -4346,6 +4349,25 @@ class MesaMainWindow(QMainWindow):
         return (self._project_name_edit.text().strip(),
                 self._project_about_edit.toPlainText().strip())
 
+    @staticmethod
+    def _scrolling(page):
+        """A tab page that keeps the height its content needs (ui_style.FitScrollArea)."""
+        _ensure_code_dir_on_syspath()
+        from ui_style import FitScrollArea
+        return FitScrollArea(page)
+
+    def _fit_window_to_tabs(self):
+        """Grow the window so that no tab needs its scroll bar, within the screen."""
+        try:
+            from ui_style import fit_window_to_content
+            pages = [self._tabs.widget(i) for i in range(self._tabs.count())]
+            # around a page: the banner, the tab bar, the data folder line and the margins
+            chrome_h = self.height() - self._tabs.currentWidget().viewport().height()
+            chrome_w = self.width() - self._tabs.currentWidget().viewport().width()
+            fit_window_to_content(self, pages, chrome=(chrome_w, chrome_h), grow_width=False)
+        except Exception as exc:
+            log_to_logfile(f"Could not fit the window to its tabs: {exc}")
+
     def _build_workspace_line(self):
         """One line under the tabs that says where the project is, with a way to open it."""
         row = QHBoxLayout()
@@ -4444,7 +4466,7 @@ class MesaMainWindow(QMainWindow):
             self._project_info_status.setText(f"Last saved: {info['updated_utc']}")
             self._project_continue_btn.setVisible(True)
 
-        self._tabs.addTab(tab, "Welcome")
+        self._tabs.addTab(self._scrolling(tab), "Welcome")
 
     # ---- Tab 2: Workflows ----
     def _build_workflows_tab(self):
@@ -4542,7 +4564,7 @@ class MesaMainWindow(QMainWindow):
         self._tabs.currentChanged.connect(
             lambda *_: QTimer.singleShot(0, self._equalize_workflow_cards))
 
-        self._tabs.addTab(tab, "Workflows")
+        self._tabs.addTab(self._scrolling(tab), "Workflows")
 
     def _equalize_workflow_cards(self):
         cards = getattr(self, "_workflow_cards", None)
@@ -4848,7 +4870,7 @@ class MesaMainWindow(QMainWindow):
 
         layout.addLayout(insights_row)
 
-        self._tabs.addTab(tab, "Status")
+        self._tabs.addTab(self._scrolling(tab), "Status")
 
         # Refresh on tab change
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -5416,7 +5438,7 @@ class MesaMainWindow(QMainWindow):
         btn_row.addWidget(save_btn)
         layout.addLayout(btn_row)
 
-        self._tabs.addTab(tab, "Config")
+        self._tabs.addTab(self._scrolling(tab), "Config")
         self._load_config_editor()
 
     # ------------------------------------------------------------------
@@ -5963,7 +5985,7 @@ class MesaMainWindow(QMainWindow):
         layout.addWidget(geonode_group)
 
         layout.addStretch()
-        self._tabs.addTab(tab, "Manage data")
+        self._tabs.addTab(self._scrolling(tab), "Manage data")
 
     def _make_archive_progress_dialog(self, title: str, action_word: str):
         """Custom backup/restore dialog with the action button centered
@@ -6606,7 +6628,7 @@ class MesaMainWindow(QMainWindow):
 
         layout.addLayout(right_col, stretch=1)
 
-        self._tabs.addTab(tab, "About")
+        self._tabs.addTab(self._scrolling(tab), "About")
 
         # Populate system info. Always re-collect live so the displayed
         # values match the running build — the cached parquet is for audit

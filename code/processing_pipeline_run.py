@@ -2755,6 +2755,10 @@ class ProcessRunnerWindow(QMainWindow):
                 "Normal mode: one click runs every stage that has its inputs "
                 "ready. Switch to Advanced to pick individual sub-stages."
             )
+            if advanced:
+                # The stage grid is taller than the window opens; grow instead of squeezing it.
+                QTimer.singleShot(0, lambda: self.resize(
+                    self.width(), max(self.height(), self.centralWidget().sizeHint().height() + 24)))
 
         self._rb_normal.toggled.connect(_apply_mode)
         self._rb_advanced.toggled.connect(_apply_mode)

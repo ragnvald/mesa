@@ -13,7 +13,7 @@ import webbrowser
 
 from PySide6.QtCore import Qt, qInstallMessageHandler
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMessageBox, QScrollArea, QWidget
 
 # =====================================================================
 # Shared stylesheet (same warm palette as mesa.py)
@@ -416,6 +416,90 @@ def apply_shared_stylesheet(app) -> None:
     install_font_warning_filter()
     css = ASSET_STYLESHEET + _generate_indicator_stylesheet()
     app.setStyleSheet(css)
+
+
+class FitScrollArea(QScrollArea):
+    """A page that is never squeezed below the height its content needs.
+
+    Qt lets a layout shrink word-wrapped labels, tick boxes, spin boxes and buttons
+    to slivers before it gives up, so a page taller than its window showed clipped
+    text and half controls. Here the page keeps the height its layout asks for at
+    the current width, and a scroll bar appears when the window is shorter.
+    See learning.md "A window too small for its content clips it silently".
+    """
+
+    def __init__(self, page: QWidget):
+        super().__init__()
+        self._page = page
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setWidget(page)
+        # The page shows through to whatever it sits on (a tab pane, the window). Child
+        # selectors only: a bare "background: transparent" on the viewport reaches every
+        # button and field inside it and strips their colours.
+        self.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            " QScrollArea > QWidget { background: transparent; }"
+            " QScrollArea > QWidget > QWidget { background: transparent; }")
+        self.viewport().setAutoFillBackground(False)
+
+    def page(self) -> QWidget:
+        return self._page
+
+    def needed_height(self, width: int | None = None) -> int:
+        layout = self._page.layout()
+        if layout is None:
+            return self._page.sizeHint().height()
+        width = int(width or self.viewport().width())
+        if layout.hasHeightForWidth():
+            return int(layout.totalHeightForWidth(width))
+        return int(layout.sizeHint().height())
+
+    def needed_width(self) -> int:
+        layout = self._page.layout()
+        return int((layout.sizeHint() if layout is not None else self._page.sizeHint()).width())
+
+    def fit(self) -> None:
+        needed = self.needed_height()
+        if needed != self._page.minimumHeight():
+            self._page.setMinimumHeight(needed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit()
+
+
+def fit_window_to_content(window, areas=None, chrome: tuple[int, int] = (32, 72),
+                          grow_width: bool = True) -> None:
+    """Open a window large enough for what its FitScrollArea pages hold, within the screen.
+
+    areas: the FitScrollArea pages to make room for (default: the central widget when
+    it is one). chrome: width and height the window needs around the page.
+    grow_width=False keeps the width and lets wrapped text decide the height.
+    """
+    try:
+        if areas is None:
+            central = window.centralWidget() if hasattr(window, "centralWidget") else None
+            areas = [central] if isinstance(central, FitScrollArea) else []
+        areas = [a for a in areas if isinstance(a, FitScrollArea)]
+        if not areas:
+            return
+        # room for a vertical scroll bar, so that one never brings a horizontal one with it
+        bar = areas[0].verticalScrollBar().sizeHint().width() + 4
+        width = window.width()
+        if grow_width:
+            width = max([width] + [a.needed_width() + chrome[0] + bar for a in areas])
+        height = max([window.height()] + [a.needed_height(width - chrome[0]) + chrome[1] for a in areas])
+        screen = window.screen() if hasattr(window, "screen") else None
+        screen = screen or QApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry()
+            width, height = min(width, room.width() - 40), min(height, room.height() - 60)
+        window.resize(max(width, window.minimumWidth()), max(height, window.minimumHeight()))
+        for area in areas:
+            area.fit()
+    except Exception:
+        pass
 
 
 class InfoCircleLabel(QLabel):

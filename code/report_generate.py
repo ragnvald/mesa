@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
     QComboBox, QProgressBar, QFrame, QSizePolicy, QButtonGroup, QMessageBox,
 )
 from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from ui_style import apply_shared_stylesheet
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject
+from ui_style import FitScrollArea, apply_shared_stylesheet, fit_window_to_content
 
 from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
 from report_progress import ReportProgress, load_history, save_history
@@ -6532,9 +6532,10 @@ class ReportGeneratorWindow(QMainWindow):
         except Exception:
             pass
 
-        central = QWidget(self)
+        central = QWidget()
         central.setObjectName("CentralHost")
-        self.setCentralWidget(central)
+        # The content keeps the size it needs; the window is fitted to it below.
+        self.setCentralWidget(FitScrollArea(central))
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -6553,6 +6554,9 @@ class ReportGeneratorWindow(QMainWindow):
         log_widget = QPlainTextEdit()
         log_widget.setReadOnly(True)
         log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # A few lines are enough to open with; the log grows with the window.
+        log_widget.setMinimumHeight(72)
+        log_widget.sizeHint = lambda: QSize(480, 84)
         log_lay.addWidget(log_widget)
         main_layout.addWidget(log_group)
 
@@ -6667,14 +6671,15 @@ class ReportGeneratorWindow(QMainWindow):
             for i, c in enumerate(_geo_cats):  # two columns to save vertical space
                 cb = QCheckBox(c)
                 cb.setChecked(c == "basic_mosaic")
-                geo_grid.addWidget(cb, i // 2, i % 2)
+                geo_grid.addWidget(cb, i // 3, i % 3)
                 self._chk_report_geocats[c] = cb
         else:
             _gh = QLabel("No geocode groups found")
             _gh.setEnabled(False)
-            geo_grid.addWidget(_gh, 0, 0, 1, 2)
+            geo_grid.addWidget(_gh, 0, 0, 1, 3)
         geo_grid.setColumnStretch(0, 1)
         geo_grid.setColumnStretch(1, 1)
+        geo_grid.setColumnStretch(2, 1)
 
         # Settings row: general includes | geocode groups | segmentation levels.
         settings_row = QWidget()
@@ -6771,6 +6776,7 @@ class ReportGeneratorWindow(QMainWindow):
         # A run may already be in flight when this window appears; the busy
         # signal fired before it existed, so take the state directly.
         self._sync_busy_button()
+        fit_window_to_content(self)
 
         # --- Control wiring ---
         self._chk_analysis.stateChanged.connect(self._sync_analysis_controls)
