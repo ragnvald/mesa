@@ -1358,3 +1358,13 @@ version returns the draft and not the old record; asking a second time put the i
 back, and a third time gave 400; a date entry inherited from the previous version is refused
 when sent back. The script handles all three. GitHub release, wiki and the DOI in the documents
 wait for the user.
+
+## 2026-10-15: the GitHub release 5.7.1
+
+Created at the user's request as https://github.com/ragnvald/mesa/releases/tag/5.7.1, tag `5.7.1`
+on `e3179b5`, the commit the published build was made from, and marked as latest. The text is
+`devtools/RELEASE_NOTES_5.7.1.md` with the Zenodo DOI filled in, in the same form as 5.7.0; no
+files are attached, the download is on Zenodo. The user explained the different zip on Zenodo:
+uploads of the first zip kept failing from Kathmandu, and the user made a new one in case the
+file itself was at fault.
+
