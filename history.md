@@ -1333,3 +1333,28 @@ zipped as `MESA_571_win11_2026_10_13.zip` (1 512 656 083 bytes, MD5
 `be718ea1309a8c246fb96ed3383a3856`), and `devtools/zenodo_release.py` was written to make the
 new version on Zenodo. At the time of this entry it had been run only as far as it goes without
 a token: reading the texts, checking the zip, finding the newest record.
+
+## 2026-10-13 to 2026-10-15: MESA 5.7.1 is published on Zenodo
+
+`devtools/zenodo_release.py` made the new version of the application record as draft
+`23337078` and wrote its metadata, but could not upload the file. Four uploads of the 1.5 GB zip
+were cut with "connection was aborted by the software in your host machine", and the user's own
+upload through the browser, from another machine, failed the same way. Probe files measured the
+line: 100 KB in 5 s, 1 MB in 57 s, 6 MB in 6 min 49 s, about 15 KB/s, while the other machine
+was also uploading. The user is in Nepal. The script was changed to upload in resumable parts,
+which Zenodo accepted for a probe, but it was not needed in the end: the user uploaded the file
+from elsewhere.
+
+The uploaded zip was the user's own, not mine: 1 502 844 542 bytes, MD5
+`2e26d6a906cf082fd1cdddd21c00ba53`. Its directory was read on Zenodo through range requests and
+compared with the local zip: the same 7 733 files with the same CRC and size, built 2026-10-13
+11:00 from `e3179b5`, version 5.7.1, without `secrets` or `log.txt`. The publication date was
+set to the day of publishing, and the record was published on 2026-10-15:
+https://doi.org/10.5281/zenodo.23337078. It has the full metadata, ORCID and affiliation
+included, which 5.7.0 lacks.
+
+Three things Zenodo does differently from its documentation, found on the way: asking for a new
+version returns the draft and not the old record; asking a second time put the inherited file
+back, and a third time gave 400; a date entry inherited from the previous version is refused
+when sent back. The script handles all three. GitHub release, wiki and the DOI in the documents
+wait for the user.
