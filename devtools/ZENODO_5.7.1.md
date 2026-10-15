@@ -33,6 +33,10 @@ Kontrollert mot Zenodo-API-et 2026-10-13: 5.7.0-posten har nå riktig tittel, me
 
 Før zip-filen lages: kontroller at `D:\dist\mesa` ikke har noen `secrets`-mappe og ingen `log.txt`.
 
+## Publisert
+
+Publisert 2026-10-15: `10.5281/zenodo.23337078` (record-id `23337078`). Filen er lastet opp av brukeren fra en annen maskin og er en egen zip av samme bygg: `MESA_571_win11_2026_10_13.zip`, 1 502 844 542 byte, MD5 `2e26d6a906cf082fd1cdddd21c00ba53`. Innholdet er kontrollert mot den lokale zip-filen over: samme 7 733 filer med samme CRC og størrelse. GitHub-utgivelsen `5.7.1` peker på `e3179b5962847cc4a6ab86217231cb58381d9155`.
+
 ## Beskrivelse (lim inn som den er)
 
 This record provides a compiled build of MESA 5.7.1 for Windows 11. MESA is a desktop workflow for preparing, processing and publishing spatial sensitivity analyses using the MESA method. The MESA 5 line replaces all earlier MESA versions.

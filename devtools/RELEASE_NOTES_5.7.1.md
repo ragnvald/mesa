@@ -2,7 +2,7 @@ A correction release. MESA 5.7.1 fixes five things in 5.7.0 and adds nothing new
 
 ### Where can I find it?
 
-- [Zenodo record](https://doi.org/10.5281/zenodo.ZENODO_RECORD_ID): `MESA_571_win11_ZIP_DATE.zip` (Windows 11, 64-bit). The macOS build for Apple Silicon follows as a later version of the same record.
+- [Zenodo record](https://doi.org/10.5281/zenodo.23337078): `MESA_571_win11_2026_10_13.zip` (Windows 11, 64-bit). The macOS build for Apple Silicon follows as a later version of the same record.
 - [All versions, and the reference to cite](https://doi.org/10.5281/zenodo.10775727)
 - [MESA project wiki](https://github.com/ragnvald/mesa/wiki), with the full [changelog](https://github.com/ragnvald/mesa/wiki/Mesa-changelog-overview)
 
