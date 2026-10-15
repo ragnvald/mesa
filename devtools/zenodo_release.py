@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -187,44 +188,120 @@ def latest_record_id() -> str:
 # ---------------------------------------------------------------------------- steps
 def open_draft(z: Zenodo, previous: str) -> dict:
     """The one unpublished new version of `previous`, created if it is not there."""
+    # An existing draft is used as it is. Asking for a new version a second time is not
+    # harmless, whatever the documentation says: seen 2026-10-13, it put the inherited
+    # file back, and the time after that it answered 400.
+    drafts = [d for d in z.call("GET", "/api/deposit/depositions?q=conceptrecid:" + CONCEPT_RECID
+                                + "&status=draft") or [] if not d.get("submitted")]
+    if len(drafts) > 1:
+        raise Stop(f"There are {len(drafts)} drafts of the record; remove the ones that should not be there.")
+    if drafts:
+        print(f"  using the draft that is already there: {drafts[0]['id']}")
+        return z.call("GET", f"/api/deposit/depositions/{drafts[0]['id']}")
+    # Zenodo answers with the new draft itself, though its documentation says the answer
+    # is the old record; following latest_draft is right in both cases.
     record = z.call("POST", f"/api/deposit/depositions/{previous}/actions/newversion")
     draft_url = (record.get("links") or {}).get("latest_draft")
     if not draft_url:
         raise Stop("Zenodo did not return a draft for the new version.")
     draft = z.call("GET", draft_url)
+    if str(draft.get("id")) == str(previous):
+        raise Stop("Zenodo returned the published record, not a draft; nothing was changed.")
     if draft.get("submitted"):
         raise Stop(f"Deposition {draft.get('id')} is already published; nothing was changed.")
     return draft
 
 
+PART_SIZE = 8 * 1024 * 1024
+
+
 def put_file(z: Zenodo, draft: dict, zip_path: Path, size: int, md5: str) -> None:
-    files_url = f"/api/deposit/depositions/{draft['id']}/files"
-    present = False
-    for f in z.call("GET", files_url) or []:
-        if f.get("filename") == zip_path.name and f.get("checksum") == md5:
-            present = True
-            print(f"  already uploaded: {zip_path.name}")
-        else:
-            print(f"  removing from the draft: {f.get('filename')}")
-            z.call("DELETE", f"{files_url}/{f['id']}")
-    if present:
+    """Upload in parts, so that a slow or broken line costs one part and not the file.
+
+    Which parts have arrived is kept in a file beside the zip, and a new run goes on
+    from there. See learning.md "A large upload goes in parts that can be resumed".
+    """
+    files_url = f"/api/records/{draft['id']}/draft/files"
+    key = urllib.parse.quote(zip_path.name)
+    state_path = zip_path.with_suffix(".upload.json")
+    state = {}
+    if state_path.is_file():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if (state.get("draft"), state.get("md5"), state.get("part_size")) != (str(draft["id"]), md5, PART_SIZE):
+            state = {}
+    entries = {e["key"]: e for e in (z.call("GET", files_url) or {}).get("entries") or []}
+    for name, entry in entries.items():
+        if name == zip_path.name:
+            continue
+        print(f"  removing from the draft: {name}")
+        z.call("DELETE", f"{files_url}/{urllib.parse.quote(name)}")
+    mine = entries.get(zip_path.name)
+    if mine and mine.get("status") == "completed" and mine.get("size") == size:
+        _check_uploaded(mine, md5, state_path)
+        print(f"  already uploaded: {zip_path.name}")
         return
-    bucket = (draft.get("links") or {}).get("bucket")
-    if not bucket:
-        raise Stop("The draft has no upload address (links.bucket).")
-    print(f"  uploading {zip_path.name}, {size / 1e9:.2f} GB ...")
+    parts = -(-size // PART_SIZE)
+    if not state or not mine:
+        if mine:
+            print("  removing an unfinished upload of the same file")
+            z.call("DELETE", f"{files_url}/{key}")
+        z.call("POST", files_url, [{"key": zip_path.name, "size": size,
+                                    "transfer": {"type": "M", "parts": parts, "part_size": PART_SIZE}}])
+        state = {"draft": str(draft["id"]), "md5": md5, "part_size": PART_SIZE, "done": []}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+    done = set(state["done"])
+    print(f"  uploading {zip_path.name}: {parts} parts of {PART_SIZE >> 20} MB, {len(done)} already there")
+    started, sent = time.time(), 0
     with open(zip_path, "rb") as fh:
-        answer = z.call("PUT", f"{bucket}/{urllib.parse.quote(zip_path.name)}", data=fh, length=size)
-    got = str((answer or {}).get("checksum", "")).removeprefix("md5:")
-    if got != md5:
-        raise Stop(f"Checksum after upload is {got or 'missing'}, expected {md5}. The draft is left as it is.")
-    print("  uploaded, checksum matches")
+        for n in range(1, parts + 1):
+            if n in done:
+                continue
+            fh.seek((n - 1) * PART_SIZE)
+            chunk = fh.read(PART_SIZE)
+            for attempt in range(1, 21):
+                try:
+                    z.call("PUT", f"{files_url}/{key}/content/{n}", data=chunk, length=len(chunk))
+                    break
+                except (Stop, urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+                    if attempt == 20:
+                        raise Stop(f"Part {n} failed twenty times; run again to go on from here.\n{exc}") from None
+                    time.sleep(min(300, 15 * attempt))
+            done.add(n)
+            sent += len(chunk)
+            state["done"] = sorted(done)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            rate = sent / max(1.0, time.time() - started)
+            left = (parts - len(done)) * PART_SIZE / max(1.0, rate)
+            print(f"  part {n} of {parts} ({len(done)} done), {rate / 1024:.0f} KB/s, "
+                  f"about {left / 3600:.1f} h left", flush=True)
+    entry = z.call("POST", f"{files_url}/{key}/commit")
+    if entry.get("size") != size:
+        raise Stop(f"Zenodo has {entry.get('size')} bytes, expected {size}. Not published.")
+    _check_uploaded(entry, md5, state_path)
+    print("  uploaded")
+
+
+def _check_uploaded(entry: dict, md5: str, state_path: Path) -> None:
+    checksum = str(entry.get("checksum") or "")
+    if checksum.startswith("md5:") and checksum != f"md5:{md5}":
+        raise Stop(f"Checksum on Zenodo is {checksum}, expected md5:{md5}. Not published.")
+    if not checksum.startswith("md5:"):
+        # A file sent in parts may get another kind of checksum; then the size is what is known.
+        print(f"  note: Zenodo reports checksum {checksum or 'none'}, which is not an MD5 of the whole file")
+    try:
+        state_path.unlink()
+    except OSError:
+        pass
 
 
 def put_metadata(z: Zenodo, deposition: dict, version: str, title: str, description: str,
                  *, new_version: bool) -> dict:
     # Start from what is there, so that fields this script does not know are sent back unchanged.
     metadata = dict(deposition.get("metadata") or {})
+    # Zenodo hands back date entries without a date and then refuses them (seen 2026-10-13).
+    dates = [d for d in metadata.pop("dates", None) or [] if d.get("start") or d.get("end")]
+    if dates:
+        metadata["dates"] = dates
     metadata.update(FIXED_METADATA)
     metadata.update({"title": title, "description": description, "version": version})
     if new_version or not metadata.get("publication_date"):
@@ -241,8 +318,11 @@ def show(deposition: dict, z: Zenodo) -> None:
     print(f"  creator       {creator.get('name')} | {creator.get('affiliation')} | {creator.get('orcid')}")
     print(f"  license       {m.get('license')}   communities {[c.get('identifier') for c in m.get('communities') or []]}")
     print(f"  keywords      {len(m.get('keywords') or [])}   related identifiers {len(m.get('related_identifiers') or [])}")
-    for f in z.call("GET", f"/api/deposit/depositions/{deposition['id']}/files") or []:
-        print(f"  file          {f.get('filename')}  {f.get('filesize')}  md5 {f.get('checksum')}")
+    try:
+        for f in z.call("GET", f"/api/deposit/depositions/{deposition['id']}/files") or []:
+            print(f"  file          {f.get('filename')}  {f.get('filesize')}  md5 {f.get('checksum')}")
+    except Stop:
+        print("  file          (the list could not be read)")
     print(f"  preview       {z.host}/uploads/{deposition.get('id')}")
 
 
