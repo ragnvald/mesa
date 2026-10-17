@@ -6,6 +6,8 @@ and thrown away with --discard. Publishing cannot be undone.
     zenodo_release.py 5.7.1 --zip D:\\dist\\MESA_571_win11_2026_10_13.zip     draft
     zenodo_release.py 5.7.1 --zip ... --publish                              draft, then publish
     zenodo_release.py 5.7.1 --discard                                        delete the draft
+    zenodo_release.py 5.7.1 --dmg MESA_571_macos_2026_10_17.dmg --keep-previous
+                                                                             add the macOS build beside the zip
     zenodo_release.py 5.7.0 --fix-metadata --record 23314128 [--publish]     correct a published record
     ... --sandbox --record <id>                                              sandbox.zenodo.org
 
@@ -121,11 +123,61 @@ def check_zip(path: Path, version: str) -> tuple[int, str]:
             raise Stop(f"The zip is version {m.group(1) if m else 'unknown'}, not {version}.")
         if not any(n.lower().endswith("/mesa.exe") for n in names):
             raise Stop("The zip has no mesa.exe.")
+    return path.stat().st_size, _md5(path)
+
+
+def _md5(path: Path) -> str:
     digest = hashlib.md5()
     with open(path, "rb") as fh:
         for block in iter(lambda: fh.read(1 << 22), b""):
             digest.update(block)
-    return path.stat().st_size, digest.hexdigest()
+    return digest.hexdigest()
+
+
+def check_dmg(path: Path, version: str) -> tuple[int, str]:
+    """Refuse a macOS disk image that is not this version or that carries what must not ship.
+
+    The image is mounted read-only and looked through the way check_zip() looks
+    through the zip: one .app, its config.ini says this version, no secrets or
+    log.txt anywhere, and the executable is there.
+    """
+    import subprocess
+    import tempfile
+    if not path.is_file():
+        raise Stop(f"{path} does not exist.")
+    if sys.platform != "darwin":
+        raise Stop("A disk image can only be checked on macOS.")
+    mount = Path(tempfile.mkdtemp(prefix="mesa_dmg_"))
+    r = subprocess.run(["hdiutil", "attach", str(path), "-readonly", "-nobrowse", "-noverify",
+                        "-mountpoint", str(mount)], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Stop(f"hdiutil could not open {path.name}: {r.stderr.strip()}")
+    try:
+        apps = [q for q in mount.iterdir() if q.suffix == ".app"]
+        if len(apps) != 1:
+            raise Stop(f"The disk image holds {len(apps)} .app bundles; expected one.")
+        app = apps[0]
+        for root, dirs, files in os.walk(app):
+            lowered = [n.lower() for n in dirs + files]
+            if "secrets" in lowered or "log.txt" in lowered:
+                raise Stop(f"{app.name} contains secrets or log.txt under {Path(root).relative_to(app)}, "
+                           "which must not be published.")
+        cfg = next((c for c in (app / "Contents" / "Resources" / "config.ini",
+                                app / "Contents" / "Frameworks" / "config.ini") if c.is_file()), None)
+        if cfg is None:
+            raise Stop(f"{app.name} has no config.ini; is this a MESA build?")
+        m = re.search(r"(?mi)^\s*mesa_version\s*=\s*(.+?)\s*$", cfg.read_text("utf-8", "ignore"))
+        if not m or m.group(1) != version:
+            raise Stop(f"The disk image is version {m.group(1) if m else 'unknown'}, not {version}.")
+        if not (app / "Contents" / "MacOS" / "mesa").is_file():
+            raise Stop(f"{app.name} has no mesa executable.")
+    finally:
+        subprocess.run(["hdiutil", "detach", str(mount), "-quiet"], capture_output=True)
+        try:
+            mount.rmdir()
+        except OSError:
+            pass
+    return path.stat().st_size, _md5(path)
 
 
 # ------------------------------------------------------------------------------ api
@@ -215,6 +267,19 @@ def open_draft(z: Zenodo, previous: str) -> dict:
 PART_SIZE = 8 * 1024 * 1024
 
 
+def prune_files(z: Zenodo, draft: dict, keep: set[str]) -> None:
+    """Remove from the draft what is not being uploaded now. A new version inherits
+    the previous version's files, which is right when a build is added beside them
+    (--keep-previous) and wrong when it is replaced."""
+    files_url = f"/api/records/{draft['id']}/draft/files"
+    for entry in (z.call("GET", files_url) or {}).get("entries") or []:
+        name = entry["key"]
+        if name in keep:
+            continue
+        print(f"  removing from the draft: {name}")
+        z.call("DELETE", f"{files_url}/{urllib.parse.quote(name)}")
+
+
 def put_file(z: Zenodo, draft: dict, zip_path: Path, size: int, md5: str) -> None:
     """Upload in parts, so that a slow or broken line costs one part and not the file.
 
@@ -230,11 +295,6 @@ def put_file(z: Zenodo, draft: dict, zip_path: Path, size: int, md5: str) -> Non
         if (state.get("draft"), state.get("md5"), state.get("part_size")) != (str(draft["id"]), md5, PART_SIZE):
             state = {}
     entries = {e["key"]: e for e in (z.call("GET", files_url) or {}).get("entries") or []}
-    for name, entry in entries.items():
-        if name == zip_path.name:
-            continue
-        print(f"  removing from the draft: {name}")
-        z.call("DELETE", f"{files_url}/{urllib.parse.quote(name)}")
     mine = entries.get(zip_path.name)
     if mine and mine.get("status") == "completed" and mine.get("size") == size:
         _check_uploaded(mine, md5, state_path)
@@ -342,7 +402,10 @@ def publish(z: Zenodo, deposition_id, note_beside: Path | None) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("version", help="for example 5.7.1")
-    ap.add_argument("--zip", type=Path, help="the build to upload")
+    ap.add_argument("--zip", type=Path, help="the Windows build to upload")
+    ap.add_argument("--dmg", type=Path, help="the macOS build to upload (a disk image)")
+    ap.add_argument("--keep-previous", action="store_true",
+                    help="keep the files the draft inherited from the previous version, to add a build beside them")
     ap.add_argument("--record", help="record id to make a new version of, or to correct (default: the newest)")
     ap.add_argument("--publish", action="store_true", help="publish; cannot be undone")
     ap.add_argument("--discard", action="store_true", help="delete the unpublished draft")
@@ -383,21 +446,30 @@ def main() -> int:
             print("The draft is deleted.")
             return 0
 
-        if not args.zip:
-            raise Stop("--zip is required.")
-        print(f"Checking {args.zip.name}")
-        size, md5 = check_zip(args.zip, args.version)
-        print(f"  {size} bytes, md5 {md5}")
+        builds = [(check_zip, args.zip)] if args.zip else []
+        if args.dmg:
+            builds.append((check_dmg, args.dmg))
+        if not builds:
+            raise Stop("--zip or --dmg is required.")
+        checked = []
+        for check, path in builds:
+            print(f"Checking {path.name}")
+            size, md5 = check(path, args.version)
+            print(f"  {size} bytes, md5 {md5}")
+            checked.append((path, size, md5))
         print(f"New version of record {previous} on {z.host}")
         draft = open_draft(z, previous)
-        put_file(z, draft, args.zip, size, md5)
+        if not args.keep_previous:
+            prune_files(z, draft, {path.name for path, _, _ in checked})
+        for path, size, md5 in checked:
+            put_file(z, draft, path, size, md5)
         draft = put_metadata(z, draft, args.version, title, description, new_version=True)
         print("Draft:")
         show(draft, z)
         if not args.publish:
             print("\nNot published. Look at the preview, then run again with --publish, or --discard.")
             return 0
-        publish(z, draft["id"], args.zip)
+        publish(z, draft["id"], checked[-1][0])
         return 0
     except Stop as exc:
         print(f"\nStopped: {exc}", file=sys.stderr)

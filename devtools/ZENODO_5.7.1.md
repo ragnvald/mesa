@@ -6,7 +6,7 @@ Skrivestil som i 5.7.0-posten: flytende prosa, ingen overskrifter, punktlister e
 
 ## Tittel
 
-> MESA 5.7.1: Mapping Environmentally Sensitive Assets (compiled Windows build)
+> MESA 5.7.1: Mapping Environmentally Sensitive Assets (compiled Windows and macOS builds)
 
 Tittelen **må** inneholde `5.7.1`. `github_release_from_zenodo.py` utleder GitHub-taggen fra den.
 
@@ -28,10 +28,13 @@ Kontrollert mot Zenodo-API-et 2026-10-13: 5.7.0-posten har nå riktig tittel, me
 ## Filer
 
 - `MESA_571_win11_<dato>.zip` (Windows 11, 64-bit)
+- `MESA_571_macos_<dato>.dmg` (macOS, Apple Silicon)
 
 `MESA_571_win11_2026_10_13.zip`: 1 512 656 083 byte, 7 733 filer, MD5 `be718ea1309a8c246fb96ed3383a3856`. Bygget 2026-10-13 kl. 11:00 fra commit `e3179b5962847cc4a6ab86217231cb58381d9155`, med `mesa_version = 5.7.1`, uten `secrets` og uten `log.txt`. Et første bygg kl. 10:31 fra `54b634a` viste 5.7.0 i tittellinjen og ble forkastet.
 
 Før zip-filen lages: kontroller at `D:\dist\mesa` ikke har noen `secrets`-mappe og ingen `log.txt`.
+
+`MESA_571_macos_2026_10_17.dmg`: STØRRELSE byte, MD5 `MD5SUM`. Bygget 2026-10-17 kl. 18:20 (Oslo) fra commit `63fc0586a418e6a11e86967a55ec9e65dea38db5`, med `mesa_version = 5.7.1`, signert med Developer ID og hardened runtime, tidsstemplet, notarisert og staplet. Commit-en ligger etter Windows-byggets `e3179b5` med to rettelser som bare gjelder Mac-bygget: byggeskriptet tar malene fra git (`bf5b4f8`), og den pakkede appen finner CA-sertifikater (`63fc058`); uten den siste hadde minikart og rapport ingen bakgrunnskart. `zenodo_release.py --dmg` kontrollerer diskbildet før opplasting.
 
 ## Publisert
 
@@ -39,7 +42,7 @@ Publisert 2026-10-15: `10.5281/zenodo.23337078` (record-id `23337078`). Filen er
 
 ## Beskrivelse (lim inn som den er)
 
-This record provides a compiled build of MESA 5.7.1 for Windows 11. MESA is a desktop workflow for preparing, processing and publishing spatial sensitivity analyses using the MESA method. The MESA 5 line replaces all earlier MESA versions.
+This record provides compiled builds of MESA 5.7.1 for Windows 11 and for macOS on Apple Silicon. MESA is a desktop workflow for preparing, processing and publishing spatial sensitivity analyses using the MESA method. The MESA 5 line replaces all earlier MESA versions.
 
 MESA 5.7.1 is a correction of 5.7.0 and adds nothing new. The name of the program is now spelled out correctly on the Welcome and About tabs: MESA is Mapping Environmentally Sensitive Assets. The Lines tab in Special focus, which could open empty with an error message, now opens with its lines. Windows that were too small for their content no longer cut off text and tick boxes. A command-line window no longer flashes by during processing. Projects and results are not affected, and nothing needs to be run again after upgrading from 5.7.0.
 
@@ -59,10 +62,16 @@ MESA is delivered without project data. Nine demonstration projects are publishe
 
 MESA can optionally connect to an AI service to draft descriptions and report text. This is switched off by default, and nothing leaves the machine unless it is deliberately configured and enabled.
 
-MESA is intended for Windows 11, and benefits from at least 16 GB of memory and 8 processor cores. To get started, unzip the archive into a folder of its own and start mesa.exe. The file READ ME FIRST.txt in the same folder explains where your data is kept.
+MESA runs on Windows 11 and on macOS with Apple Silicon, and benefits from at least 16 GB of memory and 8 processor cores. On Windows, unzip the archive into a folder of its own and start mesa.exe; the file READ ME FIRST.txt in the same folder explains where your data is kept. On a Mac, open the disk image and drag MESA to Applications; the application is signed and notarised, and it asks where to keep your data the first time it starts.
 
 For method background, workflow details and the full list of changes, see the MESA project wiki: https://github.com/ragnvald/mesa/wiki
 
-## macOS senere
+## macOS
 
-Som for 5.7.0: en publisert posts filer kan ikke suppleres, så macOS-bygget kommer som en ny versjon med begge filene, fortsatt med Version `5.7.1`. Det bygges da fra samme commit som Windows-bygget.
+En publisert posts filer kan ikke suppleres, så macOS-bygget kommer som en ny versjon av `23337078` med begge filene, fortsatt med Version `5.7.1`. Den nye versjonen arver Windows-zip-en; dmg-en legges ved siden av:
+
+```
+.venv/bin/python devtools/zenodo_release.py 5.7.1 --record 23337078 --dmg ~/Desktop/MESA_571_macos_2026_10_17.dmg --keep-previous
+```
+
+Tittelen og beskrivelsen over gjelder den nye versjonen. Windows-versjonen `23337078` beholder sin egen tekst.

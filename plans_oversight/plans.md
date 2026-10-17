@@ -63,7 +63,9 @@ Full design documents for individual items live in `devtools/docs/`, which
   `.dmg` from `build_mac.py` (`_codesign_deep` → `make_dmg(app, out, f"MESA {ver}")`).
   Decided 2026-07-31 to close the gap with Inno Setup. Not to be landed until
   5.6.0 is tagged — a new build dependency the week of a release is the kind of
-  risk one regrets.
+  risk one regrets. Still not started at 5.7.1 (2026-10-18); the signing route
+  (Phase 3) is the part that needs a decision and lead time, see the
+  certificate note.
 - **Why it is possible now:** two prerequisites arrived by other routes.
   `e5ddada` moved writable data to `<Documents>/MESA`, so an install into a
   read-only location works at all; before it, the app wrote next to the exe.
@@ -107,6 +109,24 @@ whether the installer feels like the macOS one; see the certificate note below.
 An unsigned installer can feel *worse* than today's zip, because SmartScreen's
 "Windows protected your PC" appears at the moment of installing rather than
 never.
+
+- **Certificate note (2026-10-18):** still open at 5.7.1, which shipped as an
+  unsigned zip. Three routes, not mutually exclusive, all ending in `signtool`
+  signing the installer inside `build_all.py`:
+  1. *Azure Trusted Signing.* Microsoft's own service, open to individuals, a
+     small monthly fee, identity validated by Microsoft; a signed file gets
+     SmartScreen trust at once. A validation attempt was started in 2026 and
+     stalled on Microsoft's side: the verification call never came, although an
+     open calendar had been indicated. Needs to be restarted or escalated.
+  2. *Authenticode certificate from a CA* (DigiCert, Sectigo or similar). OV
+     builds SmartScreen reputation over weeks of downloads; EV gives it at once
+     but needs a hardware token or cloud HSM and costs more.
+  3. *Microsoft Store as MSIX.* Microsoft signs, but distribution moves into the
+     Store, and the data-folder and helper layout must pass its rules. Least
+     suited to how MESA is used.
+  Whichever route, plan for the vendor's identity process to take days and to
+  stall: the macOS side lost a day on 2026-10-17 to Apple's agreement status
+  after everything on our side was correct (see history.md).
 
 - **Licence, settled 2026-07-31:** the repo is **GPL-3.0** (`LICENSE`, the full
   674-line text). Two consequences: the splash and the installer's About/licence
