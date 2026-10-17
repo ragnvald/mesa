@@ -81,3 +81,10 @@ qgis/mesa_results.qgz
 
 # Machine-local config memo (see config.mac.ini header); never committed.
 config.mac.ini
+
+# macOS build output and work folders (devtools/build_mac.py).
+dist_mac/
+_mac_build*/
+_mac_stage/
+_mac_helpers/
+_dmg_stage/

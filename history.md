@@ -1368,3 +1368,64 @@ files are attached, the download is on Zenodo. The user explained the different 
 uploads of the first zip kept failing from Kathmandu, and the user made a new one in case the
 file itself was at fault.
 
+
+## 2026-10-17: the Mac build of 5.7.1 prepared, and a build script that had not followed the rule
+
+The user asked for the Mac build of 5.7.1: bring the Mac's copy of the repository up to `main`,
+check that the code runs here, and check that the build would do what it should.
+
+The repository was 97 commits behind at `248af34` and went to `0f5660a` by fast-forward. The
+working copy of `config.ini` carries this Mac's tuning (worker sizing for the M4 Max,
+Classification with AI on) and is not committed; the pull's changes to the template (the 5.7.1
+stamp, the Stage 4 naming, `segmv_enabled`, the removal of `backfill_max_workers`, which nothing
+reads any more) were merged into it by hand. The code byte-compiles, `pip check` is clean, the
+pins in `requirements_py314.txt` match `.venv`, and the test suite passes (116 passed, 1 skipped;
+pytest was installed into `.venv` as `requirements_dev.txt` says).
+
+`devtools/build_mac.py` still bundled `config.ini`, `docs/` and `qgis/` from the working folder.
+The rule of 2026-10-11, that a build ships what git tracks, had been applied to `build_all.py`
+only, so a Mac build would have carried the tuned `config.ini` and `docs/exchange/`. The script
+now stages `config.ini`, the `input/` skeleton and `qgis/` from HEAD, ships `docs/` without
+`exchange/`, writes `build_info.json` with the build stamp and commit as on Windows, and refuses
+a bundle that carries anything else (`bf5b4f8`). The staging and the check were tried against a
+simulated `.app` before the real build.
+
+A start of `mesa.py` from source, meant as a smoke test with Qt offscreen, ran the 5.7
+geocode-name migration on the project in the working tree and was cut off after 45 seconds at
+192 of 801 `tbl_stacked` partitions. No file was damaged: the migration writes `<name>.renaming`
+and swaps it in, and rewrites `tbl_geocode_group` last. At the user's request it was completed
+by calling `migrate_geocode_group_names()` again: 610 tables in 53 seconds, and a second call did
+nothing. See learning.md "A start from source is not a smoke test".
+
+The user built at 11:07 with the corrected script, from the tree at `0f5660a` (the fix was
+committed afterwards), in about two minutes with PyInstaller's cache. The bundle passes the new
+check: the committed `config.ini` with `mesa_version = 5.7.1`, the skeleton with its four
+`readme.txt`, no `secrets`, `log.txt` or `docs/exchange/`; 1.1 GB, 8 889 files, ad hoc signed,
+`codesign --verify --strict --deep` clean, and Gatekeeper rejects it as it does every ad hoc
+signature. Its content is the same as the Windows build from `e3179b5`: the commits between
+differ in `devtools/` and the text documents only. Not done: the smoke test of the app by the
+user, the Developer ID build with timestamp, notarization (no notarytool profile is stored in the
+keychain), the dmg, and the Zenodo version with both files. Nothing was reported to mesa-server
+or mesa_demodata.
+
+## 2026-10-17: the Mac build has no basemaps, because its OpenSSL has no certificates
+
+The user smoke-tested the 11:07 build and reported two faults: the processing minimap had no
+background map, and neither had the maps in the report.
+
+Both fetch OpenStreetMap tiles over HTTPS with `http.client`: the minimap through the local tile
+proxy in `mesa_osm_tiles.py`, the report through `_fetch_osm_tile()`. Run inside the packaged
+interpreter (`mesa --run-helper code`, script on stdin), every fetch failed with
+`CERTIFICATE_VERIFY_FAILED`, and `ssl.get_default_verify_paths()` returned no file and no
+directory: the `libssl` in the bundle is the rasterio wheel's, compiled with a certificate path
+from that wheel's build machine. With `SSL_CERT_FILE` pointed at the certifi bundle the app
+already ships, the direct fetch, the proxy and the report fetcher all returned the tile. The same
+failure would meet every user, since no Mac has that path.
+
+`use_bundled_ca_certificates()` in `mesa_shared.py` now sets the variable at import in a packaged
+build, only when OpenSSL has nothing of its own and the operator has set nothing;
+`tests/test_ssl_certificates.py` covers the four cases. Two side findings, not changed: the
+packaged app cannot import `contextily` (`rasterio.sample` is not bundled), which only matters
+if `report_basemap_mode` is set away from its default `xyz`; and the GDAL data warning seen in the
+diagnostic comes from that partial rasterio import, while pyogrio sets `GDAL_DATA` correctly.
+The build has to be made again for the fix to reach the app.

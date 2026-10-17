@@ -899,10 +899,39 @@ def hide_child_console_windows() -> None:
     subprocess.Popen._mesa_original_init = original_init
 
 
+def use_bundled_ca_certificates() -> None:
+    """Point OpenSSL at the certificate bundle the packaged app ships (certifi).
+
+    The OpenSSL inside a macOS build comes from one of the wheels and was compiled
+    with a certificate path on that wheel's build machine, so it finds no CA
+    certificates at all and every HTTPS connection made with http.client or
+    urllib fails verification: no basemap tiles in the minimap, the editors or
+    the report. requests uses certifi by itself; the variable covers the rest.
+    Set once in the first process, children inherit it. Windows loads its
+    system store and is left alone. See learning.md "A packaged build has no CA
+    certificates of its own".
+    """
+    if sys.platform == "win32" or os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import ssl
+        import certifi
+    except Exception:
+        return
+    paths = ssl.get_default_verify_paths()
+    if (paths.cafile and os.path.isfile(paths.cafile)) or (paths.capath and os.path.isdir(paths.capath)):
+        return
+    bundle = certifi.where()
+    if os.path.isfile(bundle):
+        os.environ["SSL_CERT_FILE"] = bundle
+
+
 # Every MESA process, the helpers and the worker processes included, imports this
-# module early. From source there is a terminal and children should show in it.
+# module early. From source there is a terminal and children should show in it,
+# and the interpreter's own OpenSSL knows where its certificates are.
 if getattr(sys, "frozen", False):
     hide_child_console_windows()
+    use_bundled_ca_certificates()
 
 
 # ---------------------------------------------------------------------------
