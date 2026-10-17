@@ -24,12 +24,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODE_DIR = REPO_ROOT / "code"
@@ -38,6 +41,137 @@ APP_NAME = "mesa"
 # The helpers mesa.py launches as subprocesses (INPROCESS_HELPERS run inside the
 # main app instead). Built as separate onedir bundles inside the .app.
 SUBPROCESS_HELPERS = ["combined_map", "segmentation_setup", "special_focus"]
+
+
+# Resources that are data or configuration come from git at HEAD, never from the
+# working folder (which holds a tuned config.ini and the QGIS project of the last
+# run), and the bundle is checked before signing. Mirrors build_all.py on Windows.
+# See learning.md "A build ships what git tracks, not what the working folder holds".
+INPUT_SKELETON_FOLDERS = ("asset", "geocode", "lines", "images")
+DOCS_NOT_SHIPPED = ("exchange",)   # correspondence with the sibling projects
+DATA_EXTENSIONS = (".parquet", ".mbtiles", ".gpkg", ".shp", ".geojson", ".tif", ".tiff",
+                   ".xlsx", ".csv", ".zip")
+NEVER_SHIPPED = ("secrets", "log.txt", "output", "backup", "devtools", "tests", "plans_oversight")
+
+
+def _git(*args: str) -> bytes:
+    r = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True)
+    if r.returncode != 0:
+        sys.exit(f"[build_mac] git {' '.join(args)} failed: {r.stderr.decode(errors='replace').strip()}\n"
+                 "The build takes config.ini, the input skeleton and qgis/ from git, so it must run in the repository.")
+    return r.stdout
+
+
+def _git_tracked(prefix: str) -> list[str]:
+    """Paths under prefix that exist in HEAD, not in the working tree."""
+    out = _git("ls-tree", "-r", "--name-only", "HEAD", "--", prefix).decode("utf-8", errors="replace")
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def _write_from_head(repo_path: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_git("show", f"HEAD:{repo_path}"))
+
+
+def stage_resources(stage: Path) -> Path:
+    """Lay out the templates the app seeds into the data folder: config.ini, the
+    input/ skeleton (four folders with their readme.txt) and qgis/ from git at
+    HEAD; docs/ (without docs/exchange/) and system_resources/ from the repo root,
+    as build_all.py does. Also writes build_info.json, which mesa.py shows as
+    "Build <stamp>" after the version."""
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    _write_from_head("config.ini", stage / "config.ini")
+    working_cfg = REPO_ROOT / "config.ini"
+    if working_cfg.is_file() and working_cfg.read_bytes().replace(b"\r\n", b"\n") != \
+            (stage / "config.ini").read_bytes().replace(b"\r\n", b"\n"):
+        print("[build_mac] NOTE: config.ini in the working folder differs from git; the bundle gets the one in git.")
+    wanted = {f"input/{name}/readme.txt" for name in INPUT_SKELETON_FOLDERS}
+    for name in INPUT_SKELETON_FOLDERS:
+        (stage / "input" / name).mkdir(parents=True)
+    for repo_path in _git_tracked("input"):
+        if repo_path in wanted:
+            _write_from_head(repo_path, stage / repo_path)
+    for repo_path in _git_tracked("qgis"):
+        _write_from_head(repo_path, stage / repo_path)
+    ignore = shutil.ignore_patterns(".DS_Store", *DOCS_NOT_SHIPPED)
+    for name in ("docs", "system_resources"):
+        src = REPO_ROOT / name
+        if src.is_dir():
+            shutil.copytree(src, stage / name, ignore=ignore)
+    stamp = datetime.now(ZoneInfo("Europe/Oslo")).replace(second=0, microsecond=0)
+    commit = _git("rev-parse", "HEAD").decode().strip()
+    (stage / "build_info.json").write_text(json.dumps({
+        "build_timestamp": stamp.strftime("%Y-%m-%d %H:%M"),
+        "build_date": stamp.strftime("%Y-%m-%d"),
+        "timezone": "Europe/Oslo",
+        "build_platform": "darwin",
+        "build_commit": commit,
+    }, indent=2) + "\n", encoding="utf-8")
+    print(f"[build_mac] staged templates from git {commit[:7]} in {stage}")
+    return stage
+
+
+def bundle_resources(app: Path) -> Path:
+    """Where the data files sit in a PyInstaller 6 .app: Contents/Frameworks is
+    sys._MEIPASS, cross-linked with Contents/Resources."""
+    fw = app / "Contents" / "Frameworks"
+    return fw if fw.is_dir() else app / "Contents" / "Resources"
+
+
+def _walk_files(base: Path):
+    """Files under base, following the symlinks PyInstaller uses inside a .app."""
+    seen: set[str] = set()
+    for root, dirs, files in os.walk(base, followlinks=True):
+        real = os.path.realpath(root)
+        if real in seen:
+            dirs[:] = []
+            continue
+        seen.add(real)
+        for f in files:
+            yield Path(root) / f
+
+
+def verify_bundle(app: Path) -> None:
+    """Stop if the bundle carries project data, developer state, or a config.ini
+    other than the committed template."""
+    res = bundle_resources(app)
+    problems: list[str] = []
+    for name in NEVER_SHIPPED:
+        if (res / name).exists() or (app / "Contents" / "MacOS" / name).exists():
+            problems.append(f"{name} must not ship")
+    cfg = res / "config.ini"
+    if not cfg.is_file():
+        problems.append("config.ini is missing")
+    elif cfg.read_bytes() != _git("show", "HEAD:config.ini"):
+        problems.append("config.ini is not the committed template")
+    in_dir = res / "input"
+    if not in_dir.is_dir():
+        problems.append("input/ skeleton is missing")
+    else:
+        for q in _walk_files(in_dir):
+            rel = q.relative_to(in_dir)
+            if len(rel.parts) != 2 or rel.parts[0] not in INPUT_SKELETON_FOLDERS:
+                problems.append(f"input/{rel.as_posix()} is not part of the skeleton")
+            elif q.name.lower() != "readme.txt":
+                problems.append(f"input/{rel.as_posix()} is a data file")
+    for name in DOCS_NOT_SHIPPED:
+        if (res / "docs" / name).exists():
+            problems.append(f"docs/{name}/ must not ship")
+    tracked_qgis = set(_git_tracked("qgis"))
+    if (res / "qgis").is_dir():
+        for q in _walk_files(res / "qgis"):
+            if f"qgis/{q.relative_to(res / 'qgis').as_posix()}" not in tracked_qgis:
+                problems.append(f"qgis/{q.relative_to(res / 'qgis').as_posix()} is not in git")
+    for top in ("input", "docs", "qgis"):
+        if (res / top).is_dir():
+            for q in _walk_files(res / top):
+                if q.suffix.lower() in DATA_EXTENSIONS:
+                    problems.append(f"{top}/{q.relative_to(res / top).as_posix()} looks like project data")
+    if problems:
+        sys.exit("[build_mac] The bundle is not clean:\n  - " + "\n  - ".join(dict.fromkeys(problems)))
+    print(f"[build_mac] verified: config.ini is the committed template (mesa_version = "
+          f"{_config_version(cfg)}); input/ holds the skeleton only; no secrets, log.txt or docs/exchange/.")
 
 
 def add_data(src: Path, dest: str) -> list[str]:
@@ -164,27 +298,16 @@ def build_main(distpath: Path, clean: bool) -> Path:
     if clean:
         flags.append("--clean")
 
+    # The templates mesa.py seeds into the data folder (~/Documents/MESA) on a
+    # first start, laid out by stage_resources() from git and the repo root (the
+    # banner and icons live in system_resources/ at the root, not under code/).
+    # The app is never written to, so its signature/notarization stays intact.
+    stage = stage_resources(distpath.parent / "_mac_stage")
     data_args: list[str] = []
-    # The real resources (top_graphics.png banner, mesa.ico window icon, …) live
-    # at the repo root, not under code/. Bundling code/system_resources (which
-    # doesn't exist) silently dropped the top banner in the frozen app.
-    sysres = REPO_ROOT / "system_resources"
-    if not sysres.is_dir():
-        sysres = CODE_DIR / "system_resources"
-    if sysres.is_dir():
-        data_args += add_data(sysres, "system_resources")
-    # Bundle read-only reference material as templates. mesa.py seeds these into
-    # the writable working dir (~/Documents/MESA) on first run — mirrors what
-    # build_all.py copies next to mesa.exe on Windows. The app is never written
-    # to, so its signature/notarization stays intact. input/ (1.5 GB of working
-    # data) is NOT bundled; its empty subfolders are created at runtime.
-    cfg = REPO_ROOT / "config.ini"
-    if cfg.is_file():
-        data_args += add_data(cfg, ".")
-    for name in ("docs", "qgis"):
-        d = REPO_ROOT / name
-        if d.is_dir():
-            data_args += add_data(d, name)
+    for name in ("config.ini", "build_info.json"):
+        data_args += add_data(stage / name, ".")
+    for name in ("system_resources", "docs", "qgis", "input"):
+        data_args += add_data(stage / name, name)
 
     # BASE_EXCLUDES (not MAIN_EXCLUDES) keeps scipy, which segmentation_setup
     # needs now that it runs in-binary via re-exec.
@@ -371,9 +494,10 @@ def make_dmg(app: Path, out: Path, volname: str) -> None:
     print(f"[build_mac] dmg → {out}")
 
 
-def _config_version() -> str:
+def _config_version(cfg: Path) -> str:
+    """mesa_version in a config.ini (the bundled one, never the working copy)."""
     try:
-        for line in (REPO_ROOT / "config.ini").read_text().splitlines():
+        for line in cfg.read_text().splitlines():
             if line.strip().startswith("mesa_version"):
                 return line.split("=", 1)[1].strip()
     except Exception:
@@ -405,6 +529,7 @@ def main() -> None:
     distpath = Path(ns.distpath).resolve()
     distpath.mkdir(parents=True, exist_ok=True)
     app = build_main(distpath, clean=ns.clean)
+    verify_bundle(app)
     if ns.separate_helpers:
         only = [h.strip() for h in ns.helpers.split(",") if h.strip()] or None
         build_helpers(app, distpath, clean=ns.clean, only=only)
@@ -414,7 +539,7 @@ def main() -> None:
         sign_bundle(app, ns.sign_id, ent if (ent and ent.is_file()) else None,
                     runtime=devid, timestamp=ns.timestamp)
     if ns.dmg:
-        ver = _config_version()
+        ver = _config_version(bundle_resources(app) / "config.ini")
         out = Path(ns.dmg_out).expanduser() if ns.dmg_out else \
             Path.home() / "Desktop" / f"MESA-{ver}.dmg"
         make_dmg(app, out, f"MESA {ver}")
