@@ -66,6 +66,8 @@ Bygget henter `config.ini`, `input/` og `qgis/` fra `HEAD`, ikke fra arbeidsmapp
 
 Kontroller først at ingenting bruker `D:\dist\mesa` (`mesa.exe` må ikke kjøre): en byggestart tømmer mappen.
 
+For macOS: dagen før bygget, kjør `xcrun notarytool history --keychain-profile mesa-notary` på Mac-en. Svarer den 403 «A required agreement is missing or has expired», må kontoinnehaveren godta en ny avtale hos Apple før noe kan notariseres, og det kan ta dager å få registrert (se learning.md «Check the notary service before a release day»). Ikke kjør `store-credentials` på nytt mens 403 står; et mislykket forsøk kan fjerne profilen.
+
 ```
 set MESA_BUILD_MAIN=1
 set MESA_BUILD_HELPERS=1

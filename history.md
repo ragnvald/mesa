@@ -1429,3 +1429,40 @@ packaged app cannot import `contextily` (`rasterio.sample` is not bundled), whic
 if `report_basemap_mode` is set away from its default `xyz`; and the GDAL data warning seen in the
 diagnostic comes from that partial rasterio import, while pyogrio sets `GDAL_DATA` correctly.
 The build has to be made again for the fix to reach the app.
+
+## 2026-10-17 to 2026-10-18: the Mac release build is made, and Apple's notary service refuses it
+
+With basemaps confirmed in the rebuilt app, the user asked for the release steps. The release build
+was made from `63fc058` at 18:20 (Oslo), signed with Developer ID, hardened runtime and a secure
+timestamp; `codesign --verify --strict --deep` is clean and Gatekeeper reports "Unnotarized
+Developer ID", as it should before notarization. The bundle check passes. The zip for submission
+was packed, the Zenodo token verified against the published 5.7.1 record, and
+`zenodo_release.py` extended with `--dmg` (the disk image is mounted read-only and checked the way
+the zip is) and `--keep-previous` (a new version inherits the previous version's files, which is
+right when a build is added beside them); `ZENODO_5.7.1.md` was rewritten for a version with both
+builds (`515160f`). The three Windows signing routes went into plans.md A5 as the certificate note
+that Phase 3 referred to but never had.
+
+Notarization did not happen. From 18:42 every call to the notary service, `notarytool history`
+and `notarytool submit` alike, answered HTTP 403 "A required agreement is missing or has expired".
+The Apple Developer Program License Agreement had been reissued on October 14; the user accepted
+it on developer.apple.com on October 17, where the Agreements section shows it as accepted, and
+completed the DSA trader declaration in App Store Connect. App Store Connect nevertheless kept its
+banner that the agreement needs to be reviewed, with nothing left to accept under Agreements, Tax,
+and Banking, and the notary service follows App Store Connect. Membership is active to July 2027,
+team 5EHUW53DD9, Individual, so the user is the Account Holder. `store-credentials` with a freshly
+generated app-specific password and that team id answered 403 as well, which rules out the
+profile and the password; attempts with the wrong password answered 401. Apple's system status
+showed no incident. A web search found the same symptom in October 2026 for OpenMS, mixxx and
+SurfSense after the reissued agreement, and the reported fixes (accept again under Agreements, Tax,
+and Banking; another browser; log out and in) had all been tried. Polling once a minute, then
+every ten minutes, then hourly, through the night changed nothing. Between 04:22 and 05:22 the
+keychain profile `mesa-notary` disappeared, most likely removed by a failed `store-credentials`,
+so the hourly checks were stopped: a successful `store-credentials` is now both the test and the
+repair.
+
+On the morning of 2026-10-18 the user opened a case with Apple Developer Support, case id
+103000501367, with the facts above. Everything else is ready: the signed app in `dist_mac/`, the
+submission zip, the token, the texts and the script. Not done until Apple answers: notarization,
+staple, dmg, the Zenodo version with both files, and the DOI in the documents and the wiki. Nothing
+was reported to mesa-server or mesa_demodata.
