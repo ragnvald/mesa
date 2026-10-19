@@ -1466,3 +1466,37 @@ On the morning of 2026-10-18 the user opened a case with Apple Developer Support
 submission zip, the token, the texts and the script. Not done until Apple answers: notarization,
 staple, dmg, the Zenodo version with both files, and the DOI in the documents and the wiki. Nothing
 was reported to mesa-server or mesa_demodata.
+
+## 2026-10-19: MESA 5.7.1 for macOS is published on Zenodo
+
+At 10:50 the notary service answered without the 403, about 41 hours after the agreement was
+accepted and without any word from Apple Support (case 103000501367); the cause was never
+explained. The watch noticed it, but the submission was only started at 18:17, because the
+check that found it did not start the run in the same step. The signed app was accepted by
+Apple within minutes, stapled (Gatekeeper: "Notarized Developer ID") and packed as
+`MESA_571_macos_2026_10_17.dmg`, 470 642 472 bytes, MD5 `4facbbe38a1d4e07e7ba035d0602c947`,
+built from `63fc058`, two corrections after the commit the Windows build was made from.
+
+The upload to Zenodo failed through the API: the first draft was created, every part of the
+file was refused with 403 "Permission denied", and the draft itself answered 500 when read. The
+draft was deleted and a second one made, with the same result, and the user uploaded the file
+in the browser instead. `zenodo_release.py` then found the file, compared Zenodo's MD5 with the
+local one, wrote the metadata and stopped before publishing. The title now reads "compiled
+Windows and macOS builds", and the description names both platforms. The user published it on
+2026-10-19 as https://doi.org/10.5281/zenodo.23481060 (record 23481060), a new version of
+23337078 that carries both files. The Windows file is the same one.
+
+The release text and the README no longer say Windows only. Not done: the GitHub release 5.7.1
+still has the old text, since `gh` is not installed on this Mac, and the wiki (Home and
+Quickstart name Windows 11 as the only system) is a separate repository. Nothing was reported
+to mesa-server or mesa_demodata.
+
+## 2026-10-19 (evening): the GitHub release 5.7.1 names both builds
+
+`gh` was installed on this Mac with Homebrew and the user logged it in. The text of the release
+https://github.com/ragnvald/mesa/releases/tag/5.7.1 was replaced with `devtools/RELEASE_NOTES_5.7.1.md`:
+it now links the new Zenodo version (10.5281/zenodo.23481060), names the dmg beside the zip, and
+tells Mac users to drag MESA to Applications. The tag still points at `e3179b5`, the commit the
+Windows build was made from, and the release is still marked latest; the Mac build is from
+`63fc058`, which `devtools/ZENODO_5.7.1.md` records. Still open: the wiki, which names Windows 11
+as the only system in Home and Quickstart, and which is a separate repository.

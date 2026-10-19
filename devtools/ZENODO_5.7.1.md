@@ -34,11 +34,13 @@ Kontrollert mot Zenodo-API-et 2026-10-13: 5.7.0-posten har nå riktig tittel, me
 
 Før zip-filen lages: kontroller at `D:\dist\mesa` ikke har noen `secrets`-mappe og ingen `log.txt`.
 
-`MESA_571_macos_2026_10_17.dmg`: STØRRELSE byte, MD5 `MD5SUM`. Bygget 2026-10-17 kl. 18:20 (Oslo) fra commit `63fc0586a418e6a11e86967a55ec9e65dea38db5`, med `mesa_version = 5.7.1`, signert med Developer ID og hardened runtime, tidsstemplet, notarisert og staplet. Commit-en ligger etter Windows-byggets `e3179b5` med to rettelser som bare gjelder Mac-bygget: byggeskriptet tar malene fra git (`bf5b4f8`), og den pakkede appen finner CA-sertifikater (`63fc058`); uten den siste hadde minikart og rapport ingen bakgrunnskart. `zenodo_release.py --dmg` kontrollerer diskbildet før opplasting.
+`MESA_571_macos_2026_10_17.dmg`: 470 642 472 byte, MD5 `4facbbe38a1d4e07e7ba035d0602c947`. Bygget 2026-10-17 kl. 18:20 (Oslo) fra commit `63fc0586a418e6a11e86967a55ec9e65dea38db5`, med `mesa_version = 5.7.1`, signert med Developer ID og hardened runtime, tidsstemplet, notarisert og staplet. Commit-en ligger etter Windows-byggets `e3179b5` med to rettelser som bare gjelder Mac-bygget: byggeskriptet tar malene fra git (`bf5b4f8`), og den pakkede appen finner CA-sertifikater (`63fc058`); uten den siste hadde minikart og rapport ingen bakgrunnskart. `zenodo_release.py --dmg` kontrollerer diskbildet før opplasting.
 
 ## Publisert
 
 Publisert 2026-10-15: `10.5281/zenodo.23337078` (record-id `23337078`). Filen er lastet opp av brukeren fra en annen maskin og er en egen zip av samme bygg: `MESA_571_win11_2026_10_13.zip`, 1 502 844 542 byte, MD5 `2e26d6a906cf082fd1cdddd21c00ba53`. Innholdet er kontrollert mot den lokale zip-filen over: samme 7 733 filer med samme CRC og størrelse. GitHub-utgivelsen `5.7.1` peker på `e3179b5962847cc4a6ab86217231cb58381d9155`.
+
+Mac-versjonen publisert 2026-10-19: `10.5281/zenodo.23481060` (record-id `23481060`), en ny versjon av `23337078` med begge filene. Windows-filen er den samme som i `23337078`. `MESA_571_macos_2026_10_17.dmg` ble lastet opp av brukeren i nettleseren, fordi opplasting via API-et ga 403 på Zenodos side; Zenodos MD5 stemmer med den lokale. Tittelen er endret til «compiled Windows and macOS builds». `23337078` beholder sin egen tekst og fil og er fortsatt gyldig. GitHub-utgivelsen `5.7.1` peker på Windows-byggets commit; Mac-bygget er laget fra `63fc058`.
 
 ## Beskrivelse (lim inn som den er)
 

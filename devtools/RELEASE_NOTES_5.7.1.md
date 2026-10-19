@@ -2,7 +2,7 @@ A correction release. MESA 5.7.1 fixes five things in 5.7.0 and adds nothing new
 
 ### Where can I find it?
 
-- [Zenodo record](https://doi.org/10.5281/zenodo.23337078): `MESA_571_win11_2026_10_13.zip` (Windows 11, 64-bit). The macOS build for Apple Silicon follows as a later version of the same record.
+- [Zenodo record](https://doi.org/10.5281/zenodo.23481060): `MESA_571_win11_2026_10_13.zip` (Windows 11, 64-bit) and `MESA_571_macos_2026_10_17.dmg` (macOS, Apple Silicon; signed and notarised).
 - [All versions, and the reference to cite](https://doi.org/10.5281/zenodo.10775727)
 - [MESA project wiki](https://github.com/ragnvald/mesa/wiki), with the full [changelog](https://github.com/ragnvald/mesa/wiki/Mesa-changelog-overview)
 
@@ -41,4 +41,4 @@ A build that was started with a data folder kept from an earlier version showed 
 
 ## Upgrading
 
-Unzip 5.7.1 into a folder of its own and start `mesa.exe`. Your data folder is used as it is. MESA asks whether to continue with the existing data, since it was last used with another version: answer that you continue. Nothing needs to be imported or processed again.
+On Windows, unzip 5.7.1 into a folder of its own and start `mesa.exe`. On a Mac, open the disk image and drag MESA to Applications. Your data folder is used as it is. MESA asks whether to continue with the existing data, since it was last used with another version: answer that you continue. Nothing needs to be imported or processed again.

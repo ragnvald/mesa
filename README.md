@@ -1,6 +1,6 @@
 # MESA Developer README
 
-This repository contains the source for MESA, a Windows desktop system for environmental sensitivity assessment.
+This repository contains the source for MESA, a desktop system for environmental sensitivity assessment, for Windows and macOS.
 
 For developers, the important point is that MESA is not one monolithic GIS application. It is a launcher plus a set of focused helper tools that all operate on the same project folder, the same `config.ini`, and the same shared outputs under `output/`.
 
