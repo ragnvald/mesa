@@ -26,8 +26,6 @@ from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-from urllib import error as urlerror
-from urllib import request as urlrequest
 
 
 LogFn = Optional[Callable[[str], None]]

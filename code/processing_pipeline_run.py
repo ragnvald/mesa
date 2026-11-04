@@ -31,10 +31,9 @@ from mesa_shared import find_base_dir as resolve_base_dir, read_config, parquet_
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QProgressBar,
-    QFrame, QSizePolicy, QRadioButton, QButtonGroup, QMessageBox,
-    QComboBox, QSpinBox,
+    QSizePolicy, QRadioButton, QButtonGroup, QMessageBox,
 )
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
 from ui_style import apply_shared_stylesheet
@@ -883,7 +882,6 @@ def run_lines_process(
     from shapely import wkb as _shp_wkb
     from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
     from shapely.ops import polygonize, transform, unary_union
-    from shapely.validation import make_valid
 
     gpq = parquet_dir(base_dir, cfg)
 

@@ -25,7 +25,7 @@ INDEX_GRADIENT_STEPS = 100  # number of discrete colors for 1..100 index layers
 
 import argparse, gc, json, math, mmap, os, sqlite3, re, multiprocessing as mp, sys, io
 from pathlib import Path
-from typing import Tuple, Optional, Dict, List, Iterable
+from typing import Tuple, Optional, Dict, List
 
 import pyarrow.parquet as pq
 

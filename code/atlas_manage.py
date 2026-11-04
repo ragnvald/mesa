@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QButtonGroup,
 )
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtCore import Qt, Signal, QObject
 
 from ui_style import apply_shared_stylesheet, DirtyTracker, confirm_unsaved
 

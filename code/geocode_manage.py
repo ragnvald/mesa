@@ -50,7 +50,6 @@ import datetime
 import json
 import os
 import sys
-import threading
 import time
 import shutil
 import multiprocessing as mp
@@ -64,7 +63,7 @@ import geopandas as gpd
 import pandas as pd
 import uuid
 from shapely.geometry import (
-    Polygon, MultiPolygon, GeometryCollection, LineString, MultiLineString, box
+    Polygon, MultiPolygon, GeometryCollection, box
 )
 from shapely.geometry import mapping as shp_mapping
 from shapely.ops import polygonize, unary_union
@@ -156,13 +155,11 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QPlainTextEdit, QLineEdit,
-    QCheckBox, QProgressBar, QFrame, QSizePolicy,
-    QMessageBox, QHeaderView, QTreeWidget, QTreeWidgetItem,
+    QCheckBox, QProgressBar, QMessageBox, QHeaderView, QTreeWidget, QTreeWidgetItem,
     QRadioButton, QButtonGroup,
 )
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
-import json
 
 
 # -----------------------------------------------------------------------------

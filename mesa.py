@@ -3,7 +3,6 @@ import sys
 import warnings
 import importlib
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 _MESA_SKIP_VENV_RELAUNCH = "MESA_SKIP_VENV_RELAUNCH"
 
@@ -74,9 +73,6 @@ def _ensure_repo_dev_venv() -> None:
 
 _ensure_repo_dev_venv()
 
-if TYPE_CHECKING:
-    import geopandas as gpd
-
 # pyogrio (used by GeoPandas by default when installed) warns that measured (M)
 # geometries are not supported and will be converted.
 warnings.filterwarnings(
@@ -94,8 +90,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QPlainTextEdit, QTableWidget,
     QTableWidgetItem, QScrollArea, QFrame, QSizePolicy,
-    QMessageBox, QFileDialog, QHeaderView, QSplitter,
-    QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit,
+    QMessageBox, QFileDialog, QHeaderView, QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit,
     QDialog,
 )
 from PySide6.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QColor, QDesktopServices
@@ -2568,7 +2563,7 @@ QLabel[role="footer"] {
 # Custom widgets
 # =====================================================================
 from PySide6.QtGui import QPainter, QPen, QBrush
-from PySide6.QtWidgets import QLineEdit, QCheckBox, QProgressBar
+from PySide6.QtWidgets import QCheckBox, QProgressBar
 
 
 class _ActionCard(QFrame):

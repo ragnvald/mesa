@@ -393,7 +393,6 @@ def asset_group_labels(gpq: Path) -> dict:
 
 def read_layer_geometry(gpq: Path, layer: str, codes):
     """GeoDataFrame (code, geometry) for the given codes, in the file's native CRS."""
-    import geopandas as gpd
     p = Path(gpq) / "tbl_geocode_object.parquet"
     g = mesa_shared.read_geoparquet(p, columns=[COL_CODE, COL_LAYER, "geometry"])
     g = g[g[COL_LAYER].astype(str) == str(layer)].copy()
@@ -917,7 +916,6 @@ def write_png_outputs(out_dir: Path, profiles, assign_df, geom_by_code, scale, l
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import numpy as np
     except Exception as exc:
         log(f"PNG output skipped (matplotlib unavailable: {exc}).")
         return

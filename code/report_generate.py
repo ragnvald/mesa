@@ -8,10 +8,10 @@ except Exception:
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QPlainTextEdit, QCheckBox, QRadioButton,
-    QComboBox, QProgressBar, QFrame, QSizePolicy, QButtonGroup, QMessageBox,
+    QComboBox, QProgressBar, QSizePolicy, QButtonGroup, QMessageBox,
 )
 from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, QSize, QTimer, Signal, QObject
+from PySide6.QtCore import Qt, QSize, Signal, QObject
 from ui_style import FitScrollArea, apply_shared_stylesheet, fit_window_to_content
 
 from mesa_shared import ensure_bundled_geo_data as _ensure_geo_data
@@ -46,7 +46,7 @@ import re
 import threading
 from pathlib import Path
 import subprocess
-import io, math, time, urllib.request
+import io, math, time
 import functools
 import http.client
 import sqlite3

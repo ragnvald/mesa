@@ -618,7 +618,6 @@ class _Api:
         """Line segments (tbl_segment_flat) as GeoJSON, coloured by the config
         A–E ramp on sensitivity_code_max — the old Results map's 'Sensitivity
         lines' overlay."""
-        import json
         import configparser
         try:
             import geopandas as gpd

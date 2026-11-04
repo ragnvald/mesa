@@ -24,12 +24,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QGroupBox, QLabel, QPushButton, QComboBox, QFrame,
-    QSizePolicy, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
+    QGroupBox, QLabel, QPushButton, QComboBox, QFrame,
+    QSizePolicy, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox,
 )
-from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, QObject
+from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
 
 from ui_style import apply_shared_stylesheet
 from mesa_shared import find_base_dir as resolve_base_dir

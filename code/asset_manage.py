@@ -44,11 +44,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QPlainTextEdit, QLineEdit,
-    QCheckBox, QProgressBar, QFrame, QSizePolicy,
-    QMessageBox, QFileDialog,
+    QCheckBox, QProgressBar, QMessageBox, QFileDialog,
 )
-from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, Signal, QObject
 
 # Shared Qt look-and-feel lives in the lightweight ui_style module (no GIS
 # imports) so helpers can pull just the stylesheet without dragging in the

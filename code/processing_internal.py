@@ -32,8 +32,7 @@ except Exception:
 # GUI — PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QPlainTextEdit, QProgressBar, QFrame,
-    QSplitter, QSizePolicy, QMessageBox,
+    QLabel, QPushButton, QPlainTextEdit, QProgressBar, QSplitter, QSizePolicy,
 )
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject

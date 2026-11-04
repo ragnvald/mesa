@@ -187,7 +187,6 @@ def sensitivity_layers(geoparquet_dir: str) -> list[dict]:
         table = pq.read_table(
             path, columns=["ref_geocodegroup", "name_gis_geocodegroup"]
         )
-        import pandas as pd
         df = table.to_pandas()
         groups = (
             df.groupby(["ref_geocodegroup", "name_gis_geocodegroup"])

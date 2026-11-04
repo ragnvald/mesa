@@ -505,7 +505,6 @@ def build_overview_geojson(gpq_dir, layer: str, mode: str = "signatures",
     import json
     import numpy as np
     import pandas as pd
-    import geopandas as gpd
 
     gpq_dir = Path(gpq_dir)
     seg_path = gpq_dir / "tbl_segmentation" / f"{_safe_layer_name(layer)}.parquet"

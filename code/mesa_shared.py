@@ -534,8 +534,6 @@ def _rewrite_parquet_legacy_names(path: Path, *, free_text: bool = False) -> boo
     Returns True when '<name>.renaming' was written; the caller swaps it in once
     the source handle is closed (Windows will not replace an open file).
     """
-    import pyarrow as pa
-    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     with open(path, "rb") as fh:

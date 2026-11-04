@@ -69,13 +69,12 @@ workingprojection_epsg = "4326"
 # PySide6 imports
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QGroupBox, QLabel, QPushButton, QLineEdit,
-    QScrollArea, QFrame, QSizePolicy, QMessageBox, QFileDialog,
+    QLabel, QPushButton, QFrame, QMessageBox, QFileDialog,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView,
 )
-from PySide6.QtGui import QFont, QIcon, QPainter, QPen, QBrush, QColor
-from PySide6.QtCore import Qt, Signal, QObject
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
 
 from ui_style import apply_shared_stylesheet, confirm_unsaved
 
