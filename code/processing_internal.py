@@ -106,10 +106,6 @@ def reset_run_state() -> None:
     _pause_event.set()
 
 
-def is_paused() -> bool:
-    return not _pause_event.is_set()
-
-
 def is_cancelled() -> bool:
     return _cancel_event.is_set()
 

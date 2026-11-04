@@ -107,12 +107,6 @@ class ReportProgress:
         self._finished = False
 
     # ------------------------------------------------------------------ plan
-    def set_planned(self, kind: str, count: int) -> None:
-        """Correct the plan when the real number of maps of a kind becomes known."""
-        self._plan[kind] = max(0, int(count))
-        self._stats.setdefault(kind, _KindStats())
-        self._publish(force=True)
-
     def close_kind(self, kind: str) -> None:
         """A stage has ended: whatever was planned for it and not drawn will not come."""
         st = self._stats.setdefault(kind, _KindStats())

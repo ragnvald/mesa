@@ -212,23 +212,6 @@ def _explicit_int(cfg: configparser.ConfigParser, key: str) -> Optional[int]:
     return v if v != 0 else None
 
 
-def _explicit_float(cfg: configparser.ConfigParser, key: str,
-                    treat_default_as_unset: float | None = None) -> Optional[float]:
-    """Floats are trickier than ints because there's no natural "0 = auto"
-    sentinel. Caller passes treat_default_as_unset so we can recognise
-    "still at the shipped default" as overridable."""
-    raw = cfg["DEFAULT"].get(key, "").strip()
-    if not raw:
-        return None
-    try:
-        v = float(raw)
-    except Exception:
-        return None
-    if treat_default_as_unset is not None and abs(v - treat_default_as_unset) < 1e-9:
-        return None
-    return v
-
-
 def _derive_max_workers(hw: dict, cfg: configparser.ConfigParser) -> tuple[int, str]:
     """Intersect-stage worker count from RAM budget and CPU count."""
     cpu_cap = hw["cpu_count"]

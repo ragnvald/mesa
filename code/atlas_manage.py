@@ -55,15 +55,6 @@ _PARQUET_SUBDIR = "output/geoparquet"
 _PARQUET_OVERRIDE: Path | None = None
 
 
-def _exists(path: Path) -> bool:
-    try:
-        return path.exists()
-    except Exception:
-        return False
-
-
-
-
 def _ensure_cfg() -> configparser.ConfigParser:
     global _CFG, _CFG_PATH
     if _CFG is not None:

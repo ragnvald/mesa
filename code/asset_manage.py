@@ -153,13 +153,6 @@ def _force_2d_geom(geom):
         return geom
 
 
-def _exists(path: Path) -> bool:
-    try:
-        return path.exists()
-    except Exception:
-        return False
-
-
 def _ensure_cfg() -> configparser.ConfigParser:
     global _CFG, _CFG_PATH
     if _CFG is not None:
