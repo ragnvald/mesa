@@ -246,105 +246,144 @@ def read_config(base_dir: Path) -> configparser.ConfigParser:
             except Exception:
                 cfg.read(candidate)
             break
-    # config.ini holds the version-controlled defaults; a per-project settings
-    # table (seeded from it, written by Tune processing) overrides them when
-    # present. Absent table -> config.ini stays authoritative (the fallback for
-    # helpers run before mesa.py has seeded anything).
-    apply_settings_overlay(cfg, base_dir)
     return cfg
 
 
 # ---------------------------------------------------------------------------
-# Settings store (config.ini = defaults; tbl_settings = live per-project store)
+# config.ini upgrade: add what a newer version expects, never change a value
 # ---------------------------------------------------------------------------
-# Design: config.ini ships the version-controlled defaults. At runtime they are
-# overlaid by a per-project key/value table (output/geoparquet/tbl_settings.parquet)
-# that Tune processing writes to. read_config() applies the overlay, so every
-# existing `cfg["DEFAULT"].get(...)` call site honours it with no change.
-#
-# Stdlib-import-safety: this module stays stdlib-only, so pyarrow is imported
-# lazily *inside* these functions — and only when the table actually exists. An
-# untuned project (or a helper run before mesa.py seeds anything) pays just a
-# Path.exists() and falls back to config.ini. Results are cached per process,
-# keyed on the file mtime, so repeated read_config() calls stay cheap.
-_SETTINGS_OVERLAY_CACHE: dict = {}
+_CFG_SECTION_RE = re.compile(r"^\[([^\]]+)\]\s*$")
+_CFG_KEY_RE = re.compile(r"^([^\s;#\[=:][^=:]*?)\s*[=:]")
 
 
-def settings_table_path(base_dir: Path) -> Path:
-    """Path to the per-project settings store (parquet key/value table)."""
-    return Path(base_dir) / "output" / "geoparquet" / "tbl_settings.parquet"
+def _config_layout(lines: list) -> list:
+    """Map config.ini lines to sections and keys, the way configparser reads them.
 
-
-def read_settings_overlay(base_dir: Path) -> dict:
-    """Return {key: value} from the settings table, or {} if absent/unreadable.
-
-    Cached per process on the file mtime; lazy-imports pyarrow only when the
-    table exists. Any failure returns {} so config.ini remains authoritative.
+    Each section is {name, header, lead, keys, order}; each key (lower-cased, as
+    configparser's optionxform does) is {start, line, end}: the first line of the
+    comment block directly above it, its own line, and the line after its last
+    continuation. Lines before the first header form a section named None.
     """
-    try:
-        p = settings_table_path(base_dir)
-        if not p.exists():
-            return {}
-        mtime = p.stat().st_mtime
-        key = str(p)
-        cached = _SETTINGS_OVERLAY_CACHE.get(key)
-        if cached is not None and cached[0] == mtime:
-            return cached[1]
-        import pyarrow.parquet as pq  # lazy: only when a table exists
-        tbl = pq.read_table(p, columns=["key", "value"])
-        keys = tbl.column("key").to_pylist()
-        vals = tbl.column("value").to_pylist()
-        out = {str(k): ("" if v is None else str(v)) for k, v in zip(keys, vals) if k is not None}
-        _SETTINGS_OVERLAY_CACHE[key] = (mtime, out)
-        return out
-    except Exception:
-        return {}
+    sections = [{"name": None, "header": None, "lead": 0, "keys": {}, "order": []}]
+    comment_start = None
+    last_key = None
+    for i, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        stripped = line.strip()
+        current = sections[-1]
+        m = _CFG_SECTION_RE.match(line)
+        if m:
+            sections.append({"name": m.group(1).strip(), "header": i,
+                             "lead": i if comment_start is None else comment_start,
+                             "keys": {}, "order": []})
+            comment_start = last_key = None
+            continue
+        if not stripped:
+            comment_start = last_key = None
+            continue
+        if stripped[0] in "#;":
+            if comment_start is None:
+                comment_start = i
+            last_key = None
+            continue
+        if line[0] in " \t" and last_key is not None:
+            current["keys"][last_key]["end"] = i + 1
+            continue
+        m = _CFG_KEY_RE.match(line)
+        key = m.group(1).strip().lower() if m else None
+        if key and key not in current["keys"]:
+            current["keys"][key] = {"start": i if comment_start is None else comment_start,
+                                    "line": i, "end": i + 1}
+            current["order"].append(key)
+            last_key = key
+        else:
+            last_key = None
+        comment_start = None
+    return sections
 
 
-def apply_settings_overlay(cfg: configparser.ConfigParser, base_dir: Path) -> configparser.ConfigParser:
-    """Overlay the settings table onto cfg['DEFAULT'] in place and return cfg.
+def upgrade_config_file(target: Path, template: Path) -> list:
+    """Add to *target* every section and key the shipped *template* has and it lacks.
 
-    No-op when the table is absent (config.ini stays authoritative) — this is the
-    standalone-helper fallback. Never raises.
+    A newer MESA may expect settings an older data folder's config.ini does not
+    have. Each missing key is copied with the comment block above it and placed
+    after the nearest preceding key the two files share; a missing section is
+    appended whole. Existing values, comments and line endings are never changed,
+    so the user's and Tune processing's values always win. Returns the added keys
+    as "section.key"; writes nothing when nothing is missing or both paths are the
+    same file (running from source).
     """
-    try:
-        overlay = read_settings_overlay(base_dir)
-        if overlay:
-            for k, v in overlay.items():
-                try:
-                    cfg.set("DEFAULT", str(k), str(v))
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return cfg
+    target, template = Path(target), Path(template)
+    if not target.is_file() or not template.is_file():
+        return []
+    if os.path.samefile(target, template):
+        return []
+    raw = target.read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    tpl = template.read_text(encoding="utf-8-sig").splitlines()
+    tpl_sections = _config_layout(tpl)
+    added: list = []
 
+    def _terminate(idx: int) -> None:
+        if idx > 0 and not lines[idx - 1].endswith(("\n", "\r")):
+            lines[idx - 1] += nl
 
-def write_settings(base_dir: Path, updates: dict) -> bool:
-    """Upsert key/value pairs into the settings table (created if absent).
+    for n, tsec in enumerate(tpl_sections):
+        name = tsec["name"]
+        if name is None:
+            continue
+        have = next((s for s in _config_layout(lines) if s["name"] == name), None)
+        if have is None:
+            stop = tpl_sections[n + 1]["lead"] if n + 1 < len(tpl_sections) else len(tpl)
+            block = tpl[tsec["lead"]:stop]
+            while block and not block[-1].strip():
+                block.pop()
+            _terminate(len(lines))
+            if lines and lines[-1].strip():
+                lines.append(nl)
+            lines.extend(b + nl for b in block)
+            added.extend(f"{name}.{k}" for k in tsec["order"])
+            continue
+        for pos, key in enumerate(tsec["order"]):
+            have = next(s for s in _config_layout(lines) if s["name"] == name)
+            if key in have["keys"]:
+                continue
+            anchor = have["header"] + 1
+            for prev in reversed(tsec["order"][:pos]):
+                if prev in have["keys"]:
+                    anchor = have["keys"][prev]["end"]
+                    break
+            entry = tsec["keys"][key]
+            comments = tpl[entry["start"]:entry["line"]]
+            # A group comment the target already has right below the anchor is
+            # shared, not repeated: the key goes in under it.
+            nxt = anchor
+            while nxt < len(lines) and not lines[nxt].strip():
+                nxt += 1
+            shared = 0
+            while (shared < len(comments) and nxt + shared < len(lines)
+                   and lines[nxt + shared].strip() == comments[shared].strip()):
+                shared += 1
+            if shared:
+                anchor = nxt + shared
+                comments = comments[shared:]
+            block = comments + tpl[entry["line"]:entry["end"]]
+            if comments and not shared:
+                block = [""] + block
+                if anchor < len(lines) and lines[anchor].strip():
+                    block.append("")
+            _terminate(anchor)
+            lines[anchor:anchor] = [b + nl for b in block]
+            added.append(f"{name}.{key}")
 
-    Returns True on success. Lazy-imports pyarrow. Atomic write via temp+replace.
-    """
-    if not updates:
-        return False
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-        merged = dict(read_settings_overlay(base_dir))
-        for k, v in updates.items():
-            merged[str(k)] = "" if v is None else str(v)
-        keys = list(merged.keys())
-        vals = [merged[k] for k in keys]
-        tbl = pa.table({"key": keys, "value": vals})
-        p = settings_table_path(base_dir)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(p.name + ".tmp")
-        pq.write_table(tbl, tmp)
-        os.replace(tmp, p)
-        _SETTINGS_OVERLAY_CACHE.pop(str(p), None)  # invalidate cache
-        return True
-    except Exception:
-        return False
+    if added:
+        tmp = target.with_name(target.name + ".upgrading")
+        tmp.write_bytes((b"\xef\xbb\xbf" if bom else b"") + "".join(lines).encode("utf-8"))
+        os.replace(tmp, target)
+    return added
 
 
 def mesa_version_label(cfg: configparser.ConfigParser) -> str:
@@ -526,7 +565,7 @@ def _legacy_geocode_names_pending(base_dir: Path) -> bool:
     return False
 
 
-def _rewrite_parquet_legacy_names(path: Path, *, free_text: bool = False) -> bool:
+def _rewrite_parquet_legacy_names(path: Path) -> bool:
     """Pad legacy grid names in every string column of one parquet file.
 
     Streams row group by row group and writes the original Arrow schema back, so
@@ -537,10 +576,10 @@ def _rewrite_parquet_legacy_names(path: Path, *, free_text: bool = False) -> boo
     import pyarrow.parquet as pq
 
     with open(path, "rb") as fh:
-        return _rewrite_parquet_legacy_names_open(pq.ParquetFile(fh), path, free_text=free_text)
+        return _rewrite_parquet_legacy_names_open(pq.ParquetFile(fh), path)
 
 
-def _rewrite_parquet_legacy_names_open(pf, path: Path, *, free_text: bool) -> bool:
+def _rewrite_parquet_legacy_names_open(pf, path: Path) -> bool:
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
@@ -559,16 +598,11 @@ def _rewrite_parquet_legacy_names_open(pf, path: Path, *, free_text: bool) -> bo
     def _fix(arr):
         if pa.types.is_dictionary(arr.type):
             return pa.DictionaryArray.from_arrays(arr.indices, _fix(arr.dictionary))
-        if free_text:
-            return pa.array([None if v is None else _canonical_grid_tokens(v) for v in arr.to_pylist()],
-                            type=arr.type)
         return pc.replace_substring_regex(arr, _LEGACY_GRID_NAME_RE2, _LEGACY_GRID_NAME_RE2_REPL)
 
     def _has_legacy(arr) -> bool:
         if pa.types.is_dictionary(arr.type):
             arr = arr.dictionary
-        if free_text:
-            return any(v is not None and _LEGACY_GRID_TOKEN_RE.search(v) for v in arr.to_pylist())
         return bool(pc.any(pc.match_substring_regex(arr, _LEGACY_GRID_NAME_RE2)).as_py() or False)
 
     found = False
@@ -664,7 +698,7 @@ def migrate_geocode_group_names(base_dir, log=None) -> dict:
         tables.append(group_table)
     for p in tables:
         try:
-            if _rewrite_parquet_legacy_names(p, free_text=(p.name == "tbl_settings.parquet")):
+            if _rewrite_parquet_legacy_names(p):
                 os.replace(p.with_name(p.name + ".renaming"), p)
                 summary["tables"] += 1
                 _log(f"Geocode names: updated {p.relative_to(gpq) if gpq in p.parents else p.name}")

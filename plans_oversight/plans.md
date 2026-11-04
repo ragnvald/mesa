@@ -16,15 +16,10 @@ Full design documents for individual items live in `devtools/docs/`, which
 ## A. Pending — committed direction, not yet implemented
 
 ### A1. Settings store — Phase 2 (config.ini → live table)
-- **State:** Phase 1 landed (2026-06-26) — `read_config` overlays
-  `output/geoparquet/tbl_settings.parquet` on config.ini, with a config.ini
-  fallback when the table is absent. No production behaviour change yet.
-- **To do:** (1) seed the table from config.ini at mesa.py startup for *missing*
-  keys only (never clobber saved tuning); (2) move "Tune processing" Commit to
-  `mesa_shared.write_settings(...)` instead of editing config.ini, and load
-  current values from the table when the window opens.
-- **Refs:** `learning.md` "Settings store: config.ini defaults overlaid by
-  tbl_settings (Phase 1)"; `mesa_shared.apply_settings_overlay` / `write_settings`.
+- **Dropped 2026-11-04.** config.ini in the data folder stays the one settings
+  store. Phase 1's table overlay was removed; instead MESA adds at startup the keys
+  a newer version expects (`mesa_shared.upgrade_config_file`). See `learning.md`
+  "config.ini is the one settings store" and history.md 2026-11-04.
 
 ### A2. basic_mosaic — Tier 2 (tiled overlay + membership dissolve)
 - **State:** Tier 1 landed (spawn fix + snap knob + pre-flight gate). The
@@ -176,8 +171,9 @@ never.
   (`_start_panic_watchdog`) is not wired into the mosaic pool. Wiring it would let
   the extraction/reduction pools throttle under pressure (complements the
   pre-flight gate, which only fires at start).
-- **Settings re-seed / force-defaults.** Once Phase 2 exists, an explicit
-  "reset to config.ini defaults" action (re-seed the table) for operators.
+- **Settings reset / force-defaults.** An explicit "reset to the shipped
+  defaults" action for operators: today the startup upgrade only adds missing
+  keys, and a changed default never reaches a key the data folder already has.
 - **Geocode import naming.** Import names groups `geocode_001..N` sequentially, so
   importing a *different* source folder can collide with a previous import's
   names (refresh semantics overwrite them). A stable per-source naming scheme

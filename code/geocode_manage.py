@@ -248,12 +248,6 @@ def read_config(file_name: Path) -> configparser.ConfigParser:
     cfg.read(file_name, encoding="utf-8")
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
-    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
-    try:
-        from mesa_shared import apply_settings_overlay
-        apply_settings_overlay(cfg, Path(file_name).parent)
-    except Exception:
-        pass
     return cfg
 
 def _safe_rmtree(p: Path):

@@ -1537,3 +1537,35 @@ Found on the way and not fixed, since they are bugs rather than dead code:
 `NameError` is swallowed by `except Exception: pass`; and its `if __name__ == "__main__":` block
 uses `ProcessingInternalWindow` before the class is defined, so running the file directly with a
 GUI fails.
+
+## 2026-11-04: config.ini stays the one settings store; MESA adds the settings a new version expects
+
+The user asked what settings Phase 2 was. It was the second half of a plan from 2026-06-26 to move
+settings from config.ini into a table, `tbl_settings`, per project. Phase 1 had added an overlay of
+the table onto config.ini in seven config readers; nothing ever wrote the table, so it never
+changed anything, and Phase 2 (seed the table, let Tune processing write to it) was never done.
+Since 5.7 the user's config.ini lives in the data folder, apart from the program, which took away
+most of the reason; and the seven readers written or changed since June did not apply the overlay.
+
+The user's wish was a new config.ini on the first start on a machine, an upgrade of it when an
+older MESA had been there, and a database table as master with config.ini kept in step. I argued
+against the table: two copies that drift apart, hand edits lost without a word, a store that
+cannot be opened in a text editor, and machine tuning carried inside packages. The user decided on
+one store, config.ini, with an upgrade that adds what a newer version expects. I also argued
+against adding a setting at the moment it is read, as the user first described it, because
+fourteen modules and parallel helpers would then write the same file; the user accepted doing it
+once at startup.
+
+Done, not committed (the user will commit and push it together): `mesa_shared.upgrade_config_file`
+adds to the data folder's config.ini every section and key the shipped template has and it lacks,
+with the comment above each key, after the nearest key the two share; a group comment already
+there is not repeated. `_bootstrap_config()` runs it before anything reads config.ini. Existing
+values, line endings and a byte order mark are kept; running from source the two files are the
+same and nothing is written. On the released config.ini files, 5.5.0 gained the three keys 5.7.1
+added (`import_validate_geometries`, `segmv_enabled`, `segmv_export_gpkg`) and 5.6.0 the one
+(`segmv_enabled`), every old value unchanged, and a second run changed nothing. The overlay was
+removed from mesa.py and the six modules, with `write_settings` and the free-text branch of the
+geocode-name migration that only `tbl_settings` used. Eight new tests in
+`tests/test_config_upgrade.py`; 129 tests pass. Not done, as agreed: a default that changes between
+versions does not reach a key the file already has, and keys a version stops using are left in
+place.

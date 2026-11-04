@@ -232,13 +232,6 @@ def read_config(abs_or_rel_path: str):
     cfg.read(cfg_path, encoding="utf-8")
     if "DEFAULT" not in cfg:
         cfg["DEFAULT"] = {}
-    # Overlay the per-project settings table (no-op when absent; see mesa_shared).
-    try:
-        from mesa_shared import apply_settings_overlay
-        from pathlib import Path as _Path
-        apply_settings_overlay(cfg, _Path(cfg_path).parent)
-    except Exception:
-        pass
     return cfg
 
 def check_and_create_folders():
@@ -1988,6 +1981,27 @@ def _program_version() -> str:
     return ""
 
 
+def _upgrade_config_from_template() -> list[str]:
+    """Add the settings this version's config.ini template has and the data
+    folder's config.ini lacks. Values already there are never changed; running
+    from source the two are the same file and nothing happens.
+    See learning.md "config.ini is the one settings store"."""
+    template = next((p for p in (os.path.join(b, "config.ini") for b in (RESOURCE_BASE, PROJECT_BASE))
+                     if os.path.isfile(p)), "")
+    if not template:
+        return []
+    try:
+        from mesa_shared import upgrade_config_file
+        added = upgrade_config_file(Path(config_file), Path(template))
+    except Exception as exc:
+        log_to_logfile(f"config.ini: could not add the settings this version expects: {exc}")
+        return []
+    if added:
+        log_to_logfile(f"config.ini: added {len(added)} setting(s) this version expects, "
+                       f"with their defaults: {', '.join(added)}")
+    return added
+
+
 def _set_working_dir(path: str) -> None:
     global original_working_directory, config_file, gpkg_file
     original_working_directory = os.path.abspath(path)
@@ -2151,6 +2165,7 @@ def _bootstrap_config() -> None:
     _seed_working_dir()
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Configuration not found: {config_file}")
+    _upgrade_config_from_template()
     # Before read_config: the migration may rewrite group names held in config.ini.
     _migrate_geocode_group_names(original_working_directory)
     config = read_config(config_file)
