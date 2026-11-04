@@ -236,56 +236,6 @@ def _set_status_message(message: str) -> None:
     except Exception:
         pass
 
-def _ensure_default_header_present(path: str) -> None:
-    try:
-        if not os.path.isfile(path):
-            return
-        with open(path, "r", encoding="utf-8") as f:
-            txt = f.read()
-        first = ""
-        for line in txt.splitlines():
-            s = line.strip()
-            if not s or s.startswith(";") or s.startswith("#"):
-                continue
-            first = s
-            break
-        if first and not first.startswith("["):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("[DEFAULT]\n" + txt)
-    except Exception:
-        pass
-
-def update_config_with_values(cfg_path: str, **kwargs) -> None:
-    if not os.path.isabs(cfg_path):
-        raise ValueError("cfg_path must be absolute")
-    _ensure_default_header_present(cfg_path)
-    if not os.path.isfile(cfg_path):
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            f.write("[DEFAULT]\n")
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    if not any(line.strip().startswith('[') for line in lines):
-        lines.insert(0, "[DEFAULT]\n")
-    for key, value in kwargs.items():
-        found = False
-        key_norm = key.strip().casefold()
-        for i, line in enumerate(lines):
-            if "=" not in line:
-                continue
-            left, sep, right = line.partition("=")
-            if sep == "":
-                continue
-            if left.strip().casefold() != key_norm:
-                continue
-            indent = left[: len(left) - len(left.lstrip())]
-            lines[i] = f"{indent}{key} = {value}\n"
-            found = True
-            break
-        if not found:
-            lines.append(f"{key} = {value}\n")
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-
 def _is_blankish(v) -> bool:
     try:
         s = ("" if v is None else str(v)).strip().lower()

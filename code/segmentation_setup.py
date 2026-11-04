@@ -86,8 +86,7 @@ def _shared_window_icon(base_dir: Path):
 
 
 def _update_config(cfg_path: str, **kwargs) -> None:
-    """Comment-preserving write of [DEFAULT] keys (copy of processing_setup's
-    update_config_with_values — kept local so this helper stays lightweight)."""
+    """Comment-preserving write of [DEFAULT] keys, kept local so this helper stays lightweight."""
     if not os.path.isabs(cfg_path):
         raise ValueError("cfg_path must be absolute")
     if not os.path.isfile(cfg_path):
