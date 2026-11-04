@@ -1074,11 +1074,6 @@ def _run_tiles_stream_to_gui(minzoom=None, maxzoom=None):
         log_to_gui(log_widget, f"[Tiles] Error: {e}")
     finally:
         update_progress(tile_ceiling)
-        # Tail the shared worker log file into the GUI while the worker runs
-        try:
-            _start_log_tailer(root)
-        except Exception:
-            pass
 
 def _auto_run_tiles_stage(minzoom, maxzoom):
     """
@@ -5151,74 +5146,6 @@ def run_headless(original_working_directory_arg: str | None = None,
         _external_log_fn = None
 
 
-if __name__ == "__main__":
-    # Windows + PyInstaller: ensure child processes bootstrap correctly.
-    # This allows the minimap helper process (spawn) to start in frozen builds.
-    try:
-        import multiprocessing as _mp
-        try:
-            _mp.freeze_support()
-        except Exception:
-            pass
-        try:
-            # Use spawn consistently; ignore if already set by the environment
-            _mp.set_start_method("spawn", force=False)
-        except Exception:
-            pass
-    except Exception:
-        pass
-    parser = argparse.ArgumentParser(description="Process stacked/flat GeoParquet with A..E categorisation")
-    parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
-    parser.add_argument('--headless', action='store_true', help='Run without GUI (CLI mode)')
-    parser.add_argument('--explode-flat-multipolygons', action='store_true', help='Split MultiPolygon geometries in tbl_flat into individual Polygon rows')
-    args = parser.parse_args()
-    original_working_directory = args.original_working_directory or os.getcwd()
-    try:
-        leaf = os.path.basename(original_working_directory).lower()
-        if leaf in ("system", "tools", "code"):
-            original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
-    except Exception:
-        pass
-
-    # Flat config
-    cfg_path = base_dir() / "config.ini"
-    cfg = read_config(cfg_path)
-    set_global_cfg(cfg)  # make DEFAULT.parquet_folder effective everywhere
-
-    # Zooms for raster tiles (from config.ini)
-    tiles_minzoom = cfg_get_int(cfg, "tiles_minzoom", 6)
-    tiles_maxzoom = cfg_get_int(cfg, "tiles_maxzoom", 12)
-
-    # Sanitize: clamp to [0, 22] and ensure min <= max
-    tiles_minzoom = max(0, min(tiles_minzoom, 22))
-    tiles_maxzoom = max(tiles_minzoom, min(tiles_maxzoom, 22))
-
-    try:
-        HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
-    except Exception:
-        pass
-
-    MINIMAP_STATUS_PATH = gpq_dir() / "__chunk_status.json"
-    _init_idle_status()  # tiny baseline
-
-    if args.headless:
-        try:
-            run_headless(args.original_working_directory, explode_flat_multipolygons=bool(args.explode_flat_multipolygons))
-        except Exception:
-            sys.exit(1)
-        sys.exit(0)
-
-    # --- PySide6 GUI mode ---
-    app = QApplication.instance() or QApplication(sys.argv)
-    apply_shared_stylesheet(app)
-
-    _signals = _ProcessingSignals()
-
-    window = ProcessingInternalWindow(cfg_path, tiles_minzoom, tiles_maxzoom)
-    window.show()
-    sys.exit(app.exec())
-
-
 class ProcessingInternalWindow(QMainWindow):
     """Main GUI window for processing_internal (PySide6)."""
 
@@ -5426,3 +5353,70 @@ class ProcessingInternalWindow(QMainWindow):
         finally:
             self._busy = False
 
+
+if __name__ == "__main__":
+    # Windows + PyInstaller: ensure child processes bootstrap correctly.
+    # This allows the minimap helper process (spawn) to start in frozen builds.
+    try:
+        import multiprocessing as _mp
+        try:
+            _mp.freeze_support()
+        except Exception:
+            pass
+        try:
+            # Use spawn consistently; ignore if already set by the environment
+            _mp.set_start_method("spawn", force=False)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    parser = argparse.ArgumentParser(description="Process stacked/flat GeoParquet with A..E categorisation")
+    parser.add_argument('--original_working_directory', required=False, help='Path to running folder')
+    parser.add_argument('--headless', action='store_true', help='Run without GUI (CLI mode)')
+    parser.add_argument('--explode-flat-multipolygons', action='store_true', help='Split MultiPolygon geometries in tbl_flat into individual Polygon rows')
+    args = parser.parse_args()
+    original_working_directory = args.original_working_directory or os.getcwd()
+    try:
+        leaf = os.path.basename(original_working_directory).lower()
+        if leaf in ("system", "tools", "code"):
+            original_working_directory = os.path.abspath(os.path.join(original_working_directory, os.pardir))
+    except Exception:
+        pass
+
+    # Flat config
+    cfg_path = base_dir() / "config.ini"
+    cfg = read_config(cfg_path)
+    set_global_cfg(cfg)  # make DEFAULT.parquet_folder effective everywhere
+
+    # Zooms for raster tiles (from config.ini)
+    tiles_minzoom = cfg_get_int(cfg, "tiles_minzoom", 6)
+    tiles_maxzoom = cfg_get_int(cfg, "tiles_maxzoom", 12)
+
+    # Sanitize: clamp to [0, 22] and ensure min <= max
+    tiles_minzoom = max(0, min(tiles_minzoom, 22))
+    tiles_maxzoom = max(tiles_minzoom, min(tiles_maxzoom, 22))
+
+    try:
+        HEARTBEAT_SECS = cfg_get_int(cfg, "heartbeat_secs", HEARTBEAT_SECS)
+    except Exception:
+        pass
+
+    MINIMAP_STATUS_PATH = gpq_dir() / "__chunk_status.json"
+    _init_idle_status()  # tiny baseline
+
+    if args.headless:
+        try:
+            run_headless(args.original_working_directory, explode_flat_multipolygons=bool(args.explode_flat_multipolygons))
+        except Exception:
+            sys.exit(1)
+        sys.exit(0)
+
+    # --- PySide6 GUI mode ---
+    app = QApplication.instance() or QApplication(sys.argv)
+    apply_shared_stylesheet(app)
+
+    _signals = _ProcessingSignals()
+
+    window = ProcessingInternalWindow(cfg_path, tiles_minzoom, tiles_maxzoom)
+    window.show()
+    sys.exit(app.exec())

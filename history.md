@@ -1569,3 +1569,19 @@ geocode-name migration that only `tbl_settings` used. Eight new tests in
 `tests/test_config_upgrade.py`; 129 tests pass. Not done, as agreed: a default that changes between
 versions does not reach a key the file already has, and keys a version stops using are left in
 place.
+
+## 2026-11-04: two faults in processing_internal.py, found during the dead-code review
+
+Fixed at the user's request. After the tile stage, a `finally` block called
+`_start_log_tailer(root)`; `root` has never existed there (the line dates from `535b44e`,
+2026-01-24), and `except Exception: pass` swallowed the `NameError` on every run. Defining `root`
+would have been wrong: the window starts its own tailer when it opens, so a second one after the
+tiles would only have shown the log twice. The call was removed, which leaves behaviour as it was.
+
+The file's `if __name__ == "__main__":` block stood before `class ProcessingInternalWindow`, so
+running `processing_internal.py` directly with a window failed with a `NameError`. MESA itself
+only imports the file as a library, from `processing_pipeline_run`, so no user met it. The block
+was moved, unchanged, to the end of the file. Checked offscreen: the old file failed with the
+`NameError`, the new one opened the window; 133 tests pass. The direct run wrote the idle
+minimap status `output/geoparquet/__chunk_status.json` in the repository, because `base_dir()`
+did not accept the temporary folder it was given; the file is rewritten at every run.
