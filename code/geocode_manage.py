@@ -2163,8 +2163,6 @@ def _load_asset_objects(base_dir: Path) -> gpd.GeoDataFrame:
 # Task ordering helpers (for snappy early progress)
 # -----------------------------------------------------------------------------
 def _order_tasks(counts: List[int], mode: str) -> List[int]:
-    n = len(counts)
-    idxs = np.arange(n)
     if mode == "heavy_first":
         return list(np.argsort(-np.array(counts)))
     if mode == "light_first":

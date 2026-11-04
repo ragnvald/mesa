@@ -5000,7 +5000,7 @@ def intersect_assets_geocodes(asset_data: gpd.GeoDataFrame,
                     _chunk_finished(idx, paths)
                     _update_status(done_count); _tick_progress(done_count, written, progress_state["started_at"])
                     if done_count % 8 == 0: gc.collect()
-            except Exception as e:
+            except Exception:
                 if panic_state["triggered"]:
                     error_msg = (
                         f"intersection aborted by memory panic watchdog "

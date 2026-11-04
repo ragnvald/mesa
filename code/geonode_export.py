@@ -1144,7 +1144,7 @@ def _apply_style_with_session(
     # ── Step 2: GeoNode session ───────────────────────────────────────────
     gn_session = requests.Session()
     try:
-        lp = gn_session.get(f"{base}/account/login/", timeout=10)
+        gn_session.get(f"{base}/account/login/", timeout=10)
         login_csrf = gn_session.cookies.get("csrftoken", "")
         gn_session.post(
             f"{base}/account/login/",

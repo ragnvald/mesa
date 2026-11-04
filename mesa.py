@@ -6195,7 +6195,7 @@ class MesaMainWindow(QMainWindow):
                     "Either way this replaces current input/, output/ and config.ini."
                 )
                 b_reimport = box.addButton("Re-import from inputs", QMessageBox.AcceptRole)
-                b_upgrade = box.addButton("Upgrade in place", QMessageBox.DestructiveRole)
+                box.addButton("Upgrade in place", QMessageBox.DestructiveRole)
                 b_cancel = box.addButton(QMessageBox.Cancel)
                 box.setDefaultButton(b_reimport)
                 box.exec()
