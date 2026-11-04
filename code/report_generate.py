@@ -679,49 +679,6 @@ def _analysis_write_area_map_png(
         return False
 
 
-def _geom_to_mpl_path(geom) -> MplPath | None:
-    """Convert a (Multi)Polygon-like geometry to a Matplotlib Path."""
-    try:
-        if geom is None:
-            return None
-        if getattr(geom, "is_empty", True):
-            return None
-        gtype = getattr(geom, "geom_type", "")
-        if gtype == "Polygon":
-            polygons = [geom]
-        elif gtype == "MultiPolygon":
-            polygons = list(getattr(geom, "geoms", []) or [])
-        else:
-            return None
-
-        vertices: list[tuple[float, float]] = []
-        codes: list[int] = []
-
-        def _add_ring(coords):
-            pts = list(coords)
-            if len(pts) < 3:
-                return
-            # Ensure closed ring
-            if pts[0] != pts[-1]:
-                pts.append(pts[0])
-            vertices.extend([(float(x), float(y)) for x, y in pts])
-            codes.extend([MplPath.MOVETO] + [MplPath.LINETO] * (len(pts) - 2) + [MplPath.CLOSEPOLY])
-
-        for poly in polygons:
-            try:
-                _add_ring(poly.exterior.coords)
-                for interior in list(getattr(poly, "interiors", []) or []):
-                    _add_ring(interior.coords)
-            except Exception:
-                continue
-
-        if not vertices:
-            return None
-        return MplPath(vertices, codes)
-    except Exception:
-        return None
-
-
 def _analysis_write_sensitivity_bar_png(totals_df: pd.DataFrame, palette_A2E: dict, out_path: str, title: str) -> bool:
     try:
         if totals_df is None or totals_df.empty:
@@ -3581,22 +3538,6 @@ def create_line_statistic_image(line_name, sensitivity_series, color_codes, leng
     plt.savefig(output_path, dpi=dpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
 
-def resize_image(image_path, max_width_px, max_height_px):
-    """
-    Resample the stored image file to be within (max_width_px, max_height_px) in *pixels*.
-    """
-    try:
-        with PILImage.open(image_path) as img:
-            width, height = img.size
-            ratio = min(float(max_width_px) / width, float(max_height_px) / height)
-            if ratio >= 1.0:
-                return  # already within limits
-            new_w, new_h = max(1, int(width * ratio)), max(1, int(height * ratio))
-            img = img.resize((new_w, new_h), PILImage.LANCZOS)
-            img.save(image_path)
-    except Exception as e:
-        write_to_log(f"Image resize failed for {image_path}: {e}")
-
 def create_sensitivity_summary(sensitivity_series, color_codes, output_path):
     counts = sensitivity_series.value_counts().reindex(['A','B','C','D','E']).fillna(0)
     total = max(1, len(sensitivity_series))
@@ -4630,7 +4571,6 @@ def compile_docx(output_docx: str, order_list: list):
             if path and isinstance(path, str) and os.path.exists(path):
                 try:
                     width_cm = float(MAX_IMAGE_WIDTH_CM)
-                    base_name_lower = os.path.basename(path).lower()
 
                     # Atlas images slightly narrower
                     if _is_atlas_image(path):
@@ -5561,8 +5501,6 @@ def generate_report(base_dir: str,
             else:
                 write_to_log("Parquet table tbl_atlas not found; skipping atlas maps.", base_dir)
 
-        atlas_geocode_pref = 'basic_mosaic' if include_atlas_maps else None
-
         def _progress_atlas(done: int, total: int):
             if include_atlas_maps:
                 set_progress(37 + int(8 * done / max(1, total)), f"Rendering atlas tiles ({done}/{total})")
@@ -5657,23 +5595,6 @@ def generate_report(base_dir: str,
             "Line and point assets are still counted in '# objects' and can be visualized on maps."
         )
 
-        contents_lines = []
-        if include_assets:
-            contents_lines.append("- Assets overview & statistics")
-        if include_analysis_presentation:
-            mode = str(analysis_mode or "single").strip().lower()
-            if mode == "compare":
-                contents_lines.append("- Analysis presentation (compare two areas)")
-            elif mode == "all":
-                contents_lines.append("- Analysis presentation (all areas)")
-            else:
-                contents_lines.append("- Analysis presentation (single area)")
-        if include_other_maps:
-            contents_lines.append("- Other maps (basic_mosaic)")
-        if include_index_statistics:
-            contents_lines.append("- Index statistics + maps (basic_mosaic)")
-        if include_lines_and_segments:
-            contents_lines.append("- Line overview (summary across all lines)")
         # Resolve which segmented levels go into the report. Explicit selection
         # (GUI multi-select) wins; otherwise include_segmentation defaults to
         # basic_mosaic only (else all available). Used by the TOC and the section.
@@ -5691,13 +5612,6 @@ def generate_report(base_dir: str,
                 seg_layers_render = [L for L in _avail_seg if L.lower() in _want]
             elif include_segmentation:
                 seg_layers_render = ["basic_mosaic"] if "basic_mosaic" in _avail_seg else _avail_seg
-        if seg_layers_render:
-            contents_lines.append("- Segmentation (area types & zones from tbl_segmentation)")
-        if include_atlas_maps and atlas_pages:
-            contents_lines.append("- Atlas tile maps (per atlas object with inset)")
-        if include_lines_and_segments:
-            contents_lines.append("- Lines & segments (grouped by line; context & segments maps, distributions, ribbons)")
-        contents_text = "<br/>".join(contents_lines)
 
         # Templates live under docs/templates/ from MESA 5.0.2+; fall back to
         # docs/ for older project layouts where the file sat at the docs root.
@@ -6242,7 +6156,6 @@ def generate_report(base_dir: str,
                 order_list.append(('rule', None))
 
                 hist_cols = [c for c in mv.columns if str(c).startswith("h_i")]
-                nv = int(round(len(hist_cols) ** 0.5)) or 5
 
                 _cert = _seg_mv_certainty(gpq_dir)
                 for layer in sorted(mv["name_gis_geocodegroup"].astype(str).unique()):
@@ -6465,16 +6378,6 @@ def _spawn_report(base_dir, kwargs: dict) -> bool:
         raise
     return True
 
-
-def _start_report_thread(base_dir, config_file, palette, desc, report_mode):
-    # Backwards-compatible helper for old call sites.
-    return _spawn_report(base_dir, {
-        'base_dir': base_dir,
-        'config_file': config_file,
-        'palette_A2E': palette,
-        'desc_A2E': desc,
-        'report_mode': report_mode,
-    })
 
 def _start_report_thread_selected(base_dir, config_file, palette, desc, *,
                                  include_assets: bool,
