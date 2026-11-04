@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, Signal, QObject
+from PySide6.QtCore import Qt, QObject
 
 from ui_style import apply_shared_stylesheet
 from mesa_shared import find_base_dir as resolve_base_dir
@@ -1010,13 +1010,6 @@ class AnalysisData:
 
         return summary
 
-    def _sensitivity_index(self, code: str) -> int:
-        code_upper = str(code).upper()
-        try:
-            return self.sensitivity_order.index(code_upper)
-        except ValueError:
-            return len(self.sensitivity_order)
-
     def _palette_entry(self, code: str) -> Dict[str, str]:
         code_upper = str(code).strip().upper() if code is not None else ""
         if not code_upper or code_upper in {"NONE", "NAN"}:
@@ -1102,16 +1095,6 @@ class AnalysisData:
             )
         return rows
 
-    def status_message(self) -> str:
-        if self.groups.empty:
-            return "No analysis areas available. Run analysis_setup.py to create them."
-        if not self.has_analysis:
-            return (
-                "No analysis results yet. Run Process with Analysis ticked."
-            )
-        return f"Loaded {len(self.groups)} area(s). Select two areas to compare."
-
-
 # --------------------------------------------------------------------------- #
 # UI components
 # --------------------------------------------------------------------------- #
@@ -1119,8 +1102,6 @@ class AnalysisData:
 
 class GroupHeader(QFrame):
     """Selector and headline statistics for a comparison column."""
-
-    selectionChanged = Signal(str)
 
     def __init__(self, title: str, on_selection: callable, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -1157,9 +1138,6 @@ class GroupHeader(QFrame):
             idx = self.combobox.findText(display)
             if idx >= 0:
                 self.combobox.setCurrentIndex(idx)
-
-    def current_selection(self) -> str:
-        return self.combobox.currentText()
 
     def update_summary(self, summary: Dict[str, Any]) -> None:
         summary = summary or {}
@@ -1377,20 +1355,6 @@ class SensitivityTotalsPanel(QFrame):
 
     def chart_figure(self):
         return self.chart.figure
-
-
-class TwoColumnView(QWidget):
-    """Generic left/right wrapper to keep side-by-side layout."""
-
-    def __init__(self, left_factory, right_factory, parent: QWidget = None) -> None:
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.left = left_factory()
-        self.right = right_factory()
-        layout.addWidget(self.left if isinstance(self.left, QWidget) else self.left.frame, 1)
-        layout.addWidget(self.right if isinstance(self.right, QWidget) else self.right.frame, 1)
 
 
 class PolygonTotalsView(QWidget):
@@ -1813,19 +1777,6 @@ class ComparisonWindow(QMainWindow):
         self.report_dir.mkdir(parents=True, exist_ok=True)
         return self.report_dir
 
-    def _basic_overview_df(self) -> "pd.DataFrame":
-        left = self.left_summary or {}
-        right = self.right_summary or {}
-        rows = [
-            {"Metric": "Area name", "Left": left.get("group_name", ""), "Right": right.get("group_name", "")},
-            {"Metric": "Notes", "Left": left.get("group_notes", ""), "Right": right.get("group_notes", "")},
-            {"Metric": "Configured polygons", "Left": left.get("configured_count", 0), "Right": right.get("configured_count", 0)},
-            {"Metric": "Processed polygons", "Left": left.get("processed_count", 0), "Right": right.get("processed_count", 0)},
-            {"Metric": "Total analysed area (km\u00b2)", "Left": area_to_km2(left.get("total_area_m2", 0.0)), "Right": area_to_km2(right.get("total_area_m2", 0.0))},
-            {"Metric": "Last run", "Left": left.get("last_run_label", "--"), "Right": right.get("last_run_label", "--")},
-        ]
-        return pd.DataFrame(rows, columns=["Metric", "Left", "Right"])
-
     def _comprehensive_overview_df(self) -> "pd.DataFrame":
         def _sum_polygons(summary: Dict[str, Any]) -> float:
             total = 0.0
@@ -1849,21 +1800,6 @@ class ComparisonWindow(QMainWindow):
             {"Metric": "Asset groups reported", "Left": _asset_count(left), "Right": _asset_count(right)},
         ]
         return pd.DataFrame(rows, columns=["Metric", "Left", "Right"])
-
-    def _comparison_dataframe(self) -> "pd.DataFrame":
-        rows = self.data.comparison_rows(self.left_summary, self.right_summary)
-        data_rows: List[Dict[str, Any]] = []
-        for row in rows:
-            data_rows.append(
-                {
-                    "Category": row.get("label", ""),
-                    "Left (km\u00b2)": row.get("left_km2", 0.0),
-                    "Right (km\u00b2)": row.get("right_km2", 0.0),
-                    "Difference (km\u00b2)": row.get("delta_km2", 0.0),
-                }
-            )
-        columns = ["Category", "Left (km\u00b2)", "Right (km\u00b2)", "Difference (km\u00b2)"]
-        return pd.DataFrame(data_rows, columns=columns)
 
     def _write_excel_report(
         self,
@@ -1922,27 +1858,6 @@ class ComparisonWindow(QMainWindow):
 
     def _ensure_selection(self, summary: Dict[str, Any]) -> bool:
         return bool(summary and summary.get("group_id"))
-
-    def _export_basic_report(self) -> None:
-        if not (self._ensure_selection(self.left_summary) and self._ensure_selection(self.right_summary)):
-            QMessageBox.warning(self, "Export basic report", "Select two analysis areas first.")
-            return
-        try:
-            sheets = {
-                "Overview": self._basic_overview_df(),
-                "Left polygons": _polygons_dataframe(self.left_summary.get("polygons")),
-                "Right polygons": _polygons_dataframe(self.right_summary.get("polygons")),
-                "Left sensitivity": _sensitivity_dataframe(self.left_summary.get("sensitivity")),
-                "Right sensitivity": _sensitivity_dataframe(self.right_summary.get("sensitivity")),
-                "Comparison": self._comparison_dataframe(),
-            }
-            charts = self.sensitivity_view.chart_figures()
-            charts.append(("Area difference Sankey", self.sankey_view.chart_figure()))
-            path = self._write_excel_report(sheets, "basic_analysis", chart_figures=charts)
-            self._after_report_export(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
-            debug_log(self.data.base_dir, f"basic report export failed: {exc}")
 
     def _export_comprehensive_report(self) -> None:
         if not (self._ensure_selection(self.left_stacked_summary) and self._ensure_selection(self.right_stacked_summary)):
