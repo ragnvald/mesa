@@ -1500,3 +1500,40 @@ tells Mac users to drag MESA to Applications. The tag still points at `e3179b5`,
 Windows build was made from, and the release is still marked latest; the Mac build is from
 `63fc058`, which `devtools/ZENODO_5.7.1.md` records. Still open: the wiki, which names Windows 11
 as the only system in Home and Quickstart, and which is a separate repository.
+
+## 2026-11-04: dead code removed, in nine commits
+
+A short review for dead code, at the user's request, found about 540 lines in 33 functions and
+classes with no caller, and about 50 unused imports and locals. The user asked for it to be
+removed with the tests run before and after, in separate commits. The search used vulture and
+ruff (installed in the scratchpad, not in `.venv`), and every candidate was checked by text
+search across `.py`, `.html` and `.js`, so pywebview API methods called from embedded JavaScript
+were kept. Each removal was iterated until no new orphan appeared; the cascades were larger than
+the first list:
+
+- `geocode_manage`: the heartbeat thread was never started, so its `Stats` object was write-only
+  bookkeeping spread through the mosaic code. Removed with three asset-dissolve helpers
+  (`fa06e1e`). The `heartbeat_secs` key stays; other code reads it.
+- `analysis_setup`: nothing had called `_ensure_mbtiles` or `_mbtiles_info` since `31f47c5`
+  (2025-12-21), so a whole local MBTiles HTTP server was unreachable (`f03ddc3`). `bootstrap()`
+  and `load_canvas()` returned byte-identical payloads before and after. The embedded JavaScript
+  still has a branch for an `mbtiles` field nobody sets; it is harmless and was left.
+- `analysis_present`: an Excel "basic" export never wired to a button (`bea8b32`); the window was
+  built offscreen before and after.
+- `report_generate` (`c70d178`), `tiles_create_raster` (`2cc286a`), `processing_setup`
+  (`6a059e8`), small helpers in six modules (`7856756`), unused imports (`ef594a2`) and unused
+  locals (`d8f16da`).
+
+In total 9 commits across 20 files: 1 080 lines removed, 29 added. 121 tests passed before and after every commit;
+every module was imported offscreen after each step. One full run of the suite showed one
+failure that could not be reproduced in 14 further full runs and 30 runs of the only
+timing-based test (`test_processing_progress`, sleeps against a 0.2 s pulse); the cause is not
+known. In `processing_pipeline_run.py`, which had the user's own uncommitted changes, only the
+import lines were staged, through `git apply --cached`; the user's lines are still in the working
+tree. `mesa_shared.write_settings` was kept for a discussion of settings Phase 2.
+
+Found on the way and not fixed, since they are bugs rather than dead code:
+`processing_internal.py` calls `_start_log_tailer(root)` with `root` undefined, and the
+`NameError` is swallowed by `except Exception: pass`; and its `if __name__ == "__main__":` block
+uses `ProcessingInternalWindow` before the class is defined, so running the file directly with a
+GUI fails.
