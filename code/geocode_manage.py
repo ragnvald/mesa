@@ -211,25 +211,10 @@ QDGC_SIDE_KM = {lvl: (1.0 / (2 ** lvl)) * 111.320 for lvl in range(0, QDGC_MAX_L
 QDGC_SIDE_M = {lvl: km * 1000.0 for lvl, km in QDGC_SIDE_KM.items()}
 
 # -----------------------------------------------------------------------------
-# GUI globals + heartbeat
+# GUI globals
 # -----------------------------------------------------------------------------
 _gui_window: Optional["GeocodeManagerWindow"] = None
-log_main_thread_id: Optional[int] = None
 original_working_directory: Optional[str] = None
-
-HEARTBEAT_SECS = 10
-
-class Stats:
-    def __init__(self):
-        self.stage = "idle"
-        self.detail = ""
-        self.tiles_total = 0
-        self.tiles_done = 0
-        self.faces_total = 0
-        self.started_at = time.time()
-        self.worker_started_at = None
-        self.running = False
-STATS = Stats()
 
 
 def _progress_lerp(floor_v: float, ceil_v: float, frac: float) -> float:
@@ -260,13 +245,6 @@ def _progress_saturating(floor_v: float, ceil_v: float, n_done: int, half_n: int
 # Global Parquet subdir (overridden in main from config.ini if provided)
 _PARQUET_SUBDIR = "output/geoparquet"
 _PARQUET_OVERRIDE: Path | None = None
-
-def _exists(p: Path) -> bool:
-    try:
-        return p.exists()
-    except Exception:
-        return False
-
 
 def read_config(file_name: Path) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -389,16 +367,6 @@ def update_progress(new_value: float):
         _gui_window._signals.progress_update.emit(max(0.0, min(100.0, float(new_value))))
 
 
-def _tail_text_file(path: Path, max_lines: int = 20) -> list[str]:
-    try:
-        if max_lines <= 0 or not path.exists() or not path.is_file():
-            return []
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return [ln.rstrip("\r\n") for ln in lines[-max_lines:]]
-    except Exception:
-        return []
-
 def log_to_gui(message: str, level: str = "INFO"):
     timestamp = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     formatted = f"{timestamp} [{level}] - {message}"
@@ -448,86 +416,6 @@ def _run_in_thread(fn, *args, on_done=None, **kwargs):
                 except Exception:
                     pass
     _thr.Thread(target=_wrap, daemon=True).start()
-
-def _fmt_eta(elapsed_s: float, done: int, total: int) -> str:
-    if done <= 0 or total <= 0:
-        return "ETA —"
-    rate = done / max(elapsed_s, 1e-6)
-    if rate <= 0:
-        return "ETA —"
-    remaining = (total - done) / rate
-    eta_ts = datetime.datetime.now() + datetime.timedelta(seconds=max(0, remaining))
-    eta_str = eta_ts.strftime("%H:%M:%S")
-    dd = (eta_ts.date() - datetime.datetime.now().date()).days
-    if dd > 0:
-        eta_str += f" (+{dd}d)"
-    return eta_str
-
-def start_heartbeat():
-    if STATS.running:
-        return
-    STATS.running = True
-
-    # Pre-prime psutil counters so first heartbeat shows meaningful CPU
-    proc = psutil.Process(os.getpid()) if psutil else None
-    if proc:
-        try:
-            _ = proc.cpu_percent(interval=None)
-            for c in proc.children(recursive=True):
-                try: _ = c.cpu_percent(interval=None)
-                except Exception: pass
-        except Exception:
-            pass
-
-    def _hb():
-        last_tiles = -1
-        while STATS.running:
-            elapsed = time.time() - STATS.started_at
-            worker_elapsed = (time.time() - STATS.worker_started_at) if STATS.worker_started_at else 0.0
-            # Aggregate CPU/RAM across parent + children
-            cpu_total = ""
-            ram_total = ""
-            workers_alive = ""
-            if psutil:
-                try:
-                    proc = psutil.Process(os.getpid())
-                    children = [c for c in proc.children(recursive=True) if c.is_running()]
-                    cpu_p = proc.cpu_percent(interval=None) or 0.0
-                    cpu_c = sum((c.cpu_percent(interval=None) or 0.0) for c in children)
-                    cpu_total = f" • CPU {cpu_p + cpu_c:.0f}% (all)"
-                    rss = proc.memory_info().rss
-                    rss_c = 0
-                    for c in children:
-                        try: rss_c += c.memory_info().rss
-                        except Exception: pass
-                    ram_total = f" • RAM ~{(rss + rss_c)/(1024**3):.1f} GB"
-                    workers_alive = f" • workers {len(children)}"
-                except Exception:
-                    pass
-
-            pct = (STATS.tiles_done * 100.0 / max(1, STATS.tiles_total)) if STATS.tiles_total else 0.0
-            tiles_per_min = (STATS.tiles_done / worker_elapsed * 60.0) if worker_elapsed > 0 and STATS.tiles_done > 0 else 0.0
-            eta = _fmt_eta(worker_elapsed, STATS.tiles_done, STATS.tiles_total) if STATS.worker_started_at else "ETA —"
-            trend = ""
-            if last_tiles >= 0:
-                delta = STATS.tiles_done - last_tiles
-                if delta == 0 and STATS.tiles_total > 0:
-                    trend = " • waiting on first results…" if STATS.tiles_done == 0 else " • steady…"
-                elif delta > 0:
-                    trend = f" • +{delta} tiles since last HB"
-            last_tiles = STATS.tiles_done
-
-            log_to_gui(
-                f"[Mosaic/HB] {STATS.stage} {STATS.detail} • tiles {STATS.tiles_done}/{STATS.tiles_total} "
-                f"(~{pct:.1f}%) • faces {STATS.faces_total:,} • elapsed {int(elapsed)}s • {eta} • "
-                f"{tiles_per_min:.1f} tiles/min{trend}{ram_total}{cpu_total}{workers_alive}"
-            )
-            time.sleep(max(1, HEARTBEAT_SECS))
-    import threading
-    threading.Thread(target=_hb, daemon=True).start()
-
-def stop_heartbeat():
-    STATS.running = False
 
 # -----------------------------------------------------------------------------
 # Geo helpers
@@ -794,12 +682,6 @@ def _fix_valid(geom):
     except Exception:
         return geom
 
-def _wkb_hex(geom) -> Optional[str]:
-    try:
-        return shp_wkb.dumps(geom, hex=True)
-    except Exception:
-        return None
-
 # -----------------------------------------------------------------------------
 # H3 helpers
 # -----------------------------------------------------------------------------
@@ -931,195 +813,6 @@ def _geom_to_polygonal_metric(geom, *, line_buf_m: float, point_buf_m: float):
         except Exception:
             return polys[0]
     return None
-
-
-def _explode_polygons(geom) -> list[Polygon]:
-    """Explode polygonal geometry into individual Polygon parts (no MultiPolygon output)."""
-    g = _extract_polygonal(geom)
-    if g is None:
-        return []
-    if isinstance(g, Polygon):
-        return [g]
-    if isinstance(g, MultiPolygon):
-        return [p for p in g.geoms if isinstance(p, Polygon) and not p.is_empty]
-    return []
-
-
-def _default_dissolve_group_columns(df: pd.DataFrame) -> list[str]:
-    """Pick non-geometry columns likely useful for dissolve grouping.
-
-    Goal: ignore obvious unique identifiers so that "same attributes" can match.
-    """
-    import re
-
-    cols = [c for c in df.columns if c != "geometry"]
-    if not cols:
-        return []
-
-    # Common identifier patterns (keep conservative; users can still pre-clean inputs).
-    ignore = re.compile(r"(^id$|.*_id$|^id_.*|uuid|guid|objectid|fid)", re.IGNORECASE)
-    group_cols = [c for c in cols if not ignore.search(str(c))]
-    return group_cols
-
-
-def _prepare_assets_polygonal_metric(a_metric: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
-    """Convert asset geometries into polygonal metric geometries (buffering lines/points)."""
-    line_buf_m = _cfg_float(cfg, "default_line_buffer_m", 10.0)
-    point_buf_m = _cfg_float(cfg, "default_point_buffer_m", 10.0)
-
-    out = a_metric.copy()
-    polys = []
-    for geom in out.geometry:
-        polyish = _geom_to_polygonal_metric(geom, line_buf_m=line_buf_m, point_buf_m=point_buf_m)
-        if polyish is None:
-            polys.append(None)
-            continue
-        polyish = _fix_valid(polyish)
-        polyish = _extract_polygonal(polyish)
-        if polyish is None or getattr(polyish, "is_empty", True):
-            polys.append(None)
-            continue
-        polys.append(polyish)
-    out["geometry"] = polys
-    out = out[out["geometry"].notna()].copy()
-    try:
-        out = out[~out.geometry.is_empty].copy()
-    except Exception:
-        pass
-    return out
-
-
-def _dissolve_assets_by_attributes(a_poly: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
-    hb_secs = _cfg_float(cfg, "heartbeat_secs", 60.0)
-    last_log = time.time()
-    last_ui = 0.0
-
-    group_cols = _default_dissolve_group_columns(a_poly)
-    if not group_cols:
-        log_to_gui("[Mosaic] Dissolve-by-attributes: no suitable non-ID columns found; skipping dissolve.", "WARN")
-        return a_poly[["geometry"]].copy()
-
-    try:
-        ng = int(a_poly.groupby(group_cols, dropna=False, sort=False).ngroups)
-    except Exception:
-        ng = 0
-    log_to_gui(
-        f"[Mosaic] Dissolve-by-attributes: grouping by {len(group_cols)} column(s){f' across {ng:,} group(s)' if ng else ''}…",
-        "INFO",
-    )
-
-    rows = []
-    grouped = a_poly.groupby(group_cols, dropna=False, sort=False)
-    i = 0
-    for key, sub in grouped:
-        i += 1
-        now = time.time()
-        if (now - last_log) >= max(10.0, hb_secs):
-            last_log = now
-            try:
-                log_to_gui(f"[Mosaic] Dissolve-by-attributes: processed {i:,}/{ng:,} group(s)…", "INFO")
-            except Exception:
-                log_to_gui(f"[Mosaic] Dissolve-by-attributes: processed {i:,} group(s)…", "INFO")
-        # Provide a gentle progress tick during dissolve without conflicting with later stages.
-        if ng > 0 and (now - last_ui) >= 0.25:
-            last_ui = now
-            update_progress(_progress_lerp(10.0, 12.0, i / max(1, ng)))
-
-        geoms = [g for g in sub.geometry.tolist() if g is not None and not g.is_empty]
-        if not geoms:
-            continue
-
-        merged = _unary_union_safe(geoms, label="dissolve_attrs")
-        parts = _explode_polygons(merged)
-        if not parts:
-            continue
-
-        # key is scalar for 1-col groupby; tuple otherwise
-        if len(group_cols) == 1:
-            key_vals = (key,)
-        else:
-            key_vals = tuple(key)
-
-        base_row = dict(zip(group_cols, key_vals))
-        for p in parts:
-            r = dict(base_row)
-            r["geometry"] = p
-            rows.append(r)
-
-    out = gpd.GeoDataFrame(rows, geometry="geometry", crs=a_poly.crs)
-    # Avoid MultiPolygon rows: explode already ensures Polygon parts.
-    return out if not out.empty else gpd.GeoDataFrame(geometry=[], crs=a_poly.crs)
-
-
-def _dissolve_assets_aggressive_with_attrs_json(a_poly: gpd.GeoDataFrame, cfg: configparser.ConfigParser) -> gpd.GeoDataFrame:
-    hb_secs = _cfg_float(cfg, "heartbeat_secs", 60.0)
-    last_log = time.time()
-    last_ui = 0.0
-
-    attr_cols = [c for c in a_poly.columns if c != "geometry"]
-
-    geoms = [g for g in a_poly.geometry.tolist() if g is not None and not g.is_empty]
-    if not geoms:
-        return gpd.GeoDataFrame(geometry=[], crs=a_poly.crs)
-
-    merged = _unary_union_safe(geoms, label="dissolve_aggressive")
-    parts = _explode_polygons(merged)
-    if not parts:
-        return gpd.GeoDataFrame(geometry=[], crs=a_poly.crs)
-
-    log_to_gui(f"[Mosaic] Dissolve-aggressive: produced {len(parts):,} polygon(s); attaching source attributes as JSON…", "INFO")
-
-    sidx = None
-    try:
-        sidx = a_poly.sindex
-    except Exception:
-        sidx = None
-
-    rows = []
-    for i, p in enumerate(parts, start=1):
-        now = time.time()
-        if (now - last_log) >= max(10.0, hb_secs):
-            last_log = now
-            log_to_gui(f"[Mosaic] Dissolve-aggressive: processed {i:,}/{len(parts):,} polygon(s)…", "INFO")
-        if (now - last_ui) >= 0.25:
-            last_ui = now
-            update_progress(_progress_lerp(10.0, 12.0, i / max(1, len(parts))))
-
-        attrs_list = []
-        try:
-            if sidx is not None:
-                try:
-                    cand = list(sidx.query(p, predicate="intersects"))
-                except Exception:
-                    cand = list(sidx.query(p))
-                sub = a_poly.iloc[cand]
-            else:
-                sub = a_poly
-
-            try:
-                mask = sub.intersects(p)
-                sub = sub.loc[mask]
-            except Exception:
-                pass
-
-            if not sub.empty and attr_cols:
-                for _, r0 in sub[attr_cols].iterrows():
-                    d = {}
-                    for c in attr_cols:
-                        v = r0.get(c, None)
-                        if pd.isna(v):
-                            v = None
-                        d[str(c)] = v
-                    attrs_list.append(d)
-        except Exception:
-            attrs_list = []
-
-        rows.append({
-            "geometry": p,
-            "dissolve_source_attributes_json": json.dumps(attrs_list, ensure_ascii=False, default=str),
-        })
-
-    return gpd.GeoDataFrame(rows, geometry="geometry", crs=a_poly.crs)
 
 
 def _iter_boundary_lines(polyish):
@@ -1703,10 +1396,6 @@ def _build_linework_and_coverage(
             order_mode = "(default)"
 
         # Hook heartbeat/progress to real work units.
-        STATS.tiles_total = int(len(chunks))
-        STATS.tiles_done = 0
-        STATS.worker_started_at = time.time()
-        STATS.detail = "extracting boundaries"
 
         # Most user-visible waiting is here. Let extraction own most of the linework band.
         if progress_floor is not None and progress_ceiling is not None:
@@ -1770,7 +1459,6 @@ def _build_linework_and_coverage(
                     done += 1
                     last_progress_ts = time.time()
 
-                    STATS.tiles_done = int(done)
                     if extract_floor is not None and extract_ceiling is not None:
                         now = time.time()
                         if done <= 2 or done >= len(chunks) or (now - last_ui) >= 0.25:
@@ -1818,7 +1506,6 @@ def _build_linework_and_coverage(
 
         # Reduce partials once, after all chunk results are collected.
         if use_parallel and line_partials:
-            STATS.detail = "reducing unions"
             if progress_floor is not None and progress_ceiling is not None:
                 update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.93))
             log_to_gui(
@@ -1836,10 +1523,6 @@ def _build_linework_and_coverage(
 
     if not use_parallel:
         # Serial path: treat assets as work units.
-        STATS.tiles_total = int(len(a_metric))
-        STATS.tiles_done = 0
-        STATS.worker_started_at = time.time()
-        STATS.detail = "extracting boundaries"
         last_ui = 0.0
 
         if progress_floor is not None and progress_ceiling is not None:
@@ -1852,7 +1535,6 @@ def _build_linework_and_coverage(
             if i % 5000 == 0:
                 log_to_gui(f"[Mosaic] Boundary extraction: {i:,}/{len(a_metric):,} assets…", "INFO")
 
-            STATS.tiles_done = int(i)
             if extract_floor is not None and extract_ceiling is not None:
                 now = time.time()
                 if i <= 2 or i >= len(a_metric) or (now - last_ui) >= 0.25:
@@ -1887,7 +1569,6 @@ def _build_linework_and_coverage(
         return None, None, stats
 
     # Final noded linework
-    STATS.detail = "final noding"
     if progress_floor is not None and progress_ceiling is not None:
         update_progress(_progress_lerp(progress_floor, progress_ceiling, 0.985))
     line_partials = _maybe_sort_partials_before_reduction(line_partials, cfg=cfg, kind="edges")
@@ -2583,7 +2264,6 @@ def mosaic_faces_from_assets_parallel(
                         "mosaic_preflight_allow_oversized=true in config.ini.",
                         "ERROR",
                     )
-                    STATS.stage = "skipped (pre-flight memory)"
                     update_progress(100)
                     return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
             else:
@@ -2592,8 +2272,6 @@ def mosaic_faces_from_assets_parallel(
                     f"~{budget_gb:.0f} GB ({avail_gb:.0f} GB available).", "INFO",
                 )
 
-    STATS.stage = "linework"
-    STATS.faces_total = 0
     edge_net, coverage, st = _build_linework_and_coverage(
         a_metric,
         cfg=cfg,
@@ -2647,7 +2325,6 @@ def mosaic_faces_from_assets_parallel(
     except Exception:
         pass
 
-    STATS.stage = "polygonize"
     update_progress(60)
     log_to_gui("[Mosaic] polygonize(edge_net) started…", "INFO")
 
@@ -2725,7 +2402,6 @@ def mosaic_faces_from_assets_parallel(
             # Surface progress while polygonize runs. Total is unknown, so use a saturating curve.
             if faces_total <= 2 or (time.time() - last_ui) >= 0.25:
                 last_ui = time.time()
-                STATS.faces_total = int(faces_total)
                 update_progress(_progress_saturating(60.0, 85.0, faces_total, 300_000))
             if poly is None or poly.is_empty:
                 continue
@@ -2810,7 +2486,6 @@ def mosaic_faces_from_assets_parallel(
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
     update_progress(85)
-    STATS.stage = "assembling"
     parts = []
     part_files_sorted = sorted(part_files)
     for i, p in enumerate(part_files_sorted, start=1):
@@ -2873,8 +2548,6 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
 
     group_name = BASIC_MOSAIC_GROUP
 
-    STATS.stage = "publishing"
-    STATS.detail = "preparing geocodes"
     update_progress(92)
 
     cfg: configparser.ConfigParser | None = None
@@ -2923,7 +2596,6 @@ def publish_mosaic_as_geocode(base_dir: Path, faces: gpd.GeoDataFrame) -> int:
         "geometry": bbox_poly
     }], geometry="geometry", crs="EPSG:4326")
 
-    STATS.detail = "writing GeoParquet"
     update_progress(95)
 
     added_g, added_o, tot_g, tot_o = _merge_and_write_geocodes(
@@ -3275,11 +2947,6 @@ def suggest_h3_levels_by_size(min_km: float, max_km: float) -> list[int]:
             out.append(res)
     return out
 
-def format_level_size_list(levels: list[int]) -> str:
-    if not levels:
-        return "(none)"
-    return ", ".join(format_h3_level(r) for r in levels)
-
 def suggest_qdgc_levels_by_size(min_km: float, max_km: float) -> list[int]:
     """QDGC analogue of suggest_h3_levels_by_size. Matches by equator cell side;
     QDGC cells are smaller toward the poles, so this is an upper bound on size."""
@@ -3288,12 +2955,6 @@ def suggest_qdgc_levels_by_size(min_km: float, max_km: float) -> list[int]:
         if min_km <= size <= max_km:
             out.append(lvl)
     return sorted(out)
-
-def format_qdgc_level_size_list(levels: list[int]) -> str:
-    if not levels:
-        return "(none)"
-    return ", ".join(format_qdgc_level(z) for z in levels)
-
 
 # Per-level labels, used for the suggestion checkboxes. The list formatters above
 # join these, so a level reads the same whether it appears in a box or a sentence.
@@ -4413,12 +4074,6 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", m
     global _gui_window, original_working_directory
     original_working_directory = str(base)
 
-    try:
-        global HEARTBEAT_SECS
-        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
-    except Exception:
-        pass
-
     app = QApplication.instance()
     own_app = False
     if app is None:
@@ -4440,15 +4095,11 @@ def build_gui(base: Path, cfg: configparser.ConfigParser, start_tab: str = "", m
 
 def run(base_dir: str, master=None):
     """In-process entry point called by mesa.py via lazy import."""
-    global _PARQUET_SUBDIR, original_working_directory, HEARTBEAT_SECS
+    global _PARQUET_SUBDIR, original_working_directory
     base = find_base_dir(base_dir)
     cfg = read_config(config_path(base))
     _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
     original_working_directory = str(base)
-    try:
-        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
-    except Exception:
-        pass
     return build_gui(base, cfg, start_tab="", master=master)
 
 
@@ -4470,13 +4121,9 @@ def main():
     base = find_base_dir(args.original_working_directory)
     cfg = read_config(config_path(base))
 
-    global _PARQUET_SUBDIR, original_working_directory, HEARTBEAT_SECS
+    global _PARQUET_SUBDIR, original_working_directory
     _PARQUET_SUBDIR = cfg["DEFAULT"].get("parquet_folder", "output/geoparquet")
     original_working_directory = str(base)
-    try:
-        HEARTBEAT_SECS = int(cfg["DEFAULT"].get("heartbeat_secs", str(HEARTBEAT_SECS)))
-    except Exception:
-        pass
 
     if args.nogui:
         if args.h3_levels:
