@@ -26,8 +26,6 @@ from mesa_constants import (
     TABLE_ANALYSIS_GROUP as ANALYSIS_GROUP_TABLE,
     TABLE_ANALYSIS_FLAT as ANALYSIS_FLAT_TABLE,
     TABLE_ANALYSIS_STACKED as ANALYSIS_STACKED_TABLE,
-    TABLE_ASSET_OBJECT as ASSET_OBJECT_TABLE,
-    TABLE_ASSET_GROUP as ASSET_GROUP_TABLE,
     PARQUET_SUBDIR,
 )
 
@@ -36,16 +34,12 @@ import atexit
 import configparser
 import datetime as dt
 import locale
-import math
 import os
-import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import unquote
 from mesa_osm_tiles import OsmTileProxyManager
 
 from PySide6.QtWidgets import QApplication, QFileDialog
@@ -108,8 +102,6 @@ def _require_webview() -> Any:
 # ---------------------------------------------------------------------------
 
 DEFAULT_PARQUET_SUBDIR = PARQUET_SUBDIR
-DEFAULT_MBTILES_SUBDIR = "output/mbtiles"
-REPORT_FILENAME_TEMPLATE = "MESA_area_analysis_report_{ts}.pdf"
 DEFAULT_ANALYSIS_GEOCODE = "basic_mosaic"
 
 
@@ -181,264 +173,6 @@ def find_dataset_dir(base_dir: Path, cfg: configparser.ConfigParser, dirname: st
     return None
 
 
-def _mbtiles_search_dirs(base_dir: Path) -> List[Path]:
-    base = base_dir.resolve()
-    candidates = [
-        base / DEFAULT_MBTILES_SUBDIR,
-        base / "code" / DEFAULT_MBTILES_SUBDIR,
-        base / "code" / "output" / "mbtiles",
-        base / "output" / "mbtiles",
-    ]
-    seen: set[Path] = set()
-    ordered: List[Path] = []
-    for cand in candidates:
-        try:
-            resolved = cand.resolve()
-        except Exception:
-            resolved = cand
-        if resolved not in seen:
-            seen.add(resolved)
-            ordered.append(resolved)
-    return ordered
-
-
-def _norm_key(value: str) -> str:
-    return (value or "").strip().lower().replace(" ", "_").replace("-", "_")
-
-
-_MBTILES_LOCK = threading.Lock()
-_MBTILES_INDEX: Dict[str, Dict[str, Optional[Path]]] = {}
-_MBTILES_REV: Dict[str, str] = {}
-_MBTILES_META_CACHE: Dict[Path, Dict[str, Any]] = {}
-_MBTILES_BASE_URL: Optional[str] = None
-
-
-def _scan_mbtiles_dir(directory: Path) -> tuple[Dict[str, Dict[str, Optional[Path]]], Dict[str, str]]:
-    idx: Dict[str, Dict[str, Optional[Path]]] = {}
-    rev: Dict[str, str] = {}
-    if not directory.exists() or not directory.is_dir():
-        return idx, rev
-
-    for entry in directory.iterdir():
-        if not entry.is_file():
-            continue
-        name = entry.name.lower()
-        if not name.endswith(".mbtiles"):
-            continue
-        base = entry.name
-        if name.endswith("_sensitivity_max.mbtiles"):
-          cat = base[: -len("_sensitivity_max.mbtiles")]
-          kind = "sensitivity"
-        elif name.endswith("_sensitivity.mbtiles"):
-          cat = base[: -len("_sensitivity.mbtiles")]
-          kind = "sensitivity"
-        elif name.endswith("_groupstotal.mbtiles"):
-            cat = base[: -len("_groupstotal.mbtiles")]
-            kind = "groupstotal"
-        elif name.endswith("_assetstotal.mbtiles"):
-            cat = base[: -len("_assetstotal.mbtiles")]
-            kind = "assetstotal"
-        else:
-            continue
-        idx.setdefault(cat, {"sensitivity": None, "groupstotal": None, "assetstotal": None})
-        idx[cat][kind] = entry
-        rev[_norm_key(cat)] = cat
-    return idx, rev
-
-
-class _MBTilesHandler(BaseHTTPRequestHandler):
-    connections: Dict[Path, sqlite3.Connection] = {}
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-    def log_error(self, format: str, *args: Any) -> None:
-        return
-
-    def do_GET(self) -> None:  # noqa: N802
-        global _MBTILES_INDEX
-        try:
-            parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
-            if len(parts) != 6 or parts[0] != "tiles":
-                self.send_response(404)
-                self.end_headers()
-                return
-            _, kind, cat_enc, z_s, x_s, y_file = parts
-            kind = (kind or "").lower()
-            cat = unquote(cat_enc)
-
-            disp, rec = _resolve_mbtiles(cat)
-            if kind not in {"sensitivity", "groupstotal", "assetstotal"} or not rec:
-                self.send_response(404)
-                self.end_headers()
-                return
-
-            db_path = rec.get(kind)
-            if not db_path or not db_path.exists():
-                self.send_response(404)
-                self.end_headers()
-                return
-
-            z = int(z_s)
-            x = int(x_s)
-            y = int(y_file.rsplit(".", 1)[0])
-
-            con = self.connections.get(db_path)
-            if con is None:
-                con = sqlite3.connect(db_path, check_same_thread=False)
-                self.connections[db_path] = con
-
-            cur = con.cursor()
-            # Map Leaflet's XYZ row to the file's storage scheme and do ONE lookup.
-            # MESA writes TMS (metadata scheme=tms); never fall back to the raw Y row -
-            # against a TMS db that hits the vertical mirror of a real row and paints a
-            # flipped ghost copy. See learning.md "Mirror-ghost tiles".
-            scheme = "tms"
-            try:
-                r = cur.execute("SELECT value FROM metadata WHERE name='scheme'").fetchone()
-                if r and str(r[0]).strip().lower() in ("xyz", "tms"):
-                    scheme = str(r[0]).strip().lower()
-            except Exception:
-                pass
-            tile_row = y if scheme == "xyz" else (1 << z) - 1 - y
-            cur.execute(
-                "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                (z, x, tile_row),
-            )
-            row = cur.fetchone()
-            if not row:
-                self.send_response(204)
-                self.end_headers()
-                return
-
-            data = row[0]
-            fmt = _mbtiles_meta(db_path)["format"]
-            self.send_response(200)
-            self.send_header("Content-Type", fmt)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(data)
-        except Exception:
-            try:
-                self.send_response(500)
-                self.end_headers()
-            except Exception:
-                pass
-
-
-def _start_mbtiles_server() -> Optional[str]:
-    global _MBTILES_INDEX
-    if not _MBTILES_INDEX:
-        return None
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MBTilesHandler)
-    port = server.server_address[1]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{port}"
-
-
-def _mbtiles_meta(path: Path) -> Dict[str, Any]:
-    if path in _MBTILES_META_CACHE:
-        return _MBTILES_META_CACHE[path]
-    out = {"bounds": [[-85.0, -180.0], [85.0, 180.0]], "minzoom": 0, "maxzoom": 19, "format": "image/png"}
-    try:
-        con = sqlite3.connect(path)
-        try:
-            cur = con.cursor()
-            cur.execute("SELECT name, value FROM metadata")
-            meta = {str(k).lower(): (v if v is not None else "") for k, v in cur.fetchall()}
-            fmt = (meta.get("format", "") or "").lower()
-            if fmt in {"jpg", "jpeg"}:
-                out["format"] = "image/jpeg"
-            bounds_raw = meta.get("bounds", "")
-            if bounds_raw:
-                parts = [float(x) for x in str(bounds_raw).split(",")]
-                if len(parts) == 4:
-                    minx, miny, maxx, maxy = parts
-                    out["bounds"] = [[miny, minx], [maxy, maxx]]
-            try:
-                out["minzoom"] = int(meta.get("minzoom", "0"))
-            except Exception:
-                pass
-            try:
-                out["maxzoom"] = int(meta.get("maxzoom", "19"))
-            except Exception:
-                pass
-        finally:
-            con.close()
-    except Exception:
-        pass
-    _MBTILES_META_CACHE[path] = out
-    return out
-
-
-def _resolve_mbtiles(cat: str) -> tuple[str, Optional[Dict[str, Optional[Path]]]]:
-    key = _norm_key(cat)
-    if cat in _MBTILES_INDEX:
-        return cat, _MBTILES_INDEX[cat]
-    if key in _MBTILES_REV:
-        canonical = _MBTILES_REV[key]
-        return canonical, _MBTILES_INDEX.get(canonical)
-    for disp in _MBTILES_INDEX.keys():
-        if disp.lower() == cat.lower():
-            return disp, _MBTILES_INDEX.get(disp)
-    return cat, None
-
-
-def _ensure_mbtiles(base_dir: Path) -> Optional[str]:
-    global _MBTILES_INDEX, _MBTILES_REV, _MBTILES_BASE_URL
-    with _MBTILES_LOCK:
-        if _MBTILES_BASE_URL is not None:
-            return _MBTILES_BASE_URL
-        aggregated_index: Dict[str, Dict[str, Optional[Path]]] = {}
-        aggregated_rev: Dict[str, str] = {}
-        for directory in _mbtiles_search_dirs(base_dir):
-            idx, rev = _scan_mbtiles_dir(directory)
-            for cat, rec in idx.items():
-                aggregated_index.setdefault(cat, {"sensitivity": None, "groupstotal": None, "assetstotal": None})
-                for kind, path in rec.items():
-                    if path:
-                        aggregated_index[cat][kind] = path
-            aggregated_rev.update(rev)
-        _MBTILES_INDEX = aggregated_index
-        _MBTILES_REV = aggregated_rev
-        if not _MBTILES_INDEX:
-            _MBTILES_BASE_URL = None
-            return None
-        _MBTILES_BASE_URL = _start_mbtiles_server()
-        return _MBTILES_BASE_URL
-
-
-def _mbtiles_info(category: str) -> Optional[Dict[str, Any]]:
-    disp, rec = _resolve_mbtiles(category)
-    if not rec or not _MBTILES_BASE_URL:
-        return None
-    src = rec.get("sensitivity") or rec.get("groupstotal") or rec.get("assetstotal")
-    meta = _mbtiles_meta(src) if src else {"bounds": [[-85.0, -180.0], [85.0, 180.0]], "minzoom": 0, "maxzoom": 19, "format": "image/png"}
-
-    def build(kind: str) -> Optional[str]:
-        path = rec.get(kind)
-        if path and path.exists():
-            return f"{_MBTILES_BASE_URL}/tiles/{kind}/{disp}/{{z}}/{{x}}/{{y}}.png"
-        return None
-
-    bounds = meta.get("bounds", [[-85.0, -180.0], [85.0, 180.0]])
-    if isinstance(bounds, list) and len(bounds) == 2 and all(isinstance(b, (list, tuple)) and len(b) == 2 for b in bounds):
-        min_lat, min_lon = bounds[0]
-        max_lat, max_lon = bounds[1]
-        bounds4 = [min_lon, min_lat, max_lon, max_lat]
-    else:
-        bounds4 = [-180.0, -85.0, 180.0, 85.0]
-
-    return {
-        "category": disp,
-        "sensitivity_url": build("sensitivity"),
-        "groupstotal_url": build("groupstotal"),
-        "assetstotal_url": build("assetstotal"),
-        "bounds": bounds4,
-        "minzoom": meta.get("minzoom", 0),
-        "maxzoom": meta.get("maxzoom", 19),
-    }
 
 
 def analysis_polygon_path(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
@@ -455,30 +189,6 @@ def analysis_stacked_path(base_dir: Path, cfg: configparser.ConfigParser) -> Pat
 
 def analysis_flat_path(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
     return parquet_dir(base_dir, cfg) / ANALYSIS_FLAT_TABLE
-
-
-def asset_object_path(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
-    existing = find_parquet_file(base_dir, cfg, ASSET_OBJECT_TABLE)
-    if existing:
-        return existing
-    return parquet_dir(base_dir, cfg) / ASSET_OBJECT_TABLE
-
-
-def asset_group_path(base_dir: Path, cfg: configparser.ConfigParser) -> Path:
-    existing = find_parquet_file(base_dir, cfg, ASSET_GROUP_TABLE)
-    if existing:
-        return existing
-    return parquet_dir(base_dir, cfg) / ASSET_GROUP_TABLE
-
-
-def _km2(area_sq_m: float) -> str:
-    if area_sq_m is None or not math.isfinite(area_sq_m) or area_sq_m <= 0:
-        return "-"
-    return f"{area_sq_m / 1_000_000.0:,.2f} km²"
-
-
-def _timestamp_label(ts: Optional[dt.datetime] = None) -> str:
-    return (ts or dt.datetime.now()).strftime("%Y_%m_%d")
 
 
 def _is_nullish(value: Any) -> bool:
@@ -1512,12 +1222,6 @@ class WebApi:
             return {"ok": True, "geojson": layer, "mbtiles": layer.get("mbtiles"), "bounds": layer.get("bounds"), "category": self._active_geocode}
         except Exception as exc:
             debug_log(self._base_dir, f"load_canvas: error {exc}")
-            return {"ok": False, "error": str(exc)}
-
-    def list_geocodes(self) -> Dict[str, Any]:
-        try:
-            return {"ok": True, "geocode_categories": self._analyzer_obj().available_geocode_categories()}
-        except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     def select_group(self, payload: Dict[str, Any]) -> Dict[str, Any]:
