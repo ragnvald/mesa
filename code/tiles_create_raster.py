@@ -266,18 +266,6 @@ def lonlat_to_tile_xy(lon: float, lat: float, z: int) -> Tuple[int, int]:
     y = int(math.floor((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n))
     return x, y
 
-def tile_bounds_lonlat(z: int, x: int, y: int) -> Tuple[float, float, float, float]:
-    n = 2.0 ** z
-    minlon = x / n * 360.0 - 180.0
-    maxlon = (x + 1) / n * 360.0 - 180.0
-    def tiley_to_lat(t: float) -> float:
-        y = t / n
-        lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y)))
-        return math.degrees(lat_rad)
-    maxlat = tiley_to_lat(y)
-    minlat = tiley_to_lat(y + 1)
-    return (minlon, minlat, maxlon, maxlat)
-
 def tiles_covering_bounds(bounds: Tuple[float, float, float, float], z: int) -> Tuple[int, int, int, int]:
     minlon, minlat, maxlon, maxlat = bounds
     minx, miny = lonlat_to_tile_xy(minlon, maxlat, z)
@@ -286,16 +274,6 @@ def tiles_covering_bounds(bounds: Tuple[float, float, float, float], z: int) -> 
     minx = max(0, min(minx, n)); maxx = max(0, min(maxx, n))
     miny = max(0, min(miny, n)); maxy = max(0, min(maxy, n))
     return minx, miny, maxx, maxy
-
-def lonlat_to_tile_px(lon: float, lat: float, z: int, x_tile: int, y_tile: int) -> Tuple[float, float]:
-    lat = clamp_lat(lat)
-    n = 2.0 ** z
-    x_float = (lon + 180.0) / 360.0 * n
-    lat_rad = math.radians(lat)
-    y_float = (1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n
-    dx = (x_float - x_tile) * TILE_SIZE
-    dy = (y_float - y_tile) * TILE_SIZE
-    return dx, dy
 
 # ----------------------- Styling -----------------------
 _HEX_RE = re.compile(r'^\#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
@@ -606,21 +584,6 @@ def _close_ring(px: np.ndarray, py: np.ndarray, tol: float) -> List[Tuple[float,
         out[-1] = out[0]
     return out
 
-
-def ring_lonlat_to_pixels(ring, z: int, x: int, y: int, tol: float=0.3) -> List[Tuple[float,float]]:
-    """Single-ring convenience wrapper. The renderer batches instead."""
-    pts = np.asarray(ring, dtype="float64")
-    if pts.ndim != 2 or len(pts) == 0:
-        return []
-    px, py = project_lonlat(pts, z, x, y)
-    if len(px) > 1:
-        dx = np.abs(np.diff(px)); dy = np.abs(np.diff(py))
-        if np.all((dx > tol) | (dy > tol)):
-            return _close_ring(px, py, tol)
-        if (px.max() - px.min() <= tol) and (py.max() - py.min() <= tol):
-            return _close_ring(px[:1], py[:1], tol)
-        return decimate_ring(px, py, tol)
-    return _close_ring(px, py, tol)
 
 # ----------------------- MBTiles writer (single process) -----------------------
 def mbt_init(dbpath: Path, name: str, minzoom: int, maxzoom: int,
